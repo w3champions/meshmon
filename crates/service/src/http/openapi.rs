@@ -35,24 +35,28 @@ use utoipa_swagger_ui::SwaggerUi;
 )]
 struct ApiDoc;
 
-/// Assemble the `/api/*` router, collecting `#[utoipa::path]` annotations
-/// as they're added. Returns the router plus the merged schema.
-pub fn api_router() -> (OpenApiRouter<AppState>, utoipa::openapi::OpenApi) {
-    let (_router, api) =
-        OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi()).split_for_parts();
-    (OpenApiRouter::<AppState>::with_openapi(api.clone()), api)
+/// Assemble the `/api/*` router seeded with the `ApiDoc` metadata. T06+
+/// add handlers here via `.routes(utoipa_axum::routes!(...))` chained onto
+/// the returned value; callers split the result into the axum `Router`
+/// and the collected [`utoipa::openapi::OpenApi`] via `.split_for_parts()`
+/// at wire-up time.
+pub fn api_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
 }
 
-/// Return the full OpenAPI document. Callable at runtime (to serve
-/// `/api/openapi.json`) and at build time (from the xtask).
+/// Build the full OpenAPI document, including every `#[utoipa::path]`
+/// handler attached to [`api_router`]. Callable at runtime (to serve
+/// `/api/openapi.json`) and at build time (from `xtask`).
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    let (_router, schema) = api_router().split_for_parts();
+    schema
 }
 
-/// Router that mounts Swagger UI at `/api/docs` and serves the raw schema
-/// at `/api/openapi.json`. Merged into the root axum router.
-pub fn swagger_router() -> Router<AppState> {
-    let schema = openapi_document();
+/// Router that mounts Swagger UI at `/api/docs` and serves the supplied
+/// schema at `/api/openapi.json`. The caller is responsible for producing
+/// a schema that reflects every attached handler (typically via
+/// [`api_router`] + `.split_for_parts()`).
+pub fn swagger_router(schema: utoipa::openapi::OpenApi) -> Router<AppState> {
     SwaggerUi::new("/api/docs")
         .url("/api/openapi.json", schema)
         .into()

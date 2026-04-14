@@ -22,14 +22,15 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 /// Build the full axum router. Callers pass in `AppState`; the router is
-/// ready to hand to `axum::serve`.
+/// ready to hand to `axum::serve`. The OpenAPI schema is collected from
+/// whatever `#[utoipa::path]` handlers are currently attached to
+/// [`openapi::api_router`], then served at `/api/openapi.json` via Swagger UI.
 pub fn router(state: AppState) -> Router {
-    let (api, _api_schema) = openapi::api_router();
-    let api_axum: Router<AppState> = api.into();
+    let (api_axum, api_schema) = openapi::api_router().split_for_parts();
 
     Router::new()
         .merge(health::router())
-        .merge(openapi::swagger_router())
+        .merge(openapi::swagger_router(api_schema))
         .merge(api_axum)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
