@@ -1,14 +1,17 @@
 //! Shared test harness for migration integration tests.
 //!
-//! On first `acquire()` call the harness lazy-spawns a single
-//! `timescale/timescaledb:latest-pg16` container via `testcontainers` and
-//! reuses it for the remainder of the test binary's life. Each individual
-//! test then carves out its own throwaway database inside that container so
-//! tests stay hermetic from one another.
+//! Each `acquire()` call spawns its own `timescale/timescaledb:latest-pg16`
+//! container via `testcontainers` and returns a [`TestDb`] that owns the
+//! container. When the `TestDb` is dropped (or its [`TestDb::close`] is
+//! awaited) the container is stopped and removed by testcontainers.
 //!
-//! If `DATABASE_URL` is set in the environment, the harness uses that
-//! instead of spawning a container — useful for pointing at a long-lived
-//! local Postgres during iterative development.
+//! Using one container per test rather than sharing a single container via
+//! a `static` keeps cleanup reliable: Rust statics never run `Drop`, so a
+//! shared container would be orphaned on process exit.
+//!
+//! If `DATABASE_URL` is set the harness skips the container spawn and
+//! targets that existing Postgres instead — useful for pointing at a
+//! long-lived local Postgres during iterative development.
 
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::Executor;
@@ -16,66 +19,28 @@ use std::str::FromStr;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use tokio::sync::OnceCell;
 
-/// Held for the lifetime of the test binary. Dropping it stops the container
-/// (testcontainers registers its own `Drop` impl).
-struct SharedContainer {
-    _container: ContainerAsync<GenericImage>,
-    url: String,
-}
-
-static CONTAINER: OnceCell<SharedContainer> = OnceCell::const_new();
-
-/// Libpq URL of the admin (`postgres`) database inside either the shared
-/// container or the `DATABASE_URL`-supplied server.
-async fn admin_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    CONTAINER
-        .get_or_init(|| async {
-            let container = GenericImage::new("timescale/timescaledb", "latest-pg16")
-                .with_wait_for(WaitFor::message_on_stderr(
-                    "database system is ready to accept connections",
-                ))
-                .with_exposed_port(ContainerPort::Tcp(5432))
-                .with_env_var("POSTGRES_PASSWORD", "meshmon")
-                .start()
-                .await
-                .expect("start timescaledb container — is Docker running?");
-            let port = container
-                .get_host_port_ipv4(5432)
-                .await
-                .expect("resolve container host port");
-            let url = format!("postgres://postgres:meshmon@127.0.0.1:{port}/postgres");
-            SharedContainer {
-                _container: container,
-                url,
-            }
-        })
-        .await
-        .url
-        .clone()
-}
-
-/// Owns a freshly-created throwaway database. Use [`TestDb::close`] to tear
-/// down the DB explicitly — `Drop` can't run `async` work, so tests that
-/// panic will leave the DB behind (safe: the name is unique per invocation
-/// and the parent container is discarded at process exit).
+/// Owns a freshly-created throwaway database plus (when auto-spawned) the
+/// TimescaleDB container it lives in. Use [`TestDb::close`] to tear it down
+/// explicitly, or just let the value go out of scope — `Drop` on
+/// [`ContainerAsync`] stops the container.
 pub struct TestDb {
     pub pool: PgPool,
     pub name: String,
     admin_opts: PgConnectOptions,
+    /// `None` in `DATABASE_URL` mode; `Some` when we spawned a container.
+    _container: Option<ContainerAsync<GenericImage>>,
 }
 
 impl TestDb {
-    /// Close the pool and drop the underlying database.
+    /// Close the pool and drop the test database. When the container is
+    /// owned by this value, `Drop` stops and removes it right after.
     pub async fn close(self) {
         let Self {
             pool,
             name,
             admin_opts,
+            _container,
         } = self;
         pool.close().await;
         let admin = PgPool::connect_with(admin_opts)
@@ -87,6 +52,7 @@ impl TestDb {
             .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
             .await;
         admin.close().await;
+        // `_container` drops here, which stops+removes the testcontainer.
     }
 }
 
@@ -96,8 +62,7 @@ impl TestDb {
 /// in the new database so the TimescaleDB test path exercises hypertable
 /// creation.
 pub async fn acquire(with_timescale: bool) -> TestDb {
-    let admin_url = admin_url().await;
-    let admin_opts = PgConnectOptions::from_str(&admin_url).expect("parse admin URL");
+    let (admin_opts, container) = admin_options().await;
 
     // A random suffix survives parallel `cargo test` workers. 16 hex chars
     // is plenty of entropy for a short-lived test DB.
@@ -138,7 +103,39 @@ pub async fn acquire(with_timescale: bool) -> TestDb {
         pool,
         name: db_name,
         admin_opts,
+        _container: container,
     }
+}
+
+/// Resolve admin-DB connect options. Uses `DATABASE_URL` when set,
+/// otherwise spawns a fresh TimescaleDB container and derives the URL from
+/// its randomly-assigned host port.
+async fn admin_options() -> (PgConnectOptions, Option<ContainerAsync<GenericImage>>) {
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        let opts = PgConnectOptions::from_str(&url).expect("parse DATABASE_URL");
+        return (opts, None);
+    }
+
+    let container = GenericImage::new("timescale/timescaledb", "latest-pg16")
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_exposed_port(ContainerPort::Tcp(5432))
+        .with_env_var("POSTGRES_PASSWORD", "meshmon")
+        .start()
+        .await
+        .expect("start timescaledb container — is Docker running?");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("resolve container host port");
+    let opts = PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(port)
+        .username("postgres")
+        .password("meshmon")
+        .database("postgres");
+    (opts, Some(container))
 }
 
 /// Mix the current time with a hash of the thread id to get a unique-ish

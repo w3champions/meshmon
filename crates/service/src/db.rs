@@ -79,12 +79,16 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
 /// Install or reinstall the TimescaleDB hypertable + compression + retention
 /// policies for `route_snapshots`. Idempotent.
 async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // migrate_data => TRUE ensures this still works when the operator
+    // installs the timescaledb extension *after* the service has run for a
+    // while on plain Postgres (route_snapshots already contains rows).
     sqlx::query(
         "SELECT create_hypertable(
             'route_snapshots',
             'observed_at',
             chunk_time_interval => INTERVAL '1 day',
-            if_not_exists => TRUE
+            if_not_exists => TRUE,
+            migrate_data => TRUE
         )",
     )
     .execute(pool)
