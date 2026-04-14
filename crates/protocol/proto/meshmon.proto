@@ -1,0 +1,303 @@
+// meshmon — wire protocol between agent and central service.
+//
+// Field-number conventions:
+//   * Fields 1-14 are the MVP contract defined by specs 02/03/04.
+//   * Fields 15-31 are reserved for near-term extensions inside the first
+//     1-byte varint range — cheapest on the wire, so saved for things that
+//     will be set on every message.
+//   * Fields 32+ cost 2 bytes — use for optional / rarely-set additions.
+//   * Never reuse a removed field's number. Add `reserved <n>;` alongside
+//     the removal commit.
+//
+// Time conventions:
+//   * All timestamps are int64 Unix microseconds. We avoid
+//     google.protobuf.Timestamp to keep the dependency graph thin and the
+//     on-wire representation tight (a single varint).
+//   * All durations are int64 microseconds unless the field name says
+//     otherwise (e.g. `*_sec`, `*_secs`).
+//
+// IP conventions:
+//   * IPs are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6. Length
+//     determines the address family. Helper `meshmon_protocol::ip` wraps
+//     the conversion.
+//
+// Enum conventions:
+//   * Zero variant is always `*_UNSPECIFIED`. Receiving UNSPECIFIED is a
+//     decode error at the application layer (validation in T06/T11).
+
+syntax = "proto3";
+
+package meshmon;
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Wire-level protocol selector. Used in both Agent→Service path metrics and
+// Service→Agent config.
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_ICMP = 1;
+  PROTOCOL_TCP = 2;
+  PROTOCOL_UDP = 3;
+}
+
+// Path-level health (spec 02 "Path health (derived)" state machine). Used as
+// a lookup key in the ConfigResponse rates table and reported on route
+// snapshots.
+enum PathHealth {
+  PATH_HEALTH_UNSPECIFIED = 0;
+  PATH_HEALTH_NORMAL = 1;
+  PATH_HEALTH_DEGRADED = 2;
+  PATH_HEALTH_UNREACHABLE = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Agent → Service: registration
+// ---------------------------------------------------------------------------
+
+// POST /api/agent/register body. Sent once at agent startup and on agent
+// version changes (agent replays register if its version string changed
+// since last boot so the registry stays current).
+message RegisterRequest {
+  // AGENT_ID env var — human-readable, e.g. "brazil-north".
+  string id = 1;
+  // AGENT_DISPLAY_NAME, e.g. "Brazil North".
+  string display_name = 2;
+  // AGENT_LOCATION, free-form, e.g. "Fortaleza, Brazil".
+  string location = 3;
+  // AGENT_IP — raw bytes (4 or 16). Matches the `ip INET` column in
+  // postgres; the service writes it back via `ip::to_ipaddr`.
+  bytes ip = 4;
+  double lat = 5;
+  double lon = 6;
+  // Agent's semver string (e.g. "0.3.2"); updated on every register call.
+  string agent_version = 7;
+
+  reserved 15 to 31;
+}
+
+// POST /api/agent/register response. Empty body in MVP. Future fields are
+// free to use any field number — no reservation needed because no field has
+// ever lived here.
+message RegisterResponse {}
+
+// ---------------------------------------------------------------------------
+// Agent → Service: metrics batch
+// ---------------------------------------------------------------------------
+
+// Per-agent metadata attached to every metrics batch. Lets the service
+// observe agent liveness and buffer-overflow counts without a separate
+// endpoint.
+message AgentMetadata {
+  string version = 1;
+  // Seconds since agent process start.
+  uint64 uptime_secs = 2;
+  // Local probe or emitter errors accumulated since the last successful push
+  // (agent resets on successful ack).
+  uint64 local_error_count = 3;
+  // Messages dropped from the emitter's local ring buffer since the last
+  // successful push (spec 02 "Overflow: drop oldest").
+  uint64 dropped_count = 4;
+
+  reserved 15 to 31;
+}
+
+// Stats for a single (target, protocol) pair over the agent's tumbling
+// emission window (60s per spec 02).
+message PathMetrics {
+  string target_id = 1;
+  Protocol protocol = 2;
+  // Window covered by this observation, Unix micros.
+  int64 window_start_micros = 3;
+  int64 window_end_micros = 4;
+  // Counters over the window.
+  uint64 probes_sent = 5;
+  uint64 probes_successful = 6;
+  // 0.0 .. 1.0 — redundant with the counters but sent explicitly so the
+  // service can validate without division.
+  double failure_rate = 7;
+  // RTT stats in microseconds. `_min` / `_max` are zero when no successful
+  // probe landed in the window.
+  uint32 rtt_avg_micros = 8;
+  uint32 rtt_min_micros = 9;
+  uint32 rtt_max_micros = 10;
+  uint32 rtt_stddev_micros = 11;
+  uint32 rtt_p50_micros = 12;
+  uint32 rtt_p95_micros = 13;
+  uint32 rtt_p99_micros = 14;
+
+  reserved 15 to 31;
+}
+
+// POST /api/agent/metrics body. Batches every PathMetrics the agent has
+// accumulated since its last successful push.
+message MetricsBatch {
+  string source_id = 1;
+  // When this batch was assembled. Different from each PathMetrics window
+  // (the batch clock can drift seconds ahead of the youngest window).
+  int64 batch_timestamp_micros = 2;
+  AgentMetadata agent_metadata = 3;
+  repeated PathMetrics paths = 4;
+
+  reserved 15 to 31;
+}
+
+// ---------------------------------------------------------------------------
+// Agent → Service: route snapshot
+// ---------------------------------------------------------------------------
+
+// One observed IP at a given hop position, with its relative frequency in
+// the aggregation window (0.0–1.0). Used for ECMP-rich hops.
+message HopIp {
+  bytes ip = 1;
+  double frequency = 2;
+
+  reserved 15 to 31;
+}
+
+// One hop in a route snapshot. Mirrors the JSONB shape defined in spec 04.
+message HopSummary {
+  // 1-indexed TTL / hop position.
+  uint32 position = 1;
+  repeated HopIp observed_ips = 2;
+  uint32 avg_rtt_micros = 3;
+  uint32 stddev_rtt_micros = 4;
+  // 0.0 .. 1.0 loss at this hop over the 5-min window.
+  double loss_pct = 5;
+
+  reserved 15 to 31;
+}
+
+// POST /api/agent/route-snapshot body. Sent immediately when the agent
+// detects a meaningful route change (spec 02 "Diff detection").
+message RouteSnapshotRequest {
+  string source_id = 1;
+  string target_id = 2;
+  Protocol protocol = 3;
+  // Wall-clock time the snapshot describes (not send time).
+  int64 observed_at_micros = 4;
+  repeated HopSummary hops = 5;
+  // Summary across the hops — duplicates data in `hops` so the service
+  // doesn't recompute for list views. Matches `route_snapshots.path_summary`
+  // JSONB in spec 04.
+  PathSummary path_summary = 6;
+
+  reserved 15 to 31;
+}
+
+// Aggregate of the hops for quick display in lists without JSONB extraction.
+message PathSummary {
+  uint32 avg_rtt_micros = 1;
+  double loss_pct = 2;
+  uint32 hop_count = 3;
+
+  reserved 15 to 31;
+}
+
+// ---------------------------------------------------------------------------
+// Service → Agent: config
+// ---------------------------------------------------------------------------
+
+// Per-mode probe rate triple. A full config carries one entry per
+// (primary_protocol, path_health) tuple (spec 02 "Rates per mode"). Agents
+// look up their current mode and apply these rates across all three probers.
+message RateEntry {
+  Protocol primary = 1;
+  PathHealth health = 2;
+  // Probes-per-second floats. Zero means "do not probe" (valid — used for
+  // configurations that disable a protocol entirely).
+  double icmp_pps = 3;
+  double tcp_pps = 4;
+  double udp_pps = 5;
+
+  reserved 15 to 31;
+}
+
+// Per-protocol state-machine thresholds. Values are 0.0–1.0 fractions.
+// Hysteresis durations are in seconds.
+message ProtocolThresholds {
+  double unhealthy_trigger_pct = 1;
+  double healthy_recovery_pct = 2;
+  uint32 unhealthy_hysteresis_sec = 3;
+  uint32 healthy_hysteresis_sec = 4;
+
+  reserved 15 to 31;
+}
+
+// Path-health state-machine thresholds (spec 02 "Path health (derived)").
+message PathHealthThresholds {
+  double degraded_trigger_pct = 1;
+  uint32 degraded_trigger_sec = 2;
+  uint32 degraded_min_samples = 3;
+  double normal_recovery_pct = 4;
+  uint32 normal_recovery_sec = 5;
+
+  reserved 15 to 31;
+}
+
+// Aggregation window sizes per protocol role.
+message Windows {
+  uint32 primary_sec = 1;
+  uint32 diversity_sec = 2;
+
+  reserved 15 to 31;
+}
+
+// Route-change diff detection thresholds (spec 02 "Diff detection").
+message DiffDetection {
+  // New IP must appear at ≥ this fraction of observations to count.
+  double new_ip_min_freq = 1;
+  // Previously-present IP must drop below this fraction to count as gone.
+  double missing_ip_max_freq = 2;
+  // Absolute number of positions added/removed to trigger.
+  uint32 hop_count_change = 3;
+  // Relative change in average hop RTT to trigger (e.g. 0.5 = 50% shift).
+  double rtt_shift_frac = 4;
+
+  reserved 15 to 31;
+}
+
+// GET /api/agent/config response. Agents refresh this every 5 min.
+message ConfigResponse {
+  // Protocols the agent should probe. Any protocol not listed here is
+  // skipped regardless of priority.
+  repeated Protocol enabled_protocols = 1;
+  // Preference order for selecting the primary protocol (spec 02 "Protocol
+  // roles"). First healthy protocol in this list becomes primary.
+  repeated Protocol priority = 2;
+  repeated RateEntry rates = 3;
+  ProtocolThresholds icmp_thresholds = 4;
+  ProtocolThresholds tcp_thresholds = 5;
+  ProtocolThresholds udp_thresholds = 6;
+  Windows windows = 7;
+  DiffDetection diff_detection = 8;
+  PathHealthThresholds path_health_thresholds = 9;
+
+  reserved 15 to 31;
+}
+
+// ---------------------------------------------------------------------------
+// Service → Agent: targets
+// ---------------------------------------------------------------------------
+
+// One agent that appears as a probe target. Returned from
+// GET /api/agent/targets. Only "active" agents (spec 03 "Active target
+// filter") are listed.
+message Target {
+  string id = 1;
+  bytes ip = 2;
+  string display_name = 3;
+  string location = 4;
+  double lat = 5;
+  double lon = 6;
+
+  reserved 15 to 31;
+}
+
+// GET /api/agent/targets response.
+message TargetsResponse {
+  repeated Target targets = 1;
+
+  reserved 15 to 31;
+}

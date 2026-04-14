@@ -17,6 +17,7 @@ authors = ["meshmon contributors"]
 
 [workspace.dependencies]
 # Shared dependency versions. Downstream tasks add entries here.
+prost = "0.14"
 
 [profile.release]
 lto = "thin"
