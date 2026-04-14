@@ -104,3 +104,94 @@ url = "postgres://ignored"
 
     testdb.close().await;
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_reload_on_sighup_swaps_arcswap() {
+    use std::io::Write;
+
+    // Build a temp config file.
+    let tmpdir = tempdir();
+    let cfg_path = tmpdir.join("meshmon.toml");
+    let write_cfg = |filter: &str| {
+        let contents = format!(
+            r#"
+[database]
+url = "postgres://ignored@localhost/nope"
+
+[logging]
+filter = "{filter}"
+"#
+        );
+        let mut f = std::fs::File::create(&cfg_path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+    };
+    write_cfg("info");
+
+    let initial = Arc::new(Config::from_file(&cfg_path).unwrap());
+    let swap = Arc::new(ArcSwap::from(initial.clone()));
+    let (tx, mut rx) = watch::channel(initial);
+
+    let reload_handle = swap.clone();
+    let reload_path = cfg_path.clone();
+    let reload_tx = tx.clone();
+    let token = meshmon_service::shutdown::spawn(move || {
+        let reload_handle = reload_handle.clone();
+        let reload_path = reload_path.clone();
+        let reload_tx = reload_tx.clone();
+        async move {
+            if let Ok(new_cfg) = Config::from_file(&reload_path) {
+                let new_cfg = Arc::new(new_cfg);
+                reload_handle.store(new_cfg.clone());
+                let _ = reload_tx.send(new_cfg);
+            }
+        }
+    });
+
+    // Give the signal handler time to install.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Rewrite and SIGHUP ourselves.
+    write_cfg("debug");
+    let pid = std::process::id().to_string();
+    let status = std::process::Command::new("kill")
+        .args(["-HUP", &pid])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Wait for the watch channel to fire (up to 1s).
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        if swap.load().logging.filter == "debug" {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "ArcSwap never observed new config; filter={}",
+                swap.load().logging.filter
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Watch channel should also have received the new config.
+    rx.changed().await.unwrap();
+    assert_eq!(rx.borrow().logging.filter, "debug");
+
+    assert!(
+        !token.is_cancelled(),
+        "SIGHUP must not cancel shutdown token"
+    );
+    std::fs::remove_dir_all(&tmpdir).ok();
+}
+
+/// Create a fresh temporary directory for per-test scratch files. Not using
+/// `tempfile` because we don't want another dep for a one-line helper.
+#[cfg(unix)]
+fn tempdir() -> std::path::PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("meshmon_t04_{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
