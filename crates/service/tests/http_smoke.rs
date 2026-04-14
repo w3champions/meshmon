@@ -36,7 +36,12 @@ async fn healthz_always_returns_200() {
     let app = meshmon_service::http::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -50,14 +55,24 @@ async fn readyz_reflects_ready_flag() {
 
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     state.mark_ready();
     let resp = app
-        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -70,7 +85,12 @@ async fn metrics_emits_build_info_line() {
     let app = meshmon_service::http::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -81,4 +101,30 @@ async fn metrics_emits_build_info_line() {
     let text = std::str::from_utf8(&body).unwrap();
     assert!(text.contains("meshmon_service_build_info"), "body = {text}");
     assert!(text.contains("version="), "body = {text}");
+}
+
+#[tokio::test]
+async fn openapi_json_is_valid() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = make_state(pool);
+    let app = meshmon_service::http::router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json parse");
+    assert_eq!(parsed["openapi"], "3.1.0");
+    assert_eq!(parsed["info"]["title"], "meshmon Service API");
+    assert!(parsed["paths"].is_object());
 }

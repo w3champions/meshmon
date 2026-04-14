@@ -1,3 +1,9 @@
+// Each integration-test binary compiles this module independently; items
+// here are consumed by only a subset of binaries (e.g. `http_smoke` uses
+// `shared_migrated_pool` but not `acquire`), so we opt out of `dead_code`
+// here rather than sprinkling per-item attributes.
+#![allow(dead_code)]
+
 //! Integration-test harness for the meshmon service.
 //!
 //! # Design
