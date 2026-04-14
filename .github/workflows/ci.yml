@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust (check, clippy, test, fmt)
+    name: Rust (check, clippy, test, fmt, openapi drift)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,6 +37,16 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --all-targets
+
+      - name: regenerate OpenAPI snapshot
+        run: cargo xtask openapi
+
+      - name: verify OpenAPI snapshot is up to date
+        run: |
+          if ! git diff --exit-code frontend/src/api/openapi.json; then
+            echo "::error ::frontend/src/api/openapi.json is stale — run 'cargo xtask openapi' and commit the result"
+            exit 1
+          fi
 
   frontend:
     name: Frontend (biome, type-check, build)

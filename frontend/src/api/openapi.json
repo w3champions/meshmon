@@ -1,0 +1,17 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "meshmon Service API",
+    "description": "Operator-facing HTTP API for the meshmon service. Agent-facing endpoints (Protobuf) are documented separately in `crates/protocol/proto/meshmon.proto`.",
+    "contact": {
+      "name": "meshmon contributors"
+    },
+    "license": {
+      "name": "AGPL-3.0-or-later",
+      "identifier": "AGPL-3.0-or-later"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {},
+  "components": {}
+}

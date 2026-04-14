@@ -58,6 +58,46 @@ docker compose -f deploy/docker-compose.yml up -d
 
 See `deploy/meshmon.example.toml` for the service configuration surface.
 
+## Running the service
+
+```bash
+# 1. Provision Postgres + TimescaleDB (for local dev: a single docker run).
+docker run --rm -d --name meshmon-db \
+    -e POSTGRES_PASSWORD=meshmon \
+    -e POSTGRES_USER=meshmon \
+    -e POSTGRES_DB=meshmon \
+    -p 5432:5432 \
+    timescale/timescaledb:2.26.3-pg16
+
+# 2. Copy the example config.
+cp deploy/meshmon.example.toml /tmp/meshmon.toml
+# Edit /tmp/meshmon.toml: set `url = "postgres://meshmon:meshmon@localhost:5432/meshmon"` or similar.
+
+# 3. Run.
+MESHMON_CONFIG=/tmp/meshmon.toml cargo run --package meshmon-service
+```
+
+The service binds on `service.listen_addr` (default `0.0.0.0:8080`). Useful endpoints while it's running:
+- `GET /healthz` — always 200 if the process is up.
+- `GET /readyz` — 200 after migrations apply; 503 during shutdown.
+- `GET /metrics` — Prometheus text format (`meshmon_service_*`).
+- `GET /api/docs` — Swagger UI for the operator API.
+- `GET /api/openapi.json` — OpenAPI 3.1 schema (also checked in at `frontend/src/api/openapi.json`).
+
+Signals:
+- `SIGINT`, `SIGTERM` — graceful shutdown.
+- `SIGHUP` — re-read `meshmon.toml` (hot-reload for `probing`, `logging`, `upstream`; restart required for `service.listen_addr`, `auth`, `database`).
+
+## Regenerating the OpenAPI snapshot
+
+The frontend consumes `frontend/src/api/openapi.json` for TypeScript type generation. Whenever a handler's `#[utoipa::path]` annotation changes, or a new handler lands, run:
+
+```bash
+cargo xtask openapi
+```
+
+CI re-runs this and fails if the checked-in snapshot is stale.
+
 ## Running tests
 
 ```bash
