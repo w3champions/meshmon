@@ -105,6 +105,15 @@ url = "postgres://ignored"
     testdb.close().await;
 }
 
+// Safe-against-default-handler note: this test raises SIGHUP at the test
+// process itself. It works only because `shutdown::spawn` installs a
+// `tokio::signal::unix::signal(SIGHUP)` handler before we call `kill`, which
+// replaces the process-level default (`terminate`) with our consumer. If a
+// future test lands in this binary that does NOT call `shutdown::spawn`, and
+// cargo filters the test set to just that one, a SIGHUP from this test would
+// no longer be covered — the test runner would be terminated mid-run.
+// Mitigation: every test in `tests/startup.rs` must either call
+// `shutdown::spawn` or never race against this test (e.g., via `--test-threads=1`).
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_reload_on_sighup_swaps_arcswap() {

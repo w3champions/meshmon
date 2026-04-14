@@ -87,7 +87,13 @@ where
                 }
             } => {
                 info!("received SIGHUP; reloading config");
-                on_reload().await;
+                // Detach onto a separate task so a slow reload callback
+                // cannot delay SIGTERM/SIGINT observation. The callback
+                // currently runs a `Config::from_file` (sync file read +
+                // TOML parse); future subsystem-subscribers may add async
+                // work, and a ≥1s reload would otherwise extend the
+                // time-to-shutdown by that amount.
+                tokio::spawn(on_reload());
             }
         }
     }

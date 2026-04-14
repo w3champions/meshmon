@@ -106,16 +106,32 @@ async fn run() -> anyhow::Result<()> {
     state.mark_ready();
     let app = http::router(state.clone());
 
-    // --- Step 7: Serve ---
-    let shutdown_future = shutdown_token.clone().cancelled_owned();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_future.await;
-            state.mark_not_ready();
-            info!("HTTP server draining");
-        })
-        .await
-        .context("HTTP server")?;
+    // --- Step 7: Serve with a bounded drain ---
+    let deadline = state.config().service.shutdown_deadline;
+
+    let graceful_token = shutdown_token.clone();
+    let graceful_state = state.clone();
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        graceful_token.cancelled().await;
+        graceful_state.mark_not_ready();
+        info!("HTTP server draining");
+    });
+
+    let deadline_token = shutdown_token.clone();
+    let deadline_timer = async move {
+        deadline_token.cancelled().await;
+        tokio::time::sleep(deadline).await;
+    };
+
+    tokio::select! {
+        result = serve => result.context("HTTP server")?,
+        _ = deadline_timer => {
+            warn!(
+                deadline_ms = deadline.as_millis() as u64,
+                "HTTP server did not drain within shutdown_deadline; aborting in-flight connections"
+            );
+        }
+    }
     info!("meshmon-service shutdown complete");
     Ok(())
 }

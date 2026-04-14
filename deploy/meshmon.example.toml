@@ -28,10 +28,12 @@ shutdown_deadline_seconds = 5
 url_env = "MESHMON_POSTGRES_URL"
 
 [logging]
-# Env filter; overridden by $RUST_LOG when set.
+# Env filter; overridden by $RUST_LOG when set. Changes here take effect on
+# service restart — the tracing subscriber is installed once at startup and
+# does not re-read the filter on SIGHUP.
 filter = "info"
 # "json" for production (one object per line, fields flattened) or "compact"
-# for developer terminals.
+# for developer terminals. Restart-only, same reason as `filter`.
 format = "json"
 
 [auth]
