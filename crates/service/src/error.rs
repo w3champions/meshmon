@@ -63,6 +63,11 @@ pub enum BootError {
         source: std::io::Error,
     },
     /// HTTP server task failed while running.
+    ///
+    /// Constructed explicitly (no `#[from]`) so a stray `?` on any
+    /// `std::io::Error` inside a `Result<_, BootError>` doesn't silently
+    /// funnel into this variant — [`Self::Bind`] also wraps `io::Error`
+    /// and must be built deliberately.
     #[error("HTTP server: {0}")]
-    Serve(#[from] std::io::Error),
+    Serve(std::io::Error),
 }
