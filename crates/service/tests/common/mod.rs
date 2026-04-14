@@ -20,7 +20,11 @@ pub struct TestDb {
 impl TestDb {
     /// Close the pool and drop the underlying database.
     pub async fn close(self) {
-        let Self { pool, name, admin_opts } = self;
+        let Self {
+            pool,
+            name,
+            admin_opts,
+        } = self;
         pool.close().await;
         let admin = PgPool::connect_with(admin_opts)
             .await

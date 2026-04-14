@@ -12,9 +12,9 @@
 //! schema is already at the latest version. This lets T04 call it
 //! unconditionally at every service startup.
 
-use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 /// Embedded migrations read from `crates/service/migrations/`.
 ///
@@ -46,11 +46,10 @@ pub async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
 /// binary may be loadable by the server (e.g. the `timescale/timescaledb`
 /// Docker image) without being installed in every database on it.
 pub async fn detect_timescaledb(pool: &PgPool) -> Result<bool, sqlx::Error> {
-    let (present,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')",
-    )
-    .fetch_one(pool)
-    .await?;
+    let (present,): (bool,) =
+        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')")
+            .fetch_one(pool)
+            .await?;
     Ok(present)
 }
 

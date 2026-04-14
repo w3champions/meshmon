@@ -176,12 +176,10 @@ async fn migrations_are_idempotent_on_plain_postgres() {
     run_migrations(&db.pool).await.expect("second run");
 
     // sqlx tracks applied migrations — exactly one version recorded.
-    let applied: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*)::bigint FROM _sqlx_migrations",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
+    let applied: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM _sqlx_migrations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
     assert_eq!(applied.0, 1, "exactly one migration should be recorded");
 
     db.close().await;
@@ -194,18 +192,14 @@ async fn foreign_keys_restrict_agent_delete() {
     };
     run_migrations(&db.pool).await.unwrap();
 
-    sqlx::query(
-        "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO agents (id, display_name, ip) VALUES ('b', 'Agent B', '10.0.0.2')",
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('b', 'Agent B', '10.0.0.2')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO route_snapshots
             (source_id, target_id, protocol, observed_at, hops)
@@ -235,12 +229,10 @@ async fn protocol_check_constraint_rejects_unknown_value() {
     };
     run_migrations(&db.pool).await.unwrap();
 
-    sqlx::query(
-        "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
 
     let err = sqlx::query(
         "INSERT INTO route_snapshots
