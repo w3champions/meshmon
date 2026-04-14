@@ -1,0 +1,15 @@
+# Default standalone deployment for meshmon.
+#
+# This file is a scaffolding placeholder. Downstream tasks (T24) fill in the
+# real service stack: meshmon-service, meshmon-vm (VictoriaMetrics),
+# meshmon-vmalert, meshmon-alertmanager, meshmon-db (Postgres+Timescale),
+# and meshmon-grafana. See design spec 07 for the target layout.
+
+services:
+  meshmon-service:
+    image: ghcr.io/w3champions/meshmon-service:latest
+    container_name: meshmon-service
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
