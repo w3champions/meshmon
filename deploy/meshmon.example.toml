@@ -1,0 +1,30 @@
+# meshmon-service runtime configuration.
+#
+# This file is a scaffolding placeholder. Downstream tasks fill in concrete
+# sections; see design spec 03 for the configured surface.
+
+[service]
+listen_addr = "0.0.0.0:8080"
+public_base_url = "http://localhost:8080"
+
+[database]
+# Populated by T03/T04; use env var MESHMON_POSTGRES_URL or this key.
+# url = "postgres://meshmon:password@meshmon-db/meshmon"
+
+[metrics]
+# VictoriaMetrics endpoint. Populated by T07.
+# vm_url = "http://meshmon-vm:8428"
+
+[alerts]
+# Alertmanager endpoint. Populated by T22.
+# alertmanager_url = "http://meshmon-alertmanager:9093"
+
+[auth]
+# Admin users. Populated by T05.
+# [[auth.users]]
+# username = "admin"
+# password_hash_env = "MESHMON_ADMIN_PASSWORD_HASH"
+
+[agent_api]
+# Shared bearer token for agent authentication. Supplied via env.
+# shared_token_env = "MESHMON_AGENT_TOKEN"

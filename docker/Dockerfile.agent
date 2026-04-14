@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1.7
+
+# ----- Stage 1: chef base -------------------------------------------------
+FROM lukemathwalker/cargo-chef:latest-rust-1.94-bookworm AS chef
+WORKDIR /app
+
+# ----- Stage 2: planner ---------------------------------------------------
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
+COPY crates ./crates
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ----- Stage 3: builder ---------------------------------------------------
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --bin meshmon-agent
+COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
+COPY crates ./crates
+RUN cargo build --release --bin meshmon-agent
+
+# ----- Stage 4: runtime ---------------------------------------------------
+FROM gcr.io/distroless/cc-debian12 AS runtime
+WORKDIR /app
+COPY --from=builder /app/target/release/meshmon-agent /usr/local/bin/meshmon-agent
+ENTRYPOINT ["/usr/local/bin/meshmon-agent"]
