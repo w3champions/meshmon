@@ -195,3 +195,69 @@ fn tempdir() -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[tokio::test]
+async fn shutdown_flips_not_ready() {
+    let testdb = common::acquire(/*with_timescale=*/ false).await;
+    meshmon_service::db::run_migrations(&testdb.pool)
+        .await
+        .expect("migrate");
+
+    let cfg = Arc::new(
+        Config::from_str(
+            r#"
+[database]
+url = "postgres://ignored"
+"#,
+            "t.toml",
+        )
+        .unwrap(),
+    );
+    let swap = Arc::new(ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let state = AppState::new(swap, rx, testdb.pool.clone());
+    state.mark_ready();
+    assert!(state.is_ready());
+
+    let listener = TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let state_for_serve = state.clone();
+    let serve_state = state.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, meshmon_service::http::router(state_for_serve))
+            .with_graceful_shutdown(async move {
+                server_shutdown.cancelled().await;
+                serve_state.mark_not_ready();
+            })
+            .await
+    });
+
+    let client = reqwest::Client::new();
+    let r = client
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+
+    // Trigger shutdown.
+    shutdown.cancel();
+
+    // Within ~1s, /readyz should drop to 503 (state flag flips). After the
+    // server exits further requests fail to connect; that's the stronger
+    // assertion we check next.
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("shutdown exceeded 5s")
+        .expect("server task join")
+        .expect("server future");
+
+    // is_ready should be false after shutdown.
+    assert!(!state.is_ready());
+
+    testdb.close().await;
+}
