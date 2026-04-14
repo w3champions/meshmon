@@ -185,3 +185,27 @@ format = "yaml"
         BootError::ConfigInvalid { reason, .. } if reason.contains("logging.format")
     ));
 }
+
+#[test]
+fn shipped_example_parses() {
+    // Env vars the example references; set before load, clean up after.
+    std::env::set_var(
+        "MESHMON_POSTGRES_URL",
+        "postgres://admin:pw@localhost:5432/db",
+    );
+    std::env::set_var("MESHMON_AGENT_TOKEN", "dummy-token");
+
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/meshmon.example.toml"
+    );
+    let text = std::fs::read_to_string(path).expect("read example toml");
+    let cfg = Config::from_str(&text, path).expect("parse shipped example");
+
+    assert_eq!(cfg.service.listen_addr.to_string(), "0.0.0.0:8080");
+    assert_eq!(cfg.database.url(), "postgres://admin:pw@localhost:5432/db");
+    assert_eq!(cfg.agent_api.shared_token.as_deref(), Some("dummy-token"));
+
+    std::env::remove_var("MESHMON_POSTGRES_URL");
+    std::env::remove_var("MESHMON_AGENT_TOKEN");
+}

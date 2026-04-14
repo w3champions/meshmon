@@ -1,30 +1,59 @@
 # meshmon-service runtime configuration.
 #
-# This file is a scaffolding placeholder. Downstream tasks fill in concrete
-# sections; see design spec 03 for the configured surface.
+# All settings below are read by the service at startup. SIGHUP causes the
+# service to re-read this file and broadcast updates through its in-memory
+# ArcSwap; auth users and bind addresses are NOT hot-reloadable — for those
+# changes, restart the service.
+#
+# Secrets (database URL, agent shared token) can be provided inline here or
+# indirected through env vars via the sibling `*_env` key, which holds the
+# name of an environment variable containing the real value.
 
 [service]
+# Axum listen address.
 listen_addr = "0.0.0.0:8080"
-public_base_url = "http://localhost:8080"
+
+# Optional. Used by the service to emit absolute URLs in API responses. When
+# running behind nginx-proxy, set this to the externally-visible origin.
+# public_base_url = "https://meshmon.example.com"
+
+# Graceful-shutdown deadline. After SIGTERM the service flips /readyz to 503
+# and lets axum drain in-flight requests. Workers that don't exit within this
+# window are aborted. Keep tight so pod rollouts are snappy.
+shutdown_deadline_seconds = 5
 
 [database]
-# Populated by T03/T04; use env var MESHMON_POSTGRES_URL or this key.
-# url = "postgres://meshmon:password@meshmon-db/meshmon"
+# Either `url` or `url_env` must be set.
+# url = "postgres://meshmon:SECRET@meshmon-db:5432/meshmon?sslmode=disable"
+url_env = "MESHMON_POSTGRES_URL"
 
-[metrics]
-# VictoriaMetrics endpoint. Populated by T07.
-# vm_url = "http://meshmon-vm:8428"
-
-[alerts]
-# Alertmanager endpoint. Populated by T22.
-# alertmanager_url = "http://meshmon-alertmanager:9093"
+[logging]
+# Env filter; overridden by $RUST_LOG when set.
+filter = "info"
+# "json" for production (one object per line, fields flattened) or "compact"
+# for developer terminals.
+format = "json"
 
 [auth]
-# Admin users. Populated by T05.
+# Zero or more operator accounts. password_hash is a PHC-format argon2 string
+# produced offline (e.g. `argon2 <saltfile> -id -e` from the argon2 CLI).
+# Editing this section requires a full service restart — SIGHUP does NOT
+# rotate session material.
 # [[auth.users]]
 # username = "admin"
-# password_hash_env = "MESHMON_ADMIN_PASSWORD_HASH"
+# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 
 [agent_api]
-# Shared bearer token for agent authentication. Supplied via env.
-# shared_token_env = "MESHMON_AGENT_TOKEN"
+# Single shared bearer token for agent authentication. Either inline or via
+# env var; leave both unset to disable agent endpoints (they return 503).
+# shared_token = "paste-the-token-here"
+shared_token_env = "MESHMON_AGENT_TOKEN"
+
+[upstream]
+# VictoriaMetrics remote-write target and query endpoint. Unreachability at
+# startup logs a warning — the service still boots so operators can inspect
+# state and repair the upstream.
+# vm_url = "http://meshmon-vm:8428"
+
+# Alertmanager API base URL. Same reachability-is-advisory semantics.
+# alertmanager_url = "http://meshmon-alertmanager:9093"
