@@ -42,15 +42,6 @@ enum Protocol {
   PROTOCOL_UDP = 3;
 }
 
-// Per-protocol health state (spec 02 "Per-protocol health" state machine).
-// Reported by the agent in route-snapshot context and used server-side for
-// dashboards that care about protocol-level signal diversity.
-enum ProtocolHealth {
-  PROTOCOL_HEALTH_UNSPECIFIED = 0;
-  PROTOCOL_HEALTH_HEALTHY = 1;
-  PROTOCOL_HEALTH_UNHEALTHY = 2;
-}
-
 // Path-level health (spec 02 "Path health (derived)" state machine). Used as
 // a lookup key in the ConfigResponse rates table and reported on route
 // snapshots.
@@ -86,12 +77,10 @@ message RegisterRequest {
   reserved 15 to 31;
 }
 
-// POST /api/agent/register response. Empty body in MVP; reserved so we can
-// add server-assigned identifiers or rotation hints later without a breaking
-// change.
-message RegisterResponse {
-  reserved 1 to 31;
-}
+// POST /api/agent/register response. Empty body in MVP. Future fields are
+// free to use any field number — no reservation needed because no field has
+// ever lived here.
+message RegisterResponse {}
 
 // ---------------------------------------------------------------------------
 // Agent → Service: metrics batch

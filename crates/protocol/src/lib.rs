@@ -21,9 +21,8 @@ pub mod pb {
 
 pub use pb::{
     AgentMetadata, ConfigResponse, DiffDetection, HopIp, HopSummary, MetricsBatch, PathHealth,
-    PathHealthThresholds, PathMetrics, PathSummary, Protocol, ProtocolHealth, ProtocolThresholds,
-    RateEntry, RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse,
-    Windows,
+    PathHealthThresholds, PathMetrics, PathSummary, Protocol, ProtocolThresholds, RateEntry,
+    RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse, Windows,
 };
 
 pub mod ip;
