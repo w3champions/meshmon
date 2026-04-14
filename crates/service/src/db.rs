@@ -66,10 +66,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     if detect_timescaledb(pool).await? {
         apply_timescaledb_setup(pool).await?;
     } else {
-        // TODO(T04): replace with `tracing::warn!` once tracing is wired in.
-        eprintln!(
-            "meshmon: timescaledb extension not found; continuing with plain \
-             Postgres (route_snapshots will not be partitioned or compressed)"
+        tracing::warn!(
+            "timescaledb extension not found; continuing with plain Postgres \
+             (route_snapshots will not be partitioned or compressed)"
         );
     }
     Ok(())
