@@ -58,6 +58,28 @@ docker compose -f deploy/docker-compose.yml up -d
 
 See `deploy/meshmon.example.toml` for the service configuration surface.
 
+## Running tests
+
+```bash
+cargo test --workspace --all-targets
+```
+
+`meshmon-service`'s integration tests spin up one
+`timescale/timescaledb` container per test binary via
+[`testcontainers`](https://crates.io/crates/testcontainers) and share it
+across every test in that binary, so the Docker daemon must be running
+locally. A process-exit hook removes the container; if you kill a test
+run with Ctrl-C the container may survive — prune with
+`docker ps -a --filter ancestor=timescale/timescaledb | awk 'NR>1 {print $1}' | xargs -r docker rm -f`.
+
+To target an existing Postgres (e.g. a remote instance) instead of
+auto-spawning, set `DATABASE_URL`:
+
+```bash
+export DATABASE_URL="postgres://user:pass@host:port/postgres"
+cargo test -p meshmon-service --test migrations
+```
+
 ## Status
 
 This repo is under active initial construction. The scaffolding in this commit

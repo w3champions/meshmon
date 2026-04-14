@@ -17,7 +17,11 @@ authors = ["meshmon contributors"]
 
 [workspace.dependencies]
 # Shared dependency versions. Downstream tasks add entries here.
+ctor = "0.10"
 prost = "0.14"
+sqlx = { version = "0.8", default-features = false }
+testcontainers = "0.27"
+tokio = "1"
 
 [profile.release]
 lto = "thin"

@@ -7,6 +7,26 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "meshmon-service"
 path = "src/main.rs"
+
+[dependencies]
+sqlx = { workspace = true, features = [
+    "postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "migrate",
+    "chrono",
+    "uuid",
+    "ipnetwork",
+] }
+
+[dev-dependencies]
+ctor = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
