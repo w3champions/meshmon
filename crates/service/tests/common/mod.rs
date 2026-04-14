@@ -6,13 +6,14 @@
 //! first use and shared across every test in that binary. Tests get
 //! isolation at one of two granularities:
 //!
-//! 1. **Fresh database per test** via [`acquire`] — for tests that need to
-//!    own the schema (migration tests, schema-evolution tests, anything
-//!    that runs DDL).
+//! 1. **Fresh database per test** via [`acquire`] — use when the test runs
+//!    `CREATE/ALTER/DROP`, installs an extension, or calls
+//!    [`meshmon_service::db::run_migrations`] against a clean slate. In
+//!    other words: anything DDL.
 //! 2. **Shared pre-migrated database + transaction rollback** via
-//!    [`shared_migrated_pool`] — for DML-only tests (most tests in T04+
-//!    will fall here: writers, readers, HTTP handlers). Each test wraps its
-//!    work in `pool.begin().await?` and rolls back for isolation.
+//!    [`shared_migrated_pool`] — the default for everything else. Writers,
+//!    readers, HTTP handlers. Each test wraps its work in
+//!    `pool.begin().await?` and rolls back for isolation.
 //!
 //! The shared container is stopped and removed at process exit by a
 //! [`ctor::dtor`] hook. This is necessary because Rust statics never run
@@ -23,8 +24,25 @@
 //! supplied Postgres. Useful for iterating against a long-lived local
 //! server or for reproducing issues against a remote DB. When in override
 //! mode the harness does not own the server, so the `#[dtor]` is a no-op.
+//! `acquire(true)` against a plain-Postgres `DATABASE_URL` fails at the
+//! `CREATE EXTENSION timescaledb` step — that's intentional: point the
+//! override at a TimescaleDB-capable server if you need the TS paths.
 //!
-//! # Example: DDL-owning test (migration, schema evolution)
+//! # What transaction rollback does NOT cover
+//!
+//! `shared_migrated_pool()` isolation relies on transactional rollback.
+//! These pieces of state survive a rollback — don't depend on them:
+//!
+//! - **Sequence advancement** (`BIGSERIAL` / `nextval()`). `route_snapshots.id`
+//!   will skip values across rolled-back inserts. Assert on the existence
+//!   of rows, not on specific id values.
+//! - **Advisory locks released at connection close.**
+//! - **`TRUNCATE ... RESTART IDENTITY`, `VACUUM`, extension-level state,**
+//!   and anything else that implicitly commits.
+//!
+//! If your test needs a truly clean schema, use [`acquire`] instead.
+//!
+//! # Example: DDL-owning test
 //!
 //! ```ignore
 //! #[tokio::test]
@@ -35,6 +53,10 @@
 //!     db.close().await;
 //! }
 //! ```
+//!
+//! A failing assertion before `close()` leaks the throwaway database
+//! inside the shared container, but db names are UUID-suffixed and the
+//! container itself is dropped at process exit — no cross-run harm.
 //!
 //! # Example: DML-only test (default pattern going forward)
 //!
@@ -48,6 +70,23 @@
 //!         .execute(&mut *tx).await.unwrap();
 //!     // ... more work on &mut *tx ...
 //!     tx.rollback().await.unwrap();
+//! }
+//! ```
+//!
+//! # Example: axum HTTP handler test
+//!
+//! Most T04+ handler tests will want an `Arc<PgPool>` in `AppState`.
+//! `shared_migrated_pool()` returns `&'static PgPool`; clone it into an
+//! `Arc` — `PgPool` is already `Arc`-wrapped internally, so this is
+//! cheap:
+//!
+//! ```ignore
+//! #[tokio::test]
+//! async fn my_handler_test() {
+//!     let pool = std::sync::Arc::new(common::shared_migrated_pool().await.clone());
+//!     let app = meshmon_service::http::router(AppState { pool });
+//!     // ... axum::test_server invocations, each scoped by a transaction if
+//!     //     the handler-under-test allows a pool injection seam.
 //! }
 //! ```
 
