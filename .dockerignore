@@ -1,0 +1,12 @@
+target/
+frontend/node_modules/
+frontend/dist/
+.git/
+.github/
+docs/
+deploy/
+*.md
+!README.md
+.DS_Store
+.vscode/
+.idea/
