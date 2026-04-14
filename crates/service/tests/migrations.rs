@@ -175,64 +175,77 @@ async fn migrations_are_idempotent_on_plain_postgres() {
     db.close().await;
 }
 
+/// Covers both post-migration constraint behaviors (FK restriction + CHECK
+/// constraint on protocol) in a single test body. These scenarios don't
+/// modify DDL, so a single migrated database + per-scenario transaction
+/// rollback gives us full isolation without paying for a second container.
 #[tokio::test]
-async fn foreign_keys_restrict_agent_delete() {
+async fn schema_constraints_behave_correctly() {
     let db = common::acquire(false).await;
     run_migrations(&db.pool).await.unwrap();
 
-    sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')")
-        .execute(&db.pool)
+    // Scenario 1: ON DELETE RESTRICT blocks removal of an agent that still
+    // has route_snapshots pointing at it.
+    {
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
+        )
+        .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('b', 'Agent B', '10.0.0.2')")
-        .execute(&db.pool)
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip) VALUES ('b', 'Agent B', '10.0.0.2')",
+        )
+        .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO route_snapshots
-            (source_id, target_id, protocol, observed_at, hops)
-         VALUES ('a', 'b', 'icmp', NOW(), '[]'::jsonb)",
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
-
-    let err = sqlx::query("DELETE FROM agents WHERE id = 'a'")
-        .execute(&db.pool)
-        .await
-        .expect_err("ON DELETE RESTRICT must block deletion");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("violates foreign key") || msg.contains("23503"),
-        "expected FK violation, got: {msg}"
-    );
-
-    db.close().await;
-}
-
-#[tokio::test]
-async fn protocol_check_constraint_rejects_unknown_value() {
-    let db = common::acquire(false).await;
-    run_migrations(&db.pool).await.unwrap();
-
-    sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')")
-        .execute(&db.pool)
+        sqlx::query(
+            "INSERT INTO route_snapshots
+                (source_id, target_id, protocol, observed_at, hops)
+             VALUES ('a', 'b', 'icmp', NOW(), '[]'::jsonb)",
+        )
+        .execute(&mut *tx)
         .await
         .unwrap();
 
-    let err = sqlx::query(
-        "INSERT INTO route_snapshots
-            (source_id, target_id, protocol, observed_at, hops)
-         VALUES ('a', 'a', 'sctp', NOW(), '[]'::jsonb)",
-    )
-    .execute(&db.pool)
-    .await
-    .expect_err("CHECK constraint must reject 'sctp'");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("check constraint") || msg.contains("23514"),
-        "expected CHECK violation, got: {msg}"
-    );
+        let err = sqlx::query("DELETE FROM agents WHERE id = 'a'")
+            .execute(&mut *tx)
+            .await
+            .expect_err("ON DELETE RESTRICT must block deletion");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("violates foreign key") || msg.contains("23503"),
+            "expected FK violation, got: {msg}"
+        );
+        tx.rollback().await.unwrap();
+    }
+
+    // Scenario 2: CHECK constraint rejects unknown protocol values.
+    {
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+        let err = sqlx::query(
+            "INSERT INTO route_snapshots
+                (source_id, target_id, protocol, observed_at, hops)
+             VALUES ('a', 'a', 'sctp', NOW(), '[]'::jsonb)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect_err("CHECK constraint must reject 'sctp'");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("check constraint") || msg.contains("23514"),
+            "expected CHECK violation, got: {msg}"
+        );
+        tx.rollback().await.unwrap();
+    }
 
     db.close().await;
 }
