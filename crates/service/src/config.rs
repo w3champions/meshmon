@@ -127,7 +127,7 @@ pub struct UpstreamSection {
 impl Default for ServiceSection {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:8080".parse().unwrap(),
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
             public_base_url: None,
             shutdown_deadline: std::time::Duration::from_secs(5),
         }
@@ -295,7 +295,6 @@ impl Config {
             raw.agent_api.shared_token,
             raw.agent_api.shared_token_env,
             "agent_api.shared_token",
-            path,
         )?;
         let agent_api = AgentApiSection { shared_token };
 
@@ -345,7 +344,6 @@ fn resolve_optional_secret(
     inline: Option<String>,
     env_name: Option<String>,
     key: &str,
-    _path: &str,
 ) -> Result<Option<String>, BootError> {
     if let Some(v) = inline.filter(|s| !s.is_empty()) {
         return Ok(Some(v));
