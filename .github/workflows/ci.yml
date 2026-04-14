@@ -13,6 +13,21 @@ jobs:
   rust:
     name: Rust (check, clippy, test, fmt)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_PASSWORD: meshmon
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DATABASE_URL: postgres://postgres:meshmon@127.0.0.1:5432/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v5
