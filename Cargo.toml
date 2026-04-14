@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/service",
+    "crates/agent",
+    "crates/protocol",
+    "crates/common",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/w3champions/meshmon"
+authors = ["meshmon contributors"]
+
+[workspace.dependencies]
+# Shared dependency versions. Downstream tasks add entries here.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
