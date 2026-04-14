@@ -78,15 +78,22 @@ async fn run() -> anyhow::Result<()> {
     info!(addr = %local_addr, "HTTP listener bound");
 
     // --- Shutdown coordination ---
-    // on_reload: re-read the config file and swap the ArcSwap.
+    // on_reload: re-read the config file and swap the ArcSwap. Detached by
+    // shutdown.rs to keep the signal loop responsive, so rapid SIGHUPs could
+    // otherwise race. A tokio Mutex serializes the spawned tasks — each
+    // acquires the guard in FIFO order, so the most recent file read is the
+    // last to land in ArcSwap.
     let reload_path = config_path.clone();
     let reload_handle = config_handle.clone();
     let reload_tx = config_tx.clone();
+    let reload_lock = Arc::new(tokio::sync::Mutex::new(()));
     let shutdown_token = shutdown::spawn(move || {
         let reload_path = reload_path.clone();
         let reload_handle = reload_handle.clone();
         let reload_tx = reload_tx.clone();
+        let reload_lock = reload_lock.clone();
         async move {
+            let _guard = reload_lock.lock().await;
             match Config::from_file(&reload_path) {
                 Ok(new_cfg) => {
                     let new_cfg = Arc::new(new_cfg);

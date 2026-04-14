@@ -209,3 +209,74 @@ fn shipped_example_parses() {
     std::env::remove_var("MESHMON_POSTGRES_URL");
     std::env::remove_var("MESHMON_AGENT_TOKEN");
 }
+
+#[test]
+fn empty_env_var_value_rejected() {
+    // Operator typo: VAR="" silently resolving to a blank secret is exactly
+    // what produces opaque downstream failures ("connection string is
+    // invalid"). Reject at load time instead.
+    std::env::set_var("MESHMON_T04_TEST_EMPTY_URL", "");
+    let err = Config::from_str(
+        r#"
+[database]
+url_env = "MESHMON_T04_TEST_EMPTY_URL"
+"#,
+        "t.toml",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            BootError::ConfigInvalid { reason, .. }
+                if reason.contains("MESHMON_T04_TEST_EMPTY_URL") && reason.contains("empty")
+        ),
+        "unexpected: {err:?}"
+    );
+    std::env::remove_var("MESHMON_T04_TEST_EMPTY_URL");
+}
+
+#[test]
+fn zero_shutdown_deadline_rejected() {
+    let err = Config::from_str(
+        r#"
+[service]
+shutdown_deadline_seconds = 0
+
+[database]
+url = "postgres://a@b/c"
+"#,
+        "t.toml",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        BootError::ConfigInvalid { reason, .. }
+            if reason.contains("shutdown_deadline_seconds")
+    ));
+}
+
+#[test]
+fn empty_optional_env_var_value_rejected() {
+    // Same rationale as required-secret empty rejection: an opt-in env
+    // reference with a blank value is almost certainly a deploy-pipeline
+    // typo, not an intentional "token disabled" signal. Operators disable
+    // the agent API by leaving both `shared_token` and `shared_token_env`
+    // unset.
+    std::env::set_var("MESHMON_T04_TEST_EMPTY_TOKEN", "");
+    let err = Config::from_str(
+        r#"
+[database]
+url = "postgres://a@b/c"
+
+[agent_api]
+shared_token_env = "MESHMON_T04_TEST_EMPTY_TOKEN"
+"#,
+        "t.toml",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        &err,
+        BootError::EnvMissing { name, .. } if name == "MESHMON_T04_TEST_EMPTY_TOKEN"
+    ));
+    std::env::remove_var("MESHMON_T04_TEST_EMPTY_TOKEN");
+}

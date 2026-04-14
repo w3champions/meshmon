@@ -237,11 +237,18 @@ impl Config {
             })?,
             None => defaults.listen_addr,
         };
-        let shutdown_deadline = raw
-            .service
-            .shutdown_deadline_seconds
-            .map(std::time::Duration::from_secs)
-            .unwrap_or(defaults.shutdown_deadline);
+        let shutdown_deadline = match raw.service.shutdown_deadline_seconds {
+            Some(0) => {
+                return Err(BootError::ConfigInvalid {
+                    path: path.to_string(),
+                    reason: "service.shutdown_deadline_seconds must be > 0 — 0 aborts \
+                             drain immediately; omit the key to get the default 5s"
+                        .to_string(),
+                });
+            }
+            Some(n) => std::time::Duration::from_secs(n),
+            None => defaults.shutdown_deadline,
+        };
         let service = ServiceSection {
             listen_addr,
             public_base_url: raw.service.public_base_url,
@@ -316,7 +323,11 @@ impl Config {
 }
 
 /// Resolve a required secret: prefer inline, fall back to env var, error if
-/// neither is set.
+/// neither is set. An empty string (inline `""` or `VAR=""` in the
+/// environment) is treated as "not set" — a blank secret is almost always
+/// a configuration mistake, and we'd rather fail loudly at boot than
+/// surface a cryptic downstream error (bad DB URL, empty auth token) once
+/// the service is already serving traffic.
 fn resolve_secret(
     inline: Option<String>,
     env_name: Option<String>,
@@ -327,10 +338,17 @@ fn resolve_secret(
         return Ok(v);
     }
     if let Some(name) = env_name {
-        return std::env::var(&name).map_err(|_| BootError::EnvMissing {
-            name,
-            key: key.to_string(),
-        });
+        return match std::env::var(&name) {
+            Ok(v) if !v.is_empty() => Ok(v),
+            Ok(_) => Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: format!("env var {name} (for {key}) is set but empty"),
+            }),
+            Err(_) => Err(BootError::EnvMissing {
+                name,
+                key: key.to_string(),
+            }),
+        };
     }
     Err(BootError::ConfigInvalid {
         path: path.to_string(),
@@ -340,6 +358,8 @@ fn resolve_secret(
 
 /// Resolve an optional secret: absent keys yield `None`; present-but-unset
 /// env var is an error (an operator opted-in and typo'd the env var name).
+/// An empty env-var value is also rejected — same rationale as
+/// [`resolve_secret`].
 fn resolve_optional_secret(
     inline: Option<String>,
     env_name: Option<String>,
@@ -349,12 +369,17 @@ fn resolve_optional_secret(
         return Ok(Some(v));
     }
     if let Some(name) = env_name {
-        return std::env::var(&name)
-            .map(Some)
-            .map_err(|_| BootError::EnvMissing {
+        return match std::env::var(&name) {
+            Ok(v) if !v.is_empty() => Ok(Some(v)),
+            Ok(_) => Err(BootError::EnvMissing {
                 name,
                 key: key.to_string(),
-            });
+            }),
+            Err(_) => Err(BootError::EnvMissing {
+                name,
+                key: key.to_string(),
+            }),
+        };
     }
     Ok(None)
 }
