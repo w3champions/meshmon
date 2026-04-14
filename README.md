@@ -64,10 +64,12 @@ See `deploy/meshmon.example.toml` for the service configuration surface.
 cargo test --workspace --all-targets
 ```
 
-`meshmon-service`'s migration tests spin up a throwaway `timescale/timescaledb`
-container via [`testcontainers`](https://crates.io/crates/testcontainers), so
-the Docker daemon must be running locally. All tests in a single test binary
-share one container; each test carves its own throwaway database inside it.
+`meshmon-service`'s migration tests spin up throwaway `timescale/timescaledb`
+containers via [`testcontainers`](https://crates.io/crates/testcontainers), so
+the Docker daemon must be running locally. Each test owns its own container;
+cargo runs tests in parallel by default, so expect roughly one container per
+CPU core in flight. Cap with `cargo test -- --test-threads=N` if that's too
+many for the host.
 
 To target an existing Postgres (e.g. a remote instance) instead of
 auto-spawning, set `DATABASE_URL`:

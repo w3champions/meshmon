@@ -19,6 +19,13 @@ use std::str::FromStr;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use uuid::Uuid;
+
+/// Pinned TimescaleDB image tag. Bumping this is a deliberate change; the
+/// floating `latest-pg16` tag moves silently and breaks historical
+/// reproducibility.
+const TIMESCALEDB_IMAGE: &str = "timescale/timescaledb";
+const TIMESCALEDB_TAG: &str = "2.26.3-pg16";
 
 /// Owns a freshly-created throwaway database plus (when auto-spawned) the
 /// TimescaleDB container it lives in. Use [`TestDb::close`] to tear it down
@@ -33,8 +40,9 @@ pub struct TestDb {
 }
 
 impl TestDb {
-    /// Close the pool and drop the test database. When the container is
-    /// owned by this value, `Drop` stops and removes it right after.
+    /// Tear down the test database. Only meaningful on the `DATABASE_URL`
+    /// override path — when we own the container, dropping `_container`
+    /// stops and removes the whole cluster anyway.
     pub async fn close(self) {
         let Self {
             pool,
@@ -43,16 +51,20 @@ impl TestDb {
             _container,
         } = self;
         pool.close().await;
-        let admin = PgPool::connect_with(admin_opts)
-            .await
-            .expect("connect to admin db for teardown");
-        // WITH (FORCE) terminates any lingering sessions before dropping,
-        // protecting against teardown flakes on Postgres 13+.
-        let _ = admin
-            .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
-            .await;
-        admin.close().await;
-        // `_container` drops here, which stops+removes the testcontainer.
+        if _container.is_none() {
+            // External Postgres: the DB we created survives the test, drop it.
+            // WITH (FORCE) terminates any lingering sessions before dropping,
+            // protecting against teardown flakes on Postgres 13+.
+            let admin = PgPool::connect_with(admin_opts)
+                .await
+                .expect("connect to admin db for teardown");
+            let _ = admin
+                .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
+                .await;
+            admin.close().await;
+        }
+        // `_container` drops here when auto-spawned; testcontainers stops
+        // and removes the container.
     }
 }
 
@@ -64,9 +76,8 @@ impl TestDb {
 pub async fn acquire(with_timescale: bool) -> TestDb {
     let (admin_opts, container) = admin_options().await;
 
-    // A random suffix survives parallel `cargo test` workers. 16 hex chars
-    // is plenty of entropy for a short-lived test DB.
-    let db_name = format!("meshmon_t03_{:016x}", rand_u64());
+    // A UUID survives parallel `cargo test` workers with zero collision risk.
+    let db_name = format!("meshmon_t03_{}", Uuid::new_v4().simple());
 
     let admin = PgPool::connect_with(admin_opts.clone())
         .await
@@ -116,7 +127,7 @@ async fn admin_options() -> (PgConnectOptions, Option<ContainerAsync<GenericImag
         return (opts, None);
     }
 
-    let container = GenericImage::new("timescale/timescaledb", "latest-pg16")
+    let container = GenericImage::new(TIMESCALEDB_IMAGE, TIMESCALEDB_TAG)
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",
         ))
@@ -136,21 +147,4 @@ async fn admin_options() -> (PgConnectOptions, Option<ContainerAsync<GenericImag
         .password("meshmon")
         .database("postgres");
     (opts, Some(container))
-}
-
-/// Mix the current time with a hash of the thread id to get a unique-ish
-/// 64-bit value. Not cryptographic; we only need "won't collide between
-/// concurrent test threads on the same tick."
-fn rand_u64() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let mut h = DefaultHasher::new();
-    std::thread::current().id().hash(&mut h);
-    nanos ^ h.finish().wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }

@@ -66,8 +66,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     if detect_timescaledb(pool).await? {
         apply_timescaledb_setup(pool).await?;
     } else {
-        // T04 swaps this for `tracing::warn!`. eprintln! keeps T03 self-
-        // contained without pulling tracing into the dep graph yet.
+        // TODO(T04): replace with `tracing::warn!` once tracing is wired in.
         eprintln!(
             "meshmon: timescaledb extension not found; continuing with plain \
              Postgres (route_snapshots will not be partitioned or compressed)"
@@ -78,10 +77,18 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 /// Install or reinstall the TimescaleDB hypertable + compression + retention
 /// policies for `route_snapshots`. Idempotent.
+///
+/// All four DDL statements run inside a single transaction on one
+/// connection. Each individual `if_not_exists => TRUE` call is already
+/// idempotent, but wrapping them atomically means a mid-sequence failure
+/// (network blip, privilege edge case) leaves the DB in the pre-call state
+/// rather than half-configured.
 async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
-    // migrate_data => TRUE ensures this still works when the operator
-    // installs the timescaledb extension *after* the service has run for a
-    // while on plain Postgres (route_snapshots already contains rows).
+    let mut tx = pool.begin().await?;
+
+    // migrate_data => TRUE keeps this working when the operator installs
+    // the timescaledb extension *after* the service has run for a while on
+    // plain Postgres (route_snapshots already contains rows).
     sqlx::query(
         "SELECT create_hypertable(
             'route_snapshots',
@@ -91,7 +98,7 @@ async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
             migrate_data => TRUE
         )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     // ALTER TABLE ... SET ... is idempotent — reapplying the same storage
@@ -102,7 +109,7 @@ async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
             timescaledb.compress_segmentby = 'source_id, target_id'
         )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -112,7 +119,7 @@ async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
             if_not_exists => TRUE
         )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -122,8 +129,8 @@ async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
             if_not_exists => TRUE
         )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(())
+    tx.commit().await
 }

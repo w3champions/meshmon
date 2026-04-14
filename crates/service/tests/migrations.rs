@@ -1,13 +1,11 @@
 //! Migration integration tests.
 //!
-//! Requires `DATABASE_URL` to point at a Postgres (ideally with the
-//! `timescaledb` extension available, i.e. the `timescale/timescaledb` image)
-//! with permissions to `CREATE DATABASE` and install extensions. Each test
-//! carves out its own database so runs are hermetic.
+//! Every test gets its own `timescale/timescaledb` container spawned by the
+//! `common` harness via `testcontainers`. Docker must be running locally;
+//! GitHub Actions `ubuntu-latest` runners have Docker pre-installed.
 //!
-//! When `DATABASE_URL` is unset, every test short-circuits to `return` — this
-//! matches the workspace convention that a missing DB environment should not
-//! fail CI for crates that don't touch Postgres.
+//! Setting `DATABASE_URL` skips the container spawn and targets the
+//! supplied Postgres — useful for debugging against a long-lived dev DB.
 
 mod common;
 
