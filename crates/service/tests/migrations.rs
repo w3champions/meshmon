@@ -176,18 +176,17 @@ async fn migrations_are_idempotent_on_plain_postgres() {
 }
 
 /// Covers both post-migration constraint behaviors (FK restriction + CHECK
-/// constraint on protocol) in a single test body. These scenarios don't
-/// modify DDL, so a single migrated database + per-scenario transaction
-/// rollback gives us full isolation without paying for a second container.
+/// constraint on protocol) against the process-shared pre-migrated DB.
+/// Each scenario wraps its work in a transaction that rolls back for
+/// isolation — the same pattern T04+ DML tests should follow by default.
 #[tokio::test]
 async fn schema_constraints_behave_correctly() {
-    let db = common::acquire(false).await;
-    run_migrations(&db.pool).await.unwrap();
+    let pool = common::shared_migrated_pool().await;
 
     // Scenario 1: ON DELETE RESTRICT blocks removal of an agent that still
     // has route_snapshots pointing at it.
     {
-        let mut tx = db.pool.begin().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
         )
@@ -223,7 +222,7 @@ async fn schema_constraints_behave_correctly() {
 
     // Scenario 2: CHECK constraint rejects unknown protocol values.
     {
-        let mut tx = db.pool.begin().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
         )
@@ -246,6 +245,4 @@ async fn schema_constraints_behave_correctly() {
         );
         tx.rollback().await.unwrap();
     }
-
-    db.close().await;
 }
