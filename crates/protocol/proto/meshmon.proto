@@ -42,6 +42,22 @@ enum Protocol {
   PROTOCOL_UDP = 3;
 }
 
+// Per-protocol health (spec 02 "Per-protocol health" state machine). Shipped
+// on every PathMetrics so the service can expose a stable per-protocol
+// gauge without re-running the agent's hysteresis logic. The agent is the
+// authoritative source — the service should not derive this from
+// `failure_rate`.
+//
+// Callers rendering UI ("ICMP blocked on this path") read
+// `health == UNHEALTHY` together with `probes_successful == 0` as the
+// "blocked" state; BLOCKED is not a separate enum variant because the
+// spec-02 state machine only has two states.
+enum ProtocolHealth {
+  PROTOCOL_HEALTH_UNSPECIFIED = 0;
+  PROTOCOL_HEALTH_HEALTHY = 1;
+  PROTOCOL_HEALTH_UNHEALTHY = 2;
+}
+
 // Path-level health (spec 02 "Path health (derived)" state machine). Used as
 // a lookup key in the ConfigResponse rates table and reported on route
 // snapshots.
@@ -126,8 +142,12 @@ message PathMetrics {
   uint32 rtt_p50_micros = 12;
   uint32 rtt_p95_micros = 13;
   uint32 rtt_p99_micros = 14;
+  // Agent's current per-protocol health verdict for (target_id, protocol).
+  // Shipped every batch so the service can expose a stable gauge without
+  // re-running the hysteresis state machine.
+  ProtocolHealth health = 15;
 
-  reserved 15 to 31;
+  reserved 16 to 31;
 }
 
 // POST /api/agent/metrics body. Batches every PathMetrics the agent has
