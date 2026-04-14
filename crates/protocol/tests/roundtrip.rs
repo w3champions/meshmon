@@ -7,8 +7,9 @@
 
 use meshmon_protocol::{
     ip, AgentMetadata, ConfigResponse, DiffDetection, HopIp, HopSummary, MetricsBatch, PathHealth,
-    PathHealthThresholds, PathMetrics, PathSummary, Protocol, ProtocolThresholds, RateEntry,
-    RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse, Windows,
+    PathHealthThresholds, PathMetrics, PathSummary, Protocol, ProtocolHealth, ProtocolThresholds,
+    RateEntry, RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse,
+    Windows,
 };
 use prost::Message;
 
@@ -69,6 +70,7 @@ fn metrics_batch_roundtrip() {
         rtt_p50_micros: 40_000,
         rtt_p95_micros: 60_000,
         rtt_p99_micros: 75_000,
+        health: ProtocolHealth::Healthy as i32,
     };
     let msg = MetricsBatch {
         source_id: "brazil-north".into(),
@@ -83,6 +85,7 @@ fn metrics_batch_roundtrip() {
             path.clone(),
             PathMetrics {
                 protocol: Protocol::Tcp as i32,
+                health: ProtocolHealth::Unhealthy as i32,
                 ..path
             },
         ],
