@@ -15,9 +15,7 @@ use meshmon_service::db::{detect_timescaledb, run_migrations};
 
 #[tokio::test]
 async fn migrations_apply_on_plain_postgres() {
-    let Some(db) = common::acquire(false).await else {
-        return;
-    };
+    let db = common::acquire(false).await;
 
     // Sanity: extension is *not* installed in this DB.
     assert!(!detect_timescaledb(&db.pool).await.unwrap());
@@ -88,9 +86,7 @@ async fn migrations_apply_on_plain_postgres() {
 
 #[tokio::test]
 async fn migrations_apply_on_timescaledb() {
-    let Some(db) = common::acquire(true).await else {
-        return;
-    };
+    let db = common::acquire(true).await;
 
     assert!(detect_timescaledb(&db.pool).await.unwrap());
 
@@ -142,9 +138,7 @@ async fn migrations_apply_on_timescaledb() {
 
 #[tokio::test]
 async fn migrations_are_idempotent_on_timescaledb() {
-    let Some(db) = common::acquire(true).await else {
-        return;
-    };
+    let db = common::acquire(true).await;
 
     run_migrations(&db.pool).await.expect("first run");
     run_migrations(&db.pool)
@@ -168,9 +162,7 @@ async fn migrations_are_idempotent_on_timescaledb() {
 
 #[tokio::test]
 async fn migrations_are_idempotent_on_plain_postgres() {
-    let Some(db) = common::acquire(false).await else {
-        return;
-    };
+    let db = common::acquire(false).await;
 
     run_migrations(&db.pool).await.expect("first run");
     run_migrations(&db.pool).await.expect("second run");
@@ -187,9 +179,7 @@ async fn migrations_are_idempotent_on_plain_postgres() {
 
 #[tokio::test]
 async fn foreign_keys_restrict_agent_delete() {
-    let Some(db) = common::acquire(false).await else {
-        return;
-    };
+    let db = common::acquire(false).await;
     run_migrations(&db.pool).await.unwrap();
 
     sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')")
@@ -224,9 +214,7 @@ async fn foreign_keys_restrict_agent_delete() {
 
 #[tokio::test]
 async fn protocol_check_constraint_rejects_unknown_value() {
-    let Some(db) = common::acquire(false).await else {
-        return;
-    };
+    let db = common::acquire(false).await;
     run_migrations(&db.pool).await.unwrap();
 
     sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')")

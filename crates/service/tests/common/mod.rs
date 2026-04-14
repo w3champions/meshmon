@@ -1,16 +1,68 @@
 //! Shared test harness for migration integration tests.
 //!
-//! Reads `DATABASE_URL` (skipping the calling test if unset), carves out a
-//! throwaway database with a random suffix, and returns a pool connected to
-//! it plus a drop-guard that tears the database down on test exit.
+//! On first `acquire()` call the harness lazy-spawns a single
+//! `timescale/timescaledb:latest-pg16` container via `testcontainers` and
+//! reuses it for the remainder of the test binary's life. Each individual
+//! test then carves out its own throwaway database inside that container so
+//! tests stay hermetic from one another.
+//!
+//! If `DATABASE_URL` is set in the environment, the harness uses that
+//! instead of spawning a container — useful for pointing at a long-lived
+//! local Postgres during iterative development.
 
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::Executor;
 use std::str::FromStr;
+use testcontainers::core::{ContainerPort, WaitFor};
+use testcontainers::runners::AsyncRunner;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use tokio::sync::OnceCell;
+
+/// Held for the lifetime of the test binary. Dropping it stops the container
+/// (testcontainers registers its own `Drop` impl).
+struct SharedContainer {
+    _container: ContainerAsync<GenericImage>,
+    url: String,
+}
+
+static CONTAINER: OnceCell<SharedContainer> = OnceCell::const_new();
+
+/// Libpq URL of the admin (`postgres`) database inside either the shared
+/// container or the `DATABASE_URL`-supplied server.
+async fn admin_url() -> String {
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        return url;
+    }
+    CONTAINER
+        .get_or_init(|| async {
+            let container = GenericImage::new("timescale/timescaledb", "latest-pg16")
+                .with_wait_for(WaitFor::message_on_stderr(
+                    "database system is ready to accept connections",
+                ))
+                .with_exposed_port(ContainerPort::Tcp(5432))
+                .with_env_var("POSTGRES_PASSWORD", "meshmon")
+                .start()
+                .await
+                .expect("start timescaledb container — is Docker running?");
+            let port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("resolve container host port");
+            let url = format!("postgres://postgres:meshmon@127.0.0.1:{port}/postgres");
+            SharedContainer {
+                _container: container,
+                url,
+            }
+        })
+        .await
+        .url
+        .clone()
+}
 
 /// Owns a freshly-created throwaway database. Use [`TestDb::close`] to tear
 /// down the DB explicitly — `Drop` can't run `async` work, so tests that
-/// panic will leave the DB behind (safe: the name is unique per invocation).
+/// panic will leave the DB behind (safe: the name is unique per invocation
+/// and the parent container is discarded at process exit).
 pub struct TestDb {
     pub pool: PgPool,
     pub name: String,
@@ -38,14 +90,14 @@ impl TestDb {
     }
 }
 
-/// Acquire (or skip) a fresh database for a migration test.
+/// Acquire a fresh database for a migration test.
 ///
-/// Returns `None` if `DATABASE_URL` is unset — caller should `return` to
-/// skip the test. Otherwise, creates a throwaway DB and, when
-/// `with_timescale` is true, installs `CREATE EXTENSION timescaledb` in it.
-pub async fn acquire(with_timescale: bool) -> Option<TestDb> {
-    let admin_url = std::env::var("DATABASE_URL").ok()?;
-    let admin_opts = PgConnectOptions::from_str(&admin_url).expect("parse DATABASE_URL");
+/// When `with_timescale` is `true`, installs `CREATE EXTENSION timescaledb`
+/// in the new database so the TimescaleDB test path exercises hypertable
+/// creation.
+pub async fn acquire(with_timescale: bool) -> TestDb {
+    let admin_url = admin_url().await;
+    let admin_opts = PgConnectOptions::from_str(&admin_url).expect("parse admin URL");
 
     // A random suffix survives parallel `cargo test` workers. 16 hex chars
     // is plenty of entropy for a short-lived test DB.
@@ -82,11 +134,11 @@ pub async fn acquire(with_timescale: bool) -> Option<TestDb> {
             );
     }
 
-    Some(TestDb {
+    TestDb {
         pool,
         name: db_name,
         admin_opts,
-    })
+    }
 }
 
 /// Mix the current time with a hash of the thread id to get a unique-ish
