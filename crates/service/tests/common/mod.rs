@@ -97,14 +97,16 @@
 //! ```
 
 use ctor::dtor;
+use meshmon_service::config::Config;
+use meshmon_service::state::AppState;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::Executor;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use tokio::sync::OnceCell;
+use tokio::sync::{watch, OnceCell};
 use uuid::Uuid;
 
 /// Pinned TimescaleDB image. Rolling tags (`latest`, `latest-pg16`) drift
@@ -309,4 +311,55 @@ fn cleanup_shared_container() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Same PHC hash as the unit tests (`http::auth::tests::TEST_HASH`).
+/// Password: `correct horse battery staple`.
+pub const AUTH_TEST_HASH: &str =
+    "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+pub const AUTH_TEST_PASSWORD: &str = "correct horse battery staple";
+
+/// Construct an `AppState` with a single `admin` user whose password is
+/// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
+/// set a stable client IP via `X-Forwarded-For` without needing to inject a
+/// `ConnectInfo` extension per request.
+pub fn state_with_admin(pool: PgPool) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[service]
+trust_forwarded_headers = true
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    AppState::new(swap, rx, pool)
+}
+
+/// Same as [`state_with_admin`] but with `trust_forwarded_headers = false`.
+/// Use this when you need to exercise the `PeerAddrKeyExtractor` branch —
+/// tests driven via `oneshot` must inject `ConnectInfo<SocketAddr>` into
+/// the request extensions manually.
+pub fn state_with_admin_peer_only(pool: PgPool) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    AppState::new(swap, rx, pool)
 }
