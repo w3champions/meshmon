@@ -205,9 +205,18 @@ async fn run() -> anyhow::Result<()> {
     // Registry refresh loop: cancelled by `shutdown_token`. The loop checks
     // the token after each `refresh_once` completes, so an in-flight refresh
     // runs to completion before the task exits. That extra query is bounded
-    // by sqlx's connect timeout and has no drain semantics.
-    if let Err(e) = registry_refresh.await {
-        warn!(error = %e, "registry refresh task ended abnormally");
+    // by sqlx's connect timeout and has no drain semantics. We cap the wait
+    // with the same shutdown_deadline used for HTTP so a stuck DB query can't
+    // hang the process indefinitely.
+    match tokio::time::timeout(deadline, registry_refresh).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "registry refresh task ended abnormally"),
+        Err(_) => {
+            warn!(
+                deadline_ms = deadline.as_millis() as u64,
+                "registry refresh did not drain within shutdown_deadline; aborting",
+            );
+        }
     }
     info!("agent registry refresh loop drained");
 

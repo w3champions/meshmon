@@ -241,7 +241,7 @@ async fn refresh_emits_state_split_metric() {
     let mut stale = None;
     for (key, _unit, _desc, value) in snap {
         let name = key.key().name();
-        if name != "meshmon_service_registry_agents_total" {
+        if name != "meshmon_service_registry_agents" {
             continue;
         }
         let labels: Vec<_> = key.key().labels().collect();

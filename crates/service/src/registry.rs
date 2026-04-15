@@ -189,7 +189,7 @@ impl AgentRegistry {
     /// [`AgentRegistry::force_refresh`] is called.
     ///
     /// `active_window` is the lookback duration used when splitting agents
-    /// into `active` vs `stale` for the `agents_total{state}` gauge.
+    /// into `active` vs `stale` for the `agents{state}` gauge.
     pub fn new(pool: PgPool, refresh_interval: Duration, active_window: Duration) -> Self {
         Self {
             snapshot: Arc::new(ArcSwap::from_pointee(RegistrySnapshot::empty())),
@@ -240,7 +240,7 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Emit the `meshmon_service_registry_agents_total` gauge split by
+    /// Emit the `meshmon_service_registry_agents` gauge split by
     /// `state` label (`"active"` / `"stale"`).
     fn publish(&self, snap: &RegistrySnapshot) {
         let window = self.active_window;
@@ -256,12 +256,12 @@ impl AgentRegistry {
             }
         }
         metrics::gauge!(
-            "meshmon_service_registry_agents_total",
+            "meshmon_service_registry_agents",
             "state" => "active",
         )
         .set(active as f64);
         metrics::gauge!(
-            "meshmon_service_registry_agents_total",
+            "meshmon_service_registry_agents",
             "state" => "stale",
         )
         .set(stale as f64);
@@ -288,12 +288,6 @@ impl AgentRegistry {
         tokio::spawn(async move {
             let interval = self.refresh_interval;
             loop {
-                // Emit snapshot age every tick (even on skipped refresh).
-                let age_secs = (Utc::now() - self.snapshot().refreshed_at())
-                    .num_seconds()
-                    .max(0) as f64;
-                metrics::gauge!("meshmon_service_registry_last_refresh_age_seconds").set(age_secs);
-
                 match refresh_once(&self.pool).await {
                     Ok(snap) => {
                         tracing::debug!(count = snap.len(), "agent registry refreshed",);
@@ -309,6 +303,13 @@ impl AgentRegistry {
                             .increment(1);
                     }
                 }
+
+                // Reflect the snapshot's current age after this iteration: ~0
+                // on success, otherwise (prior age + iteration cost).
+                let age_secs = (Utc::now() - self.snapshot().refreshed_at())
+                    .num_seconds()
+                    .max(0) as f64;
+                metrics::gauge!("meshmon_service_registry_last_refresh_age_seconds").set(age_secs);
 
                 tokio::select! {
                     biased;
