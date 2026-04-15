@@ -64,11 +64,7 @@ impl tokio::io::AsyncWrite for StreamWithPeer {
 pub type TestClient = AgentApiClient<
     InterceptedService<
         Channel,
-        Box<
-            dyn Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>
-                + Send
-                + Sync,
-        >,
+        Box<dyn Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Send + Sync>,
     >,
 >;
 
@@ -87,11 +83,7 @@ fn tonic_rate_limit_layer(
         governor::middleware::NoOpMiddleware,
         tonic::body::Body,
     >,
-    GovernorLayer<
-        PeerAddrKeyExtractor,
-        governor::middleware::NoOpMiddleware,
-        tonic::body::Body,
-    >,
+    GovernorLayer<PeerAddrKeyExtractor, governor::middleware::NoOpMiddleware, tonic::body::Body>,
 > {
     use tower_governor::governor::GovernorConfigBuilder;
     use tower_governor::key_extractor::SmartIpKeyExtractor;
@@ -122,6 +114,7 @@ pub async fn in_process_agent_client(state: AppState, peer_ip: IpAddr) -> TestCl
     in_process_agent_client_with_token(state, peer_ip, TEST_AGENT_TOKEN).await
 }
 
+#[allow(clippy::type_complexity)]
 pub async fn in_process_agent_client_with_token(
     state: AppState,
     peer_ip: IpAddr,
@@ -156,7 +149,10 @@ pub async fn in_process_agent_client_with_token(
             .layer(rate_limit)
             .add_service(svc)
             .serve_with_incoming(tokio_stream::once(Ok::<_, std::io::Error>(
-                StreamWithPeer { inner: server_stream, peer },
+                StreamWithPeer {
+                    inner: server_stream,
+                    peer,
+                },
             )))
             .await;
     });

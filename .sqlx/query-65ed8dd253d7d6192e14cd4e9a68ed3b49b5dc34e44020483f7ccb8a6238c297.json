@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO agents\n                  (id, display_name, location, ip, lat, lon, agent_version,\n                   registered_at, last_seen_at)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())\n               ON CONFLICT (id) DO UPDATE SET\n                   display_name  = EXCLUDED.display_name,\n                   location      = EXCLUDED.location,\n                   lat           = EXCLUDED.lat,\n                   lon           = EXCLUDED.lon,\n                   agent_version = EXCLUDED.agent_version,\n                   last_seen_at  = NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Inet",
+        "Float8",
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "65ed8dd253d7d6192e14cd4e9a68ed3b49b5dc34e44020483f7ccb8a6238c297"
+}

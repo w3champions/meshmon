@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ip as \"ip: sqlx::types::ipnetwork::IpNetwork\"\n               FROM agents WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ip: sqlx::types::ipnetwork::IpNetwork",
+        "type_info": "Inet"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fa3d2ba95bbda59f4ce99f356c0aa8e1b5a28befe428f9d827d4958fb33112ad"
+}

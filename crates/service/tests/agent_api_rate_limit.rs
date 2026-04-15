@@ -41,11 +41,8 @@ rate_limit_burst = 3
 async fn exceeding_burst_returns_resource_exhausted() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = state_with_tight_limit(pool);
-    let mut client = common::grpc_harness::in_process_agent_client(
-        state,
-        IpAddr::from([203, 0, 113, 90]),
-    )
-    .await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([203, 0, 113, 90])).await;
 
     for _ in 0..3 {
         let err = client
