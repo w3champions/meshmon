@@ -6,5 +6,6 @@
 
 // Submodules added incrementally in subsequent steps.
 pub mod json_shapes;
+pub mod last_seen;
 pub mod metrics;
 pub mod validator;
