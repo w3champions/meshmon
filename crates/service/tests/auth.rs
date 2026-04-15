@@ -1,6 +1,14 @@
 //! End-to-end HTTP tests for the auth flow: login, logout, 401, 429, and
 //! cookie flags. All tests drive the real axum router via
 //! `tower::ServiceExt::oneshot`.
+//!
+//! Each test uses a unique client IP inside RFC 5737 TEST-NET-3
+//! (`203.0.113.0/24`) so the per-IP rate-limit bucket cannot contaminate
+//! other tests. Allocated so far: `.1`, `.2`, `.3`, `.4`, `.50`, `.60`,
+//! `.61`, `.80`. Pick a fresh octet for new tests. Cross-test bucket
+//! contamination is already prevented by each test building its own
+//! router, so this is defense-in-depth rather than a correctness
+//! requirement.
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
