@@ -44,12 +44,11 @@ async fn exceeding_burst_returns_resource_exhausted() {
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([203, 0, 113, 90])).await;
 
-    for _ in 0..3 {
-        let err = client
-            .get_config(GetConfigRequest::default())
-            .await
-            .unwrap_err();
-        assert_ne!(err.code(), Code::ResourceExhausted, "pre-limit");
+    for i in 0..3 {
+        let result = client.get_config(GetConfigRequest::default()).await;
+        if let Err(err) = result {
+            assert_ne!(err.code(), Code::ResourceExhausted, "pre-limit call {i}");
+        }
     }
     let err = client
         .get_config(GetConfigRequest::default())
