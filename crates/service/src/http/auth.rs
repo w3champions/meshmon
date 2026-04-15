@@ -1,0 +1,85 @@
+//! Operator auth: static user list from `meshmon.toml`, session cookies
+//! via `tower-sessions`, and per-IP rate limiting on the login endpoint.
+//!
+//! Session cookies use `Secure` + `HttpOnly` + `SameSite=Lax` with a 30-day
+//! rolling expiry. Logins go through `AuthSession::login()` from
+//! `axum-login`; the `session_auth_hash` hashes the stored PHC string, so a
+//! password-hash change in the config invalidates existing sessions for that
+//! user at next request (though the spec notes full `[auth]` changes warrant
+//! a restart anyway).
+
+use crate::config::Config;
+use arc_swap::ArcSwap;
+use axum_login::{AuthUser as AxumAuthUser, AuthnBackend, UserId};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use utoipa::ToSchema;
+
+/// Principal returned by the backend on successful authentication. Stored in
+/// the session by `axum-login`; retrieved via the `AuthSession` extractor.
+#[derive(Debug, Clone)]
+pub struct AuthUser {
+    /// Username from `[auth.users].username` in `meshmon.toml`.
+    pub username: String,
+    /// PHC-formatted argon2 hash. Captured at authenticate time so we can
+    /// compute `session_auth_hash` without re-reading the config snapshot.
+    pub password_hash: String,
+}
+
+impl AxumAuthUser for AuthUser {
+    type Id = String;
+
+    fn id(&self) -> Self::Id {
+        self.username.clone()
+    }
+
+    fn session_auth_hash(&self) -> &[u8] {
+        self.password_hash.as_bytes()
+    }
+}
+
+/// POST body for `/api/auth/login`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LoginRequest {
+    /// Username from the configured `[auth.users]` list.
+    pub username: String,
+    /// Plaintext password. Verified against the PHC hash via argon2 inside
+    /// `spawn_blocking`.
+    pub password: String,
+}
+
+/// JSON response body for `/api/auth/login`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoginResponse {
+    /// Echoed username on success.
+    pub username: String,
+}
+
+/// `AuthnBackend` implementation. Holds an `Arc<ArcSwap<Config>>` so config
+/// reloads are picked up for the next authentication attempt (existing
+/// sessions are unaffected — a full restart is still required for
+/// `[auth]` changes per spec 03).
+#[derive(Clone)]
+pub struct ConfigAuthBackend {
+    config: Arc<ArcSwap<Config>>,
+}
+
+impl ConfigAuthBackend {
+    /// Construct the backend from the service's shared `Config` handle.
+    pub fn new(config: Arc<ArcSwap<Config>>) -> Self {
+        Self { config }
+    }
+}
+
+/// `AuthnBackend` error. Authentication failures due to wrong credentials
+/// return `Ok(None)`, not an error — only infrastructure faults raise
+/// `AuthError`.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    /// `argon2` verification task panicked or was cancelled.
+    #[error("password verification task failed: {0}")]
+    VerifyTask(#[from] tokio::task::JoinError),
+}
+
+// Credentials type used by `AxumAuthSession::authenticate`.
+pub type Credentials = LoginRequest;

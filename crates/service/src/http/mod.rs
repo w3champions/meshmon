@@ -13,6 +13,7 @@
 //! Session middleware (T05) and rate limiting (T05) layer between `1` and
 //! `2` once they land.
 
+pub mod auth;
 pub mod health;
 pub mod openapi;
 
