@@ -172,14 +172,29 @@ async fn post_batch(
 
     loop {
         attempt += 1;
-        let resp = client
+        let send_fut = client
             .post(&cfg.url)
             .header("Content-Type", CONTENT_TYPE)
             .header("Content-Encoding", "snappy")
             .header(HEADER_NAME_REMOTE_WRITE_VERSION, REMOTE_WRITE_VERSION_01)
             .body(body.clone())
-            .send()
-            .await;
+            .send();
+        // During shutdown drain the reqwest client's 15s timeout is too
+        // permissive — a backlog of batches against an unreachable VM
+        // could stall shutdown for many minutes. Cap the send at 2s when
+        // cancellation is already active so drain progresses promptly,
+        // still giving a reachable VM room to respond.
+        let resp = if token.is_cancelled() {
+            match tokio::time::timeout(Duration::from_secs(2), send_fut).await {
+                Ok(resp) => resp,
+                Err(_) => {
+                    vm_write_duration().record(started.elapsed().as_secs_f64());
+                    return Err(VmWriteError::Cancelled);
+                }
+            }
+        } else {
+            send_fut.await
+        };
         let elapsed = started.elapsed().as_secs_f64();
         match resp {
             Ok(r) if r.status().is_success() => {
