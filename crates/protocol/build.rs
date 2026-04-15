@@ -8,6 +8,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
         .bytes(".")
         .compile_protos(&["proto/meshmon.proto"], &["proto"])?;
 

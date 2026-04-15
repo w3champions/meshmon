@@ -20,10 +20,18 @@ pub mod pb {
 }
 
 pub use pb::{
-    AgentMetadata, ConfigResponse, DiffDetection, HopIp, HopSummary, MetricsBatch, PathHealth,
-    PathHealthThresholds, PathMetrics, PathSummary, Protocol, ProtocolHealth, ProtocolThresholds,
-    RateEntry, RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse,
-    Windows,
+    AgentMetadata, ConfigResponse, DiffDetection, GetConfigRequest, GetTargetsRequest, HopIp,
+    HopSummary, MetricsBatch, PathHealth, PathHealthThresholds, PathMetrics, PathSummary, Protocol,
+    ProtocolHealth, ProtocolThresholds, PushMetricsResponse, PushRouteSnapshotResponse, RateEntry,
+    RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse, Windows,
 };
+
+/// Generated tonic server trait + server adapter. Implement [`AgentApi`],
+/// then wrap in [`AgentApiServer::new`] / `with_interceptor`.
+pub use pb::agent_api_server::{AgentApi, AgentApiServer};
+
+/// Generated tonic client. Used by integration tests and, eventually, by
+/// `meshmon-agent` (T11).
+pub use pb::agent_api_client::AgentApiClient;
 
 pub mod ip;
