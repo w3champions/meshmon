@@ -308,3 +308,51 @@ trust_forwarded_headers = true
     .expect("parse");
     assert!(cfg.service.trust_forwarded_headers);
 }
+
+#[test]
+fn agents_section_defaults_when_missing() {
+    let cfg = Config::from_str(
+        r#"
+[database]
+url = "postgres://a@b/c"
+"#,
+        "test.toml",
+    )
+    .expect("parse");
+    assert_eq!(cfg.agents.target_active_window_minutes, 5);
+    assert_eq!(cfg.agents.refresh_interval_seconds, 10);
+}
+
+#[test]
+fn agents_section_parses_overrides() {
+    let cfg = Config::from_str(
+        r#"
+[database]
+url = "postgres://a@b/c"
+
+[agents]
+target_active_window_minutes = 15
+refresh_interval_seconds = 30
+"#,
+        "test.toml",
+    )
+    .expect("parse");
+    assert_eq!(cfg.agents.target_active_window_minutes, 15);
+    assert_eq!(cfg.agents.refresh_interval_seconds, 30);
+}
+
+#[test]
+fn agents_section_rejects_zero_values() {
+    let err = Config::from_str(
+        r#"
+[database]
+url = "postgres://a@b/c"
+
+[agents]
+refresh_interval_seconds = 0
+"#,
+        "test.toml",
+    )
+    .expect_err("must reject zero cadence");
+    assert!(format!("{err}").contains("refresh_interval_seconds"));
+}
