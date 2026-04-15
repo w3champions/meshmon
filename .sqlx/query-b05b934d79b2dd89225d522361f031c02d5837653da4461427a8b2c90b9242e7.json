@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, display_name, location,\n               ip as \"ip: IpNetwork\",\n               lat, lon, agent_version, registered_at, last_seen_at\n        FROM agents\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "location",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "ip: IpNetwork",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 4,
+        "name": "lat",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "lon",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "agent_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "registered_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "b05b934d79b2dd89225d522361f031c02d5837653da4461427a8b2c90b9242e7"
+}

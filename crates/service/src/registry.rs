@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::types::ipnetwork::IpNetwork;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -116,4 +117,59 @@ impl RegistrySnapshot {
             .cloned()
             .collect()
     }
+}
+
+/// Flat row struct for `sqlx::query_as!`. Kept private to the module.
+struct AgentRow {
+    id: String,
+    display_name: String,
+    location: Option<String>,
+    ip: IpNetwork,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    agent_version: Option<String>,
+    registered_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
+}
+
+/// Free function: read the current `agents` table into a snapshot.
+async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
+    let rows = sqlx::query_as!(
+        AgentRow,
+        r#"
+        SELECT id, display_name, location,
+               ip as "ip: IpNetwork",
+               lat, lon, agent_version, registered_at, last_seen_at
+        FROM agents
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut map = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let info = AgentInfo {
+            id: row.id.clone(),
+            display_name: row.display_name,
+            location: row.location,
+            ip: row.ip,
+            lat: row.lat,
+            lon: row.lon,
+            agent_version: row.agent_version,
+            registered_at: row.registered_at,
+            last_seen_at: row.last_seen_at,
+        };
+        map.insert(row.id, info);
+    }
+
+    Ok(RegistrySnapshot {
+        agents: map,
+        refreshed_at: Utc::now(),
+    })
+}
+
+/// `cfg(test)` seam so integration tests can exercise the SQL directly.
+#[doc(hidden)]
+pub async fn refresh_once_for_test(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
+    refresh_once(pool).await
 }
