@@ -56,6 +56,12 @@ impl<T> DropOldest<T> {
     }
 
     /// Wait until the queue becomes non-empty. Wakes via `notify_one()`.
+    ///
+    /// Assumes a single consumer across all wait* methods on this queue —
+    /// `push` uses `notify_one()`, so two concurrent awaiters could miss
+    /// wakeups. The current pipeline has one waiter per queue; new callers
+    /// must either preserve that invariant or switch push to
+    /// `notify_waiters()`.
     pub async fn wait(&self) {
         loop {
             {
@@ -77,6 +83,8 @@ impl<T> DropOldest<T> {
     /// non-empty, so looping on it below-threshold would busy-spin. This
     /// method re-awaits the notify after each sub-threshold recheck, so
     /// the loop sleeps between `push()` calls.
+    ///
+    /// Shares the single-consumer assumption documented on [`Self::wait`].
     pub async fn wait_for_len(&self, threshold: usize) {
         loop {
             // Register interest in the next `notify_one()` BEFORE the
