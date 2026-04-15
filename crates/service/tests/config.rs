@@ -280,3 +280,31 @@ shared_token_env = "MESHMON_T04_TEST_EMPTY_TOKEN"
     ));
     std::env::remove_var("MESHMON_T04_TEST_EMPTY_TOKEN");
 }
+
+#[test]
+fn trust_forwarded_headers_defaults_to_false() {
+    let cfg = Config::from_str(
+        r#"
+[database]
+url = "postgres://u@h/d"
+"#,
+        "test.toml",
+    )
+    .expect("parse");
+    assert!(!cfg.service.trust_forwarded_headers);
+}
+
+#[test]
+fn trust_forwarded_headers_honored() {
+    let cfg = Config::from_str(
+        r#"
+[database]
+url = "postgres://u@h/d"
+[service]
+trust_forwarded_headers = true
+"#,
+        "test.toml",
+    )
+    .expect("parse");
+    assert!(cfg.service.trust_forwarded_headers);
+}
