@@ -41,6 +41,8 @@ pub struct Config {
     pub agent_api: AgentApiSection,
     /// Upstream service URLs (VictoriaMetrics, Alertmanager).
     pub upstream: UpstreamSection,
+    /// Agent registry timing settings.
+    pub agents: AgentsSection,
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -130,6 +132,25 @@ pub struct UpstreamSection {
     pub alertmanager_url: Option<String>,
 }
 
+/// Agent registry knobs: how long a `last_seen_at` still counts as active,
+/// how frequently the in-memory snapshot is re-read from Postgres.
+#[derive(Debug, Clone)]
+pub struct AgentsSection {
+    /// Minutes after `last_seen_at` before an agent is no longer considered active.
+    pub target_active_window_minutes: u32,
+    /// How often (in seconds) the in-memory registry snapshot is refreshed from Postgres.
+    pub refresh_interval_seconds: u32,
+}
+
+impl Default for AgentsSection {
+    fn default() -> Self {
+        Self {
+            target_active_window_minutes: 5,
+            refresh_interval_seconds: 10,
+        }
+    }
+}
+
 impl Default for ServiceSection {
     fn default() -> Self {
         Self {
@@ -165,6 +186,8 @@ struct RawConfig {
     agent_api: RawAgentApi,
     #[serde(default)]
     upstream: RawUpstream,
+    #[serde(default)]
+    agents: RawAgentsSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -209,6 +232,30 @@ struct RawAgentApi {
 struct RawUpstream {
     vm_url: Option<String>,
     alertmanager_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAgentsSection {
+    #[serde(default = "default_target_active_window_minutes")]
+    target_active_window_minutes: u32,
+    #[serde(default = "default_refresh_interval_seconds")]
+    refresh_interval_seconds: u32,
+}
+
+impl Default for RawAgentsSection {
+    fn default() -> Self {
+        Self {
+            target_active_window_minutes: default_target_active_window_minutes(),
+            refresh_interval_seconds: default_refresh_interval_seconds(),
+        }
+    }
+}
+
+fn default_target_active_window_minutes() -> u32 {
+    5
+}
+fn default_refresh_interval_seconds() -> u32 {
+    10
 }
 
 // ---------- loader ----------
@@ -320,6 +367,24 @@ impl Config {
             alertmanager_url: raw.upstream.alertmanager_url,
         };
 
+        // --- agents section ---
+        if raw.agents.target_active_window_minutes == 0 {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "agents.target_active_window_minutes must be non-zero".to_string(),
+            });
+        }
+        if raw.agents.refresh_interval_seconds == 0 {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "agents.refresh_interval_seconds must be non-zero".to_string(),
+            });
+        }
+        let agents = AgentsSection {
+            target_active_window_minutes: raw.agents.target_active_window_minutes,
+            refresh_interval_seconds: raw.agents.refresh_interval_seconds,
+        };
+
         Ok(Config {
             service,
             database,
@@ -327,6 +392,7 @@ impl Config {
             auth,
             agent_api,
             upstream,
+            agents,
         })
     }
 }
