@@ -24,6 +24,11 @@ axum = "0.8"
 axum-extra = "0.12"
 axum-login = "0.18"
 ctor = "0.10"
+# tower_governor 0.8 depends on governor 0.10. We name
+# `::governor::middleware::NoOpMiddleware` in the concrete type of our
+# login rate-limit layer alias, so the service crate needs `governor` as
+# a direct dep. Pin to match tower_governor's transitive version.
+governor = "0.10"
 prost = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }

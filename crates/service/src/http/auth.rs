@@ -12,7 +12,10 @@ use crate::config::Config;
 use arc_swap::ArcSwap;
 use axum_login::{AuthUser as AxumAuthUser, AuthnBackend, UserId};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::sync::Arc;
+use tower_governor::errors::GovernorError;
+use tower_governor::key_extractor::KeyExtractor;
 use utoipa::ToSchema;
 
 /// Principal returned by the backend on successful authentication. Stored in
@@ -306,6 +309,76 @@ pub fn auth_manager_layer(
     session_layer: tower_sessions::SessionManagerLayer<tower_sessions::MemoryStore>,
 ) -> axum_login::AuthManagerLayer<ConfigAuthBackend, tower_sessions::MemoryStore> {
     axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build()
+}
+
+/// Spec-pinned login rate: 5 attempts per 15 minutes with a burst of 3.
+pub const LOGIN_BURST_SIZE: u32 = 3;
+/// One permitted attempt every 180s (5 / 15 min).
+pub const LOGIN_SECONDS_PER_REQUEST: u64 = 180;
+
+/// `KeyExtractor` that reads the IP from `ConnectInfo<SocketAddr>` only,
+/// ignoring forwarded headers. Used when `service.trust_forwarded_headers`
+/// is `false` so attackers can't forge `X-Forwarded-For` to bypass the
+/// per-IP login rate limit.
+#[derive(Clone)]
+pub struct PeerAddrKeyExtractor;
+
+impl KeyExtractor for PeerAddrKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+        req.extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip())
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
+
+/// Two concrete shapes for the login rate-limit layer — one per
+/// `trust_forwarded_headers` setting. Both are wrapped in `tower::util::Either`
+/// so callers see a single `Layer` type regardless of the branch.
+///
+/// `RespBody` is pinned to `axum::body::Body` because
+/// `Response<axum::body::Body>: From<GovernorError>` is provided by
+/// tower_governor's `axum` feature (which is in the crate's default feature
+/// set).
+pub type LoginRateLimitLayer = tower::util::Either<
+    tower_governor::GovernorLayer<
+        tower_governor::key_extractor::SmartIpKeyExtractor,
+        governor::middleware::NoOpMiddleware,
+        axum::body::Body,
+    >,
+    tower_governor::GovernorLayer<
+        PeerAddrKeyExtractor,
+        governor::middleware::NoOpMiddleware,
+        axum::body::Body,
+    >,
+>;
+
+/// Build the login rate-limit layer using the spec parameters and the
+/// configured trust mode.
+pub fn login_rate_limit_layer(trust_forwarded_headers: bool) -> LoginRateLimitLayer {
+    use tower_governor::governor::GovernorConfigBuilder;
+    use tower_governor::key_extractor::SmartIpKeyExtractor;
+    use tower_governor::GovernorLayer;
+
+    if trust_forwarded_headers {
+        let cfg = GovernorConfigBuilder::default()
+            .per_second(LOGIN_SECONDS_PER_REQUEST)
+            .burst_size(LOGIN_BURST_SIZE)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("governor config (smart)");
+        tower::util::Either::Left(GovernorLayer::new(cfg))
+    } else {
+        let cfg = GovernorConfigBuilder::default()
+            .per_second(LOGIN_SECONDS_PER_REQUEST)
+            .burst_size(LOGIN_BURST_SIZE)
+            .key_extractor(PeerAddrKeyExtractor)
+            .finish()
+            .expect("governor config (peer-only)");
+        tower::util::Either::Right(GovernorLayer::new(cfg))
+    }
 }
 
 #[cfg(test)]
