@@ -1,5 +1,6 @@
 //! Tonic service implementation for the five agent RPCs.
 
+use crate::ingestion::validator::validate_metrics;
 use crate::state::AppState;
 use meshmon_protocol::{
     ip as proto_ip, AgentApi, ConfigResponse, GetConfigRequest, GetTargetsRequest, MetricsBatch,
@@ -159,11 +160,29 @@ impl AgentApi for AgentApiImpl {
         Ok(Response::new(RegisterResponse::default()))
     }
 
+    #[tracing::instrument(skip_all, fields(source_id = tracing::field::Empty))]
     async fn push_metrics(
         &self,
-        _request: Request<MetricsBatch>,
+        request: Request<MetricsBatch>,
     ) -> Result<Response<PushMetricsResponse>, Status> {
-        Err(Status::unimplemented("push_metrics"))
+        let batch = request.into_inner();
+        tracing::Span::current().record("source_id", tracing::field::display(&batch.source_id));
+
+        if self
+            .state
+            .registry
+            .snapshot()
+            .get(&batch.source_id)
+            .is_none()
+        {
+            return Err(Status::permission_denied("unknown source agent"));
+        }
+        let validated = validate_metrics(batch).map_err(|e| {
+            tracing::debug!(error = %e, "metrics batch rejected by validator");
+            Status::invalid_argument(e.to_string())
+        })?;
+        self.state.ingestion.push_metrics(validated);
+        Ok(Response::new(PushMetricsResponse::default()))
     }
 
     async fn push_route_snapshot(
