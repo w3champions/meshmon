@@ -9,10 +9,17 @@
 //! 5. Agent registry — fail-fast initial load from DB.
 //! 6. Bind HTTP listener.
 //! 7. Build state + ingestion, mark ready, spawn registry refresh loop.
-//! 8. Run the axum server with graceful shutdown, driven by SIGTERM/SIGINT.
+//! 8. Run the hyper-util auto::Builder server with graceful shutdown,
+//!    driven by SIGTERM/SIGINT.  HTTP/1.1 (REST) and HTTP/2 (gRPC) are
+//!    multiplexed on the same TCP port.
 
 use anyhow::Context;
 use arc_swap::ArcSwap;
+use axum::extract::connect_info::ConnectInfo;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
+use hyper_util::service::TowerToHyperService;
 use meshmon_service::config::{Config, DEFAULT_CONFIG_PATH};
 use meshmon_service::state::AppState;
 use meshmon_service::{db, http, logging, shutdown};
@@ -96,6 +103,22 @@ async fn run() -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
     info!(addr = %local_addr, "HTTP listener bound");
 
+    // Optionally load TLS config for standalone mode.
+    let tls_acceptor = initial_config
+        .agent_api
+        .tls
+        .as_ref()
+        .map(|tls_cfg| {
+            let cfg =
+                meshmon_service::tls::load_rustls_config(&tls_cfg.cert_path, &tls_cfg.key_path)?;
+            Ok::<_, meshmon_service::error::BootError>(tokio_rustls::TlsAcceptor::from(cfg))
+        })
+        .transpose()
+        .context("load TLS config")?;
+    if tls_acceptor.is_some() {
+        info!(addr = %local_addr, "standalone TLS enabled");
+    }
+
     // --- Shutdown coordination ---
     // on_reload: re-read the config file and swap the ArcSwap. Detached by
     // shutdown.rs to keep the signal loop responsive, so rapid SIGHUPs could
@@ -164,41 +187,101 @@ async fn run() -> anyhow::Result<()> {
     let app = http::router(state.clone());
 
     // --- Step 8: Serve with a bounded drain ---
+    //
+    // `hyper_util::server::conn::auto::Builder` detects the HTTP version on
+    // each new TCP connection (HTTP/1.1 vs HTTP/2 / gRPC) and dispatches to
+    // the appropriate hyper sub-server.  We accept connections in a loop,
+    // injecting `ConnectInfo<SocketAddr>` into request extensions so that axum
+    // extractors (`ConnectInfo`) and the tonic interceptor both see the peer IP.
+    //
+    // Graceful shutdown: when `shutdown_token` fires we stop accepting new
+    // connections and let the `shutdown_deadline` timer bound the drain window.
+    // In-flight connection tasks were spawned with `tokio::spawn` and will
+    // complete or be aborted by the tokio runtime when the process exits.
     let deadline = state.config().service.shutdown_deadline;
 
     let graceful_token = shutdown_token.clone();
     let graceful_state = state.clone();
-    let serve = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        graceful_token.cancelled().await;
-        graceful_state.mark_not_ready();
-        info!("HTTP server draining");
-    });
 
-    let deadline_token = shutdown_token.clone();
-    let deadline_timer = async move {
-        deadline_token.cancelled().await;
-        tokio::time::sleep(deadline).await;
-    };
+    let serve_result: anyhow::Result<()> = {
+        let builder = auto::Builder::new(TokioExecutor::new());
+        // Clone once; each spawned task clones again from this handle.
+        let app = app;
 
-    let serve_result = tokio::select! {
-        result = serve => result,
-        _ = deadline_timer => {
-            warn!(
-                deadline_ms = deadline.as_millis() as u64,
-                "HTTP server did not drain within shutdown_deadline; aborting in-flight connections"
-            );
+        let accept_loop = async move {
+            loop {
+                let (tcp_stream, peer_addr) = tokio::select! {
+                    result = listener.accept() => {
+                        match result {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                warn!(error = %e, "accept error; continuing");
+                                continue;
+                            }
+                        }
+                    }
+                    _ = graceful_token.cancelled() => {
+                        graceful_state.mark_not_ready();
+                        info!("HTTP server draining");
+                        break;
+                    }
+                };
+
+                // Optionally wrap in TLS.
+                let serve_fut = if let Some(ref acceptor) = tls_acceptor {
+                    let acceptor = acceptor.clone();
+                    let app = app.clone();
+                    let builder = builder.clone();
+                    tokio::spawn(async move {
+                        match acceptor.accept(tcp_stream).await {
+                            Ok(tls_stream) => {
+                                let io = TokioIo::new(tls_stream);
+                                serve_connection(io, peer_addr, app, builder).await;
+                            }
+                            Err(e) => {
+                                warn!(peer = %peer_addr, error = %e, "TLS handshake failed");
+                            }
+                        }
+                    })
+                } else {
+                    let io = TokioIo::new(tcp_stream);
+                    let app = app.clone();
+                    let builder = builder.clone();
+                    tokio::spawn(async move {
+                        serve_connection(io, peer_addr, app, builder).await;
+                    })
+                };
+
+                // We detach the task handle. The `shutdown_deadline` timer
+                // below provides the hard upper bound on how long we wait for
+                // in-flight connections to finish.
+                drop(serve_fut);
+            }
             Ok(())
+        };
+
+        let deadline_token = shutdown_token.clone();
+        let deadline_timer = async move {
+            deadline_token.cancelled().await;
+            tokio::time::sleep(deadline).await;
+        };
+
+        tokio::select! {
+            result = accept_loop => result,
+            _ = deadline_timer => {
+                warn!(
+                    deadline_ms = deadline.as_millis() as u64,
+                    "HTTP server did not drain within shutdown_deadline; aborting in-flight connections"
+                );
+                Ok(())
+            }
         }
     };
 
-    // If serve returned an error before a signal fired, shutdown_token was
-    // never cancelled. Signal it now so the registry refresh loop exits
-    // promptly instead of waiting for the full `tokio::time::timeout`
-    // deadline. No-op if already cancelled.
+    // If the accept loop returned an error before a signal fired, shutdown_token
+    // was never cancelled. Signal it now so the registry refresh loop exits
+    // promptly instead of waiting for the full `tokio::time::timeout` deadline.
+    // No-op if already cancelled.
     shutdown_token.cancel();
 
     // HTTP is done — no more in-flight handlers can call `push_metrics` /
@@ -230,6 +313,48 @@ async fn run() -> anyhow::Result<()> {
 
     info!("meshmon-service shutdown complete");
     Ok(())
+}
+
+/// Drive a single accepted connection to completion.
+///
+/// Injects `ConnectInfo<SocketAddr>` into every request's extensions so that
+/// axum's `ConnectInfo` extractor and the tonic interceptor both see the peer
+/// address without needing `into_make_service_with_connect_info`.
+///
+/// `I` must satisfy hyper's `Read + Write + Unpin + Send + 'static` bounds,
+/// which both `TokioIo<TcpStream>` and `TokioIo<TlsStream<TcpStream>>` do.
+async fn serve_connection<I>(
+    io: I,
+    peer_addr: SocketAddr,
+    app: axum::Router,
+    builder: auto::Builder<TokioExecutor>,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    // Wrap the axum router in a closure that injects `ConnectInfo` before
+    // dispatching to the router.  `axum::Router<()>` implements `Clone` and
+    // `Service<Request<Body>>`, so cloning per-connection is cheap (Arc bump).
+    let svc = tower::service_fn(move |mut req: hyper::Request<Incoming>| {
+        let mut app = app.clone();
+        async move {
+            req.extensions_mut().insert(ConnectInfo(peer_addr));
+            // axum::Router implements Service<Request<axum::body::Body>>, but
+            // hyper gives us Request<Incoming>.  axum::body::Body wraps
+            // Incoming, so we map the body type first.
+            let req = req.map(axum::body::Body::new);
+            use tower::Service as _;
+            app.call(req).await
+        }
+    });
+
+    if let Err(e) = builder
+        .serve_connection_with_upgrades(io, TowerToHyperService::new(svc))
+        .await
+    {
+        // Connection errors (client disconnect, protocol mismatch) are
+        // common in production; log at debug to avoid noise.
+        tracing::debug!(peer = %peer_addr, error = %e, "connection error");
+    }
 }
 
 /// Cheap `GET /` probe used for reachability warnings. Non-200 is still a

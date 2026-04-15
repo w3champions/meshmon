@@ -24,3 +24,4 @@ pub mod logging;
 pub mod registry;
 pub mod shutdown;
 pub mod state;
+pub mod tls;

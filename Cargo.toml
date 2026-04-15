@@ -55,6 +55,7 @@ password-hash = { version = "0.6", features = ["alloc", "phc"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 rustls-pemfile = "2"
 subtle = "2"

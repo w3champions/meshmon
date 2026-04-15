@@ -70,4 +70,13 @@ pub enum BootError {
     /// and must be built deliberately.
     #[error("HTTP server: {0}")]
     Serve(std::io::Error),
+    /// TLS certificate or key could not be loaded or parsed.
+    ///
+    /// Used by the standalone-TLS path (`agent_api.tls` config) to report
+    /// file-read or PEM-parse failures at startup before the listener opens.
+    #[error("TLS: {reason}")]
+    Tls {
+        /// Human-readable description of the failure (file path + underlying error).
+        reason: String,
+    },
 }

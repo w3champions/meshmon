@@ -26,6 +26,7 @@ snap = { workspace = true }
 axum-login = { workspace = true }
 chrono = { workspace = true }
 governor = { workspace = true }
+hyper = { workspace = true }
 hyper-util = { workspace = true }
 password-hash = { workspace = true }
 reqwest = { workspace = true }
