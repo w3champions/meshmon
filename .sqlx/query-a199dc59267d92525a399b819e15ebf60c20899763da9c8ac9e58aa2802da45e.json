@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO route_snapshots\n            (source_id, target_id, protocol, observed_at, hops, path_summary)\n         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)\n         RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a199dc59267d92525a399b819e15ebf60c20899763da9c8ac9e58aa2802da45e"
+}
