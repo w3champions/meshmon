@@ -63,6 +63,32 @@ docker stop meshmon-prep
 
 Without `DATABASE_URL`, set `SQLX_OFFLINE=true` (CI will).
 
+## Agent registry
+
+`meshmon_service::registry::AgentRegistry` keeps an in-memory snapshot of
+the `agents` table. It refreshes every
+`[agents].refresh_interval_seconds` (default 10 s) or on explicit
+`force_refresh()` — the agent-register handler calls the latter after
+writing a new row so the new agent is visible to `/api/agent/targets`
+without waiting for the next tick.
+
+`[agents].target_active_window_minutes` (default 5) controls which agents
+appear in `active_targets()` results. The window is passed as a `Duration`
+argument to `RegistrySnapshot::active_targets` at call time; handlers read
+it from `state.registry.active_window()`, which was set at construction.
+
+**Configuration knobs are read at startup.** Both `refresh_interval_seconds`
+and `target_active_window_minutes` are captured when `AgentRegistry::new` is
+called. SIGHUP-driven config reload updates `AppState::config` but does not
+re-apply those values to a running registry; a service restart is required to
+change refresh cadence or active-window.
+
+**Resilience:** initial load at startup is fail-fast. After that, any
+refresh that errors keeps the previous snapshot in place, emits
+`meshmon_service_registry_refresh_errors_total`, and retries on the next
+tick. Ingestion source validation therefore continues to accept known
+agents during brief DB outages.
+
 ## Configuration
 
 See `meshmon.toml` (canonical form lives in the deploy/ example). Secrets go through `*_env` indirection.
