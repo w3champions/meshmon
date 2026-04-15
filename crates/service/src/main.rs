@@ -109,6 +109,10 @@ async fn run() -> anyhow::Result<()> {
     });
 
     // --- Step 6: Build state, mark ready ---
+    // NOTE: the VM URL is read once at startup. Changes to `upstream.vm_url`
+    // via `SIGHUP` config reload take effect only after a service restart.
+    // Wiring the pipeline to observe `config_handle`/`config_rx` is a
+    // follow-up (tracked for the T10/exporter work).
     let vm_url_for_ingestion = initial_config.upstream.vm_url.clone().unwrap_or_else(|| {
         warn!("no upstream.vm_url configured; ingestion will fail to write to VM");
         "http://meshmon-vm:8428".to_string()

@@ -10,9 +10,9 @@
 
 use crate::ingestion::json_shapes::{HopJson, PathSummaryJson};
 use crate::ingestion::metrics::pg_snapshot_duration;
+use crate::ingestion::protocol_label;
 use crate::ingestion::validator::ValidatedSnapshot;
 use chrono::{DateTime, TimeZone, Utc};
-use meshmon_protocol::Protocol;
 use sqlx::types::Json;
 use sqlx::PgPool;
 use std::time::Instant;
@@ -21,7 +21,7 @@ use std::time::Instant;
 pub async fn insert_snapshot(pool: &PgPool, snap: &ValidatedSnapshot) -> Result<i64, sqlx::Error> {
     let started = Instant::now();
     let observed_at = micros_to_datetime(snap.observed_at_micros);
-    let proto_str = protocol_to_str(snap.protocol);
+    let proto_str = protocol_label(snap.protocol);
     let hops: Vec<HopJson> = snap.hops.iter().map(HopJson::from).collect();
     let summary = PathSummaryJson::from(&snap.path_summary);
 
@@ -42,15 +42,6 @@ pub async fn insert_snapshot(pool: &PgPool, snap: &ValidatedSnapshot) -> Result<
 
     pg_snapshot_duration().record(started.elapsed().as_secs_f64());
     Ok(row.id)
-}
-
-fn protocol_to_str(p: Protocol) -> &'static str {
-    match p {
-        Protocol::Unspecified => "icmp", // unreachable post-validation
-        Protocol::Icmp => "icmp",
-        Protocol::Tcp => "tcp",
-        Protocol::Udp => "udp",
-    }
 }
 
 fn micros_to_datetime(micros: i64) -> DateTime<Utc> {

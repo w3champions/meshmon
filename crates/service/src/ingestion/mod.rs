@@ -181,7 +181,8 @@ async fn pg_writer_loop(
             let mut buf = Vec::new();
             queue.drain_into(&mut buf, usize::MAX);
             for snap in buf {
-                let _ = pg_writer::insert_snapshot(&pool, &snap).await;
+                process_snapshot(&pool, &vm_queue, &last_seen, &mut route_change_counts, snap)
+                    .await;
             }
             return;
         }
@@ -194,38 +195,49 @@ async fn pg_writer_loop(
         let mut buf = Vec::new();
         queue.drain_into(&mut buf, 32);
         for snap in buf {
-            match pg_writer::insert_snapshot(&pool, &snap).await {
-                Ok(_id) => {
-                    let key = (
-                        snap.source_id.clone(),
-                        snap.target_id.clone(),
-                        snap.protocol,
-                    );
-                    let count = route_change_counts.entry(key).or_insert(0);
-                    *count += 1;
-                    let cumulative = *count;
-
-                    let labels = vec![
-                        ("source".to_string(), snap.source_id.clone()),
-                        ("target".to_string(), snap.target_id.clone()),
-                        (
-                            "protocol".to_string(),
-                            protocol_label(snap.protocol).to_string(),
-                        ),
-                    ];
-                    if vm_queue.push(PromSample {
-                        metric: "meshmon_route_changes_total".to_string(),
-                        labels,
-                        value: cumulative as f64,
-                        timestamp_ms: snap.observed_at_micros / 1000,
-                    }) {
-                        ingest_dropped(DropSource::Metrics).increment(1);
-                    }
-                    last_seen.touch(&snap.source_id, None);
-                }
-                Err(e) => warn!(error = %e, "route snapshot insert failed"),
-            }
+            process_snapshot(&pool, &vm_queue, &last_seen, &mut route_change_counts, snap).await;
         }
+    }
+}
+
+async fn process_snapshot(
+    pool: &PgPool,
+    vm_queue: &Arc<DropOldest<PromSample>>,
+    last_seen: &LastSeenUpdater,
+    route_change_counts: &mut std::collections::HashMap<(String, String, Protocol), u64>,
+    snap: ValidatedSnapshot,
+) {
+    match pg_writer::insert_snapshot(pool, &snap).await {
+        Ok(_id) => {
+            let key = (snap.source_id.clone(), snap.target_id.clone(), snap.protocol);
+            let count = route_change_counts.entry(key).or_insert(0);
+            *count += 1;
+            let cumulative = *count;
+
+            let labels = vec![
+                ("source".to_string(), snap.source_id.clone()),
+                ("target".to_string(), snap.target_id.clone()),
+                (
+                    "protocol".to_string(),
+                    protocol_label(snap.protocol).to_string(),
+                ),
+            ];
+            if vm_queue.push(PromSample {
+                metric: "meshmon_route_changes_total".to_string(),
+                labels,
+                value: cumulative as f64,
+                timestamp_ms: snap.observed_at_micros / 1000,
+            }) {
+                ingest_dropped(DropSource::Metrics).increment(1);
+            }
+            last_seen.touch(&snap.source_id, None);
+        }
+        Err(e) => warn!(
+            error = %e,
+            source = %snap.source_id,
+            target = %snap.target_id,
+            "route snapshot insert failed",
+        ),
     }
 }
 
@@ -274,7 +286,10 @@ fn samples_from_metrics(batch: &ValidatedMetrics) -> Vec<PromSample> {
     out
 }
 
-fn protocol_label(p: Protocol) -> &'static str {
+pub(crate) fn protocol_label(p: Protocol) -> &'static str {
+    // `Unspecified` is unreachable post-validation, but we still need a
+    // default so the match is exhaustive without `unreachable!()` (which
+    // would turn a future protocol-enum expansion into a runtime panic).
     match p {
         Protocol::Unspecified => "icmp",
         Protocol::Icmp => "icmp",

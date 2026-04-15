@@ -12,7 +12,9 @@
 //! (no dedup of common labels across the batch). For our cardinality
 //! (~40k series, ~670 samples/sec) the cost is well under network I/O.
 
-use crate::ingestion::metrics::{ingest_batch, ingest_samples, vm_write_duration, BatchOutcome};
+use crate::ingestion::metrics::{
+    ingest_batch, ingest_dropped, ingest_samples, vm_write_duration, BatchOutcome, DropSource,
+};
 use crate::ingestion::queue::DropOldest;
 use prometheus_reqwest_remote_write::{
     Label, Sample, TimeSeries, WriteRequest, CONTENT_TYPE, HEADER_NAME_REMOTE_WRITE_VERSION,
@@ -65,10 +67,16 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
 
     loop {
         if token.is_cancelled() {
-            buf.clear();
-            queue.drain_into(&mut buf, usize::MAX);
-            if !buf.is_empty() {
-                let _ = post_batch(&client, &cfg, &buf).await;
+            // Drain in batch-sized chunks so we don't build one oversized
+            // POST that VM will reject. `post_batch` is cancellation-aware
+            // and short-circuits retries once the token is set.
+            loop {
+                buf.clear();
+                let drained = queue.drain_into(&mut buf, cfg.batch_size);
+                if drained == 0 {
+                    break;
+                }
+                flush(&client, &cfg, &buf, drained, &token).await;
             }
             return;
         }
@@ -88,16 +96,29 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
         if drained == 0 {
             continue;
         }
-        match post_batch(&client, &cfg, &buf).await {
-            Ok(()) => {
-                ingest_batch(BatchOutcome::Ok).increment(1);
-                ingest_samples().increment(drained as u64);
-                debug!(samples = drained, "vm batch flushed");
-            }
-            Err(e) => {
-                ingest_batch(BatchOutcome::WriteError).increment(1);
-                warn!(error = %e, samples = drained, "vm batch dropped after retry exhaustion");
-            }
+        flush(&client, &cfg, &buf, drained, &token).await;
+    }
+}
+
+async fn flush(
+    client: &Client,
+    cfg: &VmWriterCfg,
+    buf: &[PromSample],
+    drained: usize,
+    token: &CancellationToken,
+) {
+    match post_batch(client, cfg, buf, token).await {
+        Ok(()) => {
+            ingest_batch(BatchOutcome::Ok).increment(1);
+            ingest_samples().increment(drained as u64);
+            debug!(samples = drained, "vm batch flushed");
+        }
+        Err(e) => {
+            ingest_batch(BatchOutcome::WriteError).increment(1);
+            // Samples discarded after retry exhaustion are a data-loss path
+            // equivalent to buffer overflow — mirror that in the counter.
+            ingest_dropped(DropSource::Metrics).increment(drained as u64);
+            warn!(error = %e, samples = drained, "vm batch dropped after retry exhaustion");
         }
     }
 }
@@ -106,6 +127,7 @@ async fn post_batch(
     client: &Client,
     cfg: &VmWriterCfg,
     samples: &[PromSample],
+    token: &CancellationToken,
 ) -> Result<(), VmWriteError> {
     let body = encode_batch(samples);
     let started = Instant::now();
@@ -145,7 +167,15 @@ async fn post_batch(
                 }
             }
         }
-        sleep(backoff).await;
+        // Cancellation short-circuits further retries so shutdown doesn't
+        // block for the full `max_retry` window when VM is unreachable.
+        tokio::select! {
+            _ = sleep(backoff) => {}
+            _ = token.cancelled() => {
+                vm_write_duration().record(started.elapsed().as_secs_f64());
+                return Err(VmWriteError::Cancelled);
+            }
+        }
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -195,4 +225,6 @@ enum VmWriteError {
     HttpStatus(u16),
     #[error("transport: {0}")]
     Transport(String),
+    #[error("cancelled during retry backoff")]
+    Cancelled,
 }
