@@ -68,6 +68,28 @@ impl<T> DropOldest<T> {
         }
     }
 
+    /// Wait until the queue holds at least `threshold` items.
+    ///
+    /// Returns immediately if the queue already meets the threshold.
+    /// Otherwise registers a `Notified` future *before* rechecking length,
+    /// which avoids the missed-wakeup race that naive `wait()`-plus-
+    /// recheck loops hit: `wait()` returns as soon as the queue is
+    /// non-empty, so looping on it below-threshold would busy-spin. This
+    /// method re-awaits the notify after each sub-threshold recheck, so
+    /// the loop sleeps between `push()` calls.
+    pub async fn wait_for_len(&self, threshold: usize) {
+        loop {
+            // Register interest in the next `notify_one()` BEFORE the
+            // length check, so a push that lands in the window between
+            // check-and-await still wakes us.
+            let notified = self.notify.notified();
+            if self.len() >= threshold {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Current item count (mainly for tests and metrics).
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()

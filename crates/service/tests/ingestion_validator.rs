@@ -284,3 +284,18 @@ fn validate_snapshot_rejects_zero_hop_position() {
         ValidationError::InvalidHopPosition
     ));
 }
+
+#[test]
+fn validate_snapshot_rejects_out_of_range_observed_at() {
+    // Timestamps outside chrono's representable range must be rejected
+    // at validation — otherwise they'd be accepted into the ingestion
+    // pipeline and silently dropped at INSERT time by pg_writer's
+    // `micros_to_datetime` (which returns `sqlx::Error::Protocol`).
+    // `i64::MAX` micros overflows chrono's `DateTime<Utc>` domain.
+    let mut s = good_snapshot();
+    s.observed_at_micros = i64::MAX;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::ObservedAtOutOfRange { .. }
+    ));
+}

@@ -126,14 +126,15 @@ pub async fn run(
             }
         }
 
-        // Once non-empty: wait up to `batch_interval` so more samples can
-        // accumulate before we flush. If the queue already has a full
-        // batch, skip the interval and flush immediately.
-        if queue.len() < cfg.batch_size {
-            tokio::select! {
-                _ = token.cancelled() => continue,
-                _ = sleep(cfg.batch_interval) => {}
-            }
+        // Wait up to `batch_interval` for more samples. Flush early the
+        // moment the queue reaches `batch_size` so bursts don't sit on the
+        // timer. `wait_for_len` returns immediately when the threshold is
+        // already met, which makes this also handle the "already full"
+        // case without a separate guard.
+        tokio::select! {
+            _ = token.cancelled() => continue,
+            _ = sleep(cfg.batch_interval) => {}
+            _ = queue.wait_for_len(cfg.batch_size) => {}
         }
 
         buf.clear();

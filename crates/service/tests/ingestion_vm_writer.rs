@@ -140,6 +140,81 @@ async fn flushes_when_batch_size_reached() {
     let _ = handle.await;
 }
 
+/// Regression guard for the "flush as soon as queue reaches batch_size"
+/// trigger (the "size OR interval" contract).
+///
+/// Earlier revisions of `run()` checked `queue.len() < cfg.batch_size`
+/// **once** (before sleeping `batch_interval`), so samples that arrived
+/// *during* the sleep would remain queued until the timer fired even if
+/// the queue grew past `batch_size`. Under sustained bursts that delay
+/// caused avoidable drops.
+///
+/// Proves that with a 30s interval and a batch_size of 5, pushing 5
+/// samples triggers a POST within well under 500ms — i.e. the race arm
+/// that watches queue growth is live, not the timer.
+#[tokio::test]
+async fn writer_flushes_immediately_when_batch_size_reached() {
+    let server = MockServer::start().await;
+    let mock = Mock::given(method("POST"))
+        .and(path("/api/v1/write"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount_as_scoped(&server)
+        .await;
+
+    let queue: Arc<DropOldest<PromSample>> = Arc::new(DropOldest::new(1024));
+    let token = CancellationToken::new();
+    let cfg = VmWriterCfg {
+        url: format!("{}/api/v1/write", server.uri()),
+        batch_size: 5,
+        batch_interval: Duration::from_secs(30),
+        max_retry: Duration::from_secs(1),
+    };
+    let handle = tokio::spawn({
+        let q = queue.clone();
+        let t = token.clone();
+        // Signal pg drain done up-front: these unit tests don't run a
+        // concurrent pg_writer, so the drain-wait guard would otherwise
+        // keep the writer alive indefinitely after cancel.
+        let pg_drain_complete = CancellationToken::new();
+        pg_drain_complete.cancel();
+        async move { vm_run(q, cfg, t, pg_drain_complete).await }
+    });
+
+    // Push exactly batch_size samples. If the batch-size race is live,
+    // the writer flushes well inside the 500ms window. If the interval
+    // timer is still authoritative the POST won't land for ~30s.
+    for i in 0..5 {
+        queue.push(sample(
+            "meshmon_test_burst",
+            i as f64,
+            1_700_000_000_000 + i,
+        ));
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let total: usize = mock
+        .received_requests()
+        .await
+        .iter()
+        .map(|r| {
+            decode_write_request(&r.body)
+                .timeseries
+                .iter()
+                .map(|ts| ts.samples.len())
+                .sum::<usize>()
+        })
+        .sum();
+    assert_eq!(
+        total, 5,
+        "expected size-driven flush within 500ms (batch_interval=30s); \
+         got {total} samples — batch-size race arm is not firing"
+    );
+
+    token.cancel();
+    let _ = handle.await;
+}
+
 #[tokio::test]
 async fn retries_after_failure() {
     let server = MockServer::start().await;

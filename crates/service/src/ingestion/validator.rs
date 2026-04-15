@@ -240,6 +240,15 @@ pub enum ValidationError {
     /// The metrics batch is missing its `agent_metadata` field.
     #[error("missing agent_metadata in metrics batch")]
     MissingAgentMetadata,
+    /// `observed_at_micros` is outside chrono's representable `DateTime<Utc>`
+    /// range. Previously these were accepted into ingestion and silently
+    /// dropped at INSERT time (via `sqlx::Error::Protocol`); rejecting at
+    /// validation lets handlers surface the bad payload to the agent.
+    #[error("observed_at_micros {value} is outside the representable range")]
+    ObservedAtOutOfRange {
+        /// The offending microsecond timestamp.
+        value: i64,
+    },
 }
 
 // Re-exports from the protocol crate so callers don't double-import.
@@ -288,6 +297,20 @@ pub fn validate_snapshot(req: RouteSnapshotRequest) -> Result<ValidatedSnapshot,
     }
     if req.target_id.is_empty() {
         return Err(ValidationError::EmptyTargetId);
+    }
+    // Reject timestamps that chrono can't represent. Mirrors
+    // `pg_writer::micros_to_datetime`; doing the check here lets handlers
+    // reject malformed payloads instead of silently dropping them at
+    // INSERT time.
+    {
+        use chrono::TimeZone;
+        let secs = req.observed_at_micros.div_euclid(1_000_000);
+        let nanos = (req.observed_at_micros.rem_euclid(1_000_000) * 1_000) as u32;
+        if chrono::Utc.timestamp_opt(secs, nanos).single().is_none() {
+            return Err(ValidationError::ObservedAtOutOfRange {
+                value: req.observed_at_micros,
+            });
+        }
     }
     let protocol = Protocol::try_from(req.protocol).unwrap_or(Protocol::Unspecified);
     if matches!(protocol, Protocol::Unspecified) {

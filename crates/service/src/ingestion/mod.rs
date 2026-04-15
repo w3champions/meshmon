@@ -127,10 +127,11 @@ impl IngestionPipeline {
             pg_drain_complete,
         ));
 
-        // Join order matters: pg_writer is a producer into vm_queue
-        // (it emits `meshmon_route_changes_total` samples after each
-        // snapshot insert). Awaiting it first lets vm_writer's grace-
-        // period drain observe pg's shutdown pushes before returning.
+        // Join pg first, then vm, so `IngestionPipeline::join` makes forward
+        // progress: pg's exit signals pg_drain_complete, which releases vm's
+        // final grace window. Correctness of sample retention is guaranteed
+        // by the signal chain (fired unconditionally via a drop guard, see
+        // `pg_writer_loop`), not by this ordering alone.
         Self {
             vm_queue,
             snapshot_queue,
@@ -172,6 +173,19 @@ impl IngestionPipeline {
     }
 }
 
+/// RAII wrapper that cancels the wrapped token when dropped. Ensures
+/// `pg_drain_complete` fires on *any* exit from `pg_writer_loop` (normal
+/// return **or** panic) — otherwise a future refactor that introduces a
+/// panic in `process_snapshot` could leave vm_writer and last_seen
+/// waiting forever on their drain-wait guards.
+struct FireOnDrop(CancellationToken);
+
+impl Drop for FireOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 async fn pg_writer_loop(
     queue: Arc<DropOldest<ValidatedSnapshot>>,
     vm_queue: Arc<DropOldest<PromSample>>,
@@ -180,6 +194,13 @@ async fn pg_writer_loop(
     token: CancellationToken,
     pg_drain_complete: CancellationToken,
 ) {
+    // Wrap in a drop guard so cancellation happens unconditionally on exit.
+    // The explicit `.cancel()` that used to live after the drain loop is
+    // now redundant — keeping only the guard prevents the "panic silences
+    // the signal" bug while still firing at exactly the same logical point
+    // (after the final `process_snapshot` await completes).
+    let _pg_drain_complete = FireOnDrop(pg_drain_complete);
+
     // Cumulative counter state for `meshmon_route_changes_total`. Resets to
     // 0 on service restart — Prometheus' counter-reset detection makes
     // `rate()` handle that correctly. Emitting the cumulative value (not a
@@ -201,11 +222,8 @@ async fn pg_writer_loop(
                 process_snapshot(&pool, &vm_queue, &last_seen, &mut route_change_counts, snap)
                     .await;
             }
-            // All producer pushes into vm_queue and last_seen are now done.
-            // Signalling *after* the loop exits (and therefore after every
-            // `process_snapshot` await completes) is what lets vm_writer and
-            // last_seen safely collapse their idle-wait guards.
-            pg_drain_complete.cancel();
+            // Return fires `_pg_drain_complete`'s drop impl, signalling
+            // vm_writer and last_seen that no more pushes are coming.
             return;
         }
 
