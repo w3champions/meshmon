@@ -114,7 +114,8 @@ async fn refresh_loop_picks_up_new_agents_within_one_interval() {
 
     seed(&db.pool, "bob", ChronoDuration::zero()).await;
 
-    // Within 3 intervals, the snapshot must see "bob".
+    // Poll for up to ~900ms (9 intervals at 100ms cadence). The refresh
+    // loop must observe "bob" within this window.
     let mut seen = false;
     for _ in 0..30 {
         tokio::time::sleep(TokioDuration::from_millis(30)).await;
@@ -157,7 +158,7 @@ async fn refresh_loop_exits_promptly_on_cancellation() {
 }
 
 #[tokio::test]
-async fn snapshot_survives_db_outage_and_recovers() {
+async fn snapshot_preserved_during_db_outage() {
     let db = common::acquire(false).await;
     meshmon_service::db::run_migrations(&db.pool).await.unwrap();
     seed(&db.pool, "a", ChronoDuration::zero()).await;

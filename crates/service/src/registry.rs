@@ -236,7 +236,10 @@ impl AgentRegistry {
     /// prior snapshot untouched. Stale data is strictly preferable to a
     /// cold registry.
     ///
-    /// `token` cancels the loop. The returned `JoinHandle<()>` must be
+    /// `token` cancels the loop. One in-flight refresh may complete after
+    /// `token` is cancelled, since cancellation is checked only after
+    /// `refresh_once` returns. The extra query is bounded by sqlx's connect
+    /// timeout and is harmless. The returned `JoinHandle<()>` must be
     /// awaited during shutdown (see `main.rs`).
     pub fn spawn_refresh(
         self: Arc<Self>,
