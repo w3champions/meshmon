@@ -7,6 +7,10 @@ use meshmon_protocol::{
     PushMetricsResponse, PushRouteSnapshotResponse, RegisterRequest, RegisterResponse,
     RouteSnapshotRequest, TargetsResponse,
 };
+use meshmon_protocol::{
+    DiffDetection as PbDiffDetection, PathHealthThresholds as PbPathHealthThresholds,
+    ProtocolThresholds as PbProtocolThresholds, RateEntry as PbRateEntry, Windows as PbWindows,
+};
 use tonic::{Request, Response, Status};
 
 /// Concrete implementation of the `AgentApi` tonic service.
@@ -212,7 +216,8 @@ impl AgentApi for AgentApiImpl {
         &self,
         _request: Request<GetConfigRequest>,
     ) -> Result<Response<ConfigResponse>, Status> {
-        Err(Status::unimplemented("get_config"))
+        let cfg = self.state.config();
+        Ok(Response::new(probing_to_config_response(&cfg.probing)))
     }
 
     async fn get_targets(
@@ -220,5 +225,58 @@ impl AgentApi for AgentApiImpl {
         _request: Request<GetTargetsRequest>,
     ) -> Result<Response<TargetsResponse>, Status> {
         Err(Status::unimplemented("get_targets"))
+    }
+}
+
+fn probing_to_config_response(p: &crate::probing::ProbingSection) -> ConfigResponse {
+    ConfigResponse {
+        enabled_protocols: p.enabled_protocols.iter().map(|pp| *pp as i32).collect(),
+        priority: p.priority.iter().map(|pp| *pp as i32).collect(),
+        rates: p
+            .rates
+            .iter()
+            .map(|r| PbRateEntry {
+                primary: r.primary as i32,
+                health: r.health as i32,
+                icmp_pps: r.icmp_pps,
+                tcp_pps: r.tcp_pps,
+                udp_pps: r.udp_pps,
+            })
+            .collect(),
+        icmp_thresholds: Some(PbProtocolThresholds {
+            unhealthy_trigger_pct: p.icmp_thresholds.unhealthy_trigger_pct,
+            healthy_recovery_pct: p.icmp_thresholds.healthy_recovery_pct,
+            unhealthy_hysteresis_sec: p.icmp_thresholds.unhealthy_hysteresis_sec,
+            healthy_hysteresis_sec: p.icmp_thresholds.healthy_hysteresis_sec,
+        }),
+        tcp_thresholds: Some(PbProtocolThresholds {
+            unhealthy_trigger_pct: p.tcp_thresholds.unhealthy_trigger_pct,
+            healthy_recovery_pct: p.tcp_thresholds.healthy_recovery_pct,
+            unhealthy_hysteresis_sec: p.tcp_thresholds.unhealthy_hysteresis_sec,
+            healthy_hysteresis_sec: p.tcp_thresholds.healthy_hysteresis_sec,
+        }),
+        udp_thresholds: Some(PbProtocolThresholds {
+            unhealthy_trigger_pct: p.udp_thresholds.unhealthy_trigger_pct,
+            healthy_recovery_pct: p.udp_thresholds.healthy_recovery_pct,
+            unhealthy_hysteresis_sec: p.udp_thresholds.unhealthy_hysteresis_sec,
+            healthy_hysteresis_sec: p.udp_thresholds.healthy_hysteresis_sec,
+        }),
+        windows: Some(PbWindows {
+            primary_sec: p.windows.primary_sec,
+            diversity_sec: p.windows.diversity_sec,
+        }),
+        diff_detection: Some(PbDiffDetection {
+            new_ip_min_freq: p.diff_detection.new_ip_min_freq,
+            missing_ip_max_freq: p.diff_detection.missing_ip_max_freq,
+            hop_count_change: p.diff_detection.hop_count_change,
+            rtt_shift_frac: p.diff_detection.rtt_shift_frac,
+        }),
+        path_health_thresholds: Some(PbPathHealthThresholds {
+            degraded_trigger_pct: p.path_health_thresholds.degraded_trigger_pct,
+            degraded_trigger_sec: p.path_health_thresholds.degraded_trigger_sec,
+            degraded_min_samples: p.path_health_thresholds.degraded_min_samples,
+            normal_recovery_pct: p.path_health_thresholds.normal_recovery_pct,
+            normal_recovery_sec: p.path_health_thresholds.normal_recovery_sec,
+        }),
     }
 }
