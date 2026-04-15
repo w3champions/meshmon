@@ -8,7 +8,9 @@
 //! code). This module owns only what can be derived from the payload
 //! itself.
 
-use meshmon_protocol::{MetricsBatch, PathMetrics, Protocol, ProtocolHealth};
+use meshmon_protocol::{
+    HopSummary, MetricsBatch, PathMetrics, Protocol, ProtocolHealth, RouteSnapshotRequest,
+};
 use thiserror::Error;
 
 /// Hard cap on per-batch path entries. Defends against pathological agents.
@@ -271,6 +273,93 @@ pub fn validate_metrics(batch: MetricsBatch) -> Result<ValidatedMetrics, Validat
         batch_timestamp_micros: batch.batch_timestamp_micros,
         agent_version,
         paths,
+    })
+}
+
+/// Validate a `RouteSnapshotRequest` decoded from the wire. Returns owned
+/// data so the original Protobuf can be dropped.
+pub fn validate_snapshot(req: RouteSnapshotRequest) -> Result<ValidatedSnapshot, ValidationError> {
+    if req.source_id.is_empty() {
+        return Err(ValidationError::EmptySourceId);
+    }
+    if req.target_id.is_empty() {
+        return Err(ValidationError::EmptyTargetId);
+    }
+    let protocol = Protocol::try_from(req.protocol).unwrap_or(Protocol::Unspecified);
+    if matches!(protocol, Protocol::Unspecified) {
+        return Err(ValidationError::UnspecifiedProtocol);
+    }
+    if req.hops.len() > MAX_HOPS_PER_SNAPSHOT {
+        return Err(ValidationError::TooManyHops {
+            count: req.hops.len(),
+        });
+    }
+    let path_summary = req
+        .path_summary
+        .ok_or(ValidationError::MissingPathSummary)?;
+    if path_summary.hop_count as usize != req.hops.len() {
+        return Err(ValidationError::HopCountMismatch {
+            summary: path_summary.hop_count,
+            actual: req.hops.len(),
+        });
+    }
+    if !(0.0..=1.0).contains(&path_summary.loss_pct) || path_summary.loss_pct.is_nan() {
+        return Err(ValidationError::HopLossOutOfRange {
+            position: 0,
+            value: path_summary.loss_pct,
+        });
+    }
+
+    let mut hops = Vec::with_capacity(req.hops.len());
+    for h in req.hops {
+        hops.push(validate_hop(h)?);
+    }
+
+    Ok(ValidatedSnapshot {
+        source_id: req.source_id,
+        target_id: req.target_id,
+        protocol,
+        observed_at_micros: req.observed_at_micros,
+        hops,
+        path_summary: ValidSummary {
+            avg_rtt_micros: path_summary.avg_rtt_micros,
+            loss_pct: path_summary.loss_pct,
+            hop_count: path_summary.hop_count,
+        },
+    })
+}
+
+fn validate_hop(h: HopSummary) -> Result<ValidHop, ValidationError> {
+    if !(0.0..=1.0).contains(&h.loss_pct) || h.loss_pct.is_nan() {
+        return Err(ValidationError::HopLossOutOfRange {
+            position: h.position,
+            value: h.loss_pct,
+        });
+    }
+    let mut ips = Vec::with_capacity(h.observed_ips.len());
+    for o in h.observed_ips {
+        if !(0.0..=1.0).contains(&o.frequency) || o.frequency.is_nan() {
+            return Err(ValidationError::HopFrequencyOutOfRange {
+                position: h.position,
+                value: o.frequency,
+            });
+        }
+        let ip =
+            meshmon_protocol::ip::to_ipaddr(&o.ip).map_err(|_| ValidationError::InvalidHopIp {
+                position: h.position,
+                len: o.ip.len(),
+            })?;
+        ips.push(ValidObservedIp {
+            ip,
+            frequency: o.frequency,
+        });
+    }
+    Ok(ValidHop {
+        position: h.position,
+        observed_ips: ips,
+        avg_rtt_micros: h.avg_rtt_micros,
+        stddev_rtt_micros: h.stddev_rtt_micros,
+        loss_pct: h.loss_pct,
     })
 }
 

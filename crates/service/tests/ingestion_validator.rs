@@ -1,11 +1,8 @@
 //! Pure-function tests for the ingestion validator. No I/O.
 
-use meshmon_protocol::{
-    AgentMetadata, MetricsBatch, PathMetrics, Protocol, ProtocolHealth,
-};
+use meshmon_protocol::{AgentMetadata, MetricsBatch, PathMetrics, Protocol, ProtocolHealth};
 use meshmon_service::ingestion::validator::{
-    validate_metrics, ValidationError, MAX_PATHS_PER_BATCH, MAX_PROBES_PER_WINDOW,
-    MAX_RTT_MICROS,
+    validate_metrics, ValidationError, MAX_PATHS_PER_BATCH, MAX_PROBES_PER_WINDOW, MAX_RTT_MICROS,
 };
 
 fn good_path(target: &str) -> PathMetrics {
@@ -162,5 +159,116 @@ fn missing_agent_metadata_rejected() {
     assert!(matches!(
         validate_metrics(b).unwrap_err(),
         ValidationError::MissingAgentMetadata
+    ));
+}
+
+use meshmon_protocol::{HopIp, HopSummary, PathSummary, RouteSnapshotRequest};
+use meshmon_service::ingestion::validator::{validate_snapshot, MAX_HOPS_PER_SNAPSHOT};
+
+fn good_snapshot() -> RouteSnapshotRequest {
+    RouteSnapshotRequest {
+        source_id: "agent-a".into(),
+        target_id: "agent-b".into(),
+        protocol: Protocol::Icmp as i32,
+        observed_at_micros: 1_700_000_000_000_000,
+        hops: vec![HopSummary {
+            position: 1,
+            observed_ips: vec![HopIp {
+                ip: vec![10, 0, 0, 1].into(),
+                frequency: 1.0,
+            }],
+            avg_rtt_micros: 500,
+            stddev_rtt_micros: 50,
+            loss_pct: 0.0,
+        }],
+        path_summary: Some(PathSummary {
+            avg_rtt_micros: 500,
+            loss_pct: 0.0,
+            hop_count: 1,
+        }),
+    }
+}
+
+#[test]
+fn snapshot_happy_path() {
+    let v = validate_snapshot(good_snapshot()).expect("validate");
+    assert_eq!(v.source_id, "agent-a");
+    assert_eq!(v.target_id, "agent-b");
+    assert_eq!(v.hops.len(), 1);
+    assert_eq!(
+        v.hops[0].observed_ips[0].ip,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))
+    );
+}
+
+#[test]
+fn snapshot_missing_summary_rejected() {
+    let mut s = good_snapshot();
+    s.path_summary = None;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::MissingPathSummary
+    ));
+}
+
+#[test]
+fn snapshot_invalid_ip_len_rejected() {
+    let mut s = good_snapshot();
+    s.hops[0].observed_ips[0].ip = vec![1, 2, 3].into();
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::InvalidHopIp { .. }
+    ));
+}
+
+#[test]
+fn snapshot_hop_frequency_out_of_range_rejected() {
+    let mut s = good_snapshot();
+    s.hops[0].observed_ips[0].frequency = 1.5;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::HopFrequencyOutOfRange { .. }
+    ));
+}
+
+#[test]
+fn snapshot_hop_loss_out_of_range_rejected() {
+    let mut s = good_snapshot();
+    s.hops[0].loss_pct = 1.1;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::HopLossOutOfRange { .. }
+    ));
+}
+
+#[test]
+fn snapshot_too_many_hops_rejected() {
+    let mut s = good_snapshot();
+    s.hops = (1..=(MAX_HOPS_PER_SNAPSHOT as u32 + 1))
+        .map(|i| HopSummary {
+            position: i,
+            observed_ips: vec![HopIp {
+                ip: vec![10, 0, 0, 1].into(),
+                frequency: 1.0,
+            }],
+            avg_rtt_micros: 100,
+            stddev_rtt_micros: 0,
+            loss_pct: 0.0,
+        })
+        .collect();
+    s.path_summary.as_mut().unwrap().hop_count = s.hops.len() as u32;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::TooManyHops { .. }
+    ));
+}
+
+#[test]
+fn snapshot_hop_count_mismatch_rejected() {
+    let mut s = good_snapshot();
+    s.path_summary.as_mut().unwrap().hop_count = 5;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::HopCountMismatch { .. }
     ));
 }
