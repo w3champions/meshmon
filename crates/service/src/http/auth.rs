@@ -277,6 +277,37 @@ pub async fn logout(mut auth_session: AuthSession) -> axum::response::Response {
     StatusCode::OK.into_response()
 }
 
+/// Build the tower-sessions middleware stack: in-memory store, cookie name
+/// `meshmon_session`, 30-day rolling expiry, `Secure`+`HttpOnly`+`SameSite=Lax`.
+///
+/// Returns both the layer and a handle to the store so the caller can run
+/// the store's periodic-deletion task alongside the main runtime.
+pub fn session_layer() -> (
+    tower_sessions::SessionManagerLayer<tower_sessions::MemoryStore>,
+    tower_sessions::MemoryStore,
+) {
+    use tower_sessions::cookie::time::Duration;
+    use tower_sessions::cookie::SameSite;
+    use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
+
+    let store = MemoryStore::default();
+    let layer = SessionManagerLayer::new(store.clone())
+        .with_name("meshmon_session")
+        .with_secure(true)
+        .with_http_only(true)
+        .with_same_site(SameSite::Lax)
+        .with_expiry(Expiry::OnInactivity(Duration::days(30)));
+    (layer, store)
+}
+
+/// `axum-login`'s auth layer bound to our `ConfigAuthBackend`.
+pub fn auth_manager_layer(
+    backend: ConfigAuthBackend,
+    session_layer: tower_sessions::SessionManagerLayer<tower_sessions::MemoryStore>,
+) -> axum_login::AuthManagerLayer<ConfigAuthBackend, tower_sessions::MemoryStore> {
+    axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
