@@ -2,10 +2,12 @@
 //! via `tower-sessions`, and per-IP rate limiting on the login endpoint.
 //!
 //! Session cookies use `Secure` + `HttpOnly` + `SameSite=Lax` with a 30-day
-//! rolling expiry. Logins go through `AuthSession::login()` from
-//! `axum-login`; the `session_auth_hash` hashes the stored PHC string, so a
-//! password-hash change in the config invalidates existing sessions for that
-//! user at next request (though the spec notes full `[auth]` changes warrant
+//! rolling expiry. Logins go through `AuthSession::login()` from `axum-login`;
+//! `session_auth_hash` returns the stored PHC string as an opaque
+//! identity token (stored verbatim in the session store, compared
+//! with constant-time equality), so a password-hash change in the
+//! config invalidates existing sessions for that user at next
+//! request (though the spec notes full `[auth]` changes warrant
 //! a restart anyway).
 
 use crate::config::Config;
@@ -226,6 +228,7 @@ pub async fn login(
     let user = match auth_session.authenticate(creds).await {
         Ok(Some(user)) => user,
         Ok(None) => {
+            tracing::warn!("login failed: invalid credentials");
             return (
                 StatusCode::UNAUTHORIZED,
                 axum::Json(serde_json::json!({"error": "invalid credentials"})),
@@ -246,7 +249,7 @@ pub async fn login(
         tracing::error!(error = %e, "session login failed");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({"error": "session error"})),
+            axum::Json(serde_json::json!({"error": "internal"})),
         )
             .into_response();
     }
