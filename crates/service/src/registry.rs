@@ -7,10 +7,12 @@
 //!
 //! See the service README's "Agent registry" section for design context.
 
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use sqlx::types::ipnetwork::IpNetwork;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One `agents` row, decoupled from sqlx types so handlers can clone it
@@ -168,4 +170,60 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
 #[doc(hidden)]
 pub async fn refresh_once_for_test(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
     refresh_once(pool).await
+}
+
+/// Owning wrapper around an `Arc<ArcSwap<RegistrySnapshot>>` plus the pool
+/// and refresh cadence.
+///
+/// `AgentRegistry` is constructed once at startup, held inside `AppState`,
+/// and cloned via `Arc` by every handler that needs registry access.
+pub struct AgentRegistry {
+    snapshot: Arc<ArcSwap<RegistrySnapshot>>,
+    pool: PgPool,
+    refresh_interval: Duration,
+}
+
+impl AgentRegistry {
+    /// Construct an empty registry. No DB contact until [`AgentRegistry::initial_load`] or
+    /// [`AgentRegistry::force_refresh`] is called.
+    pub fn new(pool: PgPool, refresh_interval: Duration) -> Self {
+        Self {
+            snapshot: Arc::new(ArcSwap::from_pointee(RegistrySnapshot::empty())),
+            pool,
+            refresh_interval,
+        }
+    }
+
+    /// Perform the first DB read synchronously. Called during service
+    /// startup and expected to succeed; a failure here is fail-fast
+    /// because a cold registry would reject every subsequent ingestion as
+    /// unknown-source (403).
+    pub async fn initial_load(&self) -> Result<(), sqlx::Error> {
+        let snap = refresh_once(&self.pool).await?;
+        self.snapshot.store(Arc::new(snap));
+        Ok(())
+    }
+
+    /// Lock-free read of the current snapshot.
+    pub fn snapshot(&self) -> Arc<RegistrySnapshot> {
+        self.snapshot.load_full()
+    }
+
+    /// How often the periodic refresh loop wakes up.
+    pub fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
+    }
+
+    /// Refresh right now and await completion. Called by
+    /// `POST /api/agent/register` after writing the new row, so the
+    /// caller's next request sees it without waiting for the next tick.
+    ///
+    /// Last-writer-wins semantics vs. the periodic loop: two concurrent
+    /// refreshes both succeed; the `store` that arrives later overwrites
+    /// the earlier one. At ~40 agents and 10s cadence this is benign.
+    pub async fn force_refresh(&self) -> Result<(), sqlx::Error> {
+        let snap = refresh_once(&self.pool).await?;
+        self.snapshot.store(Arc::new(snap));
+        Ok(())
+    }
 }
