@@ -1,6 +1,6 @@
 //! Tonic service implementation for the five agent RPCs.
 
-use crate::ingestion::validator::validate_metrics;
+use crate::ingestion::validator::{validate_metrics, validate_snapshot};
 use crate::state::AppState;
 use meshmon_protocol::{
     ip as proto_ip, AgentApi, ConfigResponse, GetConfigRequest, GetTargetsRequest, MetricsBatch,
@@ -185,11 +185,27 @@ impl AgentApi for AgentApiImpl {
         Ok(Response::new(PushMetricsResponse::default()))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(source_id = tracing::field::Empty, target_id = tracing::field::Empty)
+    )]
     async fn push_route_snapshot(
         &self,
-        _request: Request<RouteSnapshotRequest>,
+        request: Request<RouteSnapshotRequest>,
     ) -> Result<Response<PushRouteSnapshotResponse>, Status> {
-        Err(Status::unimplemented("push_route_snapshot"))
+        let req = request.into_inner();
+        tracing::Span::current().record("source_id", tracing::field::display(&req.source_id));
+        tracing::Span::current().record("target_id", tracing::field::display(&req.target_id));
+
+        if self.state.registry.snapshot().get(&req.source_id).is_none() {
+            return Err(Status::permission_denied("unknown source agent"));
+        }
+        let validated = validate_snapshot(req).map_err(|e| {
+            tracing::debug!(error = %e, "route snapshot rejected by validator");
+            Status::invalid_argument(e.to_string())
+        })?;
+        self.state.ingestion.push_snapshot(validated);
+        Ok(Response::new(PushRouteSnapshotResponse::default()))
     }
 
     async fn get_config(
