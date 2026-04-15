@@ -23,7 +23,7 @@ async fn touch_writes_last_seen() {
     let token = CancellationToken::new();
     let updater = LastSeenUpdater::spawn(pool.clone(), Duration::from_secs(30), token.clone());
 
-    updater.touch(&agent_id, Some("0.2.0".into())).await;
+    updater.touch(&agent_id, Some("0.2.0".into()));
     token.cancel();
     updater.join().await;
 
@@ -56,7 +56,7 @@ async fn second_touch_within_debounce_skips_db_write() {
     let token = CancellationToken::new();
     let updater = LastSeenUpdater::spawn(pool.clone(), Duration::from_secs(30), token.clone());
 
-    updater.touch(&agent_id, None).await;
+    updater.touch(&agent_id, None);
     // Give the updater task time to process the first touch and write to DB.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let after_first: chrono::DateTime<chrono::Utc> =
@@ -66,7 +66,7 @@ async fn second_touch_within_debounce_skips_db_write() {
             .await
             .unwrap();
 
-    updater.touch(&agent_id, None).await;
+    updater.touch(&agent_id, None);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let after_second: chrono::DateTime<chrono::Utc> =
         sqlx::query_scalar("SELECT last_seen_at FROM agents WHERE id = $1")

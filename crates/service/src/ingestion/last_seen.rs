@@ -31,7 +31,8 @@ struct Touch {
 
 impl LastSeenUpdater {
     /// Spawn the updater task and return its handle. The task runs until
-    /// `token` is cancelled (it drains remaining touches before returning).
+    /// `token` is cancelled, at which point it best-effort drains any
+    /// already-queued touches via `try_recv` before returning.
     pub fn spawn(pool: PgPool, debounce: Duration, token: CancellationToken) -> Self {
         let (tx, rx) = mpsc::channel::<Touch>(1024);
         let join = tokio::spawn(run(rx, pool, debounce, token));
@@ -42,10 +43,11 @@ impl LastSeenUpdater {
     }
 
     /// Enqueue a touch for `agent_id`, optionally updating `agent_version`.
-    /// Non-blocking: if the channel is full the touch is dropped and the
+    /// Non-blocking: backed by a bounded mpsc via `try_send`. If the channel
+    /// is full the touch is dropped and the
     /// `meshmon_service_ingest_dropped_total{source="touch"}` counter is
     /// incremented.
-    pub async fn touch(&self, agent_id: &str, version: Option<String>) {
+    pub fn touch(&self, agent_id: &str, version: Option<String>) {
         let touch = Touch {
             agent_id: agent_id.to_string(),
             version,

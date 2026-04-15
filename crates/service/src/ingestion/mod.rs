@@ -126,12 +126,8 @@ impl IngestionPipeline {
     /// Non-blocking: enqueue samples derived from a validated metrics batch
     /// and fire-and-forget a last-seen touch.
     pub fn push_metrics(&self, batch: ValidatedMetrics) {
-        let updater = self.last_seen.clone();
-        let agent_id = batch.source_id.clone();
-        let agent_version = batch.agent_version.clone();
-        tokio::spawn(async move {
-            updater.touch(&agent_id, agent_version).await;
-        });
+        self.last_seen
+            .touch(&batch.source_id, batch.agent_version.clone());
 
         for sample in samples_from_metrics(&batch) {
             if self.vm_queue.push(sample) {
@@ -143,11 +139,7 @@ impl IngestionPipeline {
     /// Non-blocking: enqueue a snapshot for `route_snapshots` insert and
     /// fire-and-forget a last-seen touch.
     pub fn push_snapshot(&self, snap: ValidatedSnapshot) {
-        let updater = self.last_seen.clone();
-        let agent_id = snap.source_id.clone();
-        tokio::spawn(async move {
-            updater.touch(&agent_id, None).await;
-        });
+        self.last_seen.touch(&snap.source_id, None);
         if self.snapshot_queue.push(snap) {
             ingest_dropped(DropSource::Snapshot).increment(1);
         }
@@ -175,6 +167,12 @@ async fn pg_writer_loop(
     // 0 on service restart — Prometheus' counter-reset detection makes
     // `rate()` handle that correctly. Emitting the cumulative value (not a
     // flat 1.0) is what makes `rate()` actually report changes/sec.
+    //
+    // Memory footprint is bounded by the agent registry (source × target ×
+    // protocol). For the ~36-agent mesh the spec targets, that's ~3,900
+    // entries. The map grows if agents are re-registered under new IDs; a
+    // future task can prune against the live registry if churn becomes a
+    // concern.
     let mut route_change_counts: std::collections::HashMap<(String, String, Protocol), u64> =
         std::collections::HashMap::new();
 
@@ -223,7 +221,7 @@ async fn pg_writer_loop(
                     }) {
                         ingest_dropped(DropSource::Metrics).increment(1);
                     }
-                    last_seen.touch(&snap.source_id, None).await;
+                    last_seen.touch(&snap.source_id, None);
                 }
                 Err(e) => warn!(error = %e, "route snapshot insert failed"),
             }
