@@ -39,8 +39,8 @@ pub struct AgentInfo {
 
 /// Immutable snapshot of the registry.
 ///
-/// Built by `refresh_once` (introduced in Task 3) and swapped into
-/// `AgentRegistry` atomically (introduced in Task 4).
+/// Built by `refresh_once` and stored inside `AgentRegistry` under an
+/// `ArcSwap` for lock-free concurrent reads.
 #[derive(Debug, Clone)]
 pub struct RegistrySnapshot {
     agents: HashMap<String, AgentInfo>,
@@ -57,8 +57,8 @@ impl RegistrySnapshot {
         }
     }
 
-    /// Build a snapshot from a vector of rows. Primarily for tests; the
-    /// production path goes through `refresh_once` (Task 3).
+    /// Build a snapshot from a vector of rows. Used by `refresh_once` after
+    /// a successful DB read and by tests that seed a mock snapshot.
     pub fn from_agents(agents: Vec<AgentInfo>) -> Self {
         let mut map = HashMap::with_capacity(agents.len());
         for a in agents {
@@ -108,8 +108,8 @@ impl RegistrySnapshot {
     /// removed from the result (an agent doesn't probe itself). `now` is
     /// sampled at call time so the window stays accurate between refreshes.
     pub fn active_targets(&self, excluding: &str, window: Duration) -> Vec<AgentInfo> {
-        let cutoff = Utc::now()
-            - chrono::Duration::from_std(window).unwrap_or(chrono::Duration::MAX);
+        let cutoff =
+            Utc::now() - chrono::Duration::from_std(window).unwrap_or(chrono::Duration::MAX);
         self.agents
             .values()
             .filter(|a| a.id != excluding && a.last_seen_at > cutoff)
