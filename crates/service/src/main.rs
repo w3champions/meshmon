@@ -6,9 +6,10 @@
 //! 3. Connect Postgres + run migrations.
 //! 4. Best-effort reachability checks for VictoriaMetrics and Alertmanager
 //!    (warn on failure — those upstreams may not exist yet during rollout).
-//! 5. Bind HTTP listener.
-//! 6. Mark service ready.
-//! 7. Run the axum server with graceful shutdown, driven by SIGTERM/SIGINT.
+//! 5. Agent registry — fail-fast initial load from DB.
+//! 6. Bind HTTP listener.
+//! 7. Build state + ingestion, mark ready, spawn registry refresh loop.
+//! 8. Run the axum server with graceful shutdown, driven by SIGTERM/SIGINT.
 
 use anyhow::Context;
 use arc_swap::ArcSwap;
@@ -70,7 +71,24 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
-    // --- Step 5: Bind HTTP listener ---
+    // --- Step 5: Agent registry (fail-fast on first read) ---
+    let registry_refresh_interval =
+        std::time::Duration::from_secs(initial_config.agents.refresh_interval_seconds as u64);
+    let registry_active_window = std::time::Duration::from_secs(
+        (initial_config.agents.target_active_window_minutes as u64) * 60,
+    );
+    let registry = std::sync::Arc::new(meshmon_service::registry::AgentRegistry::new(
+        pool.clone(),
+        registry_refresh_interval,
+        registry_active_window,
+    ));
+    registry
+        .initial_load()
+        .await
+        .context("initial agent registry load")?;
+    info!(count = registry.snapshot().len(), "agent registry loaded");
+
+    // --- Step 6: Bind HTTP listener ---
     let listen_addr: SocketAddr = initial_config.service.listen_addr;
     let listener = TcpListener::bind(listen_addr)
         .await
@@ -109,7 +127,7 @@ async fn run() -> anyhow::Result<()> {
         }
     });
 
-    // --- Step 6: Build state, mark ready ---
+    // --- Step 7: Build state, mark ready, spawn refresh ---
     // NOTE: the VM URL is read once at startup. Changes to `upstream.vm_url`
     // via `SIGHUP` config reload take effect only after a service restart.
     // Wiring the pipeline to observe `config_handle`/`config_rx` is a
@@ -134,11 +152,18 @@ async fn run() -> anyhow::Result<()> {
         ingestion_token.clone(),
     );
 
-    let state = AppState::new(config_handle, config_rx, pool, ingestion.clone());
+    let state = AppState::new(
+        config_handle,
+        config_rx,
+        pool,
+        ingestion.clone(),
+        registry.clone(),
+    );
     state.mark_ready();
+    let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());
     let app = http::router(state.clone());
 
-    // --- Step 7: Serve with a bounded drain ---
+    // --- Step 8: Serve with a bounded drain ---
     let deadline = state.config().service.shutdown_deadline;
 
     let graceful_token = shutdown_token.clone();
@@ -176,6 +201,17 @@ async fn run() -> anyhow::Result<()> {
     ingestion_token.cancel();
     ingestion.join().await;
     info!("ingestion pipeline drained");
+
+    // Registry refresh loop: cancelled by `shutdown_token`, bounded by its
+    // sleep interval. The task is idempotent; a partial-in-flight refresh
+    // that returns after cancellation is a no-op because the loop checks
+    // the token before starting the next sleep.
+    if let Err(e) = registry_refresh.await {
+        if !e.is_cancelled() {
+            warn!(error = %e, "registry refresh task ended abnormally");
+        }
+    }
+    info!("agent registry refresh loop drained");
 
     serve_result.context("HTTP server")?;
 
