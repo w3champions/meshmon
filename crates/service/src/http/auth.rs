@@ -112,7 +112,7 @@ impl AuthnBackend for ConfigAuthBackend {
         else {
             // Run a dummy verification anyway to keep the response timing
             // roughly flat and avoid username enumeration via latency.
-            dummy_verify(password).await?;
+            dummy_verify(password).await;
             return Ok(None);
         };
         let hash = user.password_hash.clone();
@@ -162,17 +162,31 @@ fn verify_password(plaintext: &str, phc: &str) -> bool {
     }
 }
 
-/// Run a throwaway verify against a fixed hash to keep response timing
-/// similar between "user not found" and "wrong password". Panics silently
-/// on failure — this is defence-in-depth, not a correctness gate.
-async fn dummy_verify(password: String) -> Result<(), AuthError> {
+/// Run a throwaway verify against a fixed hash to partially flatten
+/// response timing between "user not found" and "wrong password".
+///
+/// Caveat: argon2's `verify_password` executes with the parameters
+/// embedded in the parsed PHC string, not with `Argon2::default()`'s
+/// params. So the dummy only matches real-user timing when the operator's
+/// hashes share roughly these parameters. Weak production hashes (e.g.
+/// default `argon2` CLI output) will run much longer than this dummy, and
+/// the latency gap is still observable. Treat this as best-effort
+/// defence-in-depth, not a full mitigation.
+///
+/// `spawn_blocking` errors are logged and swallowed — propagating them
+/// would let an attacker distinguish known from unknown users via 500 vs
+/// 401 responses on panics.
+async fn dummy_verify(password: String) {
     const DUMMY_HASH: &str =
         "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
-    tokio::task::spawn_blocking(move || {
-        let _ = verify_password(&password, DUMMY_HASH);
-    })
-    .await?;
-    Ok(())
+    if let Err(e) =
+        tokio::task::spawn_blocking(move || {
+            let _ = verify_password(&password, DUMMY_HASH);
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "dummy password verify task failed");
+    }
 }
 
 #[cfg(test)]
