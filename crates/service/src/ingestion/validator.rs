@@ -8,9 +8,7 @@
 //! code). This module owns only what can be derived from the payload
 //! itself.
 
-use meshmon_protocol::{
-    HopSummary, MetricsBatch, PathMetrics, Protocol, ProtocolHealth, RouteSnapshotRequest,
-};
+use meshmon_protocol::{MetricsBatch, PathMetrics, Protocol, ProtocolHealth};
 use thiserror::Error;
 
 /// Hard cap on per-batch path entries. Defends against pathological agents.
@@ -29,62 +27,103 @@ pub const MAX_RTT_MICROS: u32 = 60_000_000;
 /// around 30; 128 is generous.
 pub const MAX_HOPS_PER_SNAPSHOT: usize = 128;
 
+/// A metrics batch that has passed all shape and range checks.
 #[derive(Debug, Clone)]
 pub struct ValidatedMetrics {
+    /// Identifier of the agent that sent the batch.
     pub source_id: String,
+    /// Batch wall-clock timestamp in microseconds since the Unix epoch.
     pub batch_timestamp_micros: i64,
+    /// Agent software version, or `None` if the agent did not report one.
     pub agent_version: Option<String>,
+    /// Validated per-path measurements included in this batch.
     pub paths: Vec<ValidPath>,
 }
 
+/// A single per-(target, protocol) measurement that has passed validation.
 #[derive(Debug, Clone)]
 pub struct ValidPath {
+    /// Identifier of the remote agent being measured.
     pub target_id: String,
+    /// Network protocol used for probing.
     pub protocol: Protocol,
+    /// Measurement window start, microseconds since the Unix epoch.
     pub window_start_micros: i64,
+    /// Measurement window end, microseconds since the Unix epoch.
     pub window_end_micros: i64,
+    /// Total number of probes sent during the window.
     pub probes_sent: u64,
+    /// Number of probes that received a successful response.
     pub probes_successful: u64,
+    /// Fraction of probes that failed; always in `[0.0, 1.0]`.
     pub failure_rate: f64,
+    /// Mean RTT across successful probes, in microseconds.
     pub rtt_avg_micros: u32,
+    /// Minimum RTT observed, in microseconds.
     pub rtt_min_micros: u32,
+    /// Maximum RTT observed, in microseconds.
     pub rtt_max_micros: u32,
+    /// Standard deviation of RTT, in microseconds.
     pub rtt_stddev_micros: u32,
+    /// 50th-percentile RTT, in microseconds.
     pub rtt_p50_micros: u32,
+    /// 95th-percentile RTT, in microseconds.
     pub rtt_p95_micros: u32,
+    /// 99th-percentile RTT, in microseconds.
     pub rtt_p99_micros: u32,
+    /// Derived health classification for this path.
     pub health: ProtocolHealth,
 }
 
+/// A route snapshot that has passed all shape and range checks.
 #[derive(Debug, Clone)]
 pub struct ValidatedSnapshot {
+    /// Identifier of the agent that captured the snapshot.
     pub source_id: String,
+    /// Identifier of the destination agent.
     pub target_id: String,
+    /// Network protocol used for the traceroute.
     pub protocol: Protocol,
+    /// Capture timestamp, microseconds since the Unix epoch.
     pub observed_at_micros: i64,
+    /// Ordered sequence of validated hops.
     pub hops: Vec<ValidHop>,
+    /// Aggregate summary computed from the hop sequence.
     pub path_summary: ValidSummary,
 }
 
+/// A single validated traceroute hop.
 #[derive(Debug, Clone)]
 pub struct ValidHop {
+    /// Zero-based position of this hop in the route.
     pub position: u32,
+    /// IP addresses observed at this hop position and their frequencies.
     pub observed_ips: Vec<ValidObservedIp>,
+    /// Mean RTT to this hop, in microseconds.
     pub avg_rtt_micros: u32,
+    /// Standard deviation of RTT to this hop, in microseconds.
     pub stddev_rtt_micros: u32,
+    /// Fraction of probes that received no response at this hop; in `[0.0, 1.0]`.
     pub loss_pct: f64,
 }
 
+/// An IP address observed at a particular traceroute hop.
 #[derive(Debug, Clone)]
 pub struct ValidObservedIp {
+    /// The IP address.
     pub ip: std::net::IpAddr,
+    /// Fraction of probes that reached this IP at this hop; in `[0.0, 1.0]`.
     pub frequency: f64,
 }
 
+/// Aggregate path summary derived from a validated route snapshot.
 #[derive(Debug, Clone)]
 pub struct ValidSummary {
+    /// Mean RTT across all hops, in microseconds.
     pub avg_rtt_micros: u32,
+    /// Overall path loss fraction; in `[0.0, 1.0]`.
     pub loss_pct: f64,
+    /// Total number of hops in the route.
     pub hop_count: u32,
 }
 
@@ -92,43 +131,115 @@ pub struct ValidSummary {
 /// sees them (only validated payloads make it through).
 #[derive(Debug, Error)]
 pub enum ValidationError {
+    /// The batch `source_id` field is empty.
     #[error("source_id is empty")]
     EmptySourceId,
+    /// A path entry has an empty `target_id` field.
     #[error("target_id is empty")]
     EmptyTargetId,
+    /// A path entry carries `Protocol::Unspecified`.
     #[error("protocol is unspecified")]
     UnspecifiedProtocol,
+    /// The batch contains more paths than `MAX_PATHS_PER_BATCH`.
     #[error("batch contains {count} paths; cap is {MAX_PATHS_PER_BATCH}")]
-    TooManyPaths { count: usize },
+    TooManyPaths {
+        /// Number of paths present in the batch.
+        count: usize,
+    },
+    /// A snapshot contains more hops than `MAX_HOPS_PER_SNAPSHOT`.
     #[error("snapshot contains {count} hops; cap is {MAX_HOPS_PER_SNAPSHOT}")]
-    TooManyHops { count: usize },
+    TooManyHops {
+        /// Number of hops present in the snapshot.
+        count: usize,
+    },
+    /// A path's `failure_rate` is outside `[0.0, 1.0]` or is NaN.
     #[error("failure_rate {value} outside [0.0, 1.0] for target={target}")]
-    FailureRateOutOfRange { target: String, value: f64 },
+    FailureRateOutOfRange {
+        /// Target agent identifier.
+        target: String,
+        /// The invalid failure_rate value.
+        value: f64,
+    },
+    /// One of the RTT fields exceeds `MAX_RTT_MICROS`.
     #[error("rtt_*_micros {value} > {MAX_RTT_MICROS} for target={target}")]
-    RttOutOfRange { target: String, value: u32 },
+    RttOutOfRange {
+        /// Target agent identifier.
+        target: String,
+        /// The invalid RTT value in microseconds.
+        value: u32,
+    },
+    /// `probes_sent` exceeds `MAX_PROBES_PER_WINDOW`.
     #[error("probes_sent {value} > {MAX_PROBES_PER_WINDOW} for target={target}")]
-    ProbeCountOutOfRange { target: String, value: u64 },
+    ProbeCountOutOfRange {
+        /// Target agent identifier.
+        target: String,
+        /// The invalid probe count.
+        value: u64,
+    },
+    /// `probes_successful` is greater than `probes_sent`.
     #[error("probes_successful {ok} > probes_sent {sent} for target={target}")]
-    ProbesSuccessfulExceedsSent { target: String, ok: u64, sent: u64 },
+    ProbesSuccessfulExceedsSent {
+        /// Target agent identifier.
+        target: String,
+        /// Number of successful probes reported.
+        ok: u64,
+        /// Number of probes sent.
+        sent: u64,
+    },
+    /// The measurement window end is before its start.
     #[error("invalid window: end {end} < start {start} for target={target}")]
-    InvalidWindow { target: String, start: i64, end: i64 },
+    InvalidWindow {
+        /// Target agent identifier.
+        target: String,
+        /// Window start timestamp in microseconds.
+        start: i64,
+        /// Window end timestamp in microseconds.
+        end: i64,
+    },
+    /// A hop IP frequency is outside `[0.0, 1.0]`.
     #[error("hop frequency {value} outside [0.0, 1.0] at position {position}")]
-    HopFrequencyOutOfRange { position: u32, value: f64 },
+    HopFrequencyOutOfRange {
+        /// Hop position index.
+        position: u32,
+        /// The invalid frequency value.
+        value: f64,
+    },
+    /// A hop loss percentage is outside `[0.0, 1.0]`.
     #[error("hop loss_pct {value} outside [0.0, 1.0] at position {position}")]
-    HopLossOutOfRange { position: u32, value: f64 },
+    HopLossOutOfRange {
+        /// Hop position index.
+        position: u32,
+        /// The invalid loss fraction.
+        value: f64,
+    },
+    /// A hop IP address byte slice has an unexpected length (must be 4 or 16).
     #[error("hop ip bytes len {len} (must be 4 or 16) at position {position}")]
-    InvalidHopIp { position: u32, len: usize },
+    InvalidHopIp {
+        /// Hop position index.
+        position: u32,
+        /// Actual byte length received.
+        len: usize,
+    },
+    /// The snapshot's `hop_count` summary field disagrees with `hops.len()`.
     #[error("hop_count {summary} disagrees with hops.len() {actual}")]
-    HopCountMismatch { summary: u32, actual: usize },
+    HopCountMismatch {
+        /// The hop count reported in the summary.
+        summary: u32,
+        /// The actual number of hops in the list.
+        actual: usize,
+    },
+    /// The route snapshot is missing its `path_summary` field.
     #[error("missing path_summary in route snapshot")]
     MissingPathSummary,
+    /// The metrics batch is missing its `agent_metadata` field.
     #[error("missing agent_metadata in metrics batch")]
     MissingAgentMetadata,
 }
 
 // Re-exports from the protocol crate so callers don't double-import.
-pub use meshmon_protocol::{HopIp, MetricsBatch as RawMetricsBatch,
-    RouteSnapshotRequest as RawRouteSnapshotRequest};
+pub use meshmon_protocol::{
+    HopIp, MetricsBatch as RawMetricsBatch, RouteSnapshotRequest as RawRouteSnapshotRequest,
+};
 
 /// Validate a `MetricsBatch` decoded from the wire. Returns owned data so
 /// the original Protobuf can be dropped.
@@ -137,7 +248,9 @@ pub fn validate_metrics(batch: MetricsBatch) -> Result<ValidatedMetrics, Validat
         return Err(ValidationError::EmptySourceId);
     }
     if batch.paths.len() > MAX_PATHS_PER_BATCH {
-        return Err(ValidationError::TooManyPaths { count: batch.paths.len() });
+        return Err(ValidationError::TooManyPaths {
+            count: batch.paths.len(),
+        });
     }
     let agent_metadata = batch
         .agent_metadata
@@ -176,8 +289,13 @@ fn validate_path(p: PathMetrics) -> Result<ValidPath, ValidationError> {
         });
     }
     for &rtt in &[
-        p.rtt_avg_micros, p.rtt_min_micros, p.rtt_max_micros,
-        p.rtt_stddev_micros, p.rtt_p50_micros, p.rtt_p95_micros, p.rtt_p99_micros,
+        p.rtt_avg_micros,
+        p.rtt_min_micros,
+        p.rtt_max_micros,
+        p.rtt_stddev_micros,
+        p.rtt_p50_micros,
+        p.rtt_p95_micros,
+        p.rtt_p99_micros,
     ] {
         if rtt > MAX_RTT_MICROS {
             return Err(ValidationError::RttOutOfRange {
