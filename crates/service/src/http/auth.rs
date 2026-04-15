@@ -12,13 +12,51 @@
 
 use crate::config::Config;
 use arc_swap::ArcSwap;
+use axum::http::request::Parts;
 use axum_login::{AuthUser as AxumAuthUser, AuthnBackend, UserId};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tower_governor::errors::GovernorError;
 use tower_governor::key_extractor::KeyExtractor;
 use utoipa::ToSchema;
+
+/// Client-IP extraction shared between the login rate limit, the agent
+/// rate limit, and the tonic register handler's IP identity check.
+///
+/// When `trust_forwarded = true`, the leftmost parseable entry in
+/// `X-Forwarded-For` wins; falls back to `ConnectInfo` peer on malformed
+/// headers. When `trust_forwarded = false`, only `ConnectInfo` is read.
+#[allow(dead_code)]
+pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net::IpAddr> {
+    if trust_forwarded {
+        if let Some(val) = parts.headers.get("x-forwarded-for") {
+            if let Ok(s) = val.to_str() {
+                if let Some(first) = s.split(',').next() {
+                    if let Ok(ip) = first.trim().parse::<std::net::IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
+
+/// Constant-time equality with explicit length gate (`ct_eq` panics on
+/// unequal lengths). Leaks "token-not-empty-but-wrong-length" by design —
+/// cheap to discover by trial-and-error anyway.
+#[allow(dead_code)]
+pub(crate) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    bool::from(a.ct_eq(b))
+}
 
 /// Principal returned by the backend on successful authentication. Stored in
 /// the session by `axum-login`; retrieved via the `AuthSession` extractor.
@@ -515,5 +553,77 @@ url = "postgres://ignored@h/d"
             .await
             .expect("no infra")
             .is_none());
+    }
+
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn parts_with_xff_and_peer(xff: Option<&str>, peer: IpAddr) -> axum::http::request::Parts {
+        let mut req = Request::builder().uri("/");
+        if let Some(v) = xff {
+            req = req.header("x-forwarded-for", v);
+        }
+        let (mut parts, _) = req.body(()).unwrap().into_parts();
+        parts
+            .extensions
+            .insert(ConnectInfo(SocketAddr::new(peer, 9999)));
+        parts
+    }
+
+    #[test]
+    fn client_ip_prefers_leftmost_xff_when_trusted() {
+        let parts = parts_with_xff_and_peer(
+            Some("198.51.100.7, 203.0.113.1"),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        assert_eq!(
+            client_ip(&parts, true).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))
+        );
+    }
+
+    #[test]
+    fn client_ip_ignores_xff_when_not_trusted() {
+        let parts =
+            parts_with_xff_and_peer(Some("198.51.100.7"), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(
+            client_ip(&parts, false).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer_on_missing_xff() {
+        let parts = parts_with_xff_and_peer(None, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            client_ip(&parts, true).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer_on_malformed_xff() {
+        let parts =
+            parts_with_xff_and_peer(Some("not-an-ip"), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+        assert_eq!(
+            client_ip(&parts, true).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_bytes_true_on_match() {
+        assert!(constant_time_eq_bytes(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_bytes_false_on_mismatch() {
+        assert!(!constant_time_eq_bytes(b"hello", b"world"));
+    }
+
+    #[test]
+    fn constant_time_eq_bytes_false_on_length_mismatch() {
+        assert!(!constant_time_eq_bytes(b"abc", b"abcd"));
     }
 }
