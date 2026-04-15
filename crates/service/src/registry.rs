@@ -5,8 +5,7 @@
 //! staleness semantics at read time via [`RegistrySnapshot::active_targets`]
 //! + a window taken from config.
 //!
-//! See `docs/superpowers/specs/2026-04-13-meshmon-03-central-service.md`
-//! (§Agent registry) for the design.
+//! See the service README's "Agent registry" section for design context.
 
 use chrono::{DateTime, Utc};
 use sqlx::types::ipnetwork::IpNetwork;
@@ -146,10 +145,10 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
     .fetch_all(pool)
     .await?;
 
-    let mut map = HashMap::with_capacity(rows.len());
-    for row in rows {
-        let info = AgentInfo {
-            id: row.id.clone(),
+    let agents = rows
+        .into_iter()
+        .map(|row| AgentInfo {
+            id: row.id,
             display_name: row.display_name,
             location: row.location,
             ip: row.ip,
@@ -158,17 +157,14 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
             agent_version: row.agent_version,
             registered_at: row.registered_at,
             last_seen_at: row.last_seen_at,
-        };
-        map.insert(row.id, info);
-    }
+        })
+        .collect();
 
-    Ok(RegistrySnapshot {
-        agents: map,
-        refreshed_at: Utc::now(),
-    })
+    Ok(RegistrySnapshot::from_agents(agents))
 }
 
-/// `cfg(test)` seam so integration tests can exercise the SQL directly.
+/// Test seam: exposes [`refresh_once`] to integration tests, which live in
+/// a separate crate and therefore cannot access private items.
 #[doc(hidden)]
 pub async fn refresh_once_for_test(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
     refresh_once(pool).await
