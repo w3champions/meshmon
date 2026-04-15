@@ -194,6 +194,67 @@ async fn dummy_verify(password: String) {
     }
 }
 
+/// Type alias for the concrete `AuthSession` wired through the service.
+pub type AuthSession = axum_login::AuthSession<ConfigAuthBackend>;
+
+/// POST `/api/auth/login` — authenticate and issue a session cookie.
+///
+/// - 200 + `LoginResponse` on success
+/// - 401 on wrong credentials (JSON body: `{"error": "invalid credentials"}`)
+/// - 500 only on infra failure (session store I/O, verify-task panic)
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Logged in", body = LoginResponse),
+        (status = 401, description = "Invalid credentials"),
+        (status = 429, description = "Too many attempts from this IP"),
+    )
+)]
+#[tracing::instrument(skip_all, fields(username = %creds.username))]
+pub async fn login(
+    mut auth_session: AuthSession,
+    axum::Json(creds): axum::Json<LoginRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let user = match auth_session.authenticate(creds).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({"error": "invalid credentials"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "auth backend infra failure");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "internal"})),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(e) = auth_session.login(&user).await {
+        tracing::error!(error = %e, "session login failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": "session error"})),
+        )
+            .into_response();
+    }
+
+    axum::Json(LoginResponse {
+        username: user.username,
+    })
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
