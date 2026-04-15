@@ -22,6 +22,7 @@ anyhow = "1"
 arc-swap = "1"
 axum = "0.8"
 axum-extra = "0.12"
+axum-login = "0.18"
 ctor = "0.10"
 prost = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -35,6 +36,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 toml = "1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
+tower-sessions = { version = "0.14", default-features = false, features = ["memory-store"] }
+tower_governor = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
