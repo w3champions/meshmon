@@ -39,13 +39,22 @@ impl AxumAuthUser for Principal {
 }
 
 /// POST body for `/api/auth/login`.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
     /// Username from the configured `[auth.users]` list.
     pub username: String,
     /// Plaintext password. Verified against the PHC hash via argon2 inside
     /// `spawn_blocking`.
     pub password: String,
+}
+
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// JSON response body for `/api/auth/login`.
@@ -232,5 +241,17 @@ password_hash = "{hash}"
         };
         let user = backend.authenticate(creds).await.expect("no infra error");
         assert!(user.is_none());
+    }
+
+    #[test]
+    fn login_request_debug_redacts_password() {
+        let req = LoginRequest {
+            username: "alice".into(),
+            password: "hunter2".into(),
+        };
+        let rendered = format!("{req:?}");
+        assert!(rendered.contains("alice"), "rendered = {rendered}");
+        assert!(!rendered.contains("hunter2"), "rendered = {rendered}");
+        assert!(rendered.contains("<redacted>"), "rendered = {rendered}");
     }
 }
