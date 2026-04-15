@@ -26,8 +26,10 @@ snap = { workspace = true }
 axum-login = { workspace = true }
 chrono = { workspace = true }
 governor = { workspace = true }
+hyper-util = { workspace = true }
 password-hash = { workspace = true }
 reqwest = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = [
@@ -40,10 +42,13 @@ sqlx = { workspace = true, features = [
     "ipnetwork",
     "json",
 ] }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 toml = { workspace = true }
+tonic = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tower-sessions = { workspace = true }

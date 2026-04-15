@@ -7,8 +7,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::set_var("PROTOC", protoc);
     }
 
-    prost_build::Config::new()
-        .bytes(["."])
+    tonic_prost_build::configure()
+        .bytes(".")
         .compile_protos(&["proto/meshmon.proto"], &["proto"])?;
 
     println!("cargo:rerun-if-changed=proto/meshmon.proto");
