@@ -23,7 +23,7 @@ The HTTP service half of meshmon. Receives agent pushes, persists them to Victor
 
 Producers call `IngestionPipeline::push_metrics` / `push_snapshot` after the HTTP handler strips auth and decodes Protobuf. Workers run under the shared cancellation token and drain on shutdown.
 
-Self-metrics flow through the `metrics` crate macros; the Prometheus exporter exposes them at `/metrics`.
+Self-metrics are recorded via the `metrics` crate macros. A future task will wire the Prometheus exporter to serve them at `/metrics`.
 
 ## Tests
 
