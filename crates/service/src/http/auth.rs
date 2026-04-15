@@ -184,11 +184,10 @@ fn verify_password(plaintext: &str, phc: &str) -> bool {
 async fn dummy_verify(password: String) {
     const DUMMY_HASH: &str =
         "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
-    if let Err(e) =
-        tokio::task::spawn_blocking(move || {
-            let _ = verify_password(&password, DUMMY_HASH);
-        })
-        .await
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        let _ = verify_password(&password, DUMMY_HASH);
+    })
+    .await
     {
         tracing::warn!(error = %e, "dummy password verify task failed");
     }
