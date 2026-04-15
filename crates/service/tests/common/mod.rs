@@ -349,15 +349,15 @@ pub fn dummy_ingestion(pool: sqlx::PgPool) -> meshmon_service::ingestion::Ingest
 
 /// Registry seeded with no agents; the refresh loop is not started, so
 /// handler tests see a fixed empty snapshot unless they call
-/// `force_refresh()` themselves.
+/// `force_refresh()` themselves. Active-window is 5 minutes (matches the
+/// config default); refresh-interval is 60 s (unused without a loop).
 pub fn dummy_registry(
     pool: sqlx::PgPool,
 ) -> std::sync::Arc<meshmon_service::registry::AgentRegistry> {
-    use std::time::Duration;
     std::sync::Arc::new(meshmon_service::registry::AgentRegistry::new(
         pool,
-        Duration::from_secs(60),
-        Duration::from_secs(5 * 60),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(5 * 60),
     ))
 }
 
