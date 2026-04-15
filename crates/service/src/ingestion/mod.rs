@@ -9,4 +9,5 @@ pub mod json_shapes;
 pub mod last_seen;
 pub mod metrics;
 pub mod pg_writer;
+pub mod queue;
 pub mod validator;
