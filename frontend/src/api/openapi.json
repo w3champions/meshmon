@@ -12,6 +12,94 @@
     },
     "version": "0.1.0"
   },
-  "paths": {},
-  "components": {}
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "POST `/api/auth/login` — authenticate and issue a session cookie.",
+        "description": "- 200 + `LoginResponse` on success\n- 401 on wrong credentials (JSON body: `{\"error\": \"invalid credentials\"}`)\n- 500 only on infra failure (session store I/O, verify-task panic)",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Logged in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials"
+          },
+          "429": {
+            "description": "Too many attempts from this IP"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "POST `/api/auth/logout` — invalidate the current session.",
+        "description": "Idempotent: 200 whether or not the caller was logged in. The cookie is\ncleared either way.",
+        "operationId": "logout",
+        "responses": {
+          "200": {
+            "description": "Logged out"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "description": "POST body for `/api/auth/login`.",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "Plaintext password. Verified against the PHC hash via argon2 inside\n`spawn_blocking`."
+          },
+          "username": {
+            "type": "string",
+            "description": "Username from the configured `[auth.users]` list."
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "description": "JSON response body for `/api/auth/login`.",
+        "required": [
+          "username"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "Echoed username on success."
+          }
+        }
+      }
+    }
+  }
 }
