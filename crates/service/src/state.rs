@@ -3,6 +3,7 @@
 //! Cheap to `Clone` — every field is already `Arc`-backed.
 
 use crate::config::Config;
+use crate::ingestion::IngestionPipeline;
 use arc_swap::ArcSwap;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +51,10 @@ pub struct AppState {
     /// Build-time metadata; surfaced through `/metrics` and future
     /// `/api/web-config`.
     pub build: BuildInfo,
+    /// Ingestion pipeline handle. Handlers call
+    /// [`IngestionPipeline::push_metrics`] / [`IngestionPipeline::push_snapshot`]
+    /// after validating agent payloads. Cheap to clone.
+    pub ingestion: IngestionPipeline,
 }
 
 impl AppState {
@@ -58,6 +63,7 @@ impl AppState {
         config: Arc<ArcSwap<Config>>,
         config_rx: watch::Receiver<Arc<Config>>,
         pool: PgPool,
+        ingestion: IngestionPipeline,
     ) -> Self {
         Self {
             config,
@@ -65,6 +71,7 @@ impl AppState {
             pool,
             ready: Arc::new(AtomicBool::new(false)),
             build: BuildInfo::compile_time(),
+            ingestion,
         }
     }
 

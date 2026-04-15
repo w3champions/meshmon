@@ -109,7 +109,21 @@ async fn run() -> anyhow::Result<()> {
     });
 
     // --- Step 6: Build state, mark ready ---
-    let state = AppState::new(config_handle, config_rx, pool);
+    let vm_url_for_ingestion = initial_config.upstream.vm_url.clone().unwrap_or_else(|| {
+        warn!("no upstream.vm_url configured; ingestion will fail to write to VM");
+        "http://meshmon-vm:8428".to_string()
+    });
+    let ingestion_cfg = meshmon_service::ingestion::IngestionConfig::default_with_url(format!(
+        "{}/api/v1/write",
+        vm_url_for_ingestion.trim_end_matches('/')
+    ));
+    let ingestion = meshmon_service::ingestion::IngestionPipeline::spawn(
+        ingestion_cfg,
+        pool.clone(),
+        shutdown_token.clone(),
+    );
+
+    let state = AppState::new(config_handle, config_rx, pool, ingestion.clone());
     state.mark_ready();
     let app = http::router(state.clone());
 
@@ -143,6 +157,14 @@ async fn run() -> anyhow::Result<()> {
             );
         }
     }
+
+    // The shutdown_token has already been cancelled by now (either by signal
+    // or by the deadline-timer arm above having observed cancellation).
+    // Drain the ingestion workers so buffered samples/snapshots have a
+    // chance to land before the process exits.
+    ingestion.join().await;
+    info!("ingestion pipeline drained");
+
     info!("meshmon-service shutdown complete");
     Ok(())
 }

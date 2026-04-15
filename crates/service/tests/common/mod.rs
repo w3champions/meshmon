@@ -319,6 +319,19 @@ pub const AUTH_TEST_HASH: &str =
     "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
 pub const AUTH_TEST_PASSWORD: &str = "correct horse battery staple";
 
+/// Spawns an ingestion pipeline connected to an unreachable VM URL for
+/// handler tests that don't exercise ingestion. The tokio runtime keeps the
+/// workers alive until the test process exits; there is no explicit join
+/// because the harness does not expose a shutdown hook per-test. The
+/// workers are idle unless the test pushes to them, so the resource
+/// footprint is a handful of blocked `select!`-ing tasks.
+pub fn dummy_ingestion(pool: sqlx::PgPool) -> meshmon_service::ingestion::IngestionPipeline {
+    let token = tokio_util::sync::CancellationToken::new();
+    let cfg =
+        meshmon_service::ingestion::IngestionConfig::default_with_url("http://127.0.0.1:1".into());
+    meshmon_service::ingestion::IngestionPipeline::spawn(cfg, pool, token)
+}
+
 /// Construct an `AppState` with a single `admin` user whose password is
 /// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
 /// set a stable client IP via `X-Forwarded-For` without needing to inject a
@@ -340,7 +353,8 @@ password_hash = "{AUTH_TEST_HASH}"
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
-    AppState::new(swap, rx, pool)
+    let ingestion = dummy_ingestion(pool.clone());
+    AppState::new(swap, rx, pool, ingestion)
 }
 
 /// Same as [`state_with_admin`] but with `trust_forwarded_headers = false`.
@@ -361,5 +375,6 @@ password_hash = "{AUTH_TEST_HASH}"
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
-    AppState::new(swap, rx, pool)
+    let ingestion = dummy_ingestion(pool.clone());
+    AppState::new(swap, rx, pool, ingestion)
 }
