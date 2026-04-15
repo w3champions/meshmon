@@ -5,7 +5,7 @@ use crate::state::AppState;
 use meshmon_protocol::{
     ip as proto_ip, AgentApi, ConfigResponse, GetConfigRequest, GetTargetsRequest, MetricsBatch,
     PushMetricsResponse, PushRouteSnapshotResponse, RegisterRequest, RegisterResponse,
-    RouteSnapshotRequest, TargetsResponse,
+    RouteSnapshotRequest, Target as PbTarget, TargetsResponse,
 };
 use meshmon_protocol::{
     DiffDetection as PbDiffDetection, PathHealthThresholds as PbPathHealthThresholds,
@@ -222,9 +222,29 @@ impl AgentApi for AgentApiImpl {
 
     async fn get_targets(
         &self,
-        _request: Request<GetTargetsRequest>,
+        request: Request<GetTargetsRequest>,
     ) -> Result<Response<TargetsResponse>, Status> {
-        Err(Status::unimplemented("get_targets"))
+        let req = request.into_inner();
+        if req.source_id.trim().is_empty() {
+            return Err(Status::invalid_argument("source_id required"));
+        }
+        let snap = self.state.registry.snapshot();
+        let active = snap.active_targets(&req.source_id, self.state.registry.active_window());
+        let targets = active
+            .into_iter()
+            .map(|a| PbTarget {
+                id: a.id,
+                ip: match a.ip.ip() {
+                    std::net::IpAddr::V4(v) => v.octets().to_vec().into(),
+                    std::net::IpAddr::V6(v) => v.octets().to_vec().into(),
+                },
+                display_name: a.display_name,
+                location: a.location.unwrap_or_default(),
+                lat: a.lat.unwrap_or(0.0),
+                lon: a.lon.unwrap_or(0.0),
+            })
+            .collect();
+        Ok(Response::new(TargetsResponse { targets }))
     }
 }
 
