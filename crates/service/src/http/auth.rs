@@ -283,8 +283,13 @@ pub async fn logout(mut auth_session: AuthSession) -> axum::response::Response {
 /// Build the tower-sessions middleware stack: in-memory store, cookie name
 /// `meshmon_session`, 30-day rolling expiry, `Secure`+`HttpOnly`+`SameSite=Lax`.
 ///
-/// Returns both the layer and a handle to the store so the caller can run
-/// the store's periodic-deletion task alongside the main runtime.
+/// Returns the store handle alongside the layer so callers can keep a
+/// reference for future migrations to a persistent store. Note:
+/// `MemoryStore` does not implement `ExpiredDeletion` — expired sessions
+/// are filtered on read but never purged from the in-memory map, so memory
+/// usage grows until process restart. Expected operator counts are small,
+/// so this is acceptable; revisit if switching to a persistent session
+/// store.
 pub fn session_layer() -> (
     tower_sessions::SessionManagerLayer<tower_sessions::MemoryStore>,
     tower_sessions::MemoryStore,
@@ -320,6 +325,12 @@ pub const LOGIN_SECONDS_PER_REQUEST: u64 = 180;
 /// ignoring forwarded headers. Used when `service.trust_forwarded_headers`
 /// is `false` so attackers can't forge `X-Forwarded-For` to bypass the
 /// per-IP login rate limit.
+///
+/// Requires the app to be served via
+/// `axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())`.
+/// Without the `ConnectInfo` extension, this extractor returns
+/// `GovernorError::UnableToExtractKey`, which tower_governor translates to
+/// HTTP 500 — meaning every login would fail silently.
 #[derive(Clone)]
 pub struct PeerAddrKeyExtractor;
 
