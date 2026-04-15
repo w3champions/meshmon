@@ -273,3 +273,125 @@ async fn shutdown_drain_inserts_snapshot_and_emits_route_changes_counter() {
          got metric names: {names:?}"
     );
 }
+
+/// Regression guard for the `pg_drain_complete` signal.
+///
+/// The earlier [`shutdown_drain_inserts_snapshot_and_emits_route_changes_counter`]
+/// test only pushes one snapshot; pg_writer finishes inside the 500 ms
+/// idle grace window of the old implementation, so it cannot distinguish
+/// between the pre-fix (fixed idle grace) and post-fix (drain-complete
+/// signal) behaviours.
+///
+/// This test pushes a batch of 20 snapshots just before cancel. pg_writer
+/// processes them sequentially — each INSERT is a round-trip to Postgres,
+/// plus JSONB serialisation — so the total drain time routinely crosses
+/// the old 500 ms idle window. Under the old code, vm_writer would
+/// observe an empty queue between pg's per-snapshot pushes, wait 500 ms
+/// without seeing the next push, and exit, silently dropping every
+/// `meshmon_route_changes_total` sample pushed after that point.
+///
+/// With `pg_drain_complete`, vm_writer's idle timer stays inert until
+/// pg_writer signals completion, so every queued snapshot's counter
+/// sample reaches wiremock.
+///
+/// If INSERTs on the runner happen to be sub-25 ms each (drain under
+/// 500 ms), this test still proves correctness: 20 samples must be
+/// received regardless of the timing. The name emphasises that we are
+/// pinning the signal path, not a specific timing envelope.
+#[tokio::test]
+async fn shutdown_waits_for_slow_snapshot_inserts() {
+    let pool = common::shared_migrated_pool().await;
+    let server = MockServer::start().await;
+
+    let mock = Mock::given(method("POST"))
+        .and(path("/api/v1/write"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount_as_scoped(&server)
+        .await;
+
+    let src = format!("a-{}", uuid::Uuid::new_v4().simple());
+    let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
+    for id in [&src, &tgt] {
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip, last_seen_at) \
+                     VALUES ($1, 'X', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Small batch_size so the vm_writer flushes in many small POSTs and
+    // the 500 ms-idle-grace (pre-fix) regression window is exposed
+    // between flushes, not hidden behind a single large batch.
+    let cfg = IngestionConfig {
+        vm_url: format!("{}/api/v1/write", server.uri()),
+        vm_batch_size: 4,
+        vm_batch_interval: Duration::from_millis(50),
+        vm_buffer_capacity: 8_192,
+        // Headroom for 20 snapshots.
+        snapshot_buffer_capacity: 64,
+        last_seen_debounce: Duration::from_secs(30),
+        vm_max_retry: Duration::from_secs(5),
+    };
+    let token = CancellationToken::new();
+    let pipeline = IngestionPipeline::spawn(cfg, pool.clone(), token.clone());
+
+    // Push N snapshots, then cancel immediately. Each INSERT happens
+    // sequentially during the drain, so the total drain time is
+    // `N * insert_latency`. With N=20 and real Postgres this is almost
+    // always well over 500 ms.
+    const N: usize = 20;
+    for i in 0..N {
+        let mut snap = validated_snapshot(&src, &tgt);
+        // Vary observed_at_micros to keep each row unique in timestamp,
+        // matching the cumulative counter semantics.
+        snap.observed_at_micros += i as i64 * 1_000;
+        pipeline.push_snapshot(snap);
+    }
+    token.cancel();
+
+    pipeline.join().await;
+
+    // Assert (a): every snapshot row landed.
+    let row_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM route_snapshots WHERE source_id = $1 AND target_id = $2",
+    )
+    .bind(&src)
+    .bind(&tgt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row_count, N as i64,
+        "expected {N} route_snapshots rows after shutdown drain; got {row_count}"
+    );
+
+    // Assert (b): every counter sample reached wiremock. Sum across all
+    // POSTs and count only the `meshmon_route_changes_total` samples
+    // (other metrics are irrelevant to this regression).
+    let reqs = mock.received_requests().await;
+    let counter_samples: usize = reqs
+        .iter()
+        .map(|r| {
+            let raw = snap::raw::Decoder::new().decompress_vec(&r.body).unwrap();
+            let req = WriteRequest::decode(raw.as_slice()).unwrap();
+            req.timeseries
+                .iter()
+                .filter(|ts| {
+                    ts.labels
+                        .iter()
+                        .any(|l| l.name == "__name__" && l.value == "meshmon_route_changes_total")
+                })
+                .map(|ts| ts.samples.len())
+                .sum::<usize>()
+        })
+        .sum();
+    assert_eq!(
+        counter_samples, N,
+        "expected {N} meshmon_route_changes_total samples reaching wiremock; got {counter_samples}. \
+         A shortfall means vm_writer exited before pg_writer finished draining — the \
+         pg_drain_complete signal is not being honoured."
+    );
+}

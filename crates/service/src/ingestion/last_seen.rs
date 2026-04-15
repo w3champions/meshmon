@@ -14,11 +14,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-/// How long to wait for late touches after cancellation fires.
+/// How long to wait for late touches after the `pg_writer` drain signals
+/// completion.
 ///
-/// Mirrors [`crate::ingestion::vm_writer`]'s `DRAIN_GRACE_PERIOD`: the
+/// Mirrors [`crate::ingestion::vm_writer`]'s `DRAIN_GRACE_PERIOD`. The
 /// `pg_writer` drain runs concurrently and calls `last_seen.touch()` after
-/// each INSERT. Without this window those late touches are lost.
+/// each INSERT; until it fires `pg_drain_complete`, we wait indefinitely
+/// rather than risk losing a late touch. Grace window only starts after
+/// pg_writer signals drain completion — it catches the sub-timeslice race
+/// between the last `touch()` and our `rx.recv()`.
 const DRAIN_GRACE_PERIOD: Duration = Duration::from_millis(500);
 
 /// Handle to a spawned last-seen updater task.
@@ -38,12 +42,19 @@ struct Touch {
 
 impl LastSeenUpdater {
     /// Spawn the updater task and return its handle. The task runs until
-    /// `token` is cancelled, at which point it drains any queued touches
-    /// and waits up to [`DRAIN_GRACE_PERIOD`] for late touches from the
-    /// concurrent `pg_writer` drain before returning.
-    pub fn spawn(pool: PgPool, debounce: Duration, token: CancellationToken) -> Self {
+    /// `token` is cancelled. It then keeps draining `touch()` calls while
+    /// `pg_drain_complete` has not fired (so that late touches from the
+    /// concurrent `pg_writer` drain are never lost), and only afterwards
+    /// waits up to [`DRAIN_GRACE_PERIOD`] for any final sub-timeslice race
+    /// before returning.
+    pub fn spawn(
+        pool: PgPool,
+        debounce: Duration,
+        token: CancellationToken,
+        pg_drain_complete: CancellationToken,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Touch>(1024);
-        let join = tokio::spawn(run(rx, pool, debounce, token));
+        let join = tokio::spawn(run(rx, pool, debounce, token, pg_drain_complete));
         Self {
             tx,
             join: Arc::new(Mutex::new(Some(join))),
@@ -80,26 +91,30 @@ async fn run(
     pool: PgPool,
     debounce: Duration,
     token: CancellationToken,
+    pg_drain_complete: CancellationToken,
 ) {
     let mut last_write: HashMap<String, Instant> = HashMap::new();
     loop {
         tokio::select! {
             biased;
             _ = token.cancelled() => {
-                // Grace window mirrors vm_writer: late touches arrive from
-                // pg_writer's drain after the token fires. Without waiting,
-                // agents.last_seen_at can remain stale for snapshots persisted
-                // during shutdown drain.
+                // Keep processing touches while pg_writer is still draining:
+                // its drain calls `last_seen.touch()` after each INSERT, and
+                // `pg_drain_complete` fires only after that final touch is
+                // enqueued. Grace window only starts after pg_writer signals
+                // drain completion — it catches the sub-timeslice race
+                // between the last touch and our `rx.recv()`.
                 loop {
                     while let Ok(touch) = rx.try_recv() {
                         apply(&pool, &mut last_write, debounce, touch).await;
                     }
                     tokio::select! {
-                        _ = tokio::time::sleep(DRAIN_GRACE_PERIOD) => break,
                         maybe = rx.recv() => match maybe {
                             Some(touch) => apply(&pool, &mut last_write, debounce, touch).await,
                             None => break,
                         },
+                        _ = pg_drain_complete.cancelled(), if !pg_drain_complete.is_cancelled() => continue,
+                        _ = tokio::time::sleep(DRAIN_GRACE_PERIOD), if pg_drain_complete.is_cancelled() => break,
                     }
                 }
                 break;

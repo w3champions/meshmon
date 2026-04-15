@@ -97,7 +97,7 @@ pub struct ValidatedSnapshot {
 /// A single validated traceroute hop.
 #[derive(Debug, Clone)]
 pub struct ValidHop {
-    /// Zero-based position of this hop in the route.
+    /// 1-indexed position of this hop in the route (matches the protocol contract).
     pub position: u32,
     /// IP addresses observed at this hop position and their frequencies.
     pub observed_ips: Vec<ValidObservedIp>,

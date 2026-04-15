@@ -21,10 +21,19 @@ async fn touch_writes_last_seen() {
     .unwrap();
 
     let token = CancellationToken::new();
-    let updater = LastSeenUpdater::spawn(pool.clone(), Duration::from_secs(30), token.clone());
+    let pg_drain_complete = CancellationToken::new();
+    let updater = LastSeenUpdater::spawn(
+        pool.clone(),
+        Duration::from_secs(30),
+        token.clone(),
+        pg_drain_complete.clone(),
+    );
 
     updater.touch(&agent_id, Some("0.2.0".into()));
     token.cancel();
+    // No concurrent pg_writer in this unit test — signal drain-done so the
+    // updater's idle-exit path can collapse to the grace window.
+    pg_drain_complete.cancel();
     updater.join().await;
 
     let row = sqlx::query!(
@@ -54,7 +63,13 @@ async fn second_touch_within_debounce_skips_db_write() {
     .unwrap();
 
     let token = CancellationToken::new();
-    let updater = LastSeenUpdater::spawn(pool.clone(), Duration::from_secs(30), token.clone());
+    let pg_drain_complete = CancellationToken::new();
+    let updater = LastSeenUpdater::spawn(
+        pool.clone(),
+        Duration::from_secs(30),
+        token.clone(),
+        pg_drain_complete.clone(),
+    );
 
     updater.touch(&agent_id, None);
     // Give the updater task time to process the first touch and write to DB.
@@ -78,5 +93,6 @@ async fn second_touch_within_debounce_skips_db_write() {
     assert_eq!(after_first, after_second);
 
     token.cancel();
+    pg_drain_complete.cancel();
     updater.join().await;
 }

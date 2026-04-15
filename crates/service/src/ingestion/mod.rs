@@ -94,7 +94,17 @@ impl IngestionPipeline {
         let snapshot_queue: Arc<DropOldest<ValidatedSnapshot>> =
             Arc::new(DropOldest::new(cfg.snapshot_buffer_capacity));
 
-        let last_seen = LastSeenUpdater::spawn(pool.clone(), cfg.last_seen_debounce, token.clone());
+        // Fires once `pg_writer_loop` finishes its shutdown-drain. vm_writer
+        // and last_seen key their idle-exit windows off this signal so they
+        // can't exit while pg_writer is still producing into their queues.
+        let pg_drain_complete = CancellationToken::new();
+
+        let last_seen = LastSeenUpdater::spawn(
+            pool.clone(),
+            cfg.last_seen_debounce,
+            token.clone(),
+            pg_drain_complete.clone(),
+        );
 
         let vm_handle = tokio::spawn(vm_writer::run(
             vm_queue.clone(),
@@ -105,6 +115,7 @@ impl IngestionPipeline {
                 max_retry: cfg.vm_max_retry,
             },
             token.clone(),
+            pg_drain_complete.clone(),
         ));
 
         let pg_handle = tokio::spawn(pg_writer_loop(
@@ -113,6 +124,7 @@ impl IngestionPipeline {
             pool.clone(),
             last_seen.clone(),
             token.clone(),
+            pg_drain_complete,
         ));
 
         // Join order matters: pg_writer is a producer into vm_queue
@@ -166,6 +178,7 @@ async fn pg_writer_loop(
     pool: PgPool,
     last_seen: LastSeenUpdater,
     token: CancellationToken,
+    pg_drain_complete: CancellationToken,
 ) {
     // Cumulative counter state for `meshmon_route_changes_total`. Resets to
     // 0 on service restart — Prometheus' counter-reset detection makes
@@ -188,6 +201,11 @@ async fn pg_writer_loop(
                 process_snapshot(&pool, &vm_queue, &last_seen, &mut route_change_counts, snap)
                     .await;
             }
+            // All producer pushes into vm_queue and last_seen are now done.
+            // Signalling *after* the loop exits (and therefore after every
+            // `process_snapshot` await completes) is what lets vm_writer and
+            // last_seen safely collapse their idle-wait guards.
+            pg_drain_complete.cancel();
             return;
         }
 

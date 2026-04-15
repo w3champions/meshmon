@@ -57,7 +57,18 @@ pub struct VmWriterCfg {
 
 /// Run the VM writer until `token` is cancelled. On cancel, drains the
 /// remaining queue and sends a final POST if any samples are buffered.
-pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: CancellationToken) {
+///
+/// `pg_drain_complete` is fired by `pg_writer_loop` once it has finished
+/// processing every queued snapshot (and therefore every `vm_queue.push`
+/// that shutdown-time snapshots can produce). vm_writer must keep draining
+/// until it observes that signal; only afterwards does the idle timer
+/// become authoritative.
+pub async fn run(
+    queue: Arc<DropOldest<PromSample>>,
+    cfg: VmWriterCfg,
+    token: CancellationToken,
+    pg_drain_complete: CancellationToken,
+) {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -65,18 +76,19 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
 
     let mut buf: Vec<PromSample> = Vec::with_capacity(cfg.batch_size.max(1));
 
-    // On cancellation, wait briefly for late samples pushed by the
-    // pg_writer's own drain (which runs concurrently and emits
-    // `meshmon_route_changes_total` after each INSERT). Without this
-    // grace window, vm_writer can exit before pg_writer finishes
-    // pushing, silently dropping the final shutdown counter samples.
+    // On cancellation, keep draining while pg_writer is still pushing. The
+    // `pg_drain_complete` signal fires only after pg_writer's drain loop
+    // finishes its final `process_snapshot`, so any `vm_queue.push` from
+    // shutdown-time snapshots is guaranteed to land before we observe it.
+    // The idle grace window only kicks in *after* pg signals done, to catch
+    // the sub-timeslice race between a final push and our `queue.wait()`.
     //
-    // Shutdown latency bound: the grace timer resets per late push,
-    // so total drain time is roughly
-    // `pg_snapshot_backlog * insert_latency + DRAIN_GRACE_PERIOD`.
-    // With defaults (snapshot_buffer_capacity=1024, ~50ms/INSERT) a
-    // full queue can extend shutdown to ~51s; typical steady-state
-    // (~0.04 snapshots/sec) means <= 500ms.
+    // Shutdown latency bound:
+    //   `pg_drain_time + DRAIN_GRACE_PERIOD + in-flight_batch_send_bound`
+    // where `in-flight_batch_send_bound` is capped by the cancel+2s unified
+    // select in `post_batch`. With defaults (snapshot_buffer_capacity=1024,
+    // ~50ms/INSERT) pg_drain_time can approach ~51s for a full queue;
+    // typical steady-state (~0.04 snapshots/sec) stays <= 500ms.
     const DRAIN_GRACE_PERIOD: Duration = Duration::from_millis(500);
 
     loop {
@@ -91,11 +103,15 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
                     flush(&client, &cfg, &buf, drained, &token).await;
                     continue;
                 }
-                // Queue empty — wait for any late arrivals from concurrent
-                // drains, else exit after the grace period.
+                // Queue empty. While pg_writer is still draining we MUST
+                // keep waiting (no idle exit) — otherwise a late push from
+                // pg would land on an orphaned queue. Once pg signals done
+                // the sleep arm becomes active and we take the final grace
+                // window to catch any sub-500ms race with `queue.wait()`.
                 tokio::select! {
-                    _ = sleep(DRAIN_GRACE_PERIOD) => break,
                     _ = queue.wait() => continue,
+                    _ = pg_drain_complete.cancelled(), if !pg_drain_complete.is_cancelled() => continue,
+                    _ = sleep(DRAIN_GRACE_PERIOD), if pg_drain_complete.is_cancelled() => break,
                 }
             }
             return;
@@ -179,10 +195,10 @@ async fn post_batch(
             .header(HEADER_NAME_REMOTE_WRITE_VERSION, REMOTE_WRITE_VERSION_01)
             .body(body.clone())
             .send();
-        // Race the send against "cancel + 2s grace": pre-cancel sends are
-        // bounded by reqwest's 15s client timeout; post-cancel they exit
-        // within 2s regardless of when cancel arrived. This closes the
-        // TOCTOU window of checking `is_cancelled()` before awaiting.
+        // Race the send against a post-cancel 2s budget. Pre-cancel,
+        // reqwest's 15s client timeout governs normal-path latency;
+        // post-cancel, this bounds *each* send (not cumulative drain time,
+        // which is `N x 2s` across N queued batches in the worst case).
         let cancel_budget = async {
             token.cancelled().await;
             sleep(Duration::from_secs(2)).await;

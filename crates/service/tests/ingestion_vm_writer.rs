@@ -50,7 +50,12 @@ async fn samples_reach_fake_vm_in_a_batch() {
     let handle = tokio::spawn({
         let q = queue.clone();
         let t = token.clone();
-        async move { vm_run(q, cfg, t).await }
+        // Signal pg drain done up-front: these unit tests don't run a
+        // concurrent pg_writer, so the drain-wait guard would otherwise
+        // keep the writer alive indefinitely after cancel.
+        let pg_drain_complete = CancellationToken::new();
+        pg_drain_complete.cancel();
+        async move { vm_run(q, cfg, t, pg_drain_complete).await }
     });
 
     for i in 0..3 {
@@ -101,7 +106,12 @@ async fn flushes_when_batch_size_reached() {
     let handle = tokio::spawn({
         let q = queue.clone();
         let t = token.clone();
-        async move { vm_run(q, cfg, t).await }
+        // Signal pg drain done up-front: these unit tests don't run a
+        // concurrent pg_writer, so the drain-wait guard would otherwise
+        // keep the writer alive indefinitely after cancel.
+        let pg_drain_complete = CancellationToken::new();
+        pg_drain_complete.cancel();
+        async move { vm_run(q, cfg, t, pg_drain_complete).await }
     });
 
     for i in 0..15 {
@@ -157,7 +167,12 @@ async fn retries_after_failure() {
     let handle = tokio::spawn({
         let q = queue.clone();
         let t = token.clone();
-        async move { vm_run(q, cfg, t).await }
+        // Signal pg drain done up-front: these unit tests don't run a
+        // concurrent pg_writer, so the drain-wait guard would otherwise
+        // keep the writer alive indefinitely after cancel.
+        let pg_drain_complete = CancellationToken::new();
+        pg_drain_complete.cancel();
+        async move { vm_run(q, cfg, t, pg_drain_complete).await }
     });
 
     for i in 0..5 {
@@ -227,7 +242,12 @@ async fn retry_exhaustion_stops_after_first_attempt() {
     let handle = tokio::spawn({
         let q = queue.clone();
         let t = token.clone();
-        async move { vm_run(q, cfg, t).await }
+        // Signal pg drain done up-front: these unit tests don't run a
+        // concurrent pg_writer, so the drain-wait guard would otherwise
+        // keep the writer alive indefinitely after cancel.
+        let pg_drain_complete = CancellationToken::new();
+        pg_drain_complete.cancel();
+        async move { vm_run(q, cfg, t, pg_drain_complete).await }
     });
 
     // Push 3 samples — they will be flushed as one batch after batch_interval.
@@ -294,7 +314,12 @@ async fn drain_send_timeout_bounds_shutdown_against_hanging_vm() {
     let handle = tokio::spawn({
         let q = queue.clone();
         let t = token.clone();
-        async move { vm_run(q, cfg, t).await }
+        // Signal pg drain done up-front: these unit tests don't run a
+        // concurrent pg_writer, so the drain-wait guard would otherwise
+        // keep the writer alive indefinitely after cancel.
+        let pg_drain_complete = CancellationToken::new();
+        pg_drain_complete.cancel();
+        async move { vm_run(q, cfg, t, pg_drain_complete).await }
     });
 
     for i in 0..3 {
