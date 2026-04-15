@@ -5,8 +5,9 @@
 mod common;
 
 use chrono::Duration as ChronoDuration;
-use meshmon_service::registry::{refresh_once_for_test, RegistrySnapshot};
+use meshmon_service::registry::{refresh_once_for_test, AgentRegistry, RegistrySnapshot};
 use sqlx::PgPool;
+use std::time::Duration as StdDuration;
 
 async fn seed(pool: &PgPool, id: &str, offset: ChronoDuration) {
     sqlx::query(
@@ -48,9 +49,6 @@ async fn refresh_once_returns_empty_when_no_agents() {
 
     db.close().await;
 }
-
-use meshmon_service::registry::AgentRegistry;
-use std::time::Duration as StdDuration;
 
 #[tokio::test]
 async fn initial_load_populates_snapshot() {
