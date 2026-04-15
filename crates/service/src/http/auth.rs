@@ -90,18 +90,14 @@ pub enum AuthError {
     VerifyTask(#[from] tokio::task::JoinError),
 }
 
-/// Credentials type consumed by [`AuthnBackend::authenticate`]. Aliased to
-/// [`LoginRequest`] so the HTTP handler and the backend share one shape.
-pub type Credentials = LoginRequest;
-
 impl AuthnBackend for ConfigAuthBackend {
     type User = Principal;
-    type Credentials = Credentials;
+    type Credentials = LoginRequest;
     type Error = AuthError;
 
     async fn authenticate(
         &self,
-        Credentials { username, password }: Self::Credentials,
+        LoginRequest { username, password }: Self::Credentials,
     ) -> Result<Option<Self::User>, Self::Error> {
         // Snapshot the config so a concurrent reload can't tear the slice.
         let cfg = self.config.load_full();
@@ -210,7 +206,7 @@ password_hash = "{hash}"
     async fn authenticate_returns_user_on_correct_password() {
         let cfg = cfg_with_user("alice", TEST_HASH);
         let backend = ConfigAuthBackend::new(cfg);
-        let creds = Credentials {
+        let creds = LoginRequest {
             username: "alice".into(),
             password: "correct horse battery staple".into(),
         };
@@ -223,7 +219,7 @@ password_hash = "{hash}"
     async fn authenticate_returns_none_on_wrong_password() {
         let cfg = cfg_with_user("alice", TEST_HASH);
         let backend = ConfigAuthBackend::new(cfg);
-        let creds = Credentials {
+        let creds = LoginRequest {
             username: "alice".into(),
             password: "wrong".into(),
         };
@@ -235,7 +231,7 @@ password_hash = "{hash}"
     async fn authenticate_returns_none_on_unknown_user() {
         let cfg = cfg_with_user("alice", TEST_HASH);
         let backend = ConfigAuthBackend::new(cfg);
-        let creds = Credentials {
+        let creds = LoginRequest {
             username: "eve".into(),
             password: "correct horse battery staple".into(),
         };
