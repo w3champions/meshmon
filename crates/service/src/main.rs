@@ -195,6 +195,12 @@ async fn run() -> anyhow::Result<()> {
         }
     };
 
+    // If serve returned an error before a signal fired, shutdown_token was
+    // never cancelled. Signal it now so the registry refresh loop exits
+    // promptly instead of waiting for the full `tokio::time::timeout`
+    // deadline. No-op if already cancelled.
+    shutdown_token.cancel();
+
     // HTTP is done — no more in-flight handlers can call `push_metrics` /
     // `push_snapshot`. Now cancel ingestion and drain any remaining
     // buffered samples/snapshots.
