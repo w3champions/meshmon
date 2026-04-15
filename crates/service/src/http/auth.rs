@@ -81,5 +81,156 @@ pub enum AuthError {
     VerifyTask(#[from] tokio::task::JoinError),
 }
 
-// Credentials type used by `AxumAuthSession::authenticate`.
+/// Credentials type consumed by [`AuthnBackend::authenticate`]. Aliased to
+/// [`LoginRequest`] so the HTTP handler and the backend share one shape.
 pub type Credentials = LoginRequest;
+
+impl AuthnBackend for ConfigAuthBackend {
+    type User = AuthUser;
+    type Credentials = Credentials;
+    type Error = AuthError;
+
+    async fn authenticate(
+        &self,
+        Credentials { username, password }: Self::Credentials,
+    ) -> Result<Option<Self::User>, Self::Error> {
+        // Snapshot the config so a concurrent reload can't tear the slice.
+        let cfg = self.config.load_full();
+        // Look up the user by exact username (case-sensitive — operators
+        // know their handles).
+        let Some(user) = cfg
+            .auth
+            .users
+            .iter()
+            .find(|u| u.username == username)
+            .cloned()
+        else {
+            // Run a dummy verification anyway to keep the response timing
+            // roughly flat and avoid username enumeration via latency.
+            dummy_verify(password).await?;
+            return Ok(None);
+        };
+        let hash = user.password_hash.clone();
+        let matched =
+            tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await?;
+        if matched {
+            Ok(Some(AuthUser {
+                username: user.username,
+                password_hash: user.password_hash,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_user(&self, user_id: &UserId<Self>) -> Result<Option<Self::User>, Self::Error> {
+        let cfg = self.config.load_full();
+        Ok(cfg
+            .auth
+            .users
+            .iter()
+            .find(|u| &u.username == user_id)
+            .map(|u| AuthUser {
+                username: u.username.clone(),
+                password_hash: u.password_hash.clone(),
+            }))
+    }
+}
+
+/// Blocking password verify. Uses argon2's internal `password-hash` 0.5
+/// re-export (the workspace has `password-hash` 0.6 for config-parse
+/// validation, but `argon2::PasswordVerifier::verify_password` takes a
+/// 0.5 `PasswordHash`).
+fn verify_password(plaintext: &str, phc: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::Argon2;
+    match PasswordHash::new(phc) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(plaintext.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => {
+            // Config validation already rejected malformed PHC at load.
+            // If this ever fires, the runtime config diverged from the
+            // validator — treat as non-match rather than raising.
+            false
+        }
+    }
+}
+
+/// Run a throwaway verify against a fixed hash to keep response timing
+/// similar between "user not found" and "wrong password". Panics silently
+/// on failure — this is defence-in-depth, not a correctness gate.
+async fn dummy_verify(password: String) -> Result<(), AuthError> {
+    const DUMMY_HASH: &str =
+        "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+    tokio::task::spawn_blocking(move || {
+        let _ = verify_password(&password, DUMMY_HASH);
+    })
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// PHC hash of the password `"correct horse battery staple"` generated
+    /// with the weakest argon2 parameters (`m=16,t=1,p=1`) so tests stay
+    /// fast. Regenerate with a throwaway `argon2` call using
+    /// `Params::new(16, 1, 1, None)` if the password ever changes.
+    const TEST_HASH: &str =
+        "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+
+    fn cfg_with_user(username: &str, hash: &str) -> Arc<ArcSwap<Config>> {
+        let toml = format!(
+            r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[[auth.users]]
+username = "{username}"
+password_hash = "{hash}"
+"#
+        );
+        let cfg = Arc::new(Config::from_str(&toml, "test.toml").expect("parse"));
+        Arc::new(ArcSwap::from(cfg))
+    }
+
+    #[tokio::test]
+    async fn authenticate_returns_user_on_correct_password() {
+        let cfg = cfg_with_user("alice", TEST_HASH);
+        let backend = ConfigAuthBackend::new(cfg);
+        let creds = Credentials {
+            username: "alice".into(),
+            password: "correct horse battery staple".into(),
+        };
+        let user = backend.authenticate(creds).await.expect("no infra error");
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().username, "alice");
+    }
+
+    #[tokio::test]
+    async fn authenticate_returns_none_on_wrong_password() {
+        let cfg = cfg_with_user("alice", TEST_HASH);
+        let backend = ConfigAuthBackend::new(cfg);
+        let creds = Credentials {
+            username: "alice".into(),
+            password: "wrong".into(),
+        };
+        let user = backend.authenticate(creds).await.expect("no infra error");
+        assert!(user.is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticate_returns_none_on_unknown_user() {
+        let cfg = cfg_with_user("alice", TEST_HASH);
+        let backend = ConfigAuthBackend::new(cfg);
+        let creds = Credentials {
+            username: "eve".into(),
+            password: "correct horse battery staple".into(),
+        };
+        let user = backend.authenticate(creds).await.expect("no infra error");
+        assert!(user.is_none());
+    }
+}
