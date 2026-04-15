@@ -66,6 +66,18 @@ format = "json"
 # shared_token = "paste-the-token-here"
 shared_token_env = "MESHMON_AGENT_TOKEN"
 
+# Per-IP rate limit on the agent gRPC service. Tuned for register + config +
+# targets startup bursts + steady-state ~1 req/minute per agent.
+# rate_limit_per_minute = 60
+# rate_limit_burst = 30
+
+# Standalone TLS (no proxy in front). Leave this block commented when the
+# service runs behind nginx-proxy — the proxy terminates TLS and forwards
+# plaintext gRPC via `grpc_pass`.
+# [agent_api.tls]
+# cert_path = "/etc/meshmon/tls/fullchain.pem"
+# key_path  = "/etc/meshmon/tls/privkey.pem"
+
 [upstream]
 # VictoriaMetrics remote-write target and query endpoint. Unreachability at
 # startup logs a warning — the service still boots so operators can inspect

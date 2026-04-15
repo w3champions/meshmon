@@ -50,7 +50,6 @@ pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net
 /// Constant-time equality with explicit length gate (`ct_eq` panics on
 /// unequal lengths). Leaks "token-not-empty-but-wrong-length" by design —
 /// cheap to discover by trial-and-error anyway.
-#[allow(dead_code)]
 pub(crate) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -433,6 +432,86 @@ pub fn login_rate_limit_layer(trust_forwarded_headers: bool) -> LoginRateLimitLa
     }
 }
 
+use crate::state::AppState;
+use tonic::{Request as TonicRequest, Status};
+
+/// Bearer-token gate for the tonic `AgentApi` service (design §3.4).
+///
+/// Returns a cloneable closure so `AgentApiServer::with_interceptor` can
+/// accept it. The closure reads `state.config()` on every call so SIGHUP
+/// rotations take effect on the next RPC without rebuilding the server.
+pub fn agent_grpc_interceptor(
+    state: AppState,
+) -> impl Fn(TonicRequest<()>) -> Result<TonicRequest<()>, Status> + Clone {
+    move |req: TonicRequest<()>| -> Result<TonicRequest<()>, Status> {
+        let cfg = state.config();
+        let Some(expected) = cfg.agent_api.shared_token.as_deref() else {
+            return Err(Status::unavailable("agent api not configured"));
+        };
+        let Some(header) = req.metadata().get("authorization") else {
+            return Err(Status::unauthenticated("missing bearer token"));
+        };
+        let Ok(raw) = header.to_str() else {
+            return Err(Status::unauthenticated("malformed authorization metadata"));
+        };
+        let Some(presented) = raw.strip_prefix("Bearer ") else {
+            return Err(Status::unauthenticated("missing bearer prefix"));
+        };
+        if !constant_time_eq_bytes(presented.as_bytes(), expected.as_bytes()) {
+            return Err(Status::unauthenticated("invalid bearer token"));
+        }
+        Ok(req)
+    }
+}
+
+/// Agent-API rate-limit layer (same shape as the login layer). Applied via
+/// `tonic::transport::Server::builder().layer(...)` for the gRPC half.
+pub type AgentApiRateLimitLayer = tower::util::Either<
+    tower_governor::GovernorLayer<
+        tower_governor::key_extractor::SmartIpKeyExtractor,
+        governor::middleware::NoOpMiddleware,
+        axum::body::Body,
+    >,
+    tower_governor::GovernorLayer<
+        PeerAddrKeyExtractor,
+        governor::middleware::NoOpMiddleware,
+        axum::body::Body,
+    >,
+>;
+
+/// Build the rate-limit layer from resolved `[agent_api]` knobs + trust mode.
+/// Non-zero `per_minute` and `burst` are enforced at config parse time.
+pub fn agent_api_rate_limit_layer(
+    trust_forwarded: bool,
+    per_minute: u32,
+    burst: u32,
+) -> AgentApiRateLimitLayer {
+    use tower_governor::governor::GovernorConfigBuilder;
+    use tower_governor::key_extractor::SmartIpKeyExtractor;
+    use tower_governor::GovernorLayer;
+
+    // seconds-per-request = ceil(60 / per_minute), floored at 1.
+    let seconds_per_request = ((60.0 / per_minute as f64).ceil() as u64).max(1);
+
+    if trust_forwarded {
+        let cfg = GovernorConfigBuilder::default()
+            .per_second(seconds_per_request)
+            .burst_size(burst)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("governor config (smart)");
+        tower::util::Either::Left(GovernorLayer::new(cfg))
+    } else {
+        let cfg = GovernorConfigBuilder::default()
+            .per_second(seconds_per_request)
+            .burst_size(burst)
+            .key_extractor(PeerAddrKeyExtractor)
+            .finish()
+            .expect("governor config (peer-only)");
+        tower::util::Either::Right(GovernorLayer::new(cfg))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +704,114 @@ url = "postgres://ignored@h/d"
     #[test]
     fn constant_time_eq_bytes_false_on_length_mismatch() {
         assert!(!constant_time_eq_bytes(b"abc", b"abcd"));
+    }
+
+    // ----- interceptor tests -----
+
+    use crate::ingestion::{IngestionConfig, IngestionPipeline};
+    use crate::registry::AgentRegistry;
+    use crate::state::AppState;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// Build an `AppState` with the given optional agent token wired into
+    /// `[agent_api].shared_token`. The pool is lazy (no real DB connection),
+    /// the ingestion pipeline is spawned against a token that's immediately
+    /// cancelled so no background threads linger between tests.
+    fn agent_state_with(token: Option<&str>) -> AppState {
+        let token_line = match token {
+            Some(t) => format!(r#"shared_token = "{t}""#),
+            None => String::new(),
+        };
+        let toml = format!(
+            r#"
+[database]
+url = "postgres://ignored@localhost/db"
+
+[agent_api]
+{token_line}
+"#
+        );
+        let cfg = Arc::new(Config::from_str(&toml, "test.toml").expect("config parse"));
+        let swap = Arc::new(ArcSwap::from(cfg.clone()));
+        let (_, rx) = tokio::sync::watch::channel(cfg);
+
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://ignored@localhost/db").expect("lazy pool");
+        let ct = CancellationToken::new();
+        ct.cancel(); // cancel immediately so workers exit without doing DB work
+        let ingestion = IngestionPipeline::spawn(
+            IngestionConfig::default_with_url("http://vm-ignored:8428/api/v1/write".into()),
+            pool.clone(),
+            ct,
+        );
+        let registry = Arc::new(AgentRegistry::new(
+            pool.clone(),
+            Duration::from_secs(10),
+            Duration::from_secs(300),
+        ));
+        AppState::new(swap, rx, pool, ingestion, registry)
+    }
+
+    /// Call the interceptor with the given `Authorization` header value
+    /// (pass `None` to omit the header entirely).
+    fn run_interceptor(state: AppState, authz: Option<&str>) -> Result<TonicRequest<()>, Status> {
+        let interceptor = agent_grpc_interceptor(state);
+        let mut req = TonicRequest::new(());
+        if let Some(v) = authz {
+            req.metadata_mut()
+                .insert("authorization", v.parse().expect("valid header value"));
+        }
+        interceptor(req)
+    }
+
+    #[tokio::test]
+    async fn interceptor_unavailable_when_token_unset() {
+        let state = agent_state_with(None);
+        let err = run_interceptor(state, Some("Bearer anything")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_without_header() {
+        let state = agent_state_with(Some("secret-token"));
+        let err = run_interceptor(state, None).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_without_bearer_prefix() {
+        let state = agent_state_with(Some("secret-token"));
+        let err = run_interceptor(state, Some("secret-token")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_on_wrong_token_same_length() {
+        let state = agent_state_with(Some("secret-token"));
+        // Same length as "secret-token" but different content.
+        let err = run_interceptor(state, Some("Bearer secret-XXXXX")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_on_wrong_length() {
+        let state = agent_state_with(Some("secret-token"));
+        let err = run_interceptor(state, Some("Bearer short")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_ok_on_match() {
+        let state = agent_state_with(Some("secret-token"));
+        let result = run_interceptor(state, Some("Bearer secret-token"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn agent_rate_limit_builds_for_both_trust_modes() {
+        // Just verify construction doesn't panic — no HTTP traffic needed.
+        let _ = agent_api_rate_limit_layer(true, 60, 30);
+        let _ = agent_api_rate_limit_layer(false, 60, 30);
     }
 }

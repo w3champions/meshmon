@@ -114,12 +114,41 @@ pub struct AuthUser {
 }
 
 /// Agent-facing API auth settings.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AgentApiSection {
     /// Resolved shared bearer token for agent auth. `None` means agent
     /// endpoints are effectively disabled (returns 503) — useful for early
     /// deployments before the token secret is provisioned.
     pub shared_token: Option<String>,
+    /// Per-IP rate limit (requests per minute). Default 60.
+    pub rate_limit_per_minute: u32,
+    /// Burst budget absorbed instantly before the sustained rate kicks in.
+    /// Default 30 — sized for register + config + targets at agent startup
+    /// (3 RPCs) plus headroom for 36 agents sharing a proxy.
+    pub rate_limit_burst: u32,
+    /// Optional TLS config for standalone mode (no proxy in front). When
+    /// `None`, the service binds plaintext — appropriate behind nginx-proxy.
+    pub tls: Option<AgentApiTls>,
+}
+
+impl Default for AgentApiSection {
+    fn default() -> Self {
+        Self {
+            shared_token: None,
+            rate_limit_per_minute: 60,
+            rate_limit_burst: 30,
+            tls: None,
+        }
+    }
+}
+
+/// TLS certificate + key paths for standalone agent-API mode.
+#[derive(Debug, Clone)]
+pub struct AgentApiTls {
+    /// Path to the PEM-encoded certificate chain.
+    pub cert_path: std::path::PathBuf,
+    /// Path to the PEM-encoded private key.
+    pub key_path: std::path::PathBuf,
 }
 
 /// URLs for upstream services that the meshmon service talks to.
@@ -226,6 +255,15 @@ struct RawUser {
 struct RawAgentApi {
     shared_token: Option<String>,
     shared_token_env: Option<String>,
+    rate_limit_per_minute: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    tls: Option<RawAgentApiTls>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAgentApiTls {
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -359,7 +397,37 @@ impl Config {
             raw.agent_api.shared_token_env,
             "agent_api.shared_token",
         )?;
-        let agent_api = AgentApiSection { shared_token };
+        let defaults = AgentApiSection::default();
+        let rate_limit_per_minute = raw
+            .agent_api
+            .rate_limit_per_minute
+            .unwrap_or(defaults.rate_limit_per_minute);
+        if rate_limit_per_minute == 0 {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "agent_api.rate_limit_per_minute must be > 0".to_string(),
+            });
+        }
+        let rate_limit_burst = raw
+            .agent_api
+            .rate_limit_burst
+            .unwrap_or(defaults.rate_limit_burst);
+        if rate_limit_burst == 0 {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "agent_api.rate_limit_burst must be > 0".to_string(),
+            });
+        }
+        let tls = raw.agent_api.tls.map(|t| AgentApiTls {
+            cert_path: t.cert_path,
+            key_path: t.key_path,
+        });
+        let agent_api = AgentApiSection {
+            shared_token,
+            rate_limit_per_minute,
+            rate_limit_burst,
+            tls,
+        };
 
         // --- upstream section ---
         let upstream = UpstreamSection {
