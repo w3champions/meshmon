@@ -33,6 +33,11 @@ impl AxumAuthUser for Principal {
         self.username.clone()
     }
 
+    /// axum-login stores these bytes verbatim in the session store
+    /// (`Vec<u8>`, constant-time compared on each request). With
+    /// `MemoryStore` the PHC string stays in-process; swapping to a
+    /// persistent store (Sqlite/Redis/etc.) would persist PHC hashes in
+    /// that store — revisit this if the session backend changes.
     fn session_auth_hash(&self) -> &[u8] {
         self.password_hash.as_bytes()
     }
