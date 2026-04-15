@@ -7,6 +7,7 @@
 //! - [`grpc`] — tonic gRPC service assembly (AgentApi stub, added T06).
 //! - [`http`] — axum router assembly, health endpoints, OpenAPI serving.
 //! - [`logging`] — tracing-subscriber JSON initializer.
+//! - [`probing`] — probing configuration types + spec-02 defaults.
 //! - [`registry`] — in-memory agent registry snapshot.
 //! - [`shutdown`] — cancellation token + OS signal handlers.
 //! - [`state`] — shared `AppState` handle.
@@ -21,6 +22,7 @@ pub mod grpc;
 pub mod http;
 pub mod ingestion;
 pub mod logging;
+pub mod probing;
 pub mod registry;
 pub mod shutdown;
 pub mod state;
