@@ -77,7 +77,7 @@ async fn run() -> anyhow::Result<()> {
     let registry_active_window = std::time::Duration::from_secs(
         (initial_config.agents.target_active_window_minutes as u64) * 60,
     );
-    let registry = std::sync::Arc::new(meshmon_service::registry::AgentRegistry::new(
+    let registry = Arc::new(meshmon_service::registry::AgentRegistry::new(
         pool.clone(),
         registry_refresh_interval,
         registry_active_window,
@@ -202,14 +202,12 @@ async fn run() -> anyhow::Result<()> {
     ingestion.join().await;
     info!("ingestion pipeline drained");
 
-    // Registry refresh loop: cancelled by `shutdown_token`, bounded by its
-    // sleep interval. The task is idempotent; a partial-in-flight refresh
-    // that returns after cancellation is a no-op because the loop checks
-    // the token before starting the next sleep.
+    // Registry refresh loop: cancelled by `shutdown_token`. The loop checks
+    // the token after each `refresh_once` completes, so an in-flight refresh
+    // runs to completion before the task exits. That extra query is bounded
+    // by sqlx's connect timeout and has no drain semantics.
     if let Err(e) = registry_refresh.await {
-        if !e.is_cancelled() {
-            warn!(error = %e, "registry refresh task ended abnormally");
-        }
+        warn!(error = %e, "registry refresh task ended abnormally");
     }
     info!("agent registry refresh loop drained");
 
