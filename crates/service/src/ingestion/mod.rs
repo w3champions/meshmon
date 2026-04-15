@@ -5,5 +5,6 @@
 //! after token + Protobuf decoding.
 
 // Submodules added incrementally in subsequent steps.
+pub mod json_shapes;
 pub mod metrics;
 pub mod validator;
