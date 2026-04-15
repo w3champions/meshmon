@@ -6,7 +6,10 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**/*.{ts,tsx,js,jsx,json}"]
+    "includes": [
+      "src/**/*.{ts,tsx,js,jsx,json}",
+      "!src/api/openapi.json"
+    ]
   },
   "formatter": {
     "enabled": true,

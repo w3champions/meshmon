@@ -118,7 +118,11 @@ async fn run() -> anyhow::Result<()> {
 
     let graceful_token = shutdown_token.clone();
     let graceful_state = state.clone();
-    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         graceful_token.cancelled().await;
         graceful_state.mark_not_ready();
         info!("HTTP server draining");

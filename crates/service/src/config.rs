@@ -54,6 +54,12 @@ pub struct ServiceSection {
     /// Graceful-shutdown deadline. Tasks not completed in this window are
     /// aborted. 5s keeps pod rollouts snappy.
     pub shutdown_deadline: std::time::Duration,
+    /// When `true`, trust `X-Forwarded-For`/`Forwarded` for client-IP
+    /// extraction (used by the login rate limiter). Set `true` when behind
+    /// an nginx reverse proxy; leave `false` for direct exposure — a
+    /// misconfigured `true` lets attackers bypass per-IP rate limiting by
+    /// forging the header.
+    pub trust_forwarded_headers: bool,
 }
 
 /// Resolved Postgres connection settings.
@@ -130,6 +136,7 @@ impl Default for ServiceSection {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
             public_base_url: None,
             shutdown_deadline: std::time::Duration::from_secs(5),
+            trust_forwarded_headers: false,
         }
     }
 }
@@ -165,6 +172,7 @@ struct RawService {
     listen_addr: Option<String>,
     public_base_url: Option<String>,
     shutdown_deadline_seconds: Option<u64>,
+    trust_forwarded_headers: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +261,7 @@ impl Config {
             listen_addr,
             public_base_url: raw.service.public_base_url,
             shutdown_deadline,
+            trust_forwarded_headers: raw.service.trust_forwarded_headers.unwrap_or(false),
         };
 
         // --- database section ---

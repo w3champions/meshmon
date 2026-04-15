@@ -23,6 +23,13 @@ use utoipa_swagger_ui::SwaggerUi;
 /// Top-level `#[derive(OpenApi)]` anchor. `utoipa_axum` merges route-level
 /// specs into this at build time; the `info` block below is the only
 /// hand-authored part of the schema.
+///
+/// `/api/auth/login` is documented here via the `paths(...)` attribute
+/// because its handler is wired into a standalone router (outside
+/// [`api_router`]) so the per-IP rate-limit layer can attach to just that
+/// path. Its `#[utoipa::path]` metadata still needs to land in the OpenAPI
+/// document, so we list it explicitly. `/api/auth/logout` lives on
+/// [`api_router`] via `utoipa_axum::routes!` and is picked up automatically.
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -31,7 +38,12 @@ use utoipa_swagger_ui::SwaggerUi;
                        Agent-facing endpoints (Protobuf) are documented separately in \
                        `crates/protocol/proto/meshmon.proto`.",
         version = env!("CARGO_PKG_VERSION"),
-    )
+    ),
+    paths(crate::http::auth::login),
+    components(schemas(
+        crate::http::auth::LoginRequest,
+        crate::http::auth::LoginResponse,
+    )),
 )]
 struct ApiDoc;
 
@@ -42,6 +54,7 @@ struct ApiDoc;
 /// at wire-up time.
 pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
+        .routes(utoipa_axum::routes!(crate::http::auth::logout))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

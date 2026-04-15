@@ -22,6 +22,12 @@ listen_addr = "0.0.0.0:8080"
 # window are aborted. Keep tight so pod rollouts are snappy.
 shutdown_deadline_seconds = 5
 
+# Trust `X-Forwarded-For` / `Forwarded` for client-IP extraction. Set `true`
+# when running behind an nginx reverse proxy that sets these headers; leave
+# `false` for direct exposure. A misconfigured `true` lets attackers bypass
+# the per-IP login rate limit by forging the header.
+# trust_forwarded_headers = false
+
 [database]
 # Either `url` or `url_env` must be set.
 # url = "postgres://meshmon:SECRET@meshmon-db:5432/meshmon?sslmode=disable"
@@ -37,10 +43,19 @@ filter = "info"
 format = "json"
 
 [auth]
-# Zero or more operator accounts. password_hash is a PHC-format argon2 string
-# produced offline (e.g. `argon2 <saltfile> -id -e` from the argon2 CLI).
-# Editing this section requires a full service restart — SIGHUP does NOT
-# rotate session material.
+# Zero or more operator accounts — username + PHC-format argon2 hash.
+#
+# Generate a hash offline with the argon2 CLI:
+#
+#   echo -n "plaintext" | argon2 <saltfile> -id -e
+#
+# Plaintext passwords must never land in this file; only the PHC string does.
+#
+# Login is brute-force-protected: 5 attempts per 15 minutes per IP, burst of
+# 3. On lockout the endpoint returns 429. Sessions use a `meshmon_session`
+# cookie (Secure, HttpOnly, SameSite=Lax, 30-day rolling expiry). Editing
+# this list requires a full service restart — SIGHUP does NOT rotate
+# session material.
 # [[auth.users]]
 # username = "admin"
 # password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."

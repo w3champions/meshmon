@@ -1,7 +1,8 @@
 //! Liveness, readiness, and self-metrics endpoints.
 //!
-//! All three endpoints bypass the session middleware (once T05 adds it) —
-//! infrastructure probes must work without credentials. They read the
+//! All three endpoints pass through the session and auth-manager layers but
+//! never touch the session extension, so `tower-sessions` is transparent —
+//! infrastructure probes work without credentials. They read the
 //! process-wide readiness flag exposed by [`AppState::is_ready`].
 
 use crate::state::AppState;
