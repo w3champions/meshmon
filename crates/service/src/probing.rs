@@ -6,6 +6,7 @@
 //! reloads them through the existing `ArcSwap<Config>`.
 
 use meshmon_protocol::{PathHealth, Protocol};
+use serde::Deserialize;
 
 /// Full probing configuration, broadcast to every connected agent via
 /// `GetConfig`.
@@ -209,6 +210,398 @@ impl Default for ProbingSection {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Raw (TOML-deserializable) types
+// ---------------------------------------------------------------------------
+
+// Lowercase string enum for `Protocol` that TOML can deserialize.
+// Converts to the prost-generated `Protocol` via `From`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RawProtocol {
+    Icmp,
+    Tcp,
+    Udp,
+}
+
+impl From<RawProtocol> for Protocol {
+    fn from(r: RawProtocol) -> Self {
+        match r {
+            RawProtocol::Icmp => Protocol::Icmp,
+            RawProtocol::Tcp => Protocol::Tcp,
+            RawProtocol::Udp => Protocol::Udp,
+        }
+    }
+}
+
+// Lowercase string enum for `PathHealth` that TOML can deserialize.
+// Converts to the prost-generated `PathHealth` via `From`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RawPathHealth {
+    Normal,
+    Degraded,
+    Unreachable,
+}
+
+impl From<RawPathHealth> for PathHealth {
+    fn from(r: RawPathHealth) -> Self {
+        match r {
+            RawPathHealth::Normal => PathHealth::Normal,
+            RawPathHealth::Degraded => PathHealth::Degraded,
+            RawPathHealth::Unreachable => PathHealth::Unreachable,
+        }
+    }
+}
+
+// On-disk override for a single rate-table row. All pps fields are required
+// when a rate entry is provided (partial override semantics for rates is
+// ambiguous — if the operator specifies any rates, they must supply the full set).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RawProbingRate {
+    primary: RawProtocol,
+    health: RawPathHealth,
+    icmp_pps: f64,
+    tcp_pps: f64,
+    udp_pps: f64,
+}
+
+// On-disk override shape for `ProtocolThresholds`. Every field is optional;
+// absent fields keep the spec-02 default.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct RawProtocolThresholds {
+    unhealthy_trigger_pct: Option<f64>,
+    healthy_recovery_pct: Option<f64>,
+    unhealthy_hysteresis_sec: Option<u32>,
+    healthy_hysteresis_sec: Option<u32>,
+}
+
+// On-disk override shape for `ProbingWindows`. Every field is optional.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct RawProbingWindows {
+    primary_sec: Option<u32>,
+    diversity_sec: Option<u32>,
+}
+
+// On-disk override shape for `ProbingDiffDetection`. Every field is optional.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct RawProbingDiffDetection {
+    new_ip_min_freq: Option<f64>,
+    missing_ip_max_freq: Option<f64>,
+    hop_count_change: Option<u32>,
+    rtt_shift_frac: Option<f64>,
+}
+
+// On-disk override shape for `PathHealthThresholds`. Every field is optional.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct RawPathHealthThresholds {
+    degraded_trigger_pct: Option<f64>,
+    degraded_trigger_sec: Option<u32>,
+    degraded_min_samples: Option<u32>,
+    normal_recovery_pct: Option<f64>,
+    normal_recovery_sec: Option<u32>,
+}
+
+/// The `[probing]` section as it appears on disk. Every field is optional;
+/// absent fields yield the spec-02 default. When any `[[rates]]` entry is
+/// provided, the full `priority × {Normal, Degraded, Unreachable}` matrix
+/// must be covered.
+#[derive(Debug, Default, Deserialize)]
+pub struct RawProbingSection {
+    enabled_protocols: Option<Vec<RawProtocol>>,
+    priority: Option<Vec<RawProtocol>>,
+    #[serde(default)]
+    rates: Vec<RawProbingRate>,
+    #[serde(default)]
+    icmp_thresholds: RawProtocolThresholds,
+    #[serde(default)]
+    tcp_thresholds: RawProtocolThresholds,
+    #[serde(default)]
+    udp_thresholds: RawProtocolThresholds,
+    #[serde(default)]
+    windows: RawProbingWindows,
+    #[serde(default)]
+    diff_detection: RawProbingDiffDetection,
+    #[serde(default)]
+    path_health_thresholds: RawPathHealthThresholds,
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+fn validate_fraction(name: &str, v: f64) -> Result<(), String> {
+    if (0.0..=1.0).contains(&v) {
+        Ok(())
+    } else {
+        Err(format!("`{name}` = {v} is out of range [0.0, 1.0]"))
+    }
+}
+
+fn validate_positive_u32(name: &str, v: u32) -> Result<(), String> {
+    if v > 0 {
+        Ok(())
+    } else {
+        Err(format!("`{name}` must be > 0 (zero is not allowed)"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TryFrom conversion
+// ---------------------------------------------------------------------------
+
+impl TryFrom<RawProbingSection> for ProbingSection {
+    type Error = String;
+
+    fn try_from(raw: RawProbingSection) -> Result<Self, Self::Error> {
+        let defaults = ProbingSection::default();
+
+        // --- enabled_protocols ---
+        let enabled_protocols: Vec<Protocol> = raw
+            .enabled_protocols
+            .map(|v| v.into_iter().map(Protocol::from).collect())
+            .unwrap_or_else(|| defaults.enabled_protocols.clone());
+
+        // --- priority ---
+        let priority: Vec<Protocol> = raw
+            .priority
+            .map(|v| v.into_iter().map(Protocol::from).collect())
+            .unwrap_or_else(|| defaults.priority.clone());
+
+        // Invariant: priority must be a subset of enabled_protocols.
+        for p in &priority {
+            if !enabled_protocols.contains(p) {
+                return Err(format!(
+                    "priority protocol `{p:?}` is not in `enabled_protocols` — \
+                     priority must be a subset of enabled protocols"
+                ));
+            }
+        }
+
+        // --- rates ---
+        let rates: Vec<ProbingRate> = if raw.rates.is_empty() {
+            defaults.rates.clone()
+        } else {
+            // When the operator provides any rates, they must cover the full
+            // priority × {Normal, Degraded, Unreachable} matrix.
+            let health_states = [
+                PathHealth::Normal,
+                PathHealth::Degraded,
+                PathHealth::Unreachable,
+            ];
+            for primary in &priority {
+                for health in health_states {
+                    let covered = raw.rates.iter().any(|r| {
+                        Protocol::from(r.primary) == *primary
+                            && PathHealth::from(r.health) == health
+                    });
+                    if !covered {
+                        return Err(format!(
+                            "rate entry for (primary={primary:?}, health={health:?}) is missing — \
+                             when any `[[rates]]` entries are provided, all \
+                             priority × {{Normal, Degraded, Unreachable}} combinations must be covered"
+                        ));
+                    }
+                }
+            }
+            raw.rates
+                .into_iter()
+                .map(|r| ProbingRate {
+                    primary: Protocol::from(r.primary),
+                    health: PathHealth::from(r.health),
+                    icmp_pps: r.icmp_pps,
+                    tcp_pps: r.tcp_pps,
+                    udp_pps: r.udp_pps,
+                })
+                .collect()
+        };
+
+        // --- icmp_thresholds ---
+        let icmp_thresholds = {
+            let d = defaults.icmp_thresholds;
+            let ut = raw
+                .icmp_thresholds
+                .unhealthy_trigger_pct
+                .unwrap_or(d.unhealthy_trigger_pct);
+            let hr = raw
+                .icmp_thresholds
+                .healthy_recovery_pct
+                .unwrap_or(d.healthy_recovery_pct);
+            let uh = raw
+                .icmp_thresholds
+                .unhealthy_hysteresis_sec
+                .unwrap_or(d.unhealthy_hysteresis_sec);
+            let hh = raw
+                .icmp_thresholds
+                .healthy_hysteresis_sec
+                .unwrap_or(d.healthy_hysteresis_sec);
+            validate_fraction("icmp_thresholds.unhealthy_trigger_pct", ut)?;
+            validate_fraction("icmp_thresholds.healthy_recovery_pct", hr)?;
+            validate_positive_u32("icmp_thresholds.unhealthy_hysteresis_sec", uh)?;
+            validate_positive_u32("icmp_thresholds.healthy_hysteresis_sec", hh)?;
+            ProtocolThresholds {
+                unhealthy_trigger_pct: ut,
+                healthy_recovery_pct: hr,
+                unhealthy_hysteresis_sec: uh,
+                healthy_hysteresis_sec: hh,
+            }
+        };
+
+        // --- tcp_thresholds ---
+        let tcp_thresholds = {
+            let d = defaults.tcp_thresholds;
+            let ut = raw
+                .tcp_thresholds
+                .unhealthy_trigger_pct
+                .unwrap_or(d.unhealthy_trigger_pct);
+            let hr = raw
+                .tcp_thresholds
+                .healthy_recovery_pct
+                .unwrap_or(d.healthy_recovery_pct);
+            let uh = raw
+                .tcp_thresholds
+                .unhealthy_hysteresis_sec
+                .unwrap_or(d.unhealthy_hysteresis_sec);
+            let hh = raw
+                .tcp_thresholds
+                .healthy_hysteresis_sec
+                .unwrap_or(d.healthy_hysteresis_sec);
+            validate_fraction("tcp_thresholds.unhealthy_trigger_pct", ut)?;
+            validate_fraction("tcp_thresholds.healthy_recovery_pct", hr)?;
+            validate_positive_u32("tcp_thresholds.unhealthy_hysteresis_sec", uh)?;
+            validate_positive_u32("tcp_thresholds.healthy_hysteresis_sec", hh)?;
+            ProtocolThresholds {
+                unhealthy_trigger_pct: ut,
+                healthy_recovery_pct: hr,
+                unhealthy_hysteresis_sec: uh,
+                healthy_hysteresis_sec: hh,
+            }
+        };
+
+        // --- udp_thresholds ---
+        let udp_thresholds = {
+            let d = defaults.udp_thresholds;
+            let ut = raw
+                .udp_thresholds
+                .unhealthy_trigger_pct
+                .unwrap_or(d.unhealthy_trigger_pct);
+            let hr = raw
+                .udp_thresholds
+                .healthy_recovery_pct
+                .unwrap_or(d.healthy_recovery_pct);
+            let uh = raw
+                .udp_thresholds
+                .unhealthy_hysteresis_sec
+                .unwrap_or(d.unhealthy_hysteresis_sec);
+            let hh = raw
+                .udp_thresholds
+                .healthy_hysteresis_sec
+                .unwrap_or(d.healthy_hysteresis_sec);
+            validate_fraction("udp_thresholds.unhealthy_trigger_pct", ut)?;
+            validate_fraction("udp_thresholds.healthy_recovery_pct", hr)?;
+            validate_positive_u32("udp_thresholds.unhealthy_hysteresis_sec", uh)?;
+            validate_positive_u32("udp_thresholds.healthy_hysteresis_sec", hh)?;
+            ProtocolThresholds {
+                unhealthy_trigger_pct: ut,
+                healthy_recovery_pct: hr,
+                unhealthy_hysteresis_sec: uh,
+                healthy_hysteresis_sec: hh,
+            }
+        };
+
+        // --- windows ---
+        let windows = {
+            let d = defaults.windows;
+            let ps = raw.windows.primary_sec.unwrap_or(d.primary_sec);
+            let ds = raw.windows.diversity_sec.unwrap_or(d.diversity_sec);
+            validate_positive_u32("windows.primary_sec", ps)?;
+            validate_positive_u32("windows.diversity_sec", ds)?;
+            ProbingWindows {
+                primary_sec: ps,
+                diversity_sec: ds,
+            }
+        };
+
+        // --- diff_detection ---
+        let diff_detection = {
+            let d = defaults.diff_detection;
+            let nim = raw
+                .diff_detection
+                .new_ip_min_freq
+                .unwrap_or(d.new_ip_min_freq);
+            let mim = raw
+                .diff_detection
+                .missing_ip_max_freq
+                .unwrap_or(d.missing_ip_max_freq);
+            let hcc = raw
+                .diff_detection
+                .hop_count_change
+                .unwrap_or(d.hop_count_change);
+            let rsf = raw
+                .diff_detection
+                .rtt_shift_frac
+                .unwrap_or(d.rtt_shift_frac);
+            validate_fraction("diff_detection.new_ip_min_freq", nim)?;
+            validate_fraction("diff_detection.missing_ip_max_freq", mim)?;
+            validate_fraction("diff_detection.rtt_shift_frac", rsf)?;
+            ProbingDiffDetection {
+                new_ip_min_freq: nim,
+                missing_ip_max_freq: mim,
+                hop_count_change: hcc,
+                rtt_shift_frac: rsf,
+            }
+        };
+
+        // --- path_health_thresholds ---
+        let path_health_thresholds = {
+            let d = defaults.path_health_thresholds;
+            let dtp = raw
+                .path_health_thresholds
+                .degraded_trigger_pct
+                .unwrap_or(d.degraded_trigger_pct);
+            let dts = raw
+                .path_health_thresholds
+                .degraded_trigger_sec
+                .unwrap_or(d.degraded_trigger_sec);
+            let dms = raw
+                .path_health_thresholds
+                .degraded_min_samples
+                .unwrap_or(d.degraded_min_samples);
+            let nrp = raw
+                .path_health_thresholds
+                .normal_recovery_pct
+                .unwrap_or(d.normal_recovery_pct);
+            let nrs = raw
+                .path_health_thresholds
+                .normal_recovery_sec
+                .unwrap_or(d.normal_recovery_sec);
+            validate_fraction("path_health_thresholds.degraded_trigger_pct", dtp)?;
+            validate_fraction("path_health_thresholds.normal_recovery_pct", nrp)?;
+            validate_positive_u32("path_health_thresholds.degraded_trigger_sec", dts)?;
+            validate_positive_u32("path_health_thresholds.normal_recovery_sec", nrs)?;
+            PathHealthThresholds {
+                degraded_trigger_pct: dtp,
+                degraded_trigger_sec: dts,
+                degraded_min_samples: dms,
+                normal_recovery_pct: nrp,
+                normal_recovery_sec: nrs,
+            }
+        };
+
+        Ok(ProbingSection {
+            enabled_protocols,
+            priority,
+            rates,
+            icmp_thresholds,
+            tcp_thresholds,
+            udp_thresholds,
+            windows,
+            diff_detection,
+            path_health_thresholds,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +649,101 @@ mod tests {
         ] {
             assert!((0.0..=1.0).contains(&v), "{name} = {v} out of range");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // New Task-14 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_toml_yields_defaults() {
+        let raw: RawProbingSection = toml::from_str("").unwrap();
+        let cfg = ProbingSection::try_from(raw).unwrap();
+        assert_eq!(cfg, ProbingSection::default());
+    }
+
+    #[test]
+    fn override_primary_window() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [windows]
+            primary_sec = 120
+        "#,
+        )
+        .unwrap();
+        let cfg = ProbingSection::try_from(raw).unwrap();
+        assert_eq!(cfg.windows.primary_sec, 120);
+        assert_eq!(cfg.windows.diversity_sec, 900); // default preserved
+    }
+
+    #[test]
+    fn priority_subset_of_enabled() {
+        // Priority contains UDP but enabled_protocols does not => error.
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            enabled_protocols = ["icmp", "tcp"]
+            priority = ["icmp", "udp"]
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("priority"),
+            "expected 'priority' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rates_cover_priority_x_health() {
+        // Provide only one rate entry for Udp×Normal when the default priority
+        // includes Udp — Udp×Degraded and Udp×Unreachable are missing.
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [[rates]]
+            primary = "udp"
+            health = "normal"
+            icmp_pps = 0.1
+            tcp_pps = 0.1
+            udp_pps = 0.1
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("rate"),
+            "expected 'rate' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn fraction_out_of_range_rejected() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [icmp_thresholds]
+            unhealthy_trigger_pct = 1.5
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("icmp") || err.to_lowercase().contains("pct"),
+            "expected 'icmp' or 'pct' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_window_rejected() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [windows]
+            primary_sec = 0
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("window") || err.to_lowercase().contains("primary"),
+            "expected 'window' or 'primary' in error, got: {err}"
+        );
     }
 }

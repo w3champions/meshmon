@@ -43,6 +43,8 @@ pub struct Config {
     pub upstream: UpstreamSection,
     /// Agent registry timing settings.
     pub agents: AgentsSection,
+    /// Probing configuration broadcast to agents via `GetConfig`.
+    pub probing: crate::probing::ProbingSection,
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -217,6 +219,8 @@ struct RawConfig {
     upstream: RawUpstream,
     #[serde(default)]
     agents: RawAgentsSection,
+    #[serde(default)]
+    probing: crate::probing::RawProbingSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -453,6 +457,14 @@ impl Config {
             refresh_interval_seconds: raw.agents.refresh_interval_seconds,
         };
 
+        // --- probing section ---
+        let probing = crate::probing::ProbingSection::try_from(raw.probing).map_err(|reason| {
+            BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: format!("[probing] {reason}"),
+            }
+        })?;
+
         Ok(Config {
             service,
             database,
@@ -461,6 +473,7 @@ impl Config {
             agent_api,
             upstream,
             agents,
+            probing,
         })
     }
 }
