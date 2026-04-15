@@ -57,6 +57,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 ctor = { workspace = true }
+prost = { workspace = true }
+snap = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true }  # for `ServiceExt::oneshot` in handler tests

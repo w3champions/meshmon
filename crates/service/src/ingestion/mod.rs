@@ -11,3 +11,4 @@ pub mod metrics;
 pub mod pg_writer;
 pub mod queue;
 pub mod validator;
+pub mod vm_writer;
