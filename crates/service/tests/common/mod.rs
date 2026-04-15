@@ -82,9 +82,10 @@
 //! # Example: axum HTTP handler test
 //!
 //! Most T04+ handler tests will want an `Arc<PgPool>` in `AppState`.
-//! `shared_migrated_pool()` returns `&'static PgPool`; clone it into an
-//! `Arc` — `PgPool` is already `Arc`-wrapped internally, so this is
-//! cheap:
+//! `shared_migrated_pool()` returns an owned `PgPool` (a fresh pool
+//! against the shared migrated database); wrap it in an `Arc` if your
+//! handler expects that — `PgPool` is already `Arc`-wrapped internally,
+//! so cloning is cheap:
 //!
 //! ```ignore
 //! #[tokio::test]
@@ -132,7 +133,7 @@ struct SharedContainer {
 }
 
 static SHARED: OnceCell<SharedContainer> = OnceCell::const_new();
-static SHARED_MIGRATED: OnceCell<PgPool> = OnceCell::const_new();
+static SHARED_MIGRATED_DB: OnceCell<String> = OnceCell::const_new();
 
 async fn shared() -> &'static SharedContainer {
     SHARED
@@ -259,10 +260,10 @@ pub async fn acquire(with_timescale: bool) -> TestDb {
 /// Using this under `DATABASE_URL` override leaks the shared database in
 /// the external server — that's acceptable because the database name is a
 /// UUID and conflicts are impossible across runs.
-pub async fn shared_migrated_pool() -> &'static PgPool {
-    SHARED_MIGRATED
+pub async fn shared_migrated_pool() -> PgPool {
+    let shared = shared().await;
+    let db_name = SHARED_MIGRATED_DB
         .get_or_init(|| async {
-            let shared = shared().await;
             let db_name = format!("meshmon_shared_{}", Uuid::new_v4().simple());
 
             let admin = PgPool::connect_with(shared.admin_opts.clone())
@@ -274,17 +275,31 @@ pub async fn shared_migrated_pool() -> &'static PgPool {
                 .expect("create shared test database");
             admin.close().await;
 
-            let pool = PgPoolOptions::new()
-                .max_connections(SHARED_POOL_MAX_CONNECTIONS)
+            let init_pool = PgPoolOptions::new()
+                .max_connections(4)
                 .connect_with(shared.admin_opts.clone().database(&db_name))
                 .await
-                .expect("connect shared test db");
-            meshmon_service::db::run_migrations(&pool)
+                .expect("connect shared test db for migrations");
+            meshmon_service::db::run_migrations(&init_pool)
                 .await
                 .expect("migrate shared test db");
-            pool
+            init_pool.close().await;
+
+            db_name
         })
+        .await;
+
+    // Return a fresh pool per call. The underlying DB is shared (one-time
+    // migrated), but each pool's internal tasks live on the caller's
+    // runtime — critical for `#[tokio::test]`, which spins up and tears
+    // down its own runtime per test. A long-lived `&'static PgPool` would
+    // have its tasks die when the first test's runtime drops, breaking
+    // subsequent tests.
+    PgPoolOptions::new()
+        .max_connections(SHARED_POOL_MAX_CONNECTIONS)
+        .connect_with(shared.admin_opts.clone().database(db_name))
         .await
+        .expect("connect shared test db")
 }
 
 /// Process-exit cleanup for the shared container.
@@ -319,6 +334,19 @@ pub const AUTH_TEST_HASH: &str =
     "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
 pub const AUTH_TEST_PASSWORD: &str = "correct horse battery staple";
 
+/// Spawns an ingestion pipeline connected to an unreachable VM URL for
+/// handler tests that don't exercise ingestion. The tokio runtime keeps the
+/// workers alive until the test process exits; there is no explicit join
+/// because the harness does not expose a shutdown hook per-test. The
+/// workers are idle unless the test pushes to them, so the resource
+/// footprint is a handful of blocked `select!`-ing tasks.
+pub fn dummy_ingestion(pool: sqlx::PgPool) -> meshmon_service::ingestion::IngestionPipeline {
+    let token = tokio_util::sync::CancellationToken::new();
+    let cfg =
+        meshmon_service::ingestion::IngestionConfig::default_with_url("http://127.0.0.1:1".into());
+    meshmon_service::ingestion::IngestionPipeline::spawn(cfg, pool, token)
+}
+
 /// Construct an `AppState` with a single `admin` user whose password is
 /// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
 /// set a stable client IP via `X-Forwarded-For` without needing to inject a
@@ -340,7 +368,8 @@ password_hash = "{AUTH_TEST_HASH}"
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
-    AppState::new(swap, rx, pool)
+    let ingestion = dummy_ingestion(pool.clone());
+    AppState::new(swap, rx, pool, ingestion)
 }
 
 /// Same as [`state_with_admin`] but with `trust_forwarded_headers = false`.
@@ -361,5 +390,6 @@ password_hash = "{AUTH_TEST_HASH}"
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
-    AppState::new(swap, rx, pool)
+    let ingestion = dummy_ingestion(pool.clone());
+    AppState::new(swap, rx, pool, ingestion)
 }

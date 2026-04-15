@@ -26,7 +26,8 @@ url = "postgres://ignored@localhost/nope"
     );
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
-    AppState::new(swap, rx, pool)
+    let ingestion = common::dummy_ingestion(pool.clone());
+    AppState::new(swap, rx, pool, ingestion)
 }
 
 #[tokio::test]

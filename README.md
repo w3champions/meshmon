@@ -120,6 +120,27 @@ export DATABASE_URL="postgres://user:pass@host:port/postgres"
 cargo test -p meshmon-service --test migrations
 ```
 
+### Database queries (sqlx offline cache)
+
+The service uses `sqlx::query!` / `sqlx::query_as!` macros for compile-time-checked SQL. The macros validate against either a live `DATABASE_URL` or the committed `.sqlx/` offline cache.
+
+```bash
+# One-time:
+cargo install sqlx-cli --no-default-features --features rustls,postgres --version ~0.8
+
+# After changing any query!/query_as! macro: bring up Postgres, regenerate, commit.
+docker run -d --rm --name meshmon-prep -p 55432:5432 \
+    -e POSTGRES_PASSWORD=meshmon timescale/timescaledb:2.26.3-pg16
+sleep 3
+export DATABASE_URL=postgres://postgres:meshmon@127.0.0.1:55432/postgres
+sqlx migrate run --source crates/service/migrations
+cargo sqlx prepare --workspace -- --all-targets --all-features
+git add .sqlx
+docker stop meshmon-prep
+```
+
+CI sets `SQLX_OFFLINE=true` and runs `cargo sqlx prepare --check` to guard against stale caches.
+
 ## Status
 
 This repo is under active initial construction. The scaffolding in this commit

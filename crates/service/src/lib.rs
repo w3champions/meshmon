@@ -16,6 +16,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod http;
+pub mod ingestion;
 pub mod logging;
 pub mod shutdown;
 pub mod state;

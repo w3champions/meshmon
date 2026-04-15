@@ -19,6 +19,10 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 argon2 = { workspace = true }
 axum = { workspace = true }
+metrics = { workspace = true }
+meshmon-protocol = { path = "../protocol" }
+prometheus-reqwest-remote-write = { workspace = true }
+snap = { workspace = true }
 axum-login = { workspace = true }
 chrono = { workspace = true }
 governor = { workspace = true }
@@ -34,6 +38,7 @@ sqlx = { workspace = true, features = [
     "chrono",
     "uuid",
     "ipnetwork",
+    "json",
 ] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -52,7 +57,11 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 ctor = { workspace = true }
+metrics-util = "0.20"
+prost = { workspace = true }
+snap = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true }  # for `ServiceExt::oneshot` in handler tests
 uuid = { workspace = true }
+wiremock = { workspace = true }

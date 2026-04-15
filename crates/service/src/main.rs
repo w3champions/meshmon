@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 fn main() -> anyhow::Result<()> {
@@ -109,7 +110,31 @@ async fn run() -> anyhow::Result<()> {
     });
 
     // --- Step 6: Build state, mark ready ---
-    let state = AppState::new(config_handle, config_rx, pool);
+    // NOTE: the VM URL is read once at startup. Changes to `upstream.vm_url`
+    // via `SIGHUP` config reload take effect only after a service restart.
+    // Wiring the pipeline to observe `config_handle`/`config_rx` is a
+    // follow-up (tracked for the T10/exporter work).
+    let vm_url_for_ingestion = initial_config.upstream.vm_url.clone().unwrap_or_else(|| {
+        warn!("no upstream.vm_url configured; ingestion will fail to write to VM");
+        "http://meshmon-vm:8428".to_string()
+    });
+    let ingestion_cfg = meshmon_service::ingestion::IngestionConfig::default_with_url(format!(
+        "{}/api/v1/write",
+        vm_url_for_ingestion.trim_end_matches('/')
+    ));
+    // Ingestion runs on a separate cancellation token from the HTTP
+    // server. The HTTP server is drained first (so in-flight handlers can
+    // finish pushing to the ingestion queues); only after serve returns is
+    // `ingestion_token` cancelled. Sharing `shutdown_token` here would let
+    // workers exit while handlers are still mid-push — silent data loss.
+    let ingestion_token = CancellationToken::new();
+    let ingestion = meshmon_service::ingestion::IngestionPipeline::spawn(
+        ingestion_cfg,
+        pool.clone(),
+        ingestion_token.clone(),
+    );
+
+    let state = AppState::new(config_handle, config_rx, pool, ingestion.clone());
     state.mark_ready();
     let app = http::router(state.clone());
 
@@ -134,15 +159,26 @@ async fn run() -> anyhow::Result<()> {
         tokio::time::sleep(deadline).await;
     };
 
-    tokio::select! {
-        result = serve => result.context("HTTP server")?,
+    let serve_result = tokio::select! {
+        result = serve => result,
         _ = deadline_timer => {
             warn!(
                 deadline_ms = deadline.as_millis() as u64,
                 "HTTP server did not drain within shutdown_deadline; aborting in-flight connections"
             );
+            Ok(())
         }
-    }
+    };
+
+    // HTTP is done — no more in-flight handlers can call `push_metrics` /
+    // `push_snapshot`. Now cancel ingestion and drain any remaining
+    // buffered samples/snapshots.
+    ingestion_token.cancel();
+    ingestion.join().await;
+    info!("ingestion pipeline drained");
+
+    serve_result.context("HTTP server")?;
+
     info!("meshmon-service shutdown complete");
     Ok(())
 }
