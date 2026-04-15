@@ -7,7 +7,10 @@ mod common;
 use chrono::Duration as ChronoDuration;
 use meshmon_service::registry::{refresh_once_for_test, AgentRegistry, RegistrySnapshot};
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
+use tokio::time::{timeout, Duration as TokioDuration};
+use tokio_util::sync::CancellationToken;
 
 async fn seed(pool: &PgPool, id: &str, offset: ChronoDuration) {
     sqlx::query(
@@ -92,5 +95,100 @@ async fn snapshot_is_cheap_arc_clone() {
     let a = reg.snapshot();
     let b = reg.snapshot();
     assert!(std::sync::Arc::ptr_eq(&a, &b));
+    db.close().await;
+}
+
+#[tokio::test]
+async fn refresh_loop_picks_up_new_agents_within_one_interval() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let reg = Arc::new(AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_millis(100),
+    ));
+    reg.initial_load().await.unwrap();
+
+    let token = CancellationToken::new();
+    let handle = reg.clone().spawn_refresh(token.clone());
+
+    seed(&db.pool, "bob", ChronoDuration::zero()).await;
+
+    // Within 3 intervals, the snapshot must see "bob".
+    let mut seen = false;
+    for _ in 0..30 {
+        tokio::time::sleep(TokioDuration::from_millis(30)).await;
+        if reg.snapshot().get("bob").is_some() {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "refresh loop did not observe new agent");
+
+    token.cancel();
+    timeout(TokioDuration::from_secs(2), handle)
+        .await
+        .expect("refresh task did not exit within 2s")
+        .expect("task panicked");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn refresh_loop_exits_promptly_on_cancellation() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+    let reg = Arc::new(AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_secs(60), // long sleep; cancellation must interrupt
+    ));
+    reg.initial_load().await.unwrap();
+
+    let token = CancellationToken::new();
+    let handle = reg.clone().spawn_refresh(token.clone());
+
+    token.cancel();
+    timeout(TokioDuration::from_millis(500), handle)
+        .await
+        .expect("refresh loop did not exit within 500ms after cancel")
+        .expect("task panicked");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn snapshot_survives_db_outage_and_recovers() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+    seed(&db.pool, "a", ChronoDuration::zero()).await;
+
+    let reg = Arc::new(AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_millis(50),
+    ));
+    reg.initial_load().await.unwrap();
+    assert_eq!(reg.snapshot().len(), 1);
+
+    let token = CancellationToken::new();
+    let handle = reg.clone().spawn_refresh(token.clone());
+
+    // Simulate outage: close the pool. `refresh_once` will return
+    // `sqlx::Error::PoolClosed`. The loop must keep running and NOT
+    // overwrite the snapshot.
+    db.pool.close().await;
+
+    // Wait longer than several intervals — snapshot should stay at 1.
+    tokio::time::sleep(TokioDuration::from_millis(500)).await;
+    assert_eq!(
+        reg.snapshot().len(),
+        1,
+        "snapshot was wiped during DB outage",
+    );
+
+    token.cancel();
+    timeout(TokioDuration::from_secs(2), handle)
+        .await
+        .unwrap()
+        .unwrap();
     db.close().await;
 }

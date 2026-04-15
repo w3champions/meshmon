@@ -226,4 +226,55 @@ impl AgentRegistry {
         self.snapshot.store(Arc::new(snap));
         Ok(())
     }
+
+    /// Spawn the periodic refresh task.
+    ///
+    /// The loop wakes every `refresh_interval`, calls [`refresh_once`],
+    /// and — on success — atomically swaps the new snapshot into place.
+    /// On failure it logs at `warn`, increments
+    /// `meshmon_service_registry_refresh_errors_total`, and leaves the
+    /// prior snapshot untouched. Stale data is strictly preferable to a
+    /// cold registry.
+    ///
+    /// `token` cancels the loop. The returned `JoinHandle<()>` must be
+    /// awaited during shutdown (see `main.rs`).
+    pub fn spawn_refresh(
+        self: Arc<Self>,
+        token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let interval = self.refresh_interval;
+            loop {
+                // Emit snapshot age every tick (even on skipped refresh).
+                let age_secs = (Utc::now() - self.snapshot().refreshed_at())
+                    .num_seconds()
+                    .max(0) as f64;
+                metrics::gauge!("meshmon_service_registry_last_refresh_age_seconds").set(age_secs);
+
+                match refresh_once(&self.pool).await {
+                    Ok(snap) => {
+                        tracing::debug!(count = snap.len(), "agent registry refreshed",);
+                        self.snapshot.store(Arc::new(snap));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "agent registry refresh failed; keeping stale snapshot",
+                        );
+                        metrics::counter!("meshmon_service_registry_refresh_errors_total")
+                            .increment(1);
+                    }
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        tracing::debug!("agent registry refresh loop exiting");
+                        return;
+                    }
+                    _ = tokio::time::sleep(interval) => {}
+                }
+            }
+        })
+    }
 }
