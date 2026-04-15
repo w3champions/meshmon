@@ -225,9 +225,10 @@ impl AgentRegistry {
         self.refresh_interval
     }
 
-    /// Refresh right now and await completion. Called by
-    /// `POST /api/agent/register` after writing the new row, so the
-    /// caller's next request sees it without waiting for the next tick.
+    /// Refresh right now and await completion. Intended for the
+    /// agent-register handler to invoke after writing a new row, so the
+    /// caller's next request sees the agent without waiting for the next
+    /// periodic tick.
     ///
     /// Last-writer-wins semantics vs. the periodic loop: two concurrent
     /// refreshes both succeed; the `store` that arrives later overwrites

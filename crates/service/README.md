@@ -68,9 +68,9 @@ Without `DATABASE_URL`, set `SQLX_OFFLINE=true` (CI will).
 `meshmon_service::registry::AgentRegistry` keeps an in-memory snapshot of
 the `agents` table. It refreshes every
 `[agents].refresh_interval_seconds` (default 10 s) or on explicit
-`force_refresh()` — the agent-register handler calls the latter after
-writing a new row so the new agent is visible to `/api/agent/targets`
-without waiting for the next tick.
+`force_refresh()`. The latter is the seam for the agent-register handler
+to invoke after writing a new row, so the new agent is visible to
+`/api/agent/targets` without waiting for the next tick.
 
 `[agents].target_active_window_minutes` (default 5) controls which agents
 appear in `active_targets()` results. The window is passed as a `Duration`
