@@ -74,3 +74,10 @@ shared_token_env = "MESHMON_AGENT_TOKEN"
 
 # Alertmanager API base URL. Same reachability-is-advisory semantics.
 # alertmanager_url = "http://meshmon-alertmanager:9093"
+
+[agents]
+# Minutes after last_seen_at before an agent is no longer counted as active.
+# target_active_window_minutes = 5
+
+# How often the in-memory registry snapshot is re-read from Postgres.
+# refresh_interval_seconds = 10

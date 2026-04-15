@@ -356,3 +356,19 @@ refresh_interval_seconds = 0
     .expect_err("must reject zero cadence");
     assert!(format!("{err}").contains("refresh_interval_seconds"));
 }
+
+#[test]
+fn agents_section_rejects_zero_window() {
+    let err = Config::from_str(
+        r#"
+[database]
+url = "postgres://a@b/c"
+
+[agents]
+target_active_window_minutes = 0
+"#,
+        "test.toml",
+    )
+    .expect_err("must reject zero window");
+    assert!(format!("{err}").contains("target_active_window_minutes"));
+}
