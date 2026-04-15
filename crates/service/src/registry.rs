@@ -181,17 +181,27 @@ pub struct AgentRegistry {
     snapshot: Arc<ArcSwap<RegistrySnapshot>>,
     pool: PgPool,
     refresh_interval: Duration,
+    active_window: Duration,
 }
 
 impl AgentRegistry {
     /// Construct an empty registry. No DB contact until [`AgentRegistry::initial_load`] or
     /// [`AgentRegistry::force_refresh`] is called.
-    pub fn new(pool: PgPool, refresh_interval: Duration) -> Self {
+    ///
+    /// `active_window` is the lookback duration used when splitting agents
+    /// into `active` vs `stale` for the `agents_total{state}` gauge.
+    pub fn new(pool: PgPool, refresh_interval: Duration, active_window: Duration) -> Self {
         Self {
             snapshot: Arc::new(ArcSwap::from_pointee(RegistrySnapshot::empty())),
             pool,
             refresh_interval,
+            active_window,
         }
+    }
+
+    /// The staleness window passed at construction time.
+    pub fn active_window(&self) -> Duration {
+        self.active_window
     }
 
     /// Perform the first DB read synchronously. Called during service
@@ -200,6 +210,7 @@ impl AgentRegistry {
     /// unknown-source (403).
     pub async fn initial_load(&self) -> Result<(), sqlx::Error> {
         let snap = refresh_once(&self.pool).await?;
+        self.publish(&snap);
         self.snapshot.store(Arc::new(snap));
         Ok(())
     }
@@ -223,8 +234,36 @@ impl AgentRegistry {
     /// the earlier one. At ~40 agents and 10s cadence this is benign.
     pub async fn force_refresh(&self) -> Result<(), sqlx::Error> {
         let snap = refresh_once(&self.pool).await?;
+        self.publish(&snap);
         self.snapshot.store(Arc::new(snap));
         Ok(())
+    }
+
+    /// Emit the `meshmon_service_registry_agents_total` gauge split by
+    /// `state` label (`"active"` / `"stale"`).
+    fn publish(&self, snap: &RegistrySnapshot) {
+        let window = self.active_window;
+        let cutoff =
+            Utc::now() - chrono::Duration::from_std(window).unwrap_or(chrono::Duration::MAX);
+        let mut active = 0u64;
+        let mut stale = 0u64;
+        for a in snap.all() {
+            if a.last_seen_at > cutoff {
+                active += 1;
+            } else {
+                stale += 1;
+            }
+        }
+        metrics::gauge!(
+            "meshmon_service_registry_agents_total",
+            "state" => "active",
+        )
+        .set(active as f64);
+        metrics::gauge!(
+            "meshmon_service_registry_agents_total",
+            "state" => "stale",
+        )
+        .set(stale as f64);
     }
 
     /// Spawn the periodic refresh task.
@@ -257,6 +296,7 @@ impl AgentRegistry {
                 match refresh_once(&self.pool).await {
                     Ok(snap) => {
                         tracing::debug!(count = snap.len(), "agent registry refreshed",);
+                        self.publish(&snap);
                         self.snapshot.store(Arc::new(snap));
                     }
                     Err(e) => {

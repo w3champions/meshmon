@@ -59,7 +59,11 @@ async fn initial_load_populates_snapshot() {
     meshmon_service::db::run_migrations(&db.pool).await.unwrap();
     seed(&db.pool, "a", ChronoDuration::zero()).await;
 
-    let reg = AgentRegistry::new(db.pool.clone(), StdDuration::from_secs(60));
+    let reg = AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_secs(60),
+        StdDuration::from_secs(5 * 60),
+    );
     assert!(reg.snapshot().is_empty(), "empty before initial_load");
     reg.initial_load().await.expect("initial_load");
     assert_eq!(reg.snapshot().len(), 1);
@@ -73,7 +77,11 @@ async fn force_refresh_picks_up_new_agents_immediately() {
     let db = common::acquire(false).await;
     meshmon_service::db::run_migrations(&db.pool).await.unwrap();
 
-    let reg = AgentRegistry::new(db.pool.clone(), StdDuration::from_secs(3600));
+    let reg = AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_secs(3600),
+        StdDuration::from_secs(5 * 60),
+    );
     reg.initial_load().await.expect("initial_load");
     assert!(reg.snapshot().is_empty());
 
@@ -90,7 +98,11 @@ async fn snapshot_is_cheap_arc_clone() {
     // at the same allocation when called twice without a refresh.
     let db = common::acquire(false).await;
     meshmon_service::db::run_migrations(&db.pool).await.unwrap();
-    let reg = AgentRegistry::new(db.pool.clone(), StdDuration::from_secs(60));
+    let reg = AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_secs(60),
+        StdDuration::from_secs(5 * 60),
+    );
     reg.initial_load().await.unwrap();
     let a = reg.snapshot();
     let b = reg.snapshot();
@@ -106,6 +118,7 @@ async fn refresh_loop_picks_up_new_agents_within_one_interval() {
     let reg = Arc::new(AgentRegistry::new(
         db.pool.clone(),
         StdDuration::from_millis(100),
+        StdDuration::from_secs(5 * 60),
     ));
     reg.initial_load().await.unwrap();
 
@@ -142,6 +155,7 @@ async fn refresh_loop_exits_promptly_on_cancellation() {
     let reg = Arc::new(AgentRegistry::new(
         db.pool.clone(),
         StdDuration::from_secs(60), // long sleep; cancellation must interrupt
+        StdDuration::from_secs(5 * 60),
     ));
     reg.initial_load().await.unwrap();
 
@@ -166,6 +180,7 @@ async fn snapshot_preserved_during_db_outage() {
     let reg = Arc::new(AgentRegistry::new(
         db.pool.clone(),
         StdDuration::from_millis(50),
+        StdDuration::from_secs(5 * 60),
     ));
     reg.initial_load().await.unwrap();
     assert_eq!(reg.snapshot().len(), 1);
@@ -191,5 +206,59 @@ async fn snapshot_preserved_during_db_outage() {
         .await
         .unwrap()
         .unwrap();
+    db.close().await;
+}
+
+use metrics_util::debugging::{DebuggingRecorder, Snapshotter};
+
+fn install_recorder() -> Snapshotter {
+    let recorder = DebuggingRecorder::new();
+    let snap = recorder.snapshotter();
+    // install_recorder errors if one is already installed; fine for tests
+    // that run in isolated test binaries.
+    let _ = recorder.install();
+    snap
+}
+
+#[tokio::test]
+async fn refresh_emits_state_split_metric() {
+    let snapshotter = install_recorder();
+
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+    seed(&db.pool, "fresh", ChronoDuration::zero()).await;
+    seed(&db.pool, "stale", ChronoDuration::minutes(-60)).await;
+
+    let reg = AgentRegistry::new(
+        db.pool.clone(),
+        StdDuration::from_secs(60),
+        StdDuration::from_secs(5 * 60),
+    );
+    reg.initial_load().await.unwrap();
+
+    let snap = snapshotter.snapshot().into_vec();
+    let mut active = None;
+    let mut stale = None;
+    for (key, _unit, _desc, value) in snap {
+        let name = key.key().name();
+        if name != "meshmon_service_registry_agents_total" {
+            continue;
+        }
+        let labels: Vec<_> = key.key().labels().collect();
+        let state_label = labels
+            .iter()
+            .find(|l| l.key() == "state")
+            .map(|l| l.value().to_string());
+        if let metrics_util::debugging::DebugValue::Gauge(g) = value {
+            match state_label.as_deref() {
+                Some("active") => active = Some(g.into_inner()),
+                Some("stale") => stale = Some(g.into_inner()),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(active, Some(1.0), "active count");
+    assert_eq!(stale, Some(1.0), "stale count");
+
     db.close().await;
 }
