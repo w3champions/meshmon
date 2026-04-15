@@ -59,10 +59,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(login))
         .layer(login_limit);
 
+    let grpc_router = crate::grpc::routes(state.clone());
+
     Router::new()
         .merge(health::router())
         .merge(openapi::swagger_router(api_schema))
         .merge(login_router)
+        .merge(grpc_router)
         .merge(api_axum)
         .layer(auth_layer)
         .layer(CompressionLayer::new())
