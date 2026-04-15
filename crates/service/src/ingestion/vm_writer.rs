@@ -70,6 +70,13 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
     // `meshmon_route_changes_total` after each INSERT). Without this
     // grace window, vm_writer can exit before pg_writer finishes
     // pushing, silently dropping the final shutdown counter samples.
+    //
+    // Shutdown latency bound: the grace timer resets per late push,
+    // so total drain time is roughly
+    // `pg_snapshot_backlog * insert_latency + DRAIN_GRACE_PERIOD`.
+    // With defaults (snapshot_buffer_capacity=1024, ~50ms/INSERT) a
+    // full queue can extend shutdown to ~51s; typical steady-state
+    // (~0.04 snapshots/sec) means <= 500ms.
     const DRAIN_GRACE_PERIOD: Duration = Duration::from_millis(500);
 
     loop {

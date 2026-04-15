@@ -67,3 +67,34 @@ async fn insert_writes_row_with_jsonb_hops() {
     let summary: Value = row.try_get("path_summary").unwrap();
     assert_eq!(summary["hop_count"], 1);
 }
+
+#[tokio::test]
+async fn insert_rejects_out_of_range_observed_at() {
+    let pool = common::shared_migrated_pool().await;
+
+    let src = format!("a-{}", uuid::Uuid::new_v4().simple());
+    let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
+    for id in [&src, &tgt] {
+        sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ($1, 'X', '10.0.0.1')")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let mut s = validated(); // reuse existing helper
+    s.source_id = src;
+    s.target_id = tgt;
+    s.observed_at_micros = i64::MAX; // overflows chrono's DateTime<Utc> range
+
+    let err = insert_snapshot(&pool, &s)
+        .await
+        .expect_err("out-of-range observed_at should error");
+    // The error surface is whatever insert_snapshot returns.
+    // Assert the error stringifies with the expected marker.
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("outside chrono's representable range"),
+        "unexpected error: {msg}"
+    );
+}

@@ -14,6 +14,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+/// How long to wait for late touches after cancellation fires.
+///
+/// Mirrors [`crate::ingestion::vm_writer`]'s `DRAIN_GRACE_PERIOD`: the
+/// `pg_writer` drain runs concurrently and calls `last_seen.touch()` after
+/// each INSERT. Without this window those late touches are lost.
+const DRAIN_GRACE_PERIOD: Duration = Duration::from_millis(500);
+
 /// Handle to a spawned last-seen updater task.
 ///
 /// Clone-cheap: all state is behind `Arc` / channels.
@@ -31,8 +38,9 @@ struct Touch {
 
 impl LastSeenUpdater {
     /// Spawn the updater task and return its handle. The task runs until
-    /// `token` is cancelled, at which point it best-effort drains any
-    /// already-queued touches via `try_recv` before returning.
+    /// `token` is cancelled, at which point it drains any queued touches
+    /// and waits up to [`DRAIN_GRACE_PERIOD`] for late touches from the
+    /// concurrent `pg_writer` drain before returning.
     pub fn spawn(pool: PgPool, debounce: Duration, token: CancellationToken) -> Self {
         let (tx, rx) = mpsc::channel::<Touch>(1024);
         let join = tokio::spawn(run(rx, pool, debounce, token));
@@ -78,8 +86,21 @@ async fn run(
         tokio::select! {
             biased;
             _ = token.cancelled() => {
-                while let Ok(touch) = rx.try_recv() {
-                    apply(&pool, &mut last_write, debounce, touch).await;
+                // Grace window mirrors vm_writer: late touches arrive from
+                // pg_writer's drain after the token fires. Without waiting,
+                // agents.last_seen_at can remain stale for snapshots persisted
+                // during shutdown drain.
+                loop {
+                    while let Ok(touch) = rx.try_recv() {
+                        apply(&pool, &mut last_write, debounce, touch).await;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(DRAIN_GRACE_PERIOD) => break,
+                        maybe = rx.recv() => match maybe {
+                            Some(touch) => apply(&pool, &mut last_write, debounce, touch).await,
+                            None => break,
+                        },
+                    }
                 }
                 break;
             }

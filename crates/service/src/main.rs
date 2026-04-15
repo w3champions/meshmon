@@ -162,8 +162,10 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
-    // The shutdown_token has already been cancelled by now (either by signal
-    // or by the deadline-timer arm above having observed cancellation).
+    // Ensure ingestion workers see cancellation even if serve returned an
+    // error without signal-driven shutdown. CancellationToken::cancel is
+    // idempotent, so this is safe when the signal handler already fired.
+    shutdown_token.cancel();
     // Drain the ingestion workers so buffered samples/snapshots have a
     // chance to land before the process exits.
     ingestion.join().await;
