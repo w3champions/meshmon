@@ -255,6 +255,29 @@ pub async fn login(
     .into_response()
 }
 
+/// POST `/api/auth/logout` — invalidate the current session.
+///
+/// Idempotent: 200 whether or not the caller was logged in. The cookie is
+/// cleared either way.
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Logged out"),
+    )
+)]
+#[tracing::instrument(skip_all)]
+pub async fn logout(mut auth_session: AuthSession) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if let Err(e) = auth_session.logout().await {
+        tracing::warn!(error = %e, "session logout failed — cookie still cleared client-side");
+    }
+    StatusCode::OK.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
