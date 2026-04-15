@@ -89,6 +89,82 @@ refresh that errors keeps the previous snapshot in place, emits
 tick. Ingestion source validation therefore continues to accept known
 agents during brief DB outages.
 
+## Agent API (gRPC)
+
+The service exposes a tonic gRPC endpoint named `meshmon.AgentApi`. It shares
+the same TCP port and listener as the REST API; the `auto::Builder` in
+`main.rs` dispatches HTTP/1.1 (REST) and HTTP/2 (gRPC) on the same socket.
+
+### RPCs
+
+| RPC | Direction | Description |
+|-----|-----------|-------------|
+| `Register` | Agent → Service | Upserts the agent row in Postgres and force-refreshes the in-memory registry. Validates that the claimed IP matches the connection IP (loopback-exempt). |
+| `PushMetrics` | Agent → Service | Accepts a `MetricsBatch` and enqueues it for ingestion into VictoriaMetrics + Postgres. Source agent must be registered. |
+| `PushRouteSnapshot` | Agent → Service | Accepts a `RouteSnapshotRequest` and enqueues it for Postgres ingestion. Source agent must be registered. |
+| `GetConfig` | Service → Agent | Returns the current `[probing]` configuration (enabled protocols, rate table, all thresholds). Reloaded on SIGHUP. |
+| `GetTargets` | Service → Agent | Returns the list of active agents (within `[agents].target_active_window_minutes`) excluding the caller. |
+
+### Auth
+
+Every RPC requires a `Authorization: Bearer <token>` gRPC metadata header.
+The token is the `[agent_api].shared_token` / `shared_token_env` value. If
+the token is unset, all RPCs return `UNAVAILABLE`. Wrong or missing tokens
+return `UNAUTHENTICATED`.
+
+### Rate limit
+
+A per-IP token-bucket rate limit is applied before any RPC reaches the handler:
+
+- **`rate_limit_per_minute`** (default 60) — sustained requests per minute.
+- **`rate_limit_burst`** (default 30) — burst absorbed instantly; sized for
+  the three startup RPCs (Register + GetConfig + GetTargets) across a fleet
+  of agents sharing a proxy egress IP.
+
+Requests that exceed the limit receive HTTP 429 before the gRPC layer sees them.
+
+### Error mapping
+
+| Condition | gRPC status |
+|-----------|-------------|
+| Token missing | `UNAUTHENTICATED` |
+| Token mismatch | `UNAUTHENTICATED` |
+| Agent API not configured (no token) | `UNAVAILABLE` |
+| Unknown source agent on push | `PERMISSION_DENIED` |
+| Claimed IP ≠ connection IP | `PERMISSION_DENIED` |
+| Agent ID already registered with a different IP | `ALREADY_EXISTS` |
+| Invalid payload (empty IDs, bad IP bytes, out-of-range values) | `INVALID_ARGUMENT` |
+| Database or internal error | `INTERNAL` |
+
+### Deployment modes
+
+**Behind a reverse proxy (recommended)**
+
+The proxy terminates TLS (including HTTP/2 ALPN negotiation) and forwards
+plaintext gRPC to the service via `grpc_pass`. Leave `[agent_api.tls]`
+commented out; the service binds HTTP/2 cleartext on `[service].listen_addr`.
+Set `[service].trust_forwarded_headers = true` if the proxy sets
+`X-Forwarded-For` so per-IP rate limiting uses the original client address.
+
+**Standalone TLS (no proxy)**
+
+Uncomment `[agent_api.tls]` and provide `cert_path` / `key_path`. The
+service loads the certificate chain at startup and re-reads it on SIGHUP
+(zero-downtime certificate rotation). Agents connect directly with TLS.
+
+### Debugging with grpcurl
+
+```bash
+# List available RPCs (requires server reflection or a local .proto):
+grpcurl -plaintext localhost:8080 list meshmon.AgentApi
+
+# Call GetConfig (no request body needed):
+grpcurl -plaintext \
+  -H 'Authorization: Bearer <your-token>' \
+  -d '{}' \
+  localhost:8080 meshmon.AgentApi/GetConfig
+```
+
 ## Configuration
 
 See `meshmon.toml` (canonical form lives in the deploy/ example). Secrets go through `*_env` indirection.
