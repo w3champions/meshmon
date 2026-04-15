@@ -269,4 +269,50 @@ password_hash = "{hash}"
         assert!(!rendered.contains("hunter2"), "rendered = {rendered}");
         assert!(rendered.contains("<redacted>"), "rendered = {rendered}");
     }
+
+    #[tokio::test]
+    async fn get_user_returns_user_when_present() {
+        let cfg = cfg_with_user("alice", TEST_HASH);
+        let backend = ConfigAuthBackend::new(cfg);
+        let user = backend
+            .get_user(&"alice".to_string())
+            .await
+            .expect("no infra error");
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().username, "alice");
+    }
+
+    #[tokio::test]
+    async fn get_user_returns_none_when_absent() {
+        let cfg = cfg_with_user("alice", TEST_HASH);
+        let backend = ConfigAuthBackend::new(cfg);
+        let user = backend
+            .get_user(&"bob".to_string())
+            .await
+            .expect("no infra error");
+        assert!(user.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_user_reflects_config_reload() {
+        let cfg = cfg_with_user("alice", TEST_HASH);
+        let backend = ConfigAuthBackend::new(cfg.clone());
+        assert!(backend
+            .get_user(&"alice".to_string())
+            .await
+            .expect("no infra")
+            .is_some());
+        // Simulate a config reload that removes alice.
+        let new_toml = r#"
+[database]
+url = "postgres://ignored@h/d"
+"#;
+        let new_cfg = Arc::new(Config::from_str(new_toml, "test.toml").expect("parse"));
+        cfg.store(new_cfg);
+        assert!(backend
+            .get_user(&"alice".to_string())
+            .await
+            .expect("no infra")
+            .is_none());
+    }
 }
