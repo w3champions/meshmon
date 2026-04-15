@@ -179,21 +179,20 @@ async fn post_batch(
             .header(HEADER_NAME_REMOTE_WRITE_VERSION, REMOTE_WRITE_VERSION_01)
             .body(body.clone())
             .send();
-        // During shutdown drain the reqwest client's 15s timeout is too
-        // permissive — a backlog of batches against an unreachable VM
-        // could stall shutdown for many minutes. Cap the send at 2s when
-        // cancellation is already active so drain progresses promptly,
-        // still giving a reachable VM room to respond.
-        let resp = if token.is_cancelled() {
-            match tokio::time::timeout(Duration::from_secs(2), send_fut).await {
-                Ok(resp) => resp,
-                Err(_) => {
-                    vm_write_duration().record(started.elapsed().as_secs_f64());
-                    return Err(VmWriteError::Cancelled);
-                }
+        // Race the send against "cancel + 2s grace": pre-cancel sends are
+        // bounded by reqwest's 15s client timeout; post-cancel they exit
+        // within 2s regardless of when cancel arrived. This closes the
+        // TOCTOU window of checking `is_cancelled()` before awaiting.
+        let cancel_budget = async {
+            token.cancelled().await;
+            sleep(Duration::from_secs(2)).await;
+        };
+        let resp = tokio::select! {
+            r = send_fut => r,
+            _ = cancel_budget => {
+                vm_write_duration().record(started.elapsed().as_secs_f64());
+                return Err(VmWriteError::Cancelled);
             }
-        } else {
-            send_fut.await
         };
         let elapsed = started.elapsed().as_secs_f64();
         match resp {
@@ -219,12 +218,16 @@ async fn post_batch(
         }
         // Cancellation short-circuits further retries so shutdown doesn't
         // block for the full `max_retry` window when VM is unreachable.
+        // `biased;` ensures cancel deterministically wins a tied race with
+        // sleep completion (otherwise tokio's random selection could leak
+        // one extra retry attempt past cancellation).
         tokio::select! {
-            _ = sleep(backoff) => {}
+            biased;
             _ = token.cancelled() => {
                 vm_write_duration().record(started.elapsed().as_secs_f64());
                 return Err(VmWriteError::Cancelled);
             }
+            _ = sleep(backoff) => {}
         }
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }

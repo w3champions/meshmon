@@ -214,6 +214,10 @@ pub enum ValidationError {
         /// The invalid loss fraction.
         value: f64,
     },
+    /// A hop carries `position == 0`; `HopSummary.position` is 1-indexed
+    /// per `meshmon.proto`.
+    #[error("hop position 0 is invalid (positions are 1-indexed)")]
+    InvalidHopPosition,
     /// A hop IP address byte slice has an unexpected length (must be 4 or 16).
     #[error("hop ip bytes len {len} (must be 4 or 16) at position {position}")]
     InvalidHopIp {
@@ -330,6 +334,9 @@ pub fn validate_snapshot(req: RouteSnapshotRequest) -> Result<ValidatedSnapshot,
 }
 
 fn validate_hop(h: HopSummary) -> Result<ValidHop, ValidationError> {
+    if h.position == 0 {
+        return Err(ValidationError::InvalidHopPosition);
+    }
     if !(0.0..=1.0).contains(&h.loss_pct) || h.loss_pct.is_nan() {
         return Err(ValidationError::HopLossOutOfRange {
             position: h.position,

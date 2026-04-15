@@ -272,3 +272,15 @@ fn snapshot_hop_count_mismatch_rejected() {
         ValidationError::HopCountMismatch { .. }
     ));
 }
+
+#[test]
+fn validate_snapshot_rejects_zero_hop_position() {
+    // `HopSummary.position` is 1-indexed per meshmon.proto; a malformed
+    // agent sending position=0 must be rejected, not silently persisted.
+    let mut s = good_snapshot();
+    s.hops[0].position = 0;
+    assert!(matches!(
+        validate_snapshot(s).unwrap_err(),
+        ValidationError::InvalidHopPosition
+    ));
+}

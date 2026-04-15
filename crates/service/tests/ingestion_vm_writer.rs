@@ -266,6 +266,63 @@ async fn retry_exhaustion_stops_after_first_attempt() {
     let _ = handle.await;
 }
 
+/// Regression guard for the unified drain-send timeout.
+///
+/// Proves that when the VM hangs well beyond reqwest's 15s client timeout
+/// and cancellation fires mid-send, the vm_writer exits within the
+/// cancel+2s grace budget rather than waiting on the underlying reqwest
+/// send. Uses a 15s-delayed `ResponseTemplate` so any regression that
+/// reintroduces the pre-cancel `send_fut.await` branch would block here
+/// for at least 15s, well past the 5s test budget.
+#[tokio::test]
+async fn drain_send_timeout_bounds_shutdown_against_hanging_vm() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/write"))
+        .respond_with(ResponseTemplate::new(204).set_delay(Duration::from_secs(15)))
+        .mount(&server)
+        .await;
+
+    let queue: Arc<DropOldest<PromSample>> = Arc::new(DropOldest::new(1024));
+    let token = CancellationToken::new();
+    let cfg = VmWriterCfg {
+        url: format!("{}/api/v1/write", server.uri()),
+        batch_size: 100,
+        batch_interval: Duration::from_millis(50),
+        max_retry: Duration::from_secs(60),
+    };
+    let handle = tokio::spawn({
+        let q = queue.clone();
+        let t = token.clone();
+        async move { vm_run(q, cfg, t).await }
+    });
+
+    for i in 0..3 {
+        queue.push(sample("meshmon_test_hang", i as f64, 1_700_000_000_000 + i));
+    }
+
+    // Let the writer pick up the batch and start the (hanging) POST.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let t0 = std::time::Instant::now();
+    token.cancel();
+
+    // Budget: cancel+2s grace for the in-flight send + 500ms drain grace
+    // period + some slack for batching/task scheduling. If the TOCTOU
+    // window regresses, this will hit the 15s mock delay and blow past 5s.
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    let elapsed = t0.elapsed();
+
+    shutdown_result
+        .expect("vm_writer did not exit within 5s of cancel (hanging-VM budget breached)")
+        .expect("vm_writer task panicked");
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "shutdown took {elapsed:?}; expected < 5s (cancel+2s grace + drain grace + slack)"
+    );
+}
+
 #[tokio::test]
 async fn buffer_overflow_drops_oldest() {
     let queue: Arc<DropOldest<PromSample>> = Arc::new(DropOldest::new(3));
