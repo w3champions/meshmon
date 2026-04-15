@@ -179,3 +179,97 @@ async fn full_pipeline_metrics_and_snapshot() {
     token.cancel();
     pipeline.join().await;
 }
+
+/// Regression guard for the pg_writer shutdown-drain path.
+///
+/// Proves that when the cancellation token fires while a snapshot is still
+/// queued, the pg_writer drain loop:
+/// 1. Completes the `route_snapshots` INSERT (row appears in the DB), and
+/// 2. Pushes the resulting `meshmon_route_changes_total` sample to the vm
+///    queue before returning, so the vm_writer's grace-period drain can
+///    forward it to the wiremock endpoint.
+///
+/// Without the vm_writer grace-period loop (added in round-2), vm_writer
+/// could exit before pg_writer's shutdown drain finishes pushing, silently
+/// dropping the final counter sample. This test would then fail on the
+/// `route_changes_total` assertion.
+#[tokio::test]
+async fn shutdown_drain_inserts_snapshot_and_emits_route_changes_counter() {
+    let pool = common::shared_migrated_pool().await;
+    let server = MockServer::start().await;
+
+    // Accept all remote-write POSTs with 204; we need to capture both the
+    // normal-path and drain-path pushes.
+    let mock = Mock::given(method("POST"))
+        .and(path("/api/v1/write"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount_as_scoped(&server)
+        .await;
+
+    let src = format!("a-{}", uuid::Uuid::new_v4().simple());
+    let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
+    for id in [&src, &tgt] {
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip, last_seen_at) \
+                     VALUES ($1, 'X', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Tight batch_interval so the vm_writer doesn't sit in the empty-queue
+    // wait during normal operation and can quickly enter its drain on cancel.
+    let cfg = IngestionConfig {
+        vm_url: format!("{}/api/v1/write", server.uri()),
+        vm_batch_size: 32,
+        vm_batch_interval: Duration::from_millis(50),
+        vm_buffer_capacity: 8_192,
+        snapshot_buffer_capacity: 256,
+        last_seen_debounce: Duration::from_secs(30),
+        vm_max_retry: Duration::from_secs(5),
+    };
+    let token = CancellationToken::new();
+    let pipeline = IngestionPipeline::spawn(cfg, pool.clone(), token.clone());
+
+    // Push a snapshot, then immediately trigger shutdown before pg_writer
+    // has had a chance to process it. The drain path must handle it.
+    pipeline.push_snapshot(validated_snapshot(&src, &tgt));
+    token.cancel();
+
+    // join() awaits pg_handle first (producer), then vm_handle (consumer).
+    // After join both are fully done — no races.
+    pipeline.join().await;
+
+    // Assert 1: drain path completed the INSERT.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM route_snapshots WHERE source_id = $1 AND target_id = $2",
+    )
+    .bind(&src)
+    .bind(&tgt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 1,
+        "route_snapshots row missing — pg_writer drain did not insert"
+    );
+
+    // Assert 2: the drain path pushed meshmon_route_changes_total and the
+    // vm_writer grace-period drain forwarded it to the mock endpoint.
+    let reqs = mock.received_requests().await;
+    let names: std::collections::HashSet<String> = reqs
+        .iter()
+        .flat_map(|r| {
+            let raw = snap::raw::Decoder::new().decompress_vec(&r.body).unwrap();
+            metric_names(&WriteRequest::decode(raw.as_slice()).unwrap())
+        })
+        .collect();
+    assert!(
+        names.contains("meshmon_route_changes_total"),
+        "meshmon_route_changes_total not received by wiremock — \
+         vm_writer exited before pg_writer drain pushed the sample; \
+         got metric names: {names:?}"
+    );
+}

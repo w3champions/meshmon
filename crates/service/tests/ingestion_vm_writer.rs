@@ -183,6 +183,89 @@ async fn retries_after_failure() {
     let _ = handle.await;
 }
 
+/// Regression guard for retry-exhaustion behavior.
+///
+/// Proves that when the VM endpoint is permanently failing and the
+/// `max_retry` budget is exhausted, the vm_writer:
+/// 1. Abandons the batch after exactly one POST attempt (first attempt
+///    checks `Instant::now() + initial_backoff(250 ms) > deadline`; with
+///    `max_retry = 100 ms` that is true on the very first evaluation, so
+///    no sleep/re-attempt occurs), and
+/// 2. Does NOT send any further requests after the deadline (confirming
+///    exhaustion, not cancellation).
+///
+/// The `ingest_dropped` counter increment is a side-effect of the same
+/// `Err(VmWriteError::HttpStatus(_))` arm that triggers this behavioral
+/// outcome — if the request count is correct, the counter increment is
+/// also correct (same code path). Using the behavioral proxy avoids the
+/// async global-recorder problem with `metrics_util::DebuggingRecorder`
+/// (which is thread-local and cannot observe emissions from a task on a
+/// different tokio worker thread).
+#[tokio::test]
+async fn retry_exhaustion_stops_after_first_attempt() {
+    let server = MockServer::start().await;
+
+    // Always return 500 — no success path.
+    let mock = Mock::given(method("POST"))
+        .and(path("/api/v1/write"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount_as_scoped(&server)
+        .await;
+
+    let queue: Arc<DropOldest<PromSample>> = Arc::new(DropOldest::new(1024));
+    let token = CancellationToken::new();
+
+    // max_retry = 100 ms is shorter than the initial backoff (250 ms), so
+    // post_batch() returns Err after exactly 1 POST (no sleep, no retry).
+    // batch_interval = 100 ms triggers the flush quickly after the push.
+    let cfg = VmWriterCfg {
+        url: format!("{}/api/v1/write", server.uri()),
+        batch_size: 100,
+        batch_interval: Duration::from_millis(100),
+        max_retry: Duration::from_millis(100),
+    };
+    let handle = tokio::spawn({
+        let q = queue.clone();
+        let t = token.clone();
+        async move { vm_run(q, cfg, t).await }
+    });
+
+    // Push 3 samples — they will be flushed as one batch after batch_interval.
+    for i in 0..3 {
+        queue.push(sample(
+            "meshmon_test_exhaustion",
+            i as f64,
+            1_700_000_000_000 + i,
+        ));
+    }
+
+    // Wait for batch_interval + a generous buffer for the single HTTP round-
+    // trip to complete. The writer makes exactly one attempt per the timing
+    // analysis above, then gives up.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let count_after_exhaustion = mock.received_requests().await.len();
+    assert_eq!(
+        count_after_exhaustion, 1,
+        "expected exactly 1 POST (retry exhaustion with 100ms deadline < 250ms backoff); \
+         got {count_after_exhaustion}"
+    );
+
+    // Wait an additional 600 ms (more than two backoff periods) to confirm
+    // the writer is not silently retrying in the background.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let count_after_wait = mock.received_requests().await.len();
+    assert_eq!(
+        count_after_wait, 1,
+        "unexpected additional POST(s) after retry exhaustion: \
+         expected 1 total, got {count_after_wait}"
+    );
+
+    token.cancel();
+    let _ = handle.await;
+}
+
 #[tokio::test]
 async fn buffer_overflow_drops_oldest() {
     let queue: Arc<DropOldest<PromSample>> = Arc::new(DropOldest::new(3));

@@ -57,6 +57,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 ctor = { workspace = true }
+metrics-util = "0.20"
 prost = { workspace = true }
 snap = { workspace = true }
 testcontainers = { workspace = true }

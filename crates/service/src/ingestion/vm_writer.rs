@@ -65,6 +65,13 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
 
     let mut buf: Vec<PromSample> = Vec::with_capacity(cfg.batch_size.max(1));
 
+    // On cancellation, wait briefly for late samples pushed by the
+    // pg_writer's own drain (which runs concurrently and emits
+    // `meshmon_route_changes_total` after each INSERT). Without this
+    // grace window, vm_writer can exit before pg_writer finishes
+    // pushing, silently dropping the final shutdown counter samples.
+    const DRAIN_GRACE_PERIOD: Duration = Duration::from_millis(500);
+
     loop {
         if token.is_cancelled() {
             // Drain in batch-sized chunks so we don't build one oversized
@@ -73,21 +80,36 @@ pub async fn run(queue: Arc<DropOldest<PromSample>>, cfg: VmWriterCfg, token: Ca
             loop {
                 buf.clear();
                 let drained = queue.drain_into(&mut buf, cfg.batch_size);
-                if drained == 0 {
-                    break;
+                if drained > 0 {
+                    flush(&client, &cfg, &buf, drained, &token).await;
+                    continue;
                 }
-                flush(&client, &cfg, &buf, drained, &token).await;
+                // Queue empty — wait for any late arrivals from concurrent
+                // drains, else exit after the grace period.
+                tokio::select! {
+                    _ = sleep(DRAIN_GRACE_PERIOD) => break,
+                    _ = queue.wait() => continue,
+                }
             }
             return;
         }
 
-        // If the queue already has enough for a full batch, skip the wait
-        // and flush immediately.
+        // When empty, block until the first item lands so we don't burn
+        // CPU looping through empty batch intervals.
+        if queue.is_empty() {
+            tokio::select! {
+                _ = token.cancelled() => continue,
+                _ = queue.wait() => {}
+            }
+        }
+
+        // Once non-empty: wait up to `batch_interval` so more samples can
+        // accumulate before we flush. If the queue already has a full
+        // batch, skip the interval and flush immediately.
         if queue.len() < cfg.batch_size {
             tokio::select! {
                 _ = token.cancelled() => continue,
                 _ = sleep(cfg.batch_interval) => {}
-                _ = queue.wait() => {}
             }
         }
 
@@ -112,6 +134,12 @@ async fn flush(
             ingest_batch(BatchOutcome::Ok).increment(1);
             ingest_samples().increment(drained as u64);
             debug!(samples = drained, "vm batch flushed");
+        }
+        Err(VmWriteError::Cancelled) => {
+            // Clean-shutdown drop — expected behavior when the token fires
+            // mid-retry. Not a data-loss alert condition; don't noise-
+            // alarm operators or double-count against runtime drops.
+            debug!(samples = drained, "vm batch abandoned on shutdown");
         }
         Err(e) => {
             ingest_batch(BatchOutcome::WriteError).increment(1);

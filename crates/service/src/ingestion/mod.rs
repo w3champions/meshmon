@@ -115,11 +115,15 @@ impl IngestionPipeline {
             token.clone(),
         ));
 
+        // Join order matters: pg_writer is a producer into vm_queue
+        // (it emits `meshmon_route_changes_total` samples after each
+        // snapshot insert). Awaiting it first lets vm_writer's grace-
+        // period drain observe pg's shutdown pushes before returning.
         Self {
             vm_queue,
             snapshot_queue,
             last_seen,
-            workers: Arc::new(tokio::sync::Mutex::new(vec![vm_handle, pg_handle])),
+            workers: Arc::new(tokio::sync::Mutex::new(vec![pg_handle, vm_handle])),
         }
     }
 
@@ -209,7 +213,11 @@ async fn process_snapshot(
 ) {
     match pg_writer::insert_snapshot(pool, &snap).await {
         Ok(_id) => {
-            let key = (snap.source_id.clone(), snap.target_id.clone(), snap.protocol);
+            let key = (
+                snap.source_id.clone(),
+                snap.target_id.clone(),
+                snap.protocol,
+            );
             let count = route_change_counts.entry(key).or_insert(0);
             *count += 1;
             let cumulative = *count;

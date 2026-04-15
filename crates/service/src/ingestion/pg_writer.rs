@@ -20,7 +20,7 @@ use std::time::Instant;
 /// Insert a validated snapshot. Returns the new row's `id`.
 pub async fn insert_snapshot(pool: &PgPool, snap: &ValidatedSnapshot) -> Result<i64, sqlx::Error> {
     let started = Instant::now();
-    let observed_at = micros_to_datetime(snap.observed_at_micros);
+    let observed_at = micros_to_datetime(snap.observed_at_micros)?;
     let proto_str = protocol_label(snap.protocol);
     let hops: Vec<HopJson> = snap.hops.iter().map(HopJson::from).collect();
     let summary = PathSummaryJson::from(&snap.path_summary);
@@ -44,10 +44,12 @@ pub async fn insert_snapshot(pool: &PgPool, snap: &ValidatedSnapshot) -> Result<
     Ok(row.id)
 }
 
-fn micros_to_datetime(micros: i64) -> DateTime<Utc> {
+fn micros_to_datetime(micros: i64) -> Result<DateTime<Utc>, sqlx::Error> {
     let secs = micros.div_euclid(1_000_000);
     let nanos = (micros.rem_euclid(1_000_000) * 1_000) as u32;
-    Utc.timestamp_opt(secs, nanos)
-        .single()
-        .unwrap_or_else(Utc::now)
+    Utc.timestamp_opt(secs, nanos).single().ok_or_else(|| {
+        sqlx::Error::Protocol(format!(
+            "observed_at_micros {micros} is outside chrono's representable range",
+        ))
+    })
 }
