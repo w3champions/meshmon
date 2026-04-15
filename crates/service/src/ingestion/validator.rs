@@ -129,3 +129,100 @@ pub enum ValidationError {
 // Re-exports from the protocol crate so callers don't double-import.
 pub use meshmon_protocol::{HopIp, MetricsBatch as RawMetricsBatch,
     RouteSnapshotRequest as RawRouteSnapshotRequest};
+
+/// Validate a `MetricsBatch` decoded from the wire. Returns owned data so
+/// the original Protobuf can be dropped.
+pub fn validate_metrics(batch: MetricsBatch) -> Result<ValidatedMetrics, ValidationError> {
+    if batch.source_id.is_empty() {
+        return Err(ValidationError::EmptySourceId);
+    }
+    if batch.paths.len() > MAX_PATHS_PER_BATCH {
+        return Err(ValidationError::TooManyPaths { count: batch.paths.len() });
+    }
+    let agent_metadata = batch
+        .agent_metadata
+        .ok_or(ValidationError::MissingAgentMetadata)?;
+    let agent_version = if agent_metadata.version.is_empty() {
+        None
+    } else {
+        Some(agent_metadata.version)
+    };
+
+    let mut paths = Vec::with_capacity(batch.paths.len());
+    for p in batch.paths {
+        paths.push(validate_path(p)?);
+    }
+
+    Ok(ValidatedMetrics {
+        source_id: batch.source_id,
+        batch_timestamp_micros: batch.batch_timestamp_micros,
+        agent_version,
+        paths,
+    })
+}
+
+fn validate_path(p: PathMetrics) -> Result<ValidPath, ValidationError> {
+    if p.target_id.is_empty() {
+        return Err(ValidationError::EmptyTargetId);
+    }
+    let protocol = Protocol::try_from(p.protocol).unwrap_or(Protocol::Unspecified);
+    if matches!(protocol, Protocol::Unspecified) {
+        return Err(ValidationError::UnspecifiedProtocol);
+    }
+    if !(0.0..=1.0).contains(&p.failure_rate) || p.failure_rate.is_nan() {
+        return Err(ValidationError::FailureRateOutOfRange {
+            target: p.target_id,
+            value: p.failure_rate,
+        });
+    }
+    for &rtt in &[
+        p.rtt_avg_micros, p.rtt_min_micros, p.rtt_max_micros,
+        p.rtt_stddev_micros, p.rtt_p50_micros, p.rtt_p95_micros, p.rtt_p99_micros,
+    ] {
+        if rtt > MAX_RTT_MICROS {
+            return Err(ValidationError::RttOutOfRange {
+                target: p.target_id,
+                value: rtt,
+            });
+        }
+    }
+    if p.probes_sent > MAX_PROBES_PER_WINDOW {
+        return Err(ValidationError::ProbeCountOutOfRange {
+            target: p.target_id,
+            value: p.probes_sent,
+        });
+    }
+    if p.probes_successful > p.probes_sent {
+        return Err(ValidationError::ProbesSuccessfulExceedsSent {
+            target: p.target_id,
+            ok: p.probes_successful,
+            sent: p.probes_sent,
+        });
+    }
+    if p.window_end_micros < p.window_start_micros {
+        return Err(ValidationError::InvalidWindow {
+            target: p.target_id,
+            start: p.window_start_micros,
+            end: p.window_end_micros,
+        });
+    }
+    let health = ProtocolHealth::try_from(p.health).unwrap_or(ProtocolHealth::Unspecified);
+
+    Ok(ValidPath {
+        target_id: p.target_id,
+        protocol,
+        window_start_micros: p.window_start_micros,
+        window_end_micros: p.window_end_micros,
+        probes_sent: p.probes_sent,
+        probes_successful: p.probes_successful,
+        failure_rate: p.failure_rate,
+        rtt_avg_micros: p.rtt_avg_micros,
+        rtt_min_micros: p.rtt_min_micros,
+        rtt_max_micros: p.rtt_max_micros,
+        rtt_stddev_micros: p.rtt_stddev_micros,
+        rtt_p50_micros: p.rtt_p50_micros,
+        rtt_p95_micros: p.rtt_p95_micros,
+        rtt_p99_micros: p.rtt_p99_micros,
+        health,
+    })
+}
