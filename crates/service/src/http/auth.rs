@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 /// Principal returned by the backend on successful authentication. Stored in
 /// the session by `axum-login`; retrieved via the `AuthSession` extractor.
 #[derive(Debug, Clone)]
-pub struct AuthUser {
+pub struct Principal {
     /// Username from `[auth.users].username` in `meshmon.toml`.
     pub username: String,
     /// PHC-formatted argon2 hash. Captured at authenticate time so we can
@@ -26,7 +26,7 @@ pub struct AuthUser {
     pub password_hash: String,
 }
 
-impl AxumAuthUser for AuthUser {
+impl AxumAuthUser for Principal {
     type Id = String;
 
     fn id(&self) -> Self::Id {
@@ -86,7 +86,7 @@ pub enum AuthError {
 pub type Credentials = LoginRequest;
 
 impl AuthnBackend for ConfigAuthBackend {
-    type User = AuthUser;
+    type User = Principal;
     type Credentials = Credentials;
     type Error = AuthError;
 
@@ -114,7 +114,7 @@ impl AuthnBackend for ConfigAuthBackend {
         let matched =
             tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await?;
         if matched {
-            Ok(Some(AuthUser {
+            Ok(Some(Principal {
                 username: user.username,
                 password_hash: user.password_hash,
             }))
@@ -130,7 +130,7 @@ impl AuthnBackend for ConfigAuthBackend {
             .users
             .iter()
             .find(|u| &u.username == user_id)
-            .map(|u| AuthUser {
+            .map(|u| Principal {
                 username: u.username.clone(),
                 password_hash: u.password_hash.clone(),
             }))
