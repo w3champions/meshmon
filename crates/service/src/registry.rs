@@ -247,7 +247,7 @@ impl AgentRegistry {
             Utc::now() - chrono::Duration::from_std(window).unwrap_or(chrono::Duration::MAX);
         let mut active = 0u64;
         let mut stale = 0u64;
-        for a in snap.all() {
+        for a in snap.agents.values() {
             if a.last_seen_at > cutoff {
                 active += 1;
             } else {
