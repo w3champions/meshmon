@@ -40,7 +40,8 @@ url = "postgres://ignored"
     let swap = Arc::new(ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(testdb.pool.clone());
-    let state = AppState::new(swap, rx, testdb.pool.clone(), ingestion);
+    let registry = common::dummy_registry(testdb.pool.clone());
+    let state = AppState::new(swap, rx, testdb.pool.clone(), ingestion, registry);
 
     let listener = TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
         .await
@@ -226,7 +227,8 @@ url = "postgres://ignored"
     let swap = Arc::new(ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(testdb.pool.clone());
-    let state = AppState::new(swap, rx, testdb.pool.clone(), ingestion);
+    let registry = common::dummy_registry(testdb.pool.clone());
+    let state = AppState::new(swap, rx, testdb.pool.clone(), ingestion, registry);
     state.mark_ready();
     assert!(state.is_ready());
 

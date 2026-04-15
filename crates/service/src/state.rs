@@ -4,6 +4,7 @@
 
 use crate::config::Config;
 use crate::ingestion::IngestionPipeline;
+use crate::registry::AgentRegistry;
 use arc_swap::ArcSwap;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +56,10 @@ pub struct AppState {
     /// [`IngestionPipeline::push_metrics`] / [`IngestionPipeline::push_snapshot`]
     /// after validating agent payloads. Cheap to clone.
     pub ingestion: IngestionPipeline,
+    /// Live agent registry. Keeps a periodically-refreshed snapshot of every
+    /// known agent and their last-seen timestamps. Used by handler endpoints
+    /// that need to validate source agents or list active targets.
+    pub registry: Arc<AgentRegistry>,
 }
 
 impl AppState {
@@ -64,6 +69,7 @@ impl AppState {
         config_rx: watch::Receiver<Arc<Config>>,
         pool: PgPool,
         ingestion: IngestionPipeline,
+        registry: Arc<AgentRegistry>,
     ) -> Self {
         Self {
             config,
@@ -72,6 +78,7 @@ impl AppState {
             ready: Arc::new(AtomicBool::new(false)),
             build: BuildInfo::compile_time(),
             ingestion,
+            registry,
         }
     }
 

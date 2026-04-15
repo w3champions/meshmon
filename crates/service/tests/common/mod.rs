@@ -347,6 +347,20 @@ pub fn dummy_ingestion(pool: sqlx::PgPool) -> meshmon_service::ingestion::Ingest
     meshmon_service::ingestion::IngestionPipeline::spawn(cfg, pool, token)
 }
 
+/// Registry seeded with no agents; the refresh loop is not started, so
+/// handler tests see a fixed empty snapshot unless they call
+/// `force_refresh()` themselves.
+pub fn dummy_registry(
+    pool: sqlx::PgPool,
+) -> std::sync::Arc<meshmon_service::registry::AgentRegistry> {
+    use std::time::Duration;
+    std::sync::Arc::new(meshmon_service::registry::AgentRegistry::new(
+        pool,
+        Duration::from_secs(60),
+        Duration::from_secs(5 * 60),
+    ))
+}
+
 /// Construct an `AppState` with a single `admin` user whose password is
 /// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
 /// set a stable client IP via `X-Forwarded-For` without needing to inject a
@@ -369,7 +383,8 @@ password_hash = "{AUTH_TEST_HASH}"
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
-    AppState::new(swap, rx, pool, ingestion)
+    let registry = dummy_registry(pool.clone());
+    AppState::new(swap, rx, pool, ingestion, registry)
 }
 
 /// Same as [`state_with_admin`] but with `trust_forwarded_headers = false`.
@@ -391,5 +406,6 @@ password_hash = "{AUTH_TEST_HASH}"
     let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
-    AppState::new(swap, rx, pool, ingestion)
+    let registry = dummy_registry(pool.clone());
+    AppState::new(swap, rx, pool, ingestion, registry)
 }
