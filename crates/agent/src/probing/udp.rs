@@ -330,7 +330,10 @@ async fn run_sender(
             if until > now {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
-                    _ = rate_rx.changed() => continue,
+                    r = rate_rx.changed() => {
+                        if r.is_err() { break; }
+                        continue;
+                    }
                     _ = tokio::time::sleep_until(until) => {
                         state.lock().await.paused_until = None;
                         continue;
