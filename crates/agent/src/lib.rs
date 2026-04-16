@@ -4,5 +4,6 @@ pub mod api;
 pub mod bootstrap;
 pub mod config;
 pub mod probing;
+pub mod state;
 pub mod stats;
 pub mod supervisor;
