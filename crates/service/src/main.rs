@@ -192,12 +192,17 @@ async fn run() -> anyhow::Result<()> {
         ingestion_token.clone(),
     );
 
+    // TODO(T10.11): move recorder install earlier in startup, alongside
+    // `describe_service_metrics()` and `spawn_upkeep`. For now install it
+    // here just so `AppState::new` has a handle to hold.
+    let prom = meshmon_service::metrics::install_recorder();
     let state = AppState::new(
         config_handle,
         config_rx,
         pool,
         ingestion.clone(),
         registry.clone(),
+        prom,
     );
     state.mark_ready();
     let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());

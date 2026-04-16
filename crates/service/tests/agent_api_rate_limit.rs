@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tonic::Code;
 
-fn state_with_tight_limit(pool: sqlx::PgPool) -> AppState {
+async fn state_with_tight_limit(pool: sqlx::PgPool) -> AppState {
     let toml = format!(
         r#"
 [database]
@@ -34,13 +34,20 @@ rate_limit_burst = 3
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(pool.clone());
     let registry = common::dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        common::test_prometheus_handle().await,
+    )
 }
 
 #[tokio::test]
 async fn exceeding_burst_returns_resource_exhausted() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = state_with_tight_limit(pool);
+    let state = state_with_tight_limit(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([203, 0, 113, 90])).await;
 

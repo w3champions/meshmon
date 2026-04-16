@@ -22,7 +22,7 @@ fn sample(id: &str, ip4: [u8; 4]) -> RegisterRequest {
 #[tokio::test]
 async fn register_happy_path_inserts_row() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 0, 0, 1])).await;
 
@@ -46,7 +46,7 @@ async fn register_happy_path_inserts_row() {
 #[tokio::test]
 async fn register_updates_existing_row_when_ip_matches() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 0, 0, 2])).await;
 
@@ -74,7 +74,7 @@ async fn register_updates_existing_row_when_ip_matches() {
 #[tokio::test]
 async fn register_same_id_different_ip_returns_already_exists() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
 
     // First client registers from 10.0.0.3.
     let mut client_a =
@@ -107,7 +107,7 @@ async fn register_same_id_different_ip_returns_already_exists() {
 #[tokio::test]
 async fn register_claimed_ip_mismatches_connection_returns_permission_denied() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     // Claimed IP 10.0.0.5 but connection says 10.0.0.99.
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 0, 0, 99])).await;
@@ -122,7 +122,7 @@ async fn register_claimed_ip_mismatches_connection_returns_permission_denied() {
 #[tokio::test]
 async fn register_allows_loopback_connection_with_any_claimed_ip() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([127, 0, 0, 1])).await;
 
@@ -135,7 +135,7 @@ async fn register_allows_loopback_connection_with_any_claimed_ip() {
 #[tokio::test]
 async fn register_force_refreshes_registry() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let state_for_check = state.clone();
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 0, 0, 6])).await;
@@ -161,7 +161,7 @@ async fn register_force_refreshes_registry() {
 #[tokio::test]
 async fn register_rejects_invalid_coordinates() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 0, 1])).await;
 
@@ -195,7 +195,7 @@ async fn register_rejects_invalid_coordinates() {
 #[tokio::test]
 async fn register_rejects_bad_ip_length() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([1, 2, 3, 4])).await;
 
@@ -216,7 +216,7 @@ async fn concurrent_register_same_id_different_ip_yields_single_winner() {
     // the other must receive ALREADY_EXISTS; without the guard, both
     // could silently succeed with only the non-ip fields overwritten.
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
 
     let mut client_a =
         common::grpc_harness::in_process_agent_client(state.clone(), IpAddr::from([10, 7, 0, 20]))
@@ -267,7 +267,7 @@ async fn concurrent_register_same_id_different_ip_yields_single_winner() {
 #[tokio::test]
 async fn register_without_auth_returns_unauthenticated() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     // Use the override constructor with an empty bearer so the interceptor
     // receives "Bearer " and rejects with UNAUTHENTICATED.
     let mut client = common::grpc_harness::in_process_agent_client_with_token(

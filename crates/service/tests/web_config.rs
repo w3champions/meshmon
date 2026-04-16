@@ -20,7 +20,7 @@ mod common;
 #[tokio::test]
 async fn web_config_requires_session() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -39,7 +39,7 @@ async fn web_config_requires_session() {
 #[tokio::test]
 async fn web_config_returns_body_with_session() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.100").await;
@@ -81,7 +81,8 @@ async fn web_config_populates_grafana_fields_from_config() {
             ("overview", "meshmon-overview"),
             ("path-detail", "meshmon-path"),
         ],
-    );
+    )
+    .await;
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.101").await;
 

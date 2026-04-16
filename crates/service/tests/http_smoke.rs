@@ -13,7 +13,7 @@ use tower::util::ServiceExt;
 
 mod common;
 
-fn make_state(pool: PgPool) -> AppState {
+async fn make_state(pool: PgPool) -> AppState {
     let cfg = Arc::new(
         Config::from_str(
             r#"
@@ -28,13 +28,20 @@ url = "postgres://ignored@localhost/nope"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(pool.clone());
     let registry = common::dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        common::test_prometheus_handle().await,
+    )
 }
 
 #[tokio::test]
 async fn healthz_always_returns_200() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool);
+    let state = make_state(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -52,7 +59,7 @@ async fn healthz_always_returns_200() {
 #[tokio::test]
 async fn readyz_reflects_ready_flag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool);
+    let state = make_state(pool).await;
     let app = meshmon_service::http::router(state.clone());
 
     let resp = app
@@ -83,7 +90,7 @@ async fn readyz_reflects_ready_flag() {
 #[tokio::test]
 async fn metrics_emits_build_info_line() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool);
+    let state = make_state(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -108,7 +115,7 @@ async fn metrics_emits_build_info_line() {
 #[tokio::test]
 async fn openapi_json_is_valid() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool);
+    let state = make_state(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -139,7 +146,7 @@ async fn openapi_json_is_valid() {
 #[tokio::test]
 async fn openapi_json_contains_user_api_paths() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool);
+    let state = make_state(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app

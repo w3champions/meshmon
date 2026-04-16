@@ -48,7 +48,7 @@ mod common;
 #[tokio::test]
 async fn agents_list_returns_empty_array_when_registry_is_empty() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.110").await;
@@ -77,7 +77,7 @@ async fn agents_list_returns_empty_array_when_registry_is_empty() {
 #[tokio::test]
 async fn agents_list_requires_session() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -100,7 +100,7 @@ async fn agents_list_requires_session() {
 #[tokio::test]
 async fn agent_detail_returns_404_for_unknown_id() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.112").await;
@@ -132,7 +132,7 @@ async fn agent_detail_returns_registry_snapshot_fields() {
     .await
     .expect("seed agent row");
 
-    let state = common::state_with_admin(pool.clone());
+    let state = common::state_with_admin(pool.clone()).await;
 
     // Force the registry to pick up the seeded row.
     state
@@ -275,7 +275,7 @@ async fn routes_latest_returns_the_most_recent_snapshot() {
     let (src, tgt) = ("t5-src-latest", "t5-tgt-latest");
     seed_two_snapshots(&pool, src, tgt, "icmp").await;
 
-    let state = common::state_with_admin(pool.clone());
+    let state = common::state_with_admin(pool.clone()).await;
     state.registry.force_refresh().await.expect("refresh");
     let app = meshmon_service::http::router(state);
 
@@ -340,7 +340,7 @@ async fn routes_by_id_returns_the_exact_snapshot() {
     .await
     .expect("fetch oldest id");
 
-    let state = common::state_with_admin(pool.clone());
+    let state = common::state_with_admin(pool.clone()).await;
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.115").await;
 
@@ -373,7 +373,7 @@ async fn routes_by_id_returns_the_exact_snapshot() {
 #[tokio::test]
 async fn routes_by_id_404_when_id_unknown() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.116").await;
@@ -402,7 +402,7 @@ async fn routes_list_returns_recent_snapshots_descending() {
     let (src, tgt) = ("t7-src-list", "t7-tgt-list");
     seed_two_snapshots(&pool, src, tgt, "icmp").await;
 
-    let state = common::state_with_admin(pool.clone());
+    let state = common::state_with_admin(pool.clone()).await;
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.117").await;
 
@@ -448,7 +448,7 @@ async fn routes_list_returns_recent_snapshots_descending() {
 #[tokio::test]
 async fn routes_list_rejects_limit_over_cap() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.118").await;
@@ -474,7 +474,7 @@ async fn routes_list_rejects_limit_over_cap() {
 #[tokio::test]
 async fn routes_latest_returns_404_when_no_snapshot_exists() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.121").await;
 
@@ -495,7 +495,7 @@ async fn routes_latest_returns_404_when_no_snapshot_exists() {
 #[tokio::test]
 async fn routes_latest_rejects_invalid_protocol() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.122").await;
 
@@ -558,7 +558,7 @@ async fn alerts_proxy_forwards_active_alerts_and_filters_unused_fields() {
         .await;
 
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri());
+    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri()).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.130").await;
@@ -631,7 +631,7 @@ async fn alerts_proxy_forwards_query_params_to_upstream() {
         .await;
 
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri());
+    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri()).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.144").await;
@@ -654,7 +654,7 @@ async fn alerts_proxy_forwards_query_params_to_upstream() {
 async fn alerts_proxy_returns_502_when_upstream_fails() {
     let pool = common::shared_migrated_pool().await.clone();
     // Point at a closed port — reqwest will fail to connect.
-    let state = common::state_with_admin_and_alertmanager(pool, "http://127.0.0.1:1");
+    let state = common::state_with_admin_and_alertmanager(pool, "http://127.0.0.1:1").await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.131").await;
@@ -698,7 +698,7 @@ async fn alerts_proxy_single_returns_404_when_fingerprint_missing() {
         .await;
 
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri());
+    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri()).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.132").await;
@@ -726,7 +726,7 @@ async fn alerts_proxy_single_returns_404_when_fingerprint_missing() {
 #[tokio::test]
 async fn alerts_proxy_returns_503_when_alertmanager_not_configured() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool); // no alertmanager_url
+    let state = common::state_with_admin(pool).await; // no alertmanager_url
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.133").await;
 
@@ -751,7 +751,7 @@ async fn alerts_proxy_returns_503_when_alertmanager_not_configured() {
 #[tokio::test]
 async fn metrics_proxy_rejects_non_meshmon_query() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_and_vm(pool, "http://127.0.0.1:1");
+    let state = common::state_with_admin_and_vm(pool, "http://127.0.0.1:1").await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.140").await;
@@ -803,7 +803,7 @@ async fn metrics_proxy_forwards_meshmon_query_to_vm() {
         .await;
 
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_and_vm(pool, &mock_server.uri());
+    let state = common::state_with_admin_and_vm(pool, &mock_server.uri()).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.141").await;
@@ -856,7 +856,7 @@ async fn metrics_proxy_range_forwards_all_params() {
         .await;
 
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_and_vm(pool, &mock_server.uri());
+    let state = common::state_with_admin_and_vm(pool, &mock_server.uri()).await;
     let app = meshmon_service::http::router(state);
 
     let cookie = common::login_as_admin(&app, "203.0.113.142").await;
@@ -885,7 +885,7 @@ async fn metrics_proxy_range_forwards_all_params() {
 #[tokio::test]
 async fn metrics_proxy_returns_503_when_vm_not_configured() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool); // no vm_url
+    let state = common::state_with_admin(pool).await; // no vm_url
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.143").await;
 

@@ -832,7 +832,14 @@ url = "postgres://ignored@localhost/db"
             Duration::from_secs(10),
             Duration::from_secs(300),
         ));
-        AppState::new(swap, rx, pool, ingestion, registry)
+        AppState::new(
+            swap,
+            rx,
+            pool,
+            ingestion,
+            registry,
+            crate::metrics::test_install(),
+        )
     }
 
     /// Call the interceptor with the given `Authorization` header value

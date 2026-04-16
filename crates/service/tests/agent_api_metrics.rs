@@ -71,7 +71,7 @@ async fn register_agent(state: meshmon_service::state::AppState, id: &str, ip4: 
 #[tokio::test]
 async fn metrics_happy_path() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
 
     // Seed both source and target into the agents table so the registry
     // snapshot accepts the source and the validator is happy with the target.
@@ -95,7 +95,7 @@ async fn metrics_happy_path() {
 #[tokio::test]
 async fn metrics_unknown_source_returns_permission_denied() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
 
     // Deliberately do NOT register "metrics-src-unknown" — only the target.
     register_agent(state.clone(), "metrics-tgt-perm", [10, 2, 0, 2]).await;
@@ -117,7 +117,7 @@ async fn metrics_unknown_source_returns_permission_denied() {
 #[tokio::test]
 async fn metrics_bad_range_returns_invalid_argument() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
 
     // Register source so it passes the registry check.
     register_agent(state.clone(), "metrics-src-badrange", [10, 3, 0, 1]).await;
@@ -143,7 +143,7 @@ async fn metrics_bad_range_returns_invalid_argument() {
 #[tokio::test]
 async fn metrics_empty_source_id_returns_invalid_argument() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
 
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 4, 0, 1])).await;

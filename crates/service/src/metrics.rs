@@ -304,19 +304,29 @@ pub fn spawn_upkeep(
 /// Re-export so call sites don't need to import the exporter crate.
 pub use metrics_exporter_prometheus::PrometheusHandle as Handle;
 
+/// Test-only process-wide recorder install. `metrics::set_global_recorder`
+/// rejects a second call, so every unit test in the lib's test binary must
+/// share one handle. Integration-test binaries share via their own
+/// `tests/common::test_prometheus_handle` helper — a separate compilation
+/// unit, hence the duplicated pattern.
+#[cfg(test)]
+pub(crate) fn test_install() -> Handle {
+    static ONCE: std::sync::OnceLock<Handle> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let h = install_recorder();
+        describe_service_metrics();
+        h
+    })
+    .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Single process-global install for every test in this binary.
     fn shared_install() -> Handle {
-        static ONCE: std::sync::OnceLock<Handle> = std::sync::OnceLock::new();
-        ONCE.get_or_init(|| {
-            let h = install_recorder();
-            describe_service_metrics();
-            h
-        })
-        .clone()
+        test_install()
     }
 
     #[test]
