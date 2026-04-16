@@ -43,13 +43,21 @@ jobs:
 
       - name: verify OpenAPI snapshot is up to date
         run: |
-          if ! git diff --exit-code frontend/src/api/openapi.json; then
-            echo "::error ::frontend/src/api/openapi.json is stale — run 'cargo xtask openapi' and commit the result"
+          if ! git diff --exit-code frontend/src/api/openapi.gen.json; then
+            echo "::error ::frontend/src/api/openapi.gen.json is stale — run 'cargo xtask openapi' and commit the result"
+            exit 1
+          fi
+
+      - name: verify schema.gen.ts is up to date
+        run: |
+          cd frontend && npm ci && npm run openapi:types && cd ..
+          if ! git diff --exit-code frontend/src/api/schema.gen.ts; then
+            echo "::error ::frontend/src/api/schema.gen.ts is stale — run 'cd frontend && npm run openapi:types' and commit the result"
             exit 1
           fi
 
   frontend:
-    name: Frontend (biome, type-check, build)
+    name: Frontend (biome, type-check, vitest, build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -73,6 +81,9 @@ jobs:
 
       - name: type-check
         run: npm run type-check
+
+      - name: vitest run
+        run: npm run test
 
       - name: npm run build
         run: npm run build
