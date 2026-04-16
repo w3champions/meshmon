@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "openapi:types": "openapi-typescript src/api/openapi.gen.json -o src/api/schema.gen.ts",
+    "dev": "npm run openapi:types && vite",
+    "build": "npm run openapi:types && biome check ./src && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "type-check": "tsc --noEmit",
-    "lint": "biome check ./src",
-    "lint:fix": "biome check --write ./src",
-    "format": "biome format --write ./src"
+    "type-check": "npm run openapi:types && tsc --noEmit",
+    "lint": "npm run openapi:types && biome check ./src",
+    "lint:fix": "npm run openapi:types && biome check --write ./src",
+    "format": "biome format --write ./src",
+    "test": "npm run openapi:types && vitest run",
+    "test:watch": "npm run openapi:types && vitest"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.0.0",
