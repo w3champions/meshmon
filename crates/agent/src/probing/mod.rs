@@ -7,6 +7,7 @@
 
 pub mod echo_tcp;
 pub mod echo_udp;
+pub mod tcp;
 pub mod wire;
 
 use std::net::IpAddr;
