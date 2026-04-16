@@ -66,6 +66,21 @@ pub struct ServiceSection {
     /// misconfigured `true` lets attackers bypass per-IP rate limiting by
     /// forging the header.
     pub trust_forwarded_headers: bool,
+    /// Optional HTTP Basic auth for `/metrics`. Unset → `/metrics` is
+    /// unauthenticated (spec default). Set → the Basic auth middleware
+    /// enforces credentials on scrape.
+    pub metrics_auth: Option<MetricsAuthSection>,
+}
+
+/// Optional HTTP Basic credentials for `/metrics`. Unset → no auth
+/// (the spec's default behavior).
+#[derive(Debug, Clone)]
+pub struct MetricsAuthSection {
+    /// Basic-auth username the scraper must present.
+    pub username: String,
+    /// Fully resolved PHC-formatted argon2 hash. Already PHC-parsed at
+    /// load time — validity is guaranteed if this struct exists.
+    pub password_hash: String,
 }
 
 /// Resolved Postgres connection settings.
@@ -203,6 +218,7 @@ impl Default for ServiceSection {
             public_base_url: None,
             shutdown_deadline: std::time::Duration::from_secs(5),
             trust_forwarded_headers: false,
+            metrics_auth: None,
         }
     }
 }
@@ -245,6 +261,17 @@ struct RawService {
     public_base_url: Option<String>,
     shutdown_deadline_seconds: Option<u64>,
     trust_forwarded_headers: Option<bool>,
+    #[serde(default)]
+    metrics_auth: Option<RawMetricsAuthSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMetricsAuthSection {
+    username: String,
+    #[serde(default)]
+    password_hash: Option<String>,
+    #[serde(default)]
+    password_hash_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,11 +397,13 @@ impl Config {
             Some(n) => std::time::Duration::from_secs(n),
             None => defaults.shutdown_deadline,
         };
+        let metrics_auth = resolve_metrics_auth(raw.service.metrics_auth, path)?;
         let service = ServiceSection {
             listen_addr,
             public_base_url: raw.service.public_base_url,
             shutdown_deadline,
             trust_forwarded_headers: raw.service.trust_forwarded_headers.unwrap_or(false),
+            metrics_auth,
         };
 
         // --- database section ---
@@ -577,4 +606,64 @@ fn resolve_optional_secret(
         };
     }
     Ok(None)
+}
+
+/// Resolve the optional `[service.metrics_auth]` block.
+///
+/// Absent → `None` (spec default: `/metrics` unauthenticated). Present → the
+/// hash is either inlined or read from an env var, then PHC-parsed so a
+/// malformed hash fails fast at startup, not on the first 401 attempt.
+fn resolve_metrics_auth(
+    raw: Option<RawMetricsAuthSection>,
+    path: &str,
+) -> Result<Option<MetricsAuthSection>, BootError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw.username.trim().is_empty() {
+        return Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: "[service.metrics_auth].username must not be empty".to_string(),
+        });
+    }
+    let hash = match (raw.password_hash, raw.password_hash_env) {
+        (Some(h), None) if !h.trim().is_empty() => h,
+        (None, Some(env)) => {
+            let v = std::env::var(&env).map_err(|_| BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: format!("[service.metrics_auth].password_hash_env={env} is unset"),
+            })?;
+            if v.trim().is_empty() {
+                return Err(BootError::ConfigInvalid {
+                    path: path.to_string(),
+                    reason: format!(
+                        "[service.metrics_auth].password_hash_env={env} resolved to empty string"
+                    ),
+                });
+            }
+            v
+        }
+        (Some(_), Some(_)) => {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "[service.metrics_auth] set both password_hash and password_hash_env"
+                    .to_string(),
+            });
+        }
+        _ => {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "[service.metrics_auth] requires password_hash or password_hash_env"
+                    .to_string(),
+            });
+        }
+    };
+    // PHC sanity-parse so a malformed hash fails fast at startup, not on
+    // the first 401 attempt.
+    PasswordHash::new(&hash).map_err(|e| BootError::ConfigInvalid {
+        path: path.to_string(),
+        reason: format!("[service.metrics_auth].password_hash is not a valid PHC string: {e}"),
+    })?;
+    Ok(Some(MetricsAuthSection {
+        username: raw.username,
+        password_hash: hash,
+    }))
 }

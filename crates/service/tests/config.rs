@@ -376,3 +376,67 @@ target_active_window_minutes = 0
     .expect_err("must reject zero window");
     assert!(format!("{err}").contains("target_active_window_minutes"));
 }
+
+#[test]
+fn metrics_auth_section_parses_inline_hash() {
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "prom"
+password_hash = "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY"
+"#;
+    let cfg = Config::from_str(toml, "t.toml").expect("parse");
+    let auth = cfg
+        .service
+        .metrics_auth
+        .as_ref()
+        .expect("metrics_auth present");
+    assert_eq!(auth.username, "prom");
+    assert!(auth.password_hash.starts_with("$argon2id$"));
+}
+
+#[test]
+fn metrics_auth_section_rejects_malformed_hash() {
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "prom"
+password_hash = "not-a-phc-hash"
+"#;
+    let err = Config::from_str(toml, "t.toml").unwrap_err();
+    assert!(err.to_string().contains("metrics_auth"));
+}
+
+#[test]
+fn metrics_auth_section_resolves_env_hash() {
+    std::env::set_var(
+        "MESHMON_TEST_METRICS_PASSWORD_HASH",
+        "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY",
+    );
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "prom"
+password_hash_env = "MESHMON_TEST_METRICS_PASSWORD_HASH"
+"#;
+    let cfg = Config::from_str(toml, "t.toml").expect("parse");
+    let auth = cfg.service.metrics_auth.unwrap();
+    assert!(auth.password_hash.starts_with("$argon2id$"));
+    std::env::remove_var("MESHMON_TEST_METRICS_PASSWORD_HASH");
+}
+
+#[test]
+fn metrics_auth_absent_is_none() {
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+"#;
+    let cfg = Config::from_str(toml, "t.toml").expect("parse");
+    assert!(cfg.service.metrics_auth.is_none());
+}
