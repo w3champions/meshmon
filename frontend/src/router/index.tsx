@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { api } from "@/api/client";
 import { AppShell } from "@/components/layout/AppShell";
+import AgentsList from "@/pages/AgentsList";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
@@ -81,7 +82,7 @@ const overviewRoute = createRoute({
 const agentsRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/agents",
-  component: () => <p>Coming soon.</p>,
+  component: AgentsList,
 });
 
 const alertsRoute = createRoute({
