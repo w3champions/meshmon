@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 /// Build info populated at compile time. Used by `/metrics` and
 /// `/api/web-config` to expose version/commit to operators and the UI.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BuildInfo {
     /// Crate version from `CARGO_PKG_VERSION`.
     pub version: &'static str,

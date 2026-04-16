@@ -71,7 +71,7 @@ async fn run() -> anyhow::Result<()> {
     // which shares the handle via `OnceLock`.
     let prom = meshmon_service::metrics::install_recorder();
     meshmon_service::metrics::describe_service_metrics();
-    meshmon_service::metrics::emit_build_info(&meshmon_service::state::BuildInfo::compile_time());
+    meshmon_service::metrics::emit_build_info(meshmon_service::state::BuildInfo::compile_time());
 
     // --- Step 3: Postgres + migrations ---
     let pool = db::connect(initial_config.database.url())
