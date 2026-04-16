@@ -67,7 +67,9 @@ impl SupervisorHandle {
     ///
     /// Uses `try_lock` so this method never blocks. Crucial design choice:
     /// T14 will call this from sync contexts where `blocking_lock` would
-    /// panic on a current-thread runtime.
+    /// panic on a current-thread runtime. Tests that need fresh data may
+    /// poll cheaply (e.g. every 20ms) — the `try_lock` never blocks, so
+    /// polling never interferes with the supervisor's run loop.
     pub fn snapshot(&self, protocol: Protocol) -> Option<FastSummary> {
         let idx = protocol_index(protocol)?;
         let guard = self.stats[idx].try_lock().ok()?;
@@ -155,6 +157,9 @@ async fn run(
             }
             _ = eval_interval.tick() => {
                 let now = Instant::now();
+                // Acquire and release each slot lock independently — no slot
+                // is ever held across an `.await` that could acquire another
+                // slot, so no deadlock is reachable from any code path.
                 for slot in stats.iter() {
                     slot.lock().await.purge_old(now);
                 }
@@ -333,8 +338,7 @@ mod tests {
             }
             if tokio::time::Instant::now() - start > deadline {
                 panic!(
-                    "timed out waiting for {expected} samples on {protocol:?}; last observed {:?}",
-                    last_seen.map(|s| s.sample_count),
+                    "timed out waiting for {expected} samples on {protocol:?}; last_seen = {last_seen:?}",
                 );
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -456,8 +460,11 @@ mod tests {
         assert_eq!(tcp.successful, 0);
         assert_eq!(tcp.failure_rate, 1.0);
 
-        // Give the supervisor an extra short pause to confirm UDP really
-        // didn't accumulate anything.
+        // Absence check: we have no observable event to await, so we sleep
+        // briefly to give the supervisor time to process the two UDP Refused
+        // messages (which it will drop). The TCP sample count reaching 1
+        // above already confirms the supervisor is actively draining the
+        // channel; 50ms is sufficient slack.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let udp = wait_for_sample_count(&handle, Protocol::Udp, 0, Duration::from_secs(1)).await;
         assert_eq!(
