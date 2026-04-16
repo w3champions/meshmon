@@ -89,6 +89,11 @@ message RegisterRequest {
   double lon = 6;
   // Agent's semver string (e.g. "0.3.2"); updated on every register call.
   string agent_version = 7;
+  // Advertised ports where this agent runs its echo listeners. Peers
+  // probe (id.ip, tcp_probe_port) and (id.ip, udp_probe_port). Valid
+  // range 1-65535; service rejects out-of-range. Must be non-zero.
+  uint32 tcp_probe_port = 8;
+  uint32 udp_probe_port = 9;
 
   reserved 15 to 31;
 }
@@ -293,6 +298,13 @@ message ConfigResponse {
   Windows windows = 7;
   DiffDetection diff_detection = 8;
   PathHealthThresholds path_health_thresholds = 9;
+  // UDP probe shared secret (exactly 8 bytes). Agents use this to
+  // authenticate echo listeners; see spec 02 § UDP wire protocol.
+  bytes udp_probe_secret = 10;
+  // Previous UDP probe secret during rotation. Empty when no rotation
+  // in progress. Listeners accept packets matching either this or the
+  // current secret; probers always use `udp_probe_secret` on send.
+  bytes udp_probe_previous_secret = 11;
 
   reserved 15 to 31;
 }
@@ -311,6 +323,9 @@ message Target {
   string location = 4;
   double lat = 5;
   double lon = 6;
+  // Peer's echo listener ports (see RegisterRequest.tcp_probe_port).
+  uint32 tcp_probe_port = 7;
+  uint32 udp_probe_port = 8;
 
   reserved 15 to 31;
 }
