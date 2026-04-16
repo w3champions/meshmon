@@ -7,6 +7,9 @@
 //!
 //! See the service README's "Agent registry" section for design context.
 
+use crate::metrics::{
+    registry_agents, registry_last_refresh_age_seconds, registry_refresh_errors, AgentState,
+};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use sqlx::types::ipnetwork::IpNetwork;
@@ -255,8 +258,8 @@ impl AgentRegistry {
                 stale += 1;
             }
         }
-        crate::metrics::registry_agents(crate::metrics::AgentState::Active).set(active as f64);
-        crate::metrics::registry_agents(crate::metrics::AgentState::Stale).set(stale as f64);
+        registry_agents(AgentState::Active).set(active as f64);
+        registry_agents(AgentState::Stale).set(stale as f64);
     }
 
     /// Spawn the periodic refresh task.
@@ -291,7 +294,7 @@ impl AgentRegistry {
                             error = %e,
                             "agent registry refresh failed; keeping stale snapshot",
                         );
-                        crate::metrics::registry_refresh_errors().increment(1);
+                        registry_refresh_errors().increment(1);
                     }
                 }
 
@@ -300,7 +303,7 @@ impl AgentRegistry {
                 let age_secs = (Utc::now() - self.snapshot().refreshed_at())
                     .num_seconds()
                     .max(0) as f64;
-                crate::metrics::registry_last_refresh_age_seconds().set(age_secs);
+                registry_last_refresh_age_seconds().set(age_secs);
 
                 tokio::select! {
                     biased;
