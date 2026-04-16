@@ -1,6 +1,7 @@
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { HealthMatrix } from "@/api/hooks/health-matrix";
 import { PathHealthCell } from "@/components/PathHealthCell";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { classify } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
@@ -30,28 +31,30 @@ export function PathHealthGrid({
   const cols = targetFilter ? sortedIds.filter((id) => id === targetFilter) : sortedIds;
 
   return (
-    <div
-      className={cn("inline-grid gap-1", className)}
-      style={{
-        gridTemplateColumns: `minmax(4rem, auto) repeat(${cols.length}, 1.5rem)`,
-      }}
-    >
-      {/* Top-left corner */}
-      <div />
-      {/* Column headers */}
-      {cols.map((col) => (
-        <div
-          key={`h-${col}`}
-          className="text-xs font-mono rotate-[-60deg] origin-bottom-left whitespace-nowrap text-muted-foreground"
-          data-testid="col-header"
-        >
-          {col}
-        </div>
-      ))}
-      {rows.map((source) => (
-        <Row key={source} source={source} cols={cols} matrix={matrix} />
-      ))}
-    </div>
+    <TooltipProvider delayDuration={150}>
+      <div
+        className={cn("inline-grid gap-1", className)}
+        style={{
+          gridTemplateColumns: `minmax(4rem, auto) repeat(${cols.length}, 1.5rem)`,
+        }}
+      >
+        {/* Top-left corner */}
+        <div />
+        {/* Column headers */}
+        {cols.map((col) => (
+          <div
+            key={`h-${col}`}
+            className="text-xs font-mono rotate-[-60deg] origin-bottom-left whitespace-nowrap text-muted-foreground"
+            data-testid="col-header"
+          >
+            {col}
+          </div>
+        ))}
+        {rows.map((source) => (
+          <Row key={source} source={source} cols={cols} matrix={matrix} />
+        ))}
+      </div>
+    </TooltipProvider>
   );
 }
 

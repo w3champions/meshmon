@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { HealthState } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
@@ -28,21 +28,19 @@ export function PathHealthCell({ source, target, state, failureRate }: PathHealt
       : `${source} → ${target}: ${formatRate(failureRate)}`;
 
   return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Link
-            // biome-ignore lint/suspicious/noExplicitAny: route not yet in Register
-            to={"/paths/$source/$target" as any}
-            // biome-ignore lint/suspicious/noExplicitAny: params follow unregistered route
-            params={{ source, target } as any}
-            className={cn("block h-6 w-6 rounded-sm transition-colors", COLOUR[state])}
-            data-state={state}
-            aria-label={`${source} to ${target}, ${state}`}
-          />
-        </TooltipTrigger>
-        <TooltipContent>{tooltipText}</TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Link
+          // biome-ignore lint/suspicious/noExplicitAny: route not yet in Register
+          to={"/paths/$source/$target" as any}
+          // biome-ignore lint/suspicious/noExplicitAny: params follow unregistered route
+          params={{ source, target } as any}
+          className={cn("block h-6 w-6 rounded-sm transition-colors", COLOUR[state])}
+          data-state={state}
+          aria-label={`${source} to ${target}, ${state}`}
+        />
+      </TooltipTrigger>
+      <TooltipContent>{tooltipText}</TooltipContent>
+    </Tooltip>
   );
 }
