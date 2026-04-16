@@ -16,14 +16,21 @@
 //! Middleware layering (outside → in on the assembled router):
 //! 1. `tower_http::trace::TraceLayer` — request/response logs.
 //! 2. `tower_http::compression::CompressionLayer` — gzip for large JSON.
-//! 3. `axum_login::AuthManagerLayer` (wrapping the `tower_sessions`
+//! 3. `axum_prometheus::PrometheusMetricLayerBuilder` — HTTP request
+//!    metrics (`meshmon_service_http_requests_*`). Sits outside
+//!    `auth_layer` so 401s from `login_required!` and from the
+//!    `/metrics` basic-auth gate are still counted.
+//! 4. `axum_login::AuthManagerLayer` (wrapping the `tower_sessions`
 //!    session layer) — applied to the full app so every handler can
 //!    extract an optional [`auth::AuthSession`].
-//! 4. `login_required!(ConfigAuthBackend)` — attached to the
+//! 5. `login_required!(ConfigAuthBackend)` — attached to the
 //!    OpenAPI-collected `/api/*` sub-router. Returns 401 for anonymous
 //!    callers (API-friendly: SPAs bounce to `/login` themselves).
-//! 5. `auth::login_rate_limit_layer` — attached to the login sub-router
+//! 6. `auth::login_rate_limit_layer` — attached to the login sub-router
 //!    only.
+//! 7. `metrics_auth::require_basic_auth` — attached to the `/metrics`
+//!    sub-router only; no-ops when `[service.metrics_auth]` is unset.
+//!    `/healthz` and `/readyz` stay ungated for k8s probes.
 
 pub mod alerts_proxy;
 pub mod auth;
