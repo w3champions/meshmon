@@ -97,11 +97,20 @@ shared_token_env = "MESHMON_AGENT_TOKEN"
 # ---------------------------------------------------------------------------
 # [probing] — probing configuration broadcast to agents via GetConfig.
 #
-# All fields are optional. Absent fields keep the compiled-in defaults
-# (see crates/service/src/probing.rs `Default for ProbingSection`).
-# SIGHUP reloads this section through the ArcSwap without a service restart.
-#
-# [probing]
+# The `udp_probe_secret` field is REQUIRED. All other fields are optional
+# and fall back to the compiled-in defaults (see
+# crates/service/src/probing.rs `Default for ProbingSection`). SIGHUP
+# reloads this section through the ArcSwap without a service restart.
+
+[probing]
+# Shared 8-byte secret embedded in UDP probe packets. Peers drop traffic
+# that does not match. Encoded as hex: or base64: with an 8-byte payload.
+# Rotate by moving the outgoing value to `udp_probe_previous_secret` and
+# setting a new `udp_probe_secret`; listeners accept either during the
+# rotation window.
+udp_probe_secret = "hex:0011223344556677"
+# udp_probe_previous_secret = "hex:ffeeddccbbaa9988"
+
 # Protocols agents are permitted to use. Any protocol omitted here is
 # disabled regardless of `priority`.
 # enabled_protocols = ["icmp", "tcp", "udp"]
