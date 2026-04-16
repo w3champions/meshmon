@@ -23,6 +23,8 @@ arc-swap = "1"
 axum = "0.8"
 axum-extra = "0.12"
 axum-login = "0.18"
+axum-prometheus = "0.10"
+base64 = "0.22"
 ctor = "0.10"
 # Named directly because our `LoginRateLimitLayer` alias uses
 # `governor::middleware::NoOpMiddleware`, which `tower_governor` does not
@@ -66,6 +68,7 @@ tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 
 metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 prometheus-reqwest-remote-write = "0.5"
 snap = "1"
 wiremock = "0.6"

@@ -19,11 +19,14 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 argon2 = { workspace = true }
 axum = { workspace = true }
+axum-login = { workspace = true }
+axum-prometheus = { workspace = true }
+base64 = { workspace = true }
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 meshmon-protocol = { path = "../protocol" }
 prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
-axum-login = { workspace = true }
 chrono = { workspace = true }
 governor = { workspace = true }
 hyper = { workspace = true }
