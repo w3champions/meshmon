@@ -138,6 +138,8 @@ url = "postgres://a@b/c"
     #[test]
     fn build_info_reports_version_and_commit() {
         let b = BuildInfo::compile_time();
+        // Sanity check that compile_time() wires CARGO_PKG_VERSION; guards
+        // against a future refactor that hardcodes a literal.
         assert_eq!(b.version, env!("CARGO_PKG_VERSION"));
         // Either a real short sha (hex, >= 7 chars) or the literal
         // fallback `"unknown"` — build.rs never leaves the env unset.
