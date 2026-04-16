@@ -10,26 +10,20 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// Spawn the TCP echo listener. Returns the `JoinHandle` for the listener
-/// task. The task exits when `cancel` is cancelled.
-pub fn spawn(port: u16, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(port, cancel))
+/// Bind the TCP echo listener and spawn its task. Bind happens eagerly so
+/// the caller fails fast (and surfaces the error to the operator) if the
+/// port is already in use. The returned `JoinHandle` resolves when `cancel`
+/// is cancelled.
+pub async fn spawn(
+    port: u16,
+    cancel: CancellationToken,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    tracing::info!(port, "tcp echo listener ready");
+    Ok(tokio::spawn(run(listener, cancel)))
 }
 
-async fn run(port: u16, cancel: CancellationToken) {
-    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(
-                port,
-                error = %e,
-                "tcp echo listener failed to bind; TCP probing will not work"
-            );
-            return;
-        }
-    };
-    tracing::info!(port, "tcp echo listener ready");
-
+async fn run(listener: TcpListener, cancel: CancellationToken) {
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -73,8 +67,7 @@ mod tests {
         drop(listener);
 
         let cancel = CancellationToken::new();
-        let handle = spawn(port, cancel.clone());
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let handle = spawn(port, cancel.clone()).await.expect("bind");
 
         // Connect and expect the peer to close immediately. With
         // SO_LINGER(0) the close sends a RST, so the reader may observe
@@ -103,12 +96,28 @@ mod tests {
         drop(listener);
 
         let cancel = CancellationToken::new();
-        let handle = spawn(port, cancel.clone());
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        let handle = spawn(port, cancel.clone()).await.expect("bind");
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), handle)
             .await
             .expect("timed out waiting for shutdown")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bind_fails_when_port_in_use() {
+        // Hold the port on `0.0.0.0` — same address family the listener
+        // binds on — so the collision is unambiguous across platforms.
+        let held = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let port = held.local_addr().unwrap().port();
+
+        let cancel = CancellationToken::new();
+        let res = spawn(port, cancel).await;
+        let err = match res {
+            Ok(_) => panic!("expected bind to fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(held);
     }
 }

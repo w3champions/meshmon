@@ -62,18 +62,34 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// success or cancellation.
     pub async fn bootstrap(env: AgentEnv, api: Arc<A>, cancel: CancellationToken) -> Result<Self> {
         // -- Spawn echo listeners FIRST so there is no window where peer
-        // probes silently time out. The listeners start with an empty
-        // secret/allowlist snapshot (they drop traffic until the GetConfig /
-        // GetTargets steps below populate the watch channels).
+        // probes silently time out. Bind is eager: if a port is already in
+        // use, bootstrap fails rather than registering against a dead
+        // endpoint. The listeners start with an empty secret/allowlist
+        // snapshot (they drop traffic until the GetConfig / GetTargets
+        // steps below populate the watch channels).
         let (secret_tx, secret_rx) = watch::channel(SecretSnapshot::default());
         let (allowlist_tx, allowlist_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new()));
-        let tcp_listener = echo_tcp::spawn(env.tcp_probe_port, cancel.clone());
+        let tcp_listener = echo_tcp::spawn(env.tcp_probe_port, cancel.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "tcp echo listener failed to bind on port {}",
+                    env.tcp_probe_port
+                )
+            })?;
         let udp_listener = echo_udp::spawn(
             env.udp_probe_port,
             secret_rx.clone(),
             allowlist_rx,
             cancel.clone(),
-        );
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "udp echo listener failed to bind on port {}",
+                env.udp_probe_port
+            )
+        })?;
 
         // UDP prober pool + trippy prober. Handles are owned by the runtime;
         // supervisors will attach targets via `spawn_target` in a later task.
@@ -802,6 +818,65 @@ mod tests {
     }
 
     // -- Test 5 --------------------------------------------------------------
+
+    // -- Test 6 --------------------------------------------------------------
+
+    /// If the configured TCP probe port is already in use, bootstrap must
+    /// error out rather than registering the agent while silently running
+    /// without a listener. Same principle for UDP (tested separately).
+    #[tokio::test]
+    async fn bootstrap_fails_when_tcp_port_in_use() {
+        // Hold the port on `0.0.0.0` — same address family the bootstrap
+        // binds on — for the duration of the test so the collision is
+        // unambiguous.
+        let squatter = TcpListener::bind(("0.0.0.0", 0))
+            .await
+            .expect("squatter bind");
+        let occupied_port = squatter.local_addr().unwrap().port();
+
+        let mut env = test_env().await;
+        env.tcp_probe_port = occupied_port;
+
+        let api = MockApi::new(vec![test_target("peer-a")]);
+        let res = AgentRuntime::bootstrap(env, api, CancellationToken::new()).await;
+        let err = match res {
+            Ok(_) => panic!("bootstrap should fail when TCP port is taken"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tcp echo listener failed to bind"),
+            "unexpected error: {msg}",
+        );
+        drop(squatter);
+    }
+
+    /// Same as above for UDP.
+    #[tokio::test]
+    async fn bootstrap_fails_when_udp_port_in_use() {
+        let squatter = UdpSocket::bind(("0.0.0.0", 0))
+            .await
+            .expect("squatter bind");
+        let occupied_port = squatter.local_addr().unwrap().port();
+
+        let mut env = test_env().await;
+        env.udp_probe_port = occupied_port;
+
+        let api = MockApi::new(vec![test_target("peer-a")]);
+        let res = AgentRuntime::bootstrap(env, api, CancellationToken::new()).await;
+        let err = match res {
+            Ok(_) => panic!("bootstrap should fail when UDP port is taken"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("udp echo listener failed to bind"),
+            "unexpected error: {msg}",
+        );
+        drop(squatter);
+    }
+
+    // -- Test 7 --------------------------------------------------------------
 
     /// A hung RPC (TCP connected but server never responds) must be
     /// converted to a retryable error by the per-attempt timeout, so

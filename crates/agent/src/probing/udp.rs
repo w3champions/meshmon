@@ -320,16 +320,32 @@ async fn run_sender(
     let target_addr = std::net::SocketAddr::new(target_ip, target_port);
     // `ThreadRng` is !Send; spawned futures must be Send, so use SmallRng.
     let mut rng = SmallRng::from_rng(&mut rand::rng());
+    // Independent watch receiver for the UDP secret so the pre-config
+    // wait can exit the moment the secret is published.
+    let mut secret_rx = pool.secret_rx.clone();
+    // Clone the observation sender out of state once. We use this directly
+    // (rather than re-locking state) for cheap `is_closed` / `closed()`
+    // checks and for the error-path send.
+    let obs_tx = state.lock().await.obs_tx.clone();
     loop {
+        // If the supervisor has detached, stop producing packets. This also
+        // covers the "obs channel full and supervisor gone" edge case where
+        // the receiver path's send would otherwise silently drop forever.
+        if obs_tx.is_closed() {
+            break;
+        }
+
         let interval = rate_rx.borrow().next_interval(&mut rng);
 
-        // If paused, sleep until pause expires (or until cancel / rate change).
+        // If paused, sleep until pause expires (or until cancel / rate change
+        // / supervisor detach).
         let paused_until = state.lock().await.paused_until;
         if let Some(until) = paused_until {
             let now = tokio::time::Instant::now();
             if until > now {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
+                    _ = obs_tx.closed() => break,
                     r = rate_rx.changed() => {
                         if r.is_err() { break; }
                         continue;
@@ -346,6 +362,7 @@ async fn run_sender(
 
         tokio::select! {
             _ = cancel.cancelled() => break,
+            _ = obs_tx.closed() => break,
             r = rate_rx.changed() => {
                 if r.is_err() { break; }
                 continue;
@@ -354,7 +371,21 @@ async fn run_sender(
                 // Lock, allocate nonce, record pending, release lock, send.
                 let secret_guard = pool.secret_rx.borrow().current;
                 let Some(secret) = secret_guard else {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    // Pre-config: the secret has not yet been broadcast (or
+                    // was cleared). Wait for cancel / supervisor detach /
+                    // rate change / secret publish rather than a bare sleep,
+                    // so shutdown isn't stalled by up to 250 ms per loop.
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = obs_tx.closed() => break,
+                        r = rate_rx.changed() => {
+                            if r.is_err() { break; }
+                        }
+                        r = secret_rx.changed() => {
+                            if r.is_err() { break; }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    }
                     continue;
                 };
                 let nonce = {
@@ -366,13 +397,10 @@ async fn run_sender(
                 };
                 let packet = encode_probe(&secret, nonce);
                 if let Err(e) = pool.socket.send_to(&packet, target_addr).await {
-                    // Drop the mutex before awaiting the obs channel so a
-                    // full channel can't back-pressure into other callers.
-                    let obs_tx = {
+                    {
                         let mut s = state.lock().await;
                         s.pending.remove(&nonce);
-                        s.obs_tx.clone()
-                    };
+                    }
                     let obs = ProbeObservation {
                         protocol: Protocol::Udp,
                         target_id: target_id.clone(),

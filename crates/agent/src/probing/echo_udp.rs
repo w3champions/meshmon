@@ -28,35 +28,27 @@ pub struct SecretSnapshot {
     pub previous: Option<[u8; 8]>,
 }
 
-/// Spawn the UDP echo listener. Returns its join handle.
-pub fn spawn(
+/// Bind the UDP echo listener and spawn its task. Bind happens eagerly so
+/// the caller fails fast (and surfaces the error to the operator) if the
+/// port is already in use. The returned `JoinHandle` resolves when `cancel`
+/// is cancelled.
+pub async fn spawn(
     port: u16,
     secret_rx: watch::Receiver<SecretSnapshot>,
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(port, secret_rx, allowlist_rx, cancel))
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let socket = UdpSocket::bind(("0.0.0.0", port)).await?;
+    tracing::info!(port, "udp echo listener ready");
+    Ok(tokio::spawn(run(socket, secret_rx, allowlist_rx, cancel)))
 }
 
 async fn run(
-    port: u16,
+    socket: UdpSocket,
     secret_rx: watch::Receiver<SecretSnapshot>,
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
 ) {
-    let socket = match UdpSocket::bind(("0.0.0.0", port)).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                port,
-                error = %e,
-                "udp echo listener failed to bind; UDP probing will not work"
-            );
-            return;
-        }
-    };
-    tracing::info!(port, "udp echo listener ready");
-
     // Small slack above PACKET_LEN so oversized packets are detectable.
     let mut buf = [0u8; 32];
     // One-shot pre-config flag: log the *first* probe that arrives before
@@ -151,8 +143,9 @@ mod tests {
         }));
         std::mem::forget(al_tx);
         let cancel = CancellationToken::new();
-        spawn(port, sec_rx, al_rx, cancel.clone());
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        spawn(port, sec_rx, al_rx, cancel.clone())
+            .await
+            .expect("bind");
         (port, cancel)
     }
 
@@ -206,8 +199,9 @@ mod tests {
         let (al_tx, al_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new())); // empty allowlist
         std::mem::forget(al_tx);
         let cancel = CancellationToken::new();
-        spawn(port, sec_rx, al_rx, cancel.clone());
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        spawn(port, sec_rx, al_rx, cancel.clone())
+            .await
+            .expect("bind");
 
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         sock.connect(("127.0.0.1", port)).await.unwrap();
@@ -224,5 +218,26 @@ mod tests {
             Some(DecodedResponse::Rejection),
         );
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn bind_fails_when_port_in_use() {
+        // Hold the port on `0.0.0.0` — same address family the listener
+        // binds on — so the collision is unambiguous across platforms.
+        let held = UdpSocket::bind(("0.0.0.0", 0)).await.unwrap();
+        let port = held.local_addr().unwrap().port();
+
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot::default());
+        std::mem::forget(sec_tx);
+        let (al_tx, al_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new()));
+        std::mem::forget(al_tx);
+        let cancel = CancellationToken::new();
+        let res = spawn(port, sec_rx, al_rx, cancel).await;
+        let err = match res {
+            Ok(_) => panic!("expected bind to fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(held);
     }
 }
