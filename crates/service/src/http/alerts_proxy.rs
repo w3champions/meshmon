@@ -19,7 +19,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 
@@ -109,56 +109,14 @@ pub struct AlertsQuery {
     pub inhibited: Option<bool>,
     /// Include unprocessed alerts.
     pub unprocessed: Option<bool>,
-    /// PromQL-style label matchers, e.g. `alertname="HighLatency"`.
-    /// Accepts either a single value (`filter=alertname="Foo"`) or a
-    /// sequence; `serde_urlencoded` only hands back the last value when
-    /// a key is repeated, so true multi-matcher support requires
-    /// `axum_extra::Query` -- not wired here as the frontend sends at
-    /// most one `filter` per request.
-    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
-    pub filter: Option<Vec<String>>,
-}
-
-/// Accept either a single string or a sequence of strings.
-///
-/// `axum`'s default `Query` extractor uses `serde_urlencoded`, which cannot
-/// coerce a scalar value into a `Vec<String>`. Frontend callers typically
-/// send `filter=<matcher>` once, so we need to accept that shape in
-/// addition to a JSON-style list.
-fn deserialize_string_or_seq<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use serde::de::{self, SeqAccess, Visitor};
-    use std::fmt;
-
-    struct StringOrSeq;
-
-    impl<'de> Visitor<'de> for StringOrSeq {
-        type Value = Option<Vec<String>>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a string or a sequence of strings")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            Ok(Some(vec![v.to_owned()]))
-        }
-
-        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-            Ok(Some(vec![v]))
-        }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut out = Vec::new();
-            while let Some(s) = seq.next_element::<String>()? {
-                out.push(s);
-            }
-            Ok(Some(out))
-        }
-    }
-
-    deserializer.deserialize_any(StringOrSeq)
+    /// Single PromQL-style label matcher expression, e.g.
+    /// `alertname="HighLatency"`. Multiple matchers must be combined into
+    /// one expression by the caller (Alertmanager accepts comma-separated
+    /// matchers inside a single `filter` value). `serde_urlencoded` --
+    /// the backing deserializer for axum's `Query` extractor -- does not
+    /// reliably decode a repeated `filter=` key into a `Vec`, so we
+    /// expose a single value to avoid silently dropping matchers.
+    pub filter: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +135,8 @@ fn alertmanager_base(state: &AppState) -> Option<String> {
 }
 
 /// Build `Vec<(key, value)>` pairs from [`AlertsQuery`] for forwarding to
-/// upstream. Repeated `filter` entries each become a separate pair so
-/// reqwest serializes them as `?filter=a&filter=b`.
+/// upstream. An empty `filter=` value is dropped rather than propagated so
+/// it does not accidentally act as a "match nothing" constraint upstream.
 fn query_pairs(q: &AlertsQuery) -> Vec<(&str, String)> {
     let mut pairs = Vec::new();
     if let Some(v) = q.active {
@@ -193,10 +151,8 @@ fn query_pairs(q: &AlertsQuery) -> Vec<(&str, String)> {
     if let Some(v) = q.unprocessed {
         pairs.push(("unprocessed", v.to_string()));
     }
-    if let Some(filters) = &q.filter {
-        for f in filters {
-            pairs.push(("filter", f.clone()));
-        }
+    if let Some(f) = q.filter.as_ref().filter(|f| !f.is_empty()) {
+        pairs.push(("filter", f.clone()));
     }
     pairs
 }
