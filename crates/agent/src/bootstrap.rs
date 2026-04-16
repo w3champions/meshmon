@@ -3,6 +3,7 @@
 //! periodic reconciliation of the target list.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::ServiceApi;
 use crate::config::{AgentEnv, AgentIdentity, ProbeConfig};
+use crate::probing::echo_udp::SecretSnapshot;
+use crate::probing::trippy::TrippyProber;
+use crate::probing::udp::UdpProberPool;
+use crate::probing::{echo_tcp, echo_udp};
 use crate::supervisor::{self, SupervisorHandle};
 use meshmon_protocol::{ConfigResponse, RegisterRequest, Target, TargetsResponse};
 
@@ -34,6 +39,21 @@ pub struct AgentRuntime<A: ServiceApi> {
     config_rx: watch::Receiver<ProbeConfig>,
     supervisors: HashMap<String, SupervisorHandle>,
     cancel: CancellationToken,
+    /// Broadcast of the UDP probe secret + optional previous. Populated
+    /// by `GetConfig`, consumed by the UDP listener and prober pool.
+    secret_tx: watch::Sender<SecretSnapshot>,
+    /// Broadcast of the peer IP allowlist. Populated by `GetTargets`,
+    /// consumed by the UDP listener.
+    allowlist_tx: watch::Sender<Arc<HashSet<IpAddr>>>,
+    /// UDP prober pool handle shared across per-target UDP probers.
+    pub udp_pool: Arc<UdpProberPool>,
+    /// Trippy shared prober (semaphore).
+    pub trippy_prober: Arc<TrippyProber>,
+    /// TCP echo listener handle. Held so the task is cancelled along with
+    /// the cancellation token but not awaited synchronously.
+    _tcp_listener: tokio::task::JoinHandle<()>,
+    /// UDP echo listener handle. Held for the same reason as the TCP one.
+    _udp_listener: tokio::task::JoinHandle<()>,
 }
 
 impl<A: ServiceApi> AgentRuntime<A> {
@@ -41,6 +61,27 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// supervisor per target. Each step retries with exponential backoff until
     /// success or cancellation.
     pub async fn bootstrap(env: AgentEnv, api: Arc<A>, cancel: CancellationToken) -> Result<Self> {
+        // -- Spawn echo listeners FIRST so there is no window where peer
+        // probes silently time out. The listeners start with an empty
+        // secret/allowlist snapshot (they drop traffic until the GetConfig /
+        // GetTargets steps below populate the watch channels).
+        let (secret_tx, secret_rx) = watch::channel(SecretSnapshot::default());
+        let (allowlist_tx, allowlist_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new()));
+        let tcp_listener = echo_tcp::spawn(env.tcp_probe_port, cancel.clone());
+        let udp_listener = echo_udp::spawn(
+            env.udp_probe_port,
+            secret_rx.clone(),
+            allowlist_rx,
+            cancel.clone(),
+        );
+
+        // UDP prober pool + trippy prober. Handles are owned by the runtime;
+        // supervisors will attach targets via `spawn_target` in a later task.
+        let udp_pool = UdpProberPool::new(secret_rx.clone(), cancel.clone())
+            .await
+            .context("UDP prober pool bind failed")?;
+        let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, cancel.clone());
+
         // -- Register --
         let reg_req = build_register_request(
             &env.identity,
@@ -75,6 +116,15 @@ impl<A: ServiceApi> AgentRuntime<A> {
 
         let probe_config = ProbeConfig::from_proto(config_resp)
             .context("invalid ConfigResponse from service (bootstrap)")?;
+
+        // Publish the UDP probe secret so the listener and prober pool can
+        // accept/send traffic. send() only fails when all receivers are
+        // dropped — can't happen here since we still hold secret_tx.
+        let _ = secret_tx.send(SecretSnapshot {
+            current: Some(probe_config.udp_probe_secret),
+            previous: probe_config.udp_probe_previous_secret,
+        });
+
         let (config_tx, config_rx) = watch::channel(probe_config);
 
         // -- Fetch targets --
@@ -89,6 +139,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
             "get_targets",
         )
         .await?;
+
+        // Publish the peer IP allowlist so the UDP listener echoes probes
+        // from these peers instead of rejecting them.
+        publish_allowlist(&allowlist_tx, &targets_resp.targets);
 
         // -- Spawn supervisors (skip self and duplicates) --
         let mut supervisors = HashMap::new();
@@ -113,6 +167,12 @@ impl<A: ServiceApi> AgentRuntime<A> {
             config_rx,
             supervisors,
             cancel,
+            secret_tx,
+            allowlist_tx,
+            udp_pool,
+            trippy_prober,
+            _tcp_listener: tcp_listener,
+            _udp_listener: udp_listener,
         })
     }
 
@@ -163,6 +223,12 @@ impl<A: ServiceApi> AgentRuntime<A> {
         match config_result {
             Ok(resp) => match ProbeConfig::from_proto(resp) {
                 Ok(new_config) => {
+                    // Re-publish the UDP secret so rotation propagates to the
+                    // listener and the prober pool without a restart.
+                    let _ = self.secret_tx.send(SecretSnapshot {
+                        current: Some(new_config.udp_probe_secret),
+                        previous: new_config.udp_probe_previous_secret,
+                    });
                     // send() only fails if all receivers are dropped, which
                     // cannot happen while we still hold config_rx.
                     self.config_tx.send(new_config).ok();
@@ -197,6 +263,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
         };
         match targets_result {
             Ok(resp) => {
+                // Re-publish the allowlist so the UDP listener tracks the
+                // latest peer set (newcomers get echoed, removed peers will
+                // start receiving `Refused` until they re-register).
+                publish_allowlist(&self.allowlist_tx, &resp.targets);
                 self.reconcile_targets(resp.targets).await;
                 tracing::debug!(
                     supervisor_count = self.supervisors.len(),
@@ -324,6 +394,34 @@ fn build_register_request(
 }
 
 // ---------------------------------------------------------------------------
+// Helper: publish peer IP allowlist
+// ---------------------------------------------------------------------------
+
+/// Extract the peer IPs from `targets` and publish them into `allowlist_tx`.
+/// Targets whose `ip` field cannot be decoded are logged and skipped — they
+/// will simply be omitted from the allowlist (peers with bogus IPs cannot
+/// talk to us anyway).
+fn publish_allowlist(allowlist_tx: &watch::Sender<Arc<HashSet<IpAddr>>>, targets: &[Target]) {
+    let allowlist: HashSet<IpAddr> = targets
+        .iter()
+        .filter_map(|t| match meshmon_protocol::ip::to_ipaddr(&t.ip) {
+            Ok(ip) => Some(ip),
+            Err(e) => {
+                tracing::warn!(
+                    target_id = %t.id,
+                    error = %e,
+                    "skipping target with invalid ip in allowlist",
+                );
+                None
+            }
+        })
+        .collect();
+    // send() only fails if all receivers are dropped; the listener keeps its
+    // receiver alive while the runtime exists.
+    let _ = allowlist_tx.send(Arc::new(allowlist));
+}
+
+// ---------------------------------------------------------------------------
 // Helper: retry with exponential backoff
 // ---------------------------------------------------------------------------
 
@@ -401,7 +499,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -409,10 +506,30 @@ mod tests {
         ConfigResponse, MetricsBatch, PushMetricsResponse, PushRouteSnapshotResponse,
         RegisterResponse, RouteSnapshotRequest, TargetsResponse,
     };
+    use tokio::net::{TcpListener, UdpSocket};
 
     // -- Helpers -------------------------------------------------------------
 
-    fn test_env() -> AgentEnv {
+    /// Allocate an ephemeral TCP port and an ephemeral UDP port on the
+    /// loopback interface. Binds then drops — the kernel unlikely hands
+    /// out the same port to a concurrent test within the short window
+    /// between `drop` and the real listener binding.
+    ///
+    /// Using ephemeral ports is required because the listeners bind to
+    /// fixed ports (as specified by `AgentEnv`) and multiple bootstrap
+    /// tests run in parallel inside the same test binary.
+    async fn ephemeral_probe_ports() -> (u16, u16) {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_port = tcp.local_addr().unwrap().port();
+        drop(tcp);
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp_port = udp.local_addr().unwrap().port();
+        drop(udp);
+        (tcp_port, udp_port)
+    }
+
+    async fn test_env() -> AgentEnv {
+        let (tcp_probe_port, udp_probe_port) = ephemeral_probe_ports().await;
         AgentEnv {
             service_url: "https://test.example.com".to_string(),
             agent_token: "test-token".to_string(),
@@ -425,8 +542,8 @@ mod tests {
                 lon: 0.0,
             },
             agent_version: "0.1.0".to_string(),
-            tcp_probe_port: 3555,
-            udp_probe_port: 3552,
+            tcp_probe_port,
+            udp_probe_port,
             icmp_target_concurrency: 32,
         }
     }
@@ -551,7 +668,7 @@ mod tests {
         let api = MockApi::new(vec![test_target("peer-a"), test_target("peer-b")]);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env(), api.clone(), cancel.clone())
+        let runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed");
 
@@ -568,7 +685,7 @@ mod tests {
         let api = MockApi::new(vec![test_target("self-agent"), test_target("peer-a")]);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env(), api, cancel.clone())
+        let runtime = AgentRuntime::bootstrap(test_env().await, api, cancel.clone())
             .await
             .expect("bootstrap should succeed");
 
@@ -584,7 +701,7 @@ mod tests {
         let api = MockApi::new(vec![test_target("peer-a")]);
         let cancel = CancellationToken::new();
 
-        let mut runtime = AgentRuntime::bootstrap(test_env(), api.clone(), cancel.clone())
+        let mut runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed");
 
@@ -618,7 +735,7 @@ mod tests {
         let api = FailThenSucceedApi::new(2);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env(), api.clone(), cancel.clone())
+        let runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed after retries");
 
@@ -695,7 +812,7 @@ mod tests {
         let api = HangThenSucceedApi::new(1);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env(), api.clone(), cancel.clone())
+        let runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed after timeout + retry");
 

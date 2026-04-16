@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
@@ -156,6 +156,15 @@ async fn start_mock_server() -> (SocketAddr, Arc<MockCounters>) {
 async fn bootstrap_against_real_grpc_server() {
     let (addr, counters) = start_mock_server().await;
 
+    // Allocate ephemeral probe ports so the listeners don't collide with
+    // parallel tests or other processes on well-known ports.
+    let tcp_sock = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_probe_port = tcp_sock.local_addr().unwrap().port();
+    drop(tcp_sock);
+    let udp_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_probe_port = udp_sock.local_addr().unwrap().port();
+    drop(udp_sock);
+
     let env = AgentEnv {
         service_url: format!("http://{addr}"),
         agent_token: "test-token".to_string(),
@@ -168,8 +177,8 @@ async fn bootstrap_against_real_grpc_server() {
             lon: 0.0,
         },
         agent_version: "0.0.0-test".to_string(),
-        tcp_probe_port: 3555,
-        udp_probe_port: 3552,
+        tcp_probe_port,
+        udp_probe_port,
         icmp_target_concurrency: 32,
     };
 
