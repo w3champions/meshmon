@@ -45,6 +45,8 @@ pub struct Config {
     pub agents: AgentsSection,
     /// Probing configuration broadcast to agents via `GetConfig`.
     pub probing: crate::probing::ProbingSection,
+    /// Frontend / web-config runtime settings (Grafana embed, dashboards).
+    pub web: WebSection,
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -163,6 +165,18 @@ pub struct UpstreamSection {
     pub alertmanager_url: Option<String>,
 }
 
+/// Frontend / web-config runtime settings.
+#[derive(Debug, Clone, Default)]
+pub struct WebSection {
+    /// Base URL for embedding Grafana panels. `None` if Grafana is not
+    /// configured; resolved from `[web].grafana_base_url` or the
+    /// `grafana_base_url_env` indirection.
+    pub grafana_base_url: Option<String>,
+    /// Map of logical dashboard name → Grafana dashboard UID, read from
+    /// `[web.grafana_dashboards]` in `meshmon.toml`.
+    pub grafana_dashboards: std::collections::HashMap<String, String>,
+}
+
 /// Agent registry knobs: how long a `last_seen_at` still counts as active,
 /// how frequently the in-memory snapshot is re-read from Postgres.
 #[derive(Debug, Clone)]
@@ -221,6 +235,8 @@ struct RawConfig {
     agents: RawAgentsSection,
     #[serde(default)]
     probing: crate::probing::RawProbingSection,
+    #[serde(default)]
+    web: RawWeb,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -274,6 +290,14 @@ struct RawAgentApiTls {
 struct RawUpstream {
     vm_url: Option<String>,
     alertmanager_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWeb {
+    grafana_base_url: Option<String>,
+    grafana_base_url_env: Option<String>,
+    #[serde(default)]
+    grafana_dashboards: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +424,7 @@ impl Config {
             raw.agent_api.shared_token,
             raw.agent_api.shared_token_env,
             "agent_api.shared_token",
+            path,
         )?;
         let defaults = AgentApiSection::default();
         let rate_limit_per_minute = raw
@@ -465,6 +490,18 @@ impl Config {
             }
         })?;
 
+        // --- web section ---
+        let grafana_base_url = resolve_optional_secret(
+            raw.web.grafana_base_url,
+            raw.web.grafana_base_url_env,
+            "web.grafana_base_url",
+            path,
+        )?;
+        let web = WebSection {
+            grafana_base_url,
+            grafana_dashboards: raw.web.grafana_dashboards,
+        };
+
         Ok(Config {
             service,
             database,
@@ -474,6 +511,7 @@ impl Config {
             upstream,
             agents,
             probing,
+            web,
         })
     }
 }
@@ -520,6 +558,7 @@ fn resolve_optional_secret(
     inline: Option<String>,
     env_name: Option<String>,
     key: &str,
+    path: &str,
 ) -> Result<Option<String>, BootError> {
     if let Some(v) = inline.filter(|s| !s.is_empty()) {
         return Ok(Some(v));
@@ -527,9 +566,9 @@ fn resolve_optional_secret(
     if let Some(name) = env_name {
         return match std::env::var(&name) {
             Ok(v) if !v.is_empty() => Ok(Some(v)),
-            Ok(_) => Err(BootError::EnvMissing {
-                name,
-                key: key.to_string(),
+            Ok(_) => Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: format!("env var {name} (for {key}) is set but empty"),
             }),
             Err(_) => Err(BootError::EnvMissing {
                 name,

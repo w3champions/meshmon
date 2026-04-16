@@ -5,12 +5,13 @@
 //! breaks.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// JSON representation of a single traceroute hop as stored in
 /// `route_snapshots.hops`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HopJson {
-    /// Zero-based hop position in the route.
+    /// 1-indexed TTL / hop position (matches the protocol contract).
     pub position: u32,
     /// IP addresses observed at this hop and their frequencies.
     pub observed_ips: Vec<HopIpJson>,
@@ -23,7 +24,7 @@ pub struct HopJson {
 }
 
 /// JSON representation of an observed IP at a hop.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HopIpJson {
     /// Human-readable IP string (IPv4 or IPv6 `to_string()` form).
     pub ip: String,
@@ -33,7 +34,7 @@ pub struct HopIpJson {
 
 /// JSON representation of the aggregated path summary stored in
 /// `route_snapshots.path_summary`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PathSummaryJson {
     /// Mean RTT across all hops, in microseconds.
     pub avg_rtt_micros: u32,

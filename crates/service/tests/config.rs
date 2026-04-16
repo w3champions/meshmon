@@ -261,7 +261,9 @@ fn empty_optional_env_var_value_rejected() {
     // reference with a blank value is almost certainly a deploy-pipeline
     // typo, not an intentional "token disabled" signal. Operators disable
     // the agent API by leaving both `shared_token` and `shared_token_env`
-    // unset.
+    // unset. The error must distinguish "set but empty" (ConfigInvalid)
+    // from "not set at all" (EnvMissing) so the operator-facing message
+    // actually matches reality.
     std::env::set_var("MESHMON_T04_TEST_EMPTY_TOKEN", "");
     let err = Config::from_str(
         r#"
@@ -276,7 +278,9 @@ shared_token_env = "MESHMON_T04_TEST_EMPTY_TOKEN"
     .unwrap_err();
     assert!(matches!(
         &err,
-        BootError::EnvMissing { name, .. } if name == "MESHMON_T04_TEST_EMPTY_TOKEN"
+        BootError::ConfigInvalid { reason, .. }
+            if reason.contains("MESHMON_T04_TEST_EMPTY_TOKEN")
+                && reason.contains("set but empty")
     ));
     std::env::remove_var("MESHMON_T04_TEST_EMPTY_TOKEN");
 }

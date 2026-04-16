@@ -7,9 +7,11 @@
 //!   here).
 //! - 200 returns the JSON body described by [`WebConfigResponse`].
 //!
-//! MVP ships `grafana_base_url = None` and `grafana_dashboards` empty.
-//! A later task populates them from `meshmon.toml` once the Grafana
-//! integration surface is defined in config.
+//! The Grafana fields come from the `[web]` section of `meshmon.toml`:
+//! `grafana_base_url` (or `grafana_base_url_env`) and the
+//! `[web.grafana_dashboards]` map. When `[web]` is omitted entirely the
+//! endpoint reports an unconfigured Grafana (omits the URL, empty map) so
+//! the frontend can fall back gracefully.
 
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
@@ -72,10 +74,11 @@ pub async fn web_config(
         .expect("login_required guarantees an authenticated user")
         .username
         .clone();
+    let cfg = state.config();
     Json(WebConfigResponse {
         version: state.build.version.to_string(),
         username,
-        grafana_base_url: None,
-        grafana_dashboards: HashMap::new(),
+        grafana_base_url: cfg.web.grafana_base_url.clone(),
+        grafana_dashboards: cfg.web.grafana_dashboards.clone(),
     })
 }

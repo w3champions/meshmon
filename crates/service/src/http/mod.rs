@@ -25,9 +25,13 @@
 //! 5. `auth::login_rate_limit_layer` — attached to the login sub-router
 //!    only.
 
+pub mod alerts_proxy;
 pub mod auth;
 pub mod health;
+pub mod http_client;
+pub mod metrics_proxy;
 pub mod openapi;
+pub mod user_api;
 pub mod web_config;
 
 use crate::state::AppState;
