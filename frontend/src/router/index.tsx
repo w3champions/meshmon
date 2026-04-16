@@ -1,7 +1,9 @@
+import type { QueryClient } from "@tanstack/react-query";
 import {
-  createRootRoute,
+  createRootRouteWithContext,
   createRoute,
   createRouter,
+  isRedirect,
   Outlet,
   redirect,
 } from "@tanstack/react-router";
@@ -11,7 +13,11 @@ import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
 
-const rootRoute = createRootRoute({
+interface RouterContext {
+  queryClient: QueryClient;
+}
+
+const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: () => <Outlet />,
   notFoundComponent: NotFound,
 });
@@ -25,14 +31,38 @@ const loginRoute = createRoute({
 const authRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "auth-guard",
-  beforeLoad: async ({ location }) => {
-    // `response` is undefined on network failure (DNS, timeout, backend down).
-    // Short-circuit before dereferencing `response.status`.
-    const { data, error, response } = await api.GET("/api/web-config");
-    if (!response || response.status === 401 || error) {
-      throw redirect({ to: "/login", search: { returnTo: location.pathname } });
+  beforeLoad: async ({ location, context }) => {
+    // Preserve both pathname and search params so `?filter=active` survives
+    // an auth bounce. `searchStr` already includes the leading "?".
+    const returnTo = location.pathname + location.searchStr;
+
+    try {
+      const data = await context.queryClient.fetchQuery({
+        queryKey: ["web-config"],
+        queryFn: async () => {
+          const { data, error, response } = await api.GET("/api/web-config");
+          // Only treat 401 as "needs login". Network failures / 5xx fall
+          // through to the router's error boundary or the toast middleware.
+          if (response?.status === 401) {
+            throw redirect({ to: "/login", search: { returnTo } });
+          }
+          if (error || !data) {
+            throw error ?? new Error("web-config: no data");
+          }
+          return data;
+        },
+        staleTime: Number.POSITIVE_INFINITY,
+        retry: false,
+      });
+      return { webConfig: data };
+    } catch (err) {
+      // Re-throw redirect objects so TanStack Router can handle navigation.
+      if (isRedirect(err)) {
+        throw err;
+      }
+      // Network failures / 5xx: bubble up to the router error boundary.
+      throw err;
     }
-    return { webConfig: data };
   },
   component: AppShell,
 });
@@ -60,10 +90,21 @@ const routeTree = rootRoute.addChildren([
   authRoute.addChildren([overviewRoute, agentsRoute, alertsRoute]),
 ]);
 
-export const router = createRouter({ routeTree });
+export function createAppRouter(queryClient: QueryClient) {
+  return createRouter({ routeTree, context: { queryClient } });
+}
+
+// Default export for backwards-compatibility during migration (no queryClient context).
+// main.tsx should use createAppRouter instead.
+export const router = createAppRouter(
+  // Lazy import at module level isn't possible; this placeholder will be
+  // replaced when main.tsx passes the real QueryClient via createAppRouter.
+  // biome-ignore lint/suspicious/noExplicitAny: bootstrap placeholder
+  undefined as any,
+);
 
 declare module "@tanstack/react-router" {
   interface Register {
-    router: typeof router;
+    router: ReturnType<typeof createAppRouter>;
   }
 }

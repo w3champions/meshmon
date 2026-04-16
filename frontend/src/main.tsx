@@ -3,7 +3,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "@/components/ui/sonner";
-import { router } from "@/router";
+import { createAppRouter } from "@/router";
 import { useUiStore } from "@/stores/ui";
 import "@/styles/globals.css";
 
@@ -19,6 +19,10 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// Pass queryClient as router context so beforeLoad guards can dedup
+// auth probes with component-level reads via the same ["web-config"] cache key.
+const router = createAppRouter(queryClient);
 
 const rootEl = document.getElementById("app");
 if (!rootEl) {
