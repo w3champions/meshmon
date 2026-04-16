@@ -292,6 +292,89 @@ impl TargetStateMachine {
             path: PathStateMachine::new(),
         }
     }
+
+    pub fn health_snapshot(&self) -> [(Protocol, ProtoHealth); 3] {
+        [
+            (Protocol::Icmp, self.icmp.state()),
+            (Protocol::Tcp, self.tcp.state()),
+            (Protocol::Udp, self.udp.state()),
+        ]
+    }
+
+    pub fn path_state(&self) -> PathHealthState {
+        self.path.state()
+    }
+
+    pub fn evaluate(
+        &mut self,
+        config: &ProbeConfig,
+        stats_by_protocol: [&FastSummary; 3],
+        now: Instant,
+    ) -> StateChange {
+        let priority = config.priority_list();
+        let old_primary = select_primary(&priority, &self.health_snapshot());
+
+        let mut protocol_transitions = Vec::with_capacity(3);
+        if let Some(t) = self.icmp.evaluate(
+            stats_by_protocol[0],
+            &config.thresholds_for(Protocol::Icmp),
+            now,
+        ) {
+            protocol_transitions.push(t);
+        }
+        if let Some(t) = self.tcp.evaluate(
+            stats_by_protocol[1],
+            &config.thresholds_for(Protocol::Tcp),
+            now,
+        ) {
+            protocol_transitions.push(t);
+        }
+        if let Some(t) = self.udp.evaluate(
+            stats_by_protocol[2],
+            &config.thresholds_for(Protocol::Udp),
+            now,
+        ) {
+            protocol_transitions.push(t);
+        }
+
+        let new_primary = select_primary(&priority, &self.health_snapshot());
+        let primary_transition = if new_primary == old_primary {
+            None
+        } else {
+            Some((old_primary, new_primary))
+        };
+
+        let primary_stats: Option<&FastSummary> = new_primary.and_then(|p| match p {
+            Protocol::Icmp => Some(stats_by_protocol[0]),
+            Protocol::Tcp => Some(stats_by_protocol[1]),
+            Protocol::Udp => Some(stats_by_protocol[2]),
+            Protocol::Unspecified => None,
+        });
+        let path_transition = self.path.evaluate(primary_stats, &config.path_thresholds(), now);
+        let path_state = self.path.state();
+
+        let rates = rates_for_mode(
+            config,
+            Mode {
+                primary: new_primary,
+                path_health: path_state,
+            },
+        );
+        let trippy_protocol = new_primary
+            .unwrap_or_else(|| priority.first().copied().unwrap_or(Protocol::Unspecified));
+        let trippy_pps = trippy_pps_for(trippy_protocol, rates);
+
+        StateChange {
+            protocol_transitions,
+            path: path_state,
+            path_transition,
+            primary: new_primary,
+            primary_transition,
+            rates,
+            trippy_protocol,
+            trippy_pps,
+        }
+    }
 }
 
 impl Default for TargetStateMachine {
@@ -696,5 +779,96 @@ mod tests {
             p.evaluate(Some(&stats), &path_thresholds(), Instant::now()),
             Some((PathHealthState::Unreachable, PathHealthState::Normal)),
         );
+    }
+
+    fn full_config() -> ProbeConfig {
+        use meshmon_protocol::PathHealth as H;
+        let rates = vec![
+            rate_row(Protocol::Icmp, H::Normal, 0.2, 0.05, 0.05),
+            rate_row(Protocol::Icmp, H::Degraded, 1.0, 0.05, 0.05),
+            rate_row(Protocol::Icmp, H::Unreachable, 1.0, 0.05, 0.05),
+            rate_row(Protocol::Tcp, H::Normal, 0.05, 0.2, 0.05),
+            rate_row(Protocol::Tcp, H::Degraded, 0.05, 1.0, 0.05),
+            rate_row(Protocol::Tcp, H::Unreachable, 0.05, 1.0, 0.05),
+            rate_row(Protocol::Udp, H::Normal, 0.05, 0.05, 0.2),
+            rate_row(Protocol::Udp, H::Degraded, 0.05, 0.05, 1.0),
+            rate_row(Protocol::Udp, H::Unreachable, 0.05, 0.05, 1.0),
+        ];
+        config_with_rates(rates)
+    }
+
+    #[test]
+    fn fresh_machine_emits_normal_icmp_primary() {
+        let cfg = full_config();
+        let mut tsm = TargetStateMachine::new();
+        let healthy = summary(100, 100);
+        let change = tsm.evaluate(&cfg, [&healthy, &healthy, &healthy], Instant::now());
+        assert_eq!(change.primary, Some(Protocol::Icmp));
+        assert_eq!(change.path, PathHealthState::Normal);
+        assert_eq!(change.rates.icmp_pps, 0.2);
+        assert_eq!(change.trippy_protocol, Protocol::Icmp);
+        assert_eq!(change.trippy_pps, 0.2);
+        assert!(change.protocol_transitions.is_empty());
+        assert_eq!(change.path_transition, None);
+        assert_eq!(change.primary_transition, None);
+    }
+
+    #[test]
+    fn primary_swings_to_tcp_when_icmp_goes_unhealthy() {
+        let cfg = full_config();
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+        let healthy = summary(100, 100);
+        let bad_icmp = summary(100, 0);
+
+        tsm.evaluate(&cfg, [&bad_icmp, &healthy, &healthy], t0);
+        let change = tsm.evaluate(
+            &cfg,
+            [&bad_icmp, &healthy, &healthy],
+            t0 + Duration::from_secs(30),
+        );
+        assert_eq!(change.primary, Some(Protocol::Tcp));
+        assert_eq!(change.rates.tcp_pps, 0.2);
+        assert_eq!(change.trippy_protocol, Protocol::Tcp);
+        assert_eq!(change.trippy_pps, 0.2);
+        assert_eq!(
+            change.primary_transition,
+            Some((Some(Protocol::Icmp), Some(Protocol::Tcp))),
+        );
+    }
+
+    #[test]
+    fn all_unhealthy_yields_unreachable_and_fallback_rates() {
+        let cfg = full_config();
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+        let bad = summary(100, 0);
+
+        tsm.evaluate(&cfg, [&bad, &bad, &bad], t0);
+        let change = tsm.evaluate(&cfg, [&bad, &bad, &bad], t0 + Duration::from_secs(30));
+        assert_eq!(change.primary, None);
+        assert_eq!(change.path, PathHealthState::Unreachable);
+        assert_eq!(change.rates.icmp_pps, 1.0); // icmp-unreachable row
+        assert_eq!(change.trippy_protocol, Protocol::Icmp);
+        assert_eq!(change.trippy_pps, 1.0);
+    }
+
+    #[test]
+    fn path_degrades_when_primary_loses_samples() {
+        let cfg = full_config();
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+        let noisy_icmp = summary(30, 27); // failure_rate = 0.1: healthy at protocol, degraded at path
+        let healthy = summary(30, 30);
+
+        tsm.evaluate(&cfg, [&noisy_icmp, &healthy, &healthy], t0);
+        let change = tsm.evaluate(
+            &cfg,
+            [&noisy_icmp, &healthy, &healthy],
+            t0 + Duration::from_secs(120),
+        );
+        assert_eq!(change.primary, Some(Protocol::Icmp));
+        assert_eq!(change.path, PathHealthState::Degraded);
+        assert_eq!(change.rates.icmp_pps, 1.0);
     }
 }
