@@ -626,12 +626,9 @@ fn resolve_metrics_auth(
     }
     let hash = match (raw.password_hash, raw.password_hash_env) {
         (Some(h), None) if !h.trim().is_empty() => h,
-        (None, Some(env)) => {
-            let v = std::env::var(&env).map_err(|_| BootError::ConfigInvalid {
-                path: path.to_string(),
-                reason: format!("[service.metrics_auth].password_hash_env={env} is unset"),
-            })?;
-            if v.trim().is_empty() {
+        (None, Some(env)) => match std::env::var(&env) {
+            Ok(v) if !v.trim().is_empty() => v,
+            Ok(_) => {
                 return Err(BootError::ConfigInvalid {
                     path: path.to_string(),
                     reason: format!(
@@ -639,8 +636,13 @@ fn resolve_metrics_auth(
                     ),
                 });
             }
-            v
-        }
+            Err(_) => {
+                return Err(BootError::EnvMissing {
+                    name: env,
+                    key: "service.metrics_auth.password_hash".to_string(),
+                });
+            }
+        },
         (Some(_), Some(_)) => {
             return Err(BootError::ConfigInvalid {
                 path: path.to_string(),

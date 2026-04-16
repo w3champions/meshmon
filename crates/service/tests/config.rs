@@ -440,3 +440,104 @@ url = "postgres://a@b/c"
     let cfg = Config::from_str(toml, "t.toml").expect("parse");
     assert!(cfg.service.metrics_auth.is_none());
 }
+
+#[test]
+fn metrics_auth_section_rejects_both_hash_forms() {
+    // Operator error: inline AND env-indirected. Fail loudly instead of
+    // silently picking one — either of them may have been the intended
+    // credential and the other a leftover.
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "prom"
+password_hash = "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY"
+password_hash_env = "MESHMON_TEST_METRICS_PASSWORD_HASH_BOTH"
+"#;
+    let err = Config::from_str(toml, "t.toml").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            BootError::ConfigInvalid { reason, .. } if reason.contains("metrics_auth")
+        ),
+        "unexpected: {err:?}"
+    );
+}
+
+#[test]
+fn metrics_auth_section_rejects_no_hash_form() {
+    // Username is set but neither password_hash nor password_hash_env is —
+    // an incomplete opt-in that must not silently disable auth.
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "prom"
+"#;
+    let err = Config::from_str(toml, "t.toml").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            BootError::ConfigInvalid { reason, .. } if reason.contains("metrics_auth")
+        ),
+        "unexpected: {err:?}"
+    );
+}
+
+#[test]
+fn metrics_auth_section_rejects_empty_username() {
+    // Whitespace-only usernames are a deploy-pipeline typo, not a
+    // legitimate "no principal" signal.
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "   "
+password_hash = "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY"
+"#;
+    let err = Config::from_str(toml, "t.toml").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            BootError::ConfigInvalid { reason, .. }
+                if reason.contains("metrics_auth") && reason.contains("username")
+        ),
+        "unexpected: {err:?}"
+    );
+}
+
+#[test]
+fn metrics_auth_section_rejects_missing_env() {
+    // Opt-in env-var reference pointing at an unset variable must surface
+    // as EnvMissing so the operator-facing message names the variable
+    // AND the config key (matches resolve_secret / resolve_optional_secret
+    // taxonomy in crates/service/src/config.rs).
+    std::env::remove_var("DOES_NOT_EXIST_MESHMON_T10_TEST");
+    let toml = r#"
+[database]
+url = "postgres://a@b/c"
+
+[service.metrics_auth]
+username = "prom"
+password_hash_env = "DOES_NOT_EXIST_MESHMON_T10_TEST"
+"#;
+    let err = Config::from_str(toml, "t.toml").unwrap_err();
+    let rendered = err.to_string();
+    assert!(
+        matches!(
+            &err,
+            BootError::EnvMissing { name, key }
+                if name == "DOES_NOT_EXIST_MESHMON_T10_TEST"
+                    && key == "service.metrics_auth.password_hash"
+        ),
+        "unexpected: {err:?}"
+    );
+    assert!(
+        rendered.contains("DOES_NOT_EXIST_MESHMON_T10_TEST")
+            && rendered.contains("service.metrics_auth.password_hash"),
+        "unexpected rendering: {rendered}"
+    );
+}
