@@ -76,7 +76,10 @@ impl AgentApi for MockAgentApiServer {
         &self,
         _request: Request<GetConfigRequest>,
     ) -> Result<Response<ConfigResponse>, Status> {
-        Ok(Response::new(ConfigResponse::default()))
+        Ok(Response::new(ConfigResponse {
+            udp_probe_secret: vec![0u8; 8].into(),
+            ..Default::default()
+        }))
     }
 
     async fn get_targets(
@@ -91,6 +94,8 @@ impl AgentApi for MockAgentApiServer {
                 location: "Test".to_string(),
                 lat: 1.0,
                 lon: 2.0,
+                tcp_probe_port: 3555,
+                udp_probe_port: 3552,
             },
             Target {
                 id: "peer-b".to_string(),
@@ -99,6 +104,8 @@ impl AgentApi for MockAgentApiServer {
                 location: "Test".to_string(),
                 lat: 3.0,
                 lon: 4.0,
+                tcp_probe_port: 3555,
+                udp_probe_port: 3552,
             },
         ];
         Ok(Response::new(TargetsResponse { targets }))
@@ -161,6 +168,9 @@ async fn bootstrap_against_real_grpc_server() {
             lon: 0.0,
         },
         agent_version: "0.0.0-test".to_string(),
+        tcp_probe_port: 3555,
+        udp_probe_port: 3552,
+        icmp_target_concurrency: 32,
     };
 
     let api = GrpcServiceApi::connect(&env.service_url, &env.agent_token)

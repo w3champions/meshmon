@@ -135,11 +135,17 @@ mod tests {
             location: "Test".to_string(),
             lat: 0.0,
             lon: 0.0,
+            tcp_probe_port: 3555,
+            udp_probe_port: 3552,
         }
     }
 
     fn test_config() -> ProbeConfig {
-        ProbeConfig::from_proto(ConfigResponse::default())
+        ProbeConfig::from_proto(ConfigResponse {
+            udp_probe_secret: vec![0u8; 8].into(),
+            ..Default::default()
+        })
+        .expect("valid test config")
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rand::Rng;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -42,7 +42,12 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// success or cancellation.
     pub async fn bootstrap(env: AgentEnv, api: Arc<A>, cancel: CancellationToken) -> Result<Self> {
         // -- Register --
-        let reg_req = build_register_request(&env.identity, &env.agent_version);
+        let reg_req = build_register_request(
+            &env.identity,
+            &env.agent_version,
+            env.tcp_probe_port,
+            env.udp_probe_port,
+        );
         retry_with_backoff(
             || {
                 let req = reg_req.clone();
@@ -68,7 +73,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
         )
         .await?;
 
-        let probe_config = ProbeConfig::from_proto(config_resp);
+        let probe_config = ProbeConfig::from_proto(config_resp)
+            .context("invalid ConfigResponse from service (bootstrap)")?;
         let (config_tx, config_rx) = watch::channel(probe_config);
 
         // -- Fetch targets --
@@ -155,13 +161,20 @@ impl<A: ServiceApi> AgentRuntime<A> {
             result = self.api.get_config() => result,
         };
         match config_result {
-            Ok(resp) => {
-                let new_config = ProbeConfig::from_proto(resp);
-                // send() only fails if all receivers are dropped, which
-                // cannot happen while we still hold config_rx.
-                self.config_tx.send(new_config).ok();
-                tracing::debug!("config refreshed");
-            }
+            Ok(resp) => match ProbeConfig::from_proto(resp) {
+                Ok(new_config) => {
+                    // send() only fails if all receivers are dropped, which
+                    // cannot happen while we still hold config_rx.
+                    self.config_tx.send(new_config).ok();
+                    tracing::debug!("config refreshed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "refresh config failed validation — keeping old",
+                    );
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "failed to refresh config — keeping old");
             }
@@ -291,7 +304,12 @@ impl<A: ServiceApi> AgentRuntime<A> {
 // Helper: build RegisterRequest
 // ---------------------------------------------------------------------------
 
-fn build_register_request(id: &AgentIdentity, version: &str) -> RegisterRequest {
+fn build_register_request(
+    id: &AgentIdentity,
+    version: &str,
+    tcp_probe_port: u16,
+    udp_probe_port: u16,
+) -> RegisterRequest {
     RegisterRequest {
         id: id.id.clone(),
         display_name: id.display_name.clone(),
@@ -300,6 +318,8 @@ fn build_register_request(id: &AgentIdentity, version: &str) -> RegisterRequest 
         lat: id.lat,
         lon: id.lon,
         agent_version: version.to_string(),
+        tcp_probe_port: tcp_probe_port as u32,
+        udp_probe_port: udp_probe_port as u32,
     }
 }
 
@@ -405,6 +425,9 @@ mod tests {
                 lon: 0.0,
             },
             agent_version: "0.1.0".to_string(),
+            tcp_probe_port: 3555,
+            udp_probe_port: 3552,
+            icmp_target_concurrency: 32,
         }
     }
 
@@ -416,6 +439,8 @@ mod tests {
             location: "Test".to_string(),
             lat: 0.0,
             lon: 0.0,
+            tcp_probe_port: 3555,
+            udp_probe_port: 3552,
         }
     }
 
@@ -446,7 +471,10 @@ mod tests {
         }
 
         async fn get_config(&self) -> Result<ConfigResponse> {
-            Ok(ConfigResponse::default())
+            Ok(ConfigResponse {
+                udp_probe_secret: vec![0u8; 8].into(),
+                ..Default::default()
+            })
         }
 
         async fn get_targets(&self, _source_id: &str) -> Result<TargetsResponse> {
@@ -492,7 +520,10 @@ mod tests {
         }
 
         async fn get_config(&self) -> Result<ConfigResponse> {
-            Ok(ConfigResponse::default())
+            Ok(ConfigResponse {
+                udp_probe_secret: vec![0u8; 8].into(),
+                ..Default::default()
+            })
         }
 
         async fn get_targets(&self, _source_id: &str) -> Result<TargetsResponse> {
@@ -629,7 +660,10 @@ mod tests {
         }
 
         async fn get_config(&self) -> Result<ConfigResponse> {
-            Ok(ConfigResponse::default())
+            Ok(ConfigResponse {
+                udp_probe_secret: vec![0u8; 8].into(),
+                ..Default::default()
+            })
         }
 
         async fn get_targets(&self, _source_id: &str) -> Result<TargetsResponse> {
