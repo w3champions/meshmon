@@ -528,33 +528,52 @@ mod tests {
 
     #[test]
     fn purge_works_when_observed_at_is_out_of_order_relative_to_insert() {
-        // Simulates the UDP-timeout scenario: a late sample with
-        // observed_at < front.observed_at. Receive-time `t` is monotonic
+        // Simulates the UDP-timeout scenario: a late sample whose
+        // `observed_at` (send time) is OLDER than the previous sample's,
+        // but whose receive time is newer. Receive-time `t` is monotonic
         // because we set it in insert order.
         //
-        // BUG (pre-fix): with `t = obs.observed_at`, the late sample sits
-        // behind a newer-`t` front and `purge_old` (prefix-pop on `t`) cannot
-        // evict it until that front itself ages out — under-purging by the
-        // inter-arrival lag. Setting `t = now` (receive time) at insert
-        // restores monotonicity and lets `purge_old` evict correctly.
+        // BUG (pre-fix): with `t = obs.observed_at`, the late sample
+        // sits behind a newer-`t` front in the deque. `purge_old`
+        // (prefix-pop on `t`) could either miss evicting the late
+        // sample (cutoff between observed_ats) or over-evict the late
+        // sample (cutoff past both observed_ats but within the late
+        // sample's true receive-time window).
+        //
+        // The cutoff chosen below lands exactly between the fast
+        // sample's receive time (t+10) and the late sample's receive
+        // time (t+12). Under pre-fix semantics the deque is sorted
+        // [t+10, t+0] (by observed_at), and prefix-pop at cutoff=t+10
+        // pops both → sample_count=0. Under post-fix semantics the deque
+        // is [t+10, t+12] (by receive time), and prefix-pop at
+        // cutoff=t+10 pops only the front → sample_count=1. The
+        // post-fix answer is correct: the late sample's receive time
+        // (t+12) is within the 15s window that ends at t+25.
         let base = Instant::now();
-        let win = Duration::from_secs(60);
+        let win = Duration::from_secs(15);
         let mut stats = RollingStats::new(win);
 
-        // Insert a "fast success" first, observed at base+1s, received at base+1s.
-        let fast = ok(base + Duration::from_secs(1), 1_000);
-        stats.insert(&fast, base + Duration::from_secs(1));
+        // Fast success: observed_at = t+10, received at t+10.
+        let fast_t = base + Duration::from_secs(10);
+        stats.insert(&ok(fast_t, 1_000), fast_t);
 
-        // Now insert a "late timeout" — observed_at is base+0s (it was sent
-        // first but timed out, arriving 2s after its send), received at base+2s.
-        let late = timeout(base + Duration::from_secs(0));
-        stats.insert(&late, base + Duration::from_secs(2));
+        // Late timeout: observed_at = t+0 (it was the earlier probe,
+        // timed out), received at t+12 (emitted by the timeout sweeper
+        // ~2s after its send).
+        let late_obs = base;
+        let late_recv = base + Duration::from_secs(12);
+        stats.insert(&timeout(late_obs), late_recv);
 
-        // 90s later, both should have aged out. (Cutoff = base+30s; both
-        // samples have receive-time t < cutoff.)
-        stats.purge_old(base + Duration::from_secs(90));
+        // Purge at t+25: cutoff = t+25 - 15 = t+10.
+        stats.purge_old(base + Duration::from_secs(25));
         let s = stats.summary_fast();
-        assert_eq!(s.sample_count, 0, "both samples should have been purged");
+        assert_eq!(
+            s.sample_count, 1,
+            "late sample (receive t+12) must survive purge_old(t+25) with 15s window \
+             (cutoff=t+10); pre-fix `Sample.t = observed_at` would have incorrectly \
+             popped it because observed_at=t+0 < cutoff"
+        );
+        assert_eq!(s.successful, 0, "only the surviving timeout remains");
     }
 
     // `Duration` is already imported at the top of `mod tests` for the
