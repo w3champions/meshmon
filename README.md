@@ -84,6 +84,21 @@ The service binds on `service.listen_addr` (default `0.0.0.0:8080`). Useful endp
 - `GET /api/docs` — Swagger UI for the operator API.
 - `GET /api/openapi.json` — OpenAPI 3.1 schema (also checked in at `frontend/src/api/openapi.json`).
 
+### One-command smoke harness
+
+`scripts/smoke.sh` brings up Postgres + VictoriaMetrics in Docker, writes a
+throwaway config, seeds a few agents and route snapshots, and launches the
+service in the foreground. Ctrl-C tears the containers down. Intended for
+local UI smoke-testing only — see `deploy/docker-compose.yml` for the full
+production stack.
+
+```bash
+./scripts/smoke.sh
+# Open http://127.0.0.1:8080/  —  login: admin / smoketest
+```
+
+Requires `docker`, `cargo`, `argon2`, `openssl`, `psql`, and `sqlx` on `$PATH`.
+
 Signals:
 - `SIGINT`, `SIGTERM` — graceful shutdown.
 - `SIGHUP` — re-read `meshmon.toml` (hot-reload for `probing`, `logging`, `upstream`; restart required for `service.listen_addr`, `auth`, `database`).
