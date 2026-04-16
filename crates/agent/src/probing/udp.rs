@@ -379,8 +379,8 @@ async fn run_sender(
     // `::ffff:a.b.c.d`, but on macOS / BSD the `sendto(2)` path rejects
     // a plain `sockaddr_in` on an `AF_INET6` socket with `EINVAL`.
     // Always map v4 targets to v4-mapped-v6 ourselves so every platform
-    // agrees. The dispatch-map key stays as the native `IpAddr` because
-    // the receiver re-canonicalizes incoming peer addresses.
+    // agrees. `target_ip` is already canonical (canonicalized at
+    // `spawn_target` insert time — see the `DispatchMap` docstring).
     let target_addr = dual_stack_send_addr(target_ip, target_port);
     // `ThreadRng` is !Send; spawned futures must be Send, so use SmallRng.
     let mut rng = SmallRng::from_rng(&mut rand::rng());
