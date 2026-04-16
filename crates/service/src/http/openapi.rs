@@ -65,6 +65,7 @@ struct ApiDoc;
 pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
         .routes(utoipa_axum::routes!(crate::http::user_api::list_agents))
+        .routes(utoipa_axum::routes!(crate::http::user_api::get_agent))
         .routes(utoipa_axum::routes!(crate::http::web_config::web_config))
 }
 

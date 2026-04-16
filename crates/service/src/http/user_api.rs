@@ -1,6 +1,7 @@
 //! User-facing agent endpoints.
 //!
 //! - `GET /api/agents` — list every agent in the registry snapshot.
+//! - `GET /api/agents/{id}` — single-agent detail by id.
 //!
 //! All endpoints sit behind the `login_required!` layer, so
 //! unauthenticated callers receive 401 from the middleware before the
@@ -8,7 +9,9 @@
 
 use crate::registry::AgentInfo;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -79,3 +82,31 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
     Json(agents)
 }
 
+/// `GET /api/agents/{id}` — return a single agent by id.
+///
+/// Returns 404 with a JSON error body when the id is not found in the
+/// current registry snapshot.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent identifier"),
+    ),
+    responses(
+        (status = 200, description = "Agent detail", body = AgentSummary),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Agent not found"),
+    ),
+)]
+pub async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let snap = state.registry.snapshot();
+    match snap.get(&id).cloned() {
+        Some(info) => Json(AgentSummary::from(info)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "agent not found" })),
+        )
+            .into_response(),
+    }
+}
