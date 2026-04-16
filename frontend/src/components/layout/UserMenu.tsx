@@ -17,8 +17,9 @@ export function UserMenu() {
   async function logout() {
     try {
       await api.POST("/api/auth/logout");
-    } catch {
+    } catch (err) {
       // Best-effort server-side logout; proceed with local cleanup regardless.
+      console.warn("server logout failed", err);
     }
     useAuthStore.getState().clearSession();
     window.location.assign("/login");
@@ -32,7 +33,7 @@ export function UserMenu() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>Signed in as {username ?? "?"}</DropdownMenuLabel>
+        <DropdownMenuLabel>{username ? `Signed in as ${username}` : "Account"}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={logout}>Log out</DropdownMenuItem>
       </DropdownMenuContent>
