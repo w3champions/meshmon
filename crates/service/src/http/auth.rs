@@ -479,6 +479,20 @@ pub type AgentApiRateLimitLayer = tower::util::Either<
     >,
 >;
 
+/// Replenish interval for the agent-API rate limiter, in nanoseconds.
+///
+/// Nanosecond precision avoids the seconds-only quantization bug where e.g.
+/// `per_minute = 59` rounded up to `per_second(2)` enforces 30 req/min, or
+/// `per_minute = 120` rounded down to `per_second(1)` enforces 60 req/min.
+/// Config parsing guarantees `per_minute > 0`; the `max(1)` calls are
+/// defense in depth so a future refactor does not produce a panic here.
+fn rate_limit_period_nanos(per_minute: u32) -> u64 {
+    60_000_000_000u64
+        .checked_div(u64::from(per_minute.max(1)))
+        .unwrap_or(1_000_000_000)
+        .max(1)
+}
+
 /// Build the rate-limit layer from resolved `[agent_api]` knobs + trust mode.
 /// Non-zero `per_minute` and `burst` are enforced at config parse time.
 pub fn agent_api_rate_limit_layer(
@@ -490,12 +504,11 @@ pub fn agent_api_rate_limit_layer(
     use tower_governor::key_extractor::SmartIpKeyExtractor;
     use tower_governor::GovernorLayer;
 
-    // seconds-per-request = ceil(60 / per_minute), floored at 1.
-    let seconds_per_request = ((60.0 / per_minute as f64).ceil() as u64).max(1);
+    let period_nanos = rate_limit_period_nanos(per_minute);
 
     if trust_forwarded {
         let cfg = GovernorConfigBuilder::default()
-            .per_second(seconds_per_request)
+            .per_nanosecond(period_nanos)
             .burst_size(burst)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
@@ -503,7 +516,7 @@ pub fn agent_api_rate_limit_layer(
         tower::util::Either::Left(GovernorLayer::new(cfg))
     } else {
         let cfg = GovernorConfigBuilder::default()
-            .per_second(seconds_per_request)
+            .per_nanosecond(period_nanos)
             .burst_size(burst)
             .key_extractor(PeerAddrKeyExtractor)
             .finish()
@@ -813,5 +826,24 @@ url = "postgres://ignored@localhost/db"
         // Just verify construction doesn't panic — no HTTP traffic needed.
         let _ = agent_api_rate_limit_layer(true, 60, 30);
         let _ = agent_api_rate_limit_layer(false, 60, 30);
+    }
+
+    #[test]
+    fn rate_limit_period_nanos_matches_per_minute() {
+        // 60/min = 1 req/sec.
+        assert_eq!(rate_limit_period_nanos(60), 1_000_000_000);
+        // 120/min = 500ms/req — previously truncated to `per_second(1)`
+        // which enforced 60/min.
+        assert_eq!(rate_limit_period_nanos(120), 500_000_000);
+        // 59/min — previously rounded up to `per_second(2)` which
+        // enforced 30/min.
+        assert_eq!(rate_limit_period_nanos(59), 60_000_000_000 / 59);
+        // Extreme low: 1/min = 60s/req.
+        assert_eq!(rate_limit_period_nanos(1), 60_000_000_000);
+        // Extreme high: 60_000/min = 1ms/req.
+        assert_eq!(rate_limit_period_nanos(60_000), 1_000_000);
+        // Pathological zero falls back to 1/min (defensive only — config
+        // parsing rejects `per_minute = 0`).
+        assert_eq!(rate_limit_period_nanos(0), 60_000_000_000);
     }
 }

@@ -88,12 +88,16 @@ fn tonic_rate_limit_layer(
     use tower_governor::governor::GovernorConfigBuilder;
     use tower_governor::key_extractor::SmartIpKeyExtractor;
 
-    // seconds-per-request = ceil(60 / per_minute), floored at 1.
-    let seconds_per_request = ((60.0 / per_minute as f64).ceil() as u64).max(1);
+    // Mirror production: nanosecond precision so `per_minute` is honored
+    // across non-multiples-of-60 (see meshmon_service::http::auth).
+    let period_nanos = 60_000_000_000u64
+        .checked_div(u64::from(per_minute.max(1)))
+        .unwrap_or(1_000_000_000)
+        .max(1);
 
     if trust_forwarded {
         let cfg = GovernorConfigBuilder::default()
-            .per_second(seconds_per_request)
+            .per_nanosecond(period_nanos)
             .burst_size(burst)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
@@ -101,7 +105,7 @@ fn tonic_rate_limit_layer(
         tower::util::Either::Left(GovernorLayer::new(cfg))
     } else {
         let cfg = GovernorConfigBuilder::default()
-            .per_second(seconds_per_request)
+            .per_nanosecond(period_nanos)
             .burst_size(burst)
             .key_extractor(PeerAddrKeyExtractor)
             .finish()
