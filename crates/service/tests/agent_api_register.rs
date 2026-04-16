@@ -184,16 +184,12 @@ async fn concurrent_register_same_id_different_ip_yields_single_winner() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_agent_token(pool.clone());
 
-    let mut client_a = common::grpc_harness::in_process_agent_client(
-        state.clone(),
-        IpAddr::from([10, 7, 0, 20]),
-    )
-    .await;
-    let mut client_b = common::grpc_harness::in_process_agent_client(
-        state.clone(),
-        IpAddr::from([10, 7, 0, 21]),
-    )
-    .await;
+    let mut client_a =
+        common::grpc_harness::in_process_agent_client(state.clone(), IpAddr::from([10, 7, 0, 20]))
+            .await;
+    let mut client_b =
+        common::grpc_harness::in_process_agent_client(state.clone(), IpAddr::from([10, 7, 0, 21]))
+            .await;
 
     let req_a = sample("agent-reg-race", [10, 7, 0, 20]);
     let req_b = sample("agent-reg-race", [10, 7, 0, 21]);
@@ -208,7 +204,11 @@ async fn concurrent_register_same_id_different_ip_yields_single_winner() {
         "exactly one caller must win the race; a_ok={a_ok} b_ok={b_ok}",
     );
 
-    let loser_err = if a_ok { res_b.unwrap_err() } else { res_a.unwrap_err() };
+    let loser_err = if a_ok {
+        res_b.unwrap_err()
+    } else {
+        res_a.unwrap_err()
+    };
     assert_eq!(
         loser_err.code(),
         Code::AlreadyExists,
