@@ -33,7 +33,7 @@ export function UserMenu() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>{username ? `Signed in as ${username}` : "Account"}</DropdownMenuLabel>
+        <DropdownMenuLabel>Signed in as {username}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={logout}>Log out</DropdownMenuItem>
       </DropdownMenuContent>

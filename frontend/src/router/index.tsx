@@ -12,6 +12,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
+import { useAuthStore } from "@/stores/auth";
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -54,6 +55,10 @@ const authRoute = createRoute({
         staleTime: Number.POSITIVE_INFINITY,
         retry: false,
       });
+      // Hydrate the auth store from the probe so hard-refreshed tabs still
+      // know who's signed in (sessionStorage is wiped on hard refresh but
+      // the cookie isn't).
+      useAuthStore.getState().setSession({ username: data.username });
       return { webConfig: data };
     } catch (err) {
       // Re-throw redirect objects so TanStack Router can handle navigation.
