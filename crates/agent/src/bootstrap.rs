@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::api::ServiceApi;
 use crate::config::{AgentEnv, AgentIdentity, ProbeConfig};
 use crate::supervisor::{self, SupervisorHandle};
-use meshmon_protocol::{RegisterRequest, Target};
+use meshmon_protocol::{ConfigResponse, RegisterRequest, Target, TargetsResponse};
 
 // ---------------------------------------------------------------------------
 // AgentRuntime
@@ -135,15 +135,22 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// Re-fetch config and targets from the service. Failures are logged as
     /// warnings; the agent continues with its previous state.
     ///
-    /// Each RPC is raced against cancellation so a hung call cannot block the
-    /// refresh loop (and therefore shutdown) during network stalls.
+    /// Each RPC is raced against cancellation and a per-attempt timeout so a
+    /// hung call cannot block the refresh loop (and therefore shutdown) during
+    /// network stalls.
     async fn refresh_once(&mut self) {
         // -- Refresh config --
-        let config_result = tokio::select! {
+        let config_result: Result<ConfigResponse> = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => {
                 tracing::debug!("refresh: config fetch cancelled");
                 return;
+            }
+            _ = tokio::time::sleep(RPC_ATTEMPT_TIMEOUT) => {
+                Err(anyhow::anyhow!(
+                    "get_config timed out after {}s",
+                    RPC_ATTEMPT_TIMEOUT.as_secs(),
+                ))
             }
             result = self.api.get_config() => result,
         };
@@ -161,11 +168,17 @@ impl<A: ServiceApi> AgentRuntime<A> {
         }
 
         // -- Refresh targets --
-        let targets_result = tokio::select! {
+        let targets_result: Result<TargetsResponse> = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => {
                 tracing::debug!("refresh: target fetch cancelled");
                 return;
+            }
+            _ = tokio::time::sleep(RPC_ATTEMPT_TIMEOUT) => {
+                Err(anyhow::anyhow!(
+                    "get_targets timed out after {}s",
+                    RPC_ATTEMPT_TIMEOUT.as_secs(),
+                ))
             }
             result = self.api.get_targets(&self.env.identity.id) => result,
         };
@@ -294,8 +307,15 @@ fn build_register_request(id: &AgentIdentity, version: &str) -> RegisterRequest 
 // Helper: retry with exponential backoff
 // ---------------------------------------------------------------------------
 
+/// Per-attempt deadline for each RPC inside [`retry_with_backoff`]. A hung
+/// RPC (TCP connected but server never responds at the gRPC layer) would
+/// otherwise block bootstrap forever; this deadline converts the hang into
+/// a retryable error so the backoff/retry logic can actually run.
+const RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Retry an async operation with exponential backoff (1s base, 30s max, ±25%
-/// jitter). Returns the first successful result or an error if cancelled.
+/// jitter). Each attempt is bounded by [`RPC_ATTEMPT_TIMEOUT`]. Returns the
+/// first successful result or an error if cancelled.
 async fn retry_with_backoff<F, Fut, T>(
     mut op: F,
     cancel: &CancellationToken,
@@ -309,12 +329,19 @@ where
     let max_delay = Duration::from_secs(30);
 
     loop {
-        // Race the in-flight RPC against cancellation so a hung call (stalled
-        // TCP/TLS handshake or unresponsive upstream) cannot block shutdown.
+        // Race the in-flight RPC against:
+        // - cancellation: so a hung call cannot block shutdown
+        // - attempt timeout: so a hung call becomes a retryable failure
         let outcome = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 bail!("{label}: cancelled during RPC");
+            }
+            _ = tokio::time::sleep(RPC_ATTEMPT_TIMEOUT) => {
+                Err(anyhow::anyhow!(
+                    "{label}: RPC attempt timed out after {}s",
+                    RPC_ATTEMPT_TIMEOUT.as_secs(),
+                ))
             }
             result = op() => result,
         };
@@ -567,6 +594,80 @@ mod tests {
         assert!(
             api.call_count.load(Ordering::SeqCst) >= 3,
             "should have called register at least 3 times"
+        );
+        assert_eq!(runtime.supervisor_count(), 1);
+
+        runtime.shutdown().await;
+    }
+
+    // -- HangThenSucceedApi --------------------------------------------------
+
+    /// First `hang_count` calls to `register` hang forever (modelling a TCP
+    /// connect that succeeds but the server never responds at the gRPC
+    /// layer); subsequent calls succeed.
+    struct HangThenSucceedApi {
+        call_count: AtomicUsize,
+        hang_count: usize,
+    }
+
+    impl HangThenSucceedApi {
+        fn new(hang_count: usize) -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicUsize::new(0),
+                hang_count,
+            })
+        }
+    }
+
+    impl ServiceApi for HangThenSucceedApi {
+        async fn register(&self, _req: RegisterRequest) -> Result<RegisterResponse> {
+            let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if n < self.hang_count {
+                std::future::pending::<()>().await;
+            }
+            Ok(RegisterResponse {})
+        }
+
+        async fn get_config(&self) -> Result<ConfigResponse> {
+            Ok(ConfigResponse::default())
+        }
+
+        async fn get_targets(&self, _source_id: &str) -> Result<TargetsResponse> {
+            Ok(TargetsResponse {
+                targets: vec![test_target("peer-a")],
+            })
+        }
+
+        async fn push_metrics(&self, _batch: MetricsBatch) -> Result<PushMetricsResponse> {
+            Ok(PushMetricsResponse {})
+        }
+
+        async fn push_route_snapshot(
+            &self,
+            _req: RouteSnapshotRequest,
+        ) -> Result<PushRouteSnapshotResponse> {
+            Ok(PushRouteSnapshotResponse {})
+        }
+    }
+
+    // -- Test 5 --------------------------------------------------------------
+
+    /// A hung RPC (TCP connected but server never responds) must be
+    /// converted to a retryable error by the per-attempt timeout, so
+    /// bootstrap eventually succeeds instead of stalling forever.
+    #[tokio::test(start_paused = true)]
+    async fn bootstrap_recovers_from_hung_rpc() {
+        // First call to register hangs; second succeeds.
+        let api = HangThenSucceedApi::new(1);
+        let cancel = CancellationToken::new();
+
+        let runtime = AgentRuntime::bootstrap(test_env(), api.clone(), cancel.clone())
+            .await
+            .expect("bootstrap should succeed after timeout + retry");
+
+        assert!(
+            api.call_count.load(Ordering::SeqCst) >= 2,
+            "register should have been called at least twice (hang, then succeed)"
         );
         assert_eq!(runtime.supervisor_count(), 1);
 
