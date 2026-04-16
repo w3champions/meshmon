@@ -669,3 +669,68 @@ fn resolve_metrics_auth(
         password_hash: hash,
     }))
 }
+
+/// Construct an [`AppState`](crate::state::AppState) from raw TOML for unit
+/// tests that only need a parsed [`Config`] plumbed through state — for
+/// example the `/metrics` Basic-auth middleware, which dispatches on
+/// `cfg.service.metrics_auth` and ignores every other field.
+///
+/// Differences from the integration-test harness in `tests/common/mod.rs`:
+///
+/// - Synchronous (plain `#[test]`-compatible). Unit tests use `#[tokio::test]`
+///   on the middleware itself, but callers may also want to build state in
+///   non-async helpers without lifting them.
+/// - Pool is [`sqlx::PgPool::connect_lazy`] — never opens a socket. Tests
+///   that need real DB access should use the integration-test harness.
+/// - Ingestion workers are spawned with a pre-cancelled
+///   [`CancellationToken`](tokio_util::sync::CancellationToken) so they
+///   exit immediately without doing any DB work.
+/// - The Prometheus recorder is installed process-wide via
+///   [`crate::metrics::test_install`], which dedups across every test in
+///   the same binary (a second `metrics::set_global_recorder` call would
+///   panic).
+#[cfg(test)]
+pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
+    use crate::ingestion::{IngestionConfig, IngestionPipeline};
+    use crate::registry::AgentRegistry;
+    use crate::state::AppState;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::watch;
+    use tokio_util::sync::CancellationToken;
+
+    let cfg = Arc::new(Config::from_str(toml, "unit-test.toml").expect("parse"));
+    let swap = Arc::new(ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+
+    // Lazy pool: `connect_lazy` never opens a socket, so tests that never
+    // touch the DB (middleware, handler shape tests) stay hermetic.
+    let pool =
+        sqlx::PgPool::connect_lazy("postgres://ignored@127.0.0.1/ignored").expect("lazy pool");
+
+    // Pre-cancel so the ingestion workers exit on first poll without
+    // attempting any DB work.
+    let token = CancellationToken::new();
+    token.cancel();
+    let ingestion = IngestionPipeline::spawn(
+        IngestionConfig::default_with_url("http://127.0.0.1:1".into()),
+        pool.clone(),
+        token,
+    );
+
+    let registry = Arc::new(AgentRegistry::new(
+        pool.clone(),
+        Duration::from_secs(60),
+        Duration::from_secs(300),
+    ));
+
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        crate::metrics::test_install(),
+    )
+}
