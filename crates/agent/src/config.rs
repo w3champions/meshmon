@@ -46,6 +46,13 @@ pub struct AgentEnv {
     pub identity: AgentIdentity,
     /// Semantic version of the agent binary (compiled in).
     pub agent_version: String,
+    /// Port the TCP echo listener binds to (and peers probe us on).
+    pub tcp_probe_port: u16,
+    /// Port the UDP echo listener binds to (and peers probe us on).
+    pub udp_probe_port: u16,
+    /// Global cap on concurrent per-target ICMP/traceroute rounds.
+    /// Defaults to 32 when unset.
+    pub icmp_target_concurrency: usize,
 }
 
 /// Read a required env var, pushing an error message if missing.
@@ -54,6 +61,23 @@ fn read_required(name: &str, errors: &mut Vec<String>) -> Option<String> {
         Ok(v) if !v.is_empty() => Some(v),
         _ => {
             errors.push(format!("{name}: required but not set"));
+            None
+        }
+    }
+}
+
+/// Read and parse a required `u16` port env var. Rejects `0` and values that
+/// cannot be parsed as `u16`. Returns `None` on failure (error pushed).
+fn parse_port_required(name: &str, errors: &mut Vec<String>) -> Option<u16> {
+    let raw = read_required(name, errors)?;
+    match raw.parse::<u16>() {
+        Ok(0) => {
+            errors.push(format!("{name}: must not be zero"));
+            None
+        }
+        Ok(n) => Some(n),
+        Err(e) => {
+            errors.push(format!("{name}: invalid port {raw:?}: {e}"));
             None
         }
     }
@@ -113,6 +137,30 @@ impl AgentEnv {
             }
         });
 
+        // -- probe ports --
+        let tcp_probe_port = parse_port_required("MESHMON_TCP_PROBE_PORT", &mut errors);
+        let udp_probe_port = parse_port_required("MESHMON_UDP_PROBE_PORT", &mut errors);
+
+        // -- per-target ICMP/traceroute concurrency (optional, default 32) --
+        let icmp_target_concurrency = match std::env::var("MESHMON_ICMP_TARGET_CONCURRENCY") {
+            Err(_) => 32,
+            Ok(raw) => match raw.parse::<usize>() {
+                Ok(n) if (1..=1024).contains(&n) => n,
+                Ok(n) => {
+                    errors.push(format!(
+                        "MESHMON_ICMP_TARGET_CONCURRENCY: {n} out of range [1, 1024]"
+                    ));
+                    0
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "MESHMON_ICMP_TARGET_CONCURRENCY: invalid usize {raw:?}: {e}"
+                    ));
+                    0
+                }
+            },
+        };
+
         // -- report all collected errors --
         if !errors.is_empty() {
             bail!("invalid agent environment:\n  {}", errors.join("\n  "));
@@ -131,6 +179,9 @@ impl AgentEnv {
                 lon: lon.unwrap(),
             },
             agent_version,
+            tcp_probe_port: tcp_probe_port.unwrap(),
+            udp_probe_port: udp_probe_port.unwrap(),
+            icmp_target_concurrency,
         })
     }
 }
@@ -148,13 +199,42 @@ impl AgentEnv {
 pub struct ProbeConfig {
     /// Raw proto response — downstream tasks extract what they need.
     pub raw: meshmon_protocol::ConfigResponse,
+    /// Current UDP probe secret (exactly 8 bytes).
+    pub udp_probe_secret: [u8; 8],
+    /// Previous UDP probe secret during rotation; `None` when absent.
+    pub udp_probe_previous_secret: Option<[u8; 8]>,
 }
 
 impl ProbeConfig {
-    /// Wrap a `ConfigResponse` received from the service.
-    pub fn from_proto(resp: meshmon_protocol::ConfigResponse) -> Self {
-        Self { raw: resp }
+    /// Wrap a `ConfigResponse` received from the service, validating that the
+    /// UDP probe secrets are the expected 8 bytes when present.
+    pub fn from_proto(resp: meshmon_protocol::ConfigResponse) -> Result<Self> {
+        let udp_probe_secret = to_fixed_secret(&resp.udp_probe_secret, "udp_probe_secret")?;
+        let udp_probe_previous_secret = if resp.udp_probe_previous_secret.is_empty() {
+            None
+        } else {
+            Some(to_fixed_secret(
+                &resp.udp_probe_previous_secret,
+                "udp_probe_previous_secret",
+            )?)
+        };
+        Ok(Self {
+            raw: resp,
+            udp_probe_secret,
+            udp_probe_previous_secret,
+        })
     }
+}
+
+/// Copy an exactly-8-byte field from a `Bytes`-style slice into a fixed array,
+/// returning a descriptive error if the length is wrong.
+fn to_fixed_secret(bytes: &[u8], field: &str) -> Result<[u8; 8]> {
+    if bytes.len() != 8 {
+        bail!("{field}: expected 8 bytes, got {}", bytes.len());
+    }
+    let mut out = [0u8; 8];
+    out.copy_from_slice(bytes);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +250,9 @@ mod tests {
     /// Serialize tests that mutate process-global environment variables.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// All env var names touched by the agent config.
-    const ALL_VARS: [&str; 8] = [
+    /// Required env var names touched by the agent config. Every entry here
+    /// must produce an error when missing.
+    const REQUIRED_VARS: [&str; 10] = [
         "MESHMON_SERVICE_URL",
         "MESHMON_AGENT_TOKEN",
         "AGENT_ID",
@@ -180,17 +261,31 @@ mod tests {
         "AGENT_IP",
         "AGENT_LAT",
         "AGENT_LON",
+        "MESHMON_TCP_PROBE_PORT",
+        "MESHMON_UDP_PROBE_PORT",
     ];
+
+    /// Optional env vars the agent accepts. Cleared between tests to prevent
+    /// leakage but not required for `from_env` to succeed.
+    const OPTIONAL_VARS: [&str; 1] = ["MESHMON_ICMP_TARGET_CONCURRENCY"];
+
+    /// Clear every env var this test module is aware of, both required and
+    /// optional, to prevent cross-test leakage.
+    fn clear_all_env_vars() {
+        for k in &REQUIRED_VARS {
+            env::remove_var(k);
+        }
+        for k in &OPTIONAL_VARS {
+            env::remove_var(k);
+        }
+    }
 
     /// Helper: hold the env lock, clear all agent vars, set the valid
     /// defaults, run the closure, then clean up. Ensures no env leakage
     /// between parallel tests.
     fn with_valid_env(f: impl FnOnce()) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Start from a clean slate.
-        for k in &ALL_VARS {
-            env::remove_var(k);
-        }
+        clear_all_env_vars();
         let vars = [
             ("MESHMON_SERVICE_URL", "https://meshmon.example.com:443"),
             ("MESHMON_AGENT_TOKEN", "test-token-123"),
@@ -200,23 +295,21 @@ mod tests {
             ("AGENT_IP", "170.80.110.90"),
             ("AGENT_LAT", "-3.7172"),
             ("AGENT_LON", "-38.5433"),
+            ("MESHMON_TCP_PROBE_PORT", "3555"),
+            ("MESHMON_UDP_PROBE_PORT", "3552"),
         ];
         for (k, v) in &vars {
             env::set_var(k, v);
         }
         f();
-        for (k, _) in &vars {
-            env::remove_var(k);
-        }
+        clear_all_env_vars();
     }
 
     /// Helper: hold the env lock, clear all agent vars, run the closure,
     /// then clean up.
     fn with_cleared_env(f: impl FnOnce()) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for k in &ALL_VARS {
-            env::remove_var(k);
-        }
+        clear_all_env_vars();
         f();
     }
 
@@ -248,7 +341,7 @@ mod tests {
         with_cleared_env(|| {
             let err = AgentEnv::from_env().unwrap_err();
             let msg = err.to_string();
-            for var in &ALL_VARS {
+            for var in &REQUIRED_VARS {
                 assert!(
                     msg.contains(var),
                     "error should mention missing var {var}, got: {msg}"
@@ -307,5 +400,133 @@ mod tests {
                 "error should mention AGENT_LON for out-of-range, got: {msg}"
             );
         });
+    }
+
+    #[test]
+    fn parses_probe_ports() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_TCP_PROBE_PORT", "3555");
+            env::set_var("MESHMON_UDP_PROBE_PORT", "3552");
+            let env = AgentEnv::from_env().expect("valid");
+            assert_eq!(env.tcp_probe_port, 3555);
+            assert_eq!(env.udp_probe_port, 3552);
+            assert_eq!(env.icmp_target_concurrency, 32);
+        });
+    }
+
+    #[test]
+    fn rejects_zero_tcp_probe_port() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_TCP_PROBE_PORT", "0");
+            env::set_var("MESHMON_UDP_PROBE_PORT", "3552");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(err.to_string().contains("MESHMON_TCP_PROBE_PORT"), "{err}");
+        });
+    }
+
+    #[test]
+    fn rejects_invalid_tcp_probe_port() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_TCP_PROBE_PORT", "not-a-port");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(err.to_string().contains("MESHMON_TCP_PROBE_PORT"), "{err}");
+        });
+    }
+
+    #[test]
+    fn icmp_target_concurrency_override() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_TCP_PROBE_PORT", "3555");
+            env::set_var("MESHMON_UDP_PROBE_PORT", "3552");
+            env::set_var("MESHMON_ICMP_TARGET_CONCURRENCY", "8");
+            let env = AgentEnv::from_env().unwrap();
+            assert_eq!(env.icmp_target_concurrency, 8);
+        });
+    }
+
+    #[test]
+    fn rejects_icmp_target_concurrency_out_of_range() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_ICMP_TARGET_CONCURRENCY", "2048");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(
+                err.to_string().contains("MESHMON_ICMP_TARGET_CONCURRENCY"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_icmp_target_concurrency_zero() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_ICMP_TARGET_CONCURRENCY", "0");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(
+                err.to_string().contains("MESHMON_ICMP_TARGET_CONCURRENCY"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_icmp_target_concurrency_invalid() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_ICMP_TARGET_CONCURRENCY", "not-a-number");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(
+                err.to_string().contains("MESHMON_ICMP_TARGET_CONCURRENCY"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn probe_config_extracts_secret() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).expect("valid");
+        assert_eq!(cfg.udp_probe_secret, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(cfg.udp_probe_previous_secret.is_none());
+    }
+
+    #[test]
+    fn probe_config_extracts_previous_secret() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+            udp_probe_previous_secret: vec![9, 10, 11, 12, 13, 14, 15, 16].into(),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).expect("valid");
+        assert_eq!(cfg.udp_probe_secret, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            cfg.udp_probe_previous_secret,
+            Some([9, 10, 11, 12, 13, 14, 15, 16])
+        );
+    }
+
+    #[test]
+    fn probe_config_rejects_wrong_length_secret() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1, 2, 3, 4].into(),
+            ..Default::default()
+        };
+        let err = ProbeConfig::from_proto(resp).unwrap_err();
+        assert!(err.to_string().contains("udp_probe_secret"), "{err}");
+    }
+
+    #[test]
+    fn probe_config_rejects_wrong_length_previous_secret() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+            udp_probe_previous_secret: vec![1, 2, 3].into(),
+            ..Default::default()
+        };
+        let err = ProbeConfig::from_proto(resp).unwrap_err();
+        assert!(
+            err.to_string().contains("udp_probe_previous_secret"),
+            "{err}"
+        );
     }
 }

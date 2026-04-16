@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 async fn seed(pool: &PgPool, id: &str, offset: ChronoDuration) {
     sqlx::query(
-        "INSERT INTO agents (id, display_name, ip, last_seen_at) \
-         VALUES ($1, $2, '10.0.0.1'::inet, NOW() + $3)",
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+         VALUES ($1, $2, '10.0.0.1'::inet, 3555, 3552, NOW() + $3)",
     )
     .bind(id)
     .bind(format!("Agent {id}"))

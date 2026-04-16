@@ -618,6 +618,9 @@ url = "postgres://ignored@h/d"
 [[auth.users]]
 username = "{username}"
 password_hash = "{hash}"
+
+[probing]
+udp_probe_secret = "hex:6d73686d6e2d7631"
 "#
         );
         let cfg = Arc::new(Config::from_str(&toml, "test.toml").expect("parse"));
@@ -709,6 +712,9 @@ password_hash = "{hash}"
         let new_toml = r#"
 [database]
 url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:6d73686d6e2d7631"
 "#;
         let new_cfg = Arc::new(Config::from_str(new_toml, "test.toml").expect("parse"));
         cfg.store(new_cfg);
@@ -822,6 +828,9 @@ url = "postgres://ignored@localhost/db"
 
 [agent_api]
 {token_line}
+
+[probing]
+udp_probe_secret = "hex:6d73686d6e2d7631"
 "#
         );
         let cfg = Arc::new(Config::from_str(&toml, "test.toml").expect("config parse"));

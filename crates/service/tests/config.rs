@@ -9,6 +9,9 @@ listen_addr = "127.0.0.1:8080"
 
 [database]
 url = "postgres://meshmon:secret@localhost:5432/meshmon"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#;
 
 #[test]
@@ -72,6 +75,9 @@ fn url_env_resolves() {
         r#"
 [database]
 url_env = "MESHMON_T04_TEST_URL"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "t.toml",
     )
@@ -144,6 +150,9 @@ url = "postgres://a@b/c"
 [[auth.users]]
 username = "admin"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$BztdyfEefG5V18Uudy4vk6vVrWxD1w9dDLV5GhJNDAs"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "t.toml",
     );
@@ -161,6 +170,8 @@ fn log_format_compact_accepted() {
 url = "postgres://a@b/c"
 [logging]
 format = "compact"
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "t.toml",
     )
@@ -291,6 +302,8 @@ fn trust_forwarded_headers_defaults_to_false() {
         r#"
 [database]
 url = "postgres://u@h/d"
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -306,6 +319,8 @@ fn trust_forwarded_headers_honored() {
 url = "postgres://u@h/d"
 [service]
 trust_forwarded_headers = true
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -319,6 +334,9 @@ fn agents_section_defaults_when_missing() {
         r#"
 [database]
 url = "postgres://a@b/c"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -337,6 +355,9 @@ url = "postgres://a@b/c"
 [agents]
 target_active_window_minutes = 15
 refresh_interval_seconds = 30
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -383,6 +404,9 @@ fn metrics_auth_section_parses_inline_hash() {
 [database]
 url = "postgres://a@b/c"
 
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
 [service.metrics_auth]
 username = "prom"
 password_hash = "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY"
@@ -421,6 +445,9 @@ fn metrics_auth_section_resolves_env_hash() {
 [database]
 url = "postgres://a@b/c"
 
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
 [service.metrics_auth]
 username = "prom"
 password_hash_env = "MESHMON_TEST_METRICS_PASSWORD_HASH"
@@ -436,6 +463,9 @@ fn metrics_auth_absent_is_none() {
     let toml = r#"
 [database]
 url = "postgres://a@b/c"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#;
     let cfg = Config::from_str(toml, "t.toml").expect("parse");
     assert!(cfg.service.metrics_auth.is_none());

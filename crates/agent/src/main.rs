@@ -7,8 +7,22 @@ use meshmon_agent::bootstrap::AgentRuntime;
 use meshmon_agent::config::AgentEnv;
 use tokio_util::sync::CancellationToken;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Build the runtime with an explicit cap on the blocking pool.
+    // Rationale: trippy rounds run under `spawn_blocking` and each holds
+    // a thread for up to `read_timeout + grace`. Bounding the pool
+    // prevents runaway thread + memory growth if trippy stalls under
+    // network degradation. Stack size halved from tokio's 8 MB default
+    // to bound worst-case RAM at ~128 MB rather than ~512 MB.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(64)
+        .thread_stack_size(2 * 1024 * 1024)
+        .build()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Tracing subscriber: structured JSON on stdout, configurable via
     // RUST_LOG (default: info for meshmon crates, warn for everything else).
     tracing_subscriber::fmt()

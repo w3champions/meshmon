@@ -17,12 +17,16 @@ path = "src/main.rs"
 [dependencies]
 meshmon-protocol = { path = "../protocol" }
 anyhow.workspace = true
+dashmap.workspace = true
 prost.workspace = true
 rand.workspace = true
 serde.workspace = true
+socket2.workspace = true
+subtle.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["tls-native-roots"] }
+trippy-core.workspace = true
 tonic-prost.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

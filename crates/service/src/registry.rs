@@ -36,6 +36,10 @@ pub struct AgentInfo {
     pub lon: Option<f64>,
     /// Optional `agent_version` string reported on register.
     pub agent_version: Option<String>,
+    /// Advertised TCP echo-listener port (1-65535, enforced by DB CHECK).
+    pub tcp_probe_port: u16,
+    /// Advertised UDP echo-listener port (1-65535, enforced by DB CHECK).
+    pub udp_probe_port: u16,
     /// When this agent first registered.
     pub registered_at: DateTime<Utc>,
     /// Last successful push (register/metrics/snapshot).
@@ -132,6 +136,8 @@ struct AgentRow {
     lat: Option<f64>,
     lon: Option<f64>,
     agent_version: Option<String>,
+    tcp_probe_port: i32,
+    udp_probe_port: i32,
     registered_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
 }
@@ -143,25 +149,59 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
         r#"
         SELECT id, display_name, location,
                ip as "ip: IpNetwork",
-               lat, lon, agent_version, registered_at, last_seen_at
+               lat, lon, agent_version,
+               tcp_probe_port, udp_probe_port,
+               registered_at, last_seen_at
         FROM agents
         "#,
     )
     .fetch_all(pool)
     .await?;
 
-    let agents = rows
+    // DB has CHECK (port BETWEEN 1 AND 65535) on both columns, so the cast
+    // below always succeeds on a well-formed database. We still guard here:
+    // a constraint drift (`ALTER TABLE ... NOT VALID`, replica skew, manual
+    // tamper) would otherwise panic the refresh task, kill the `JoinHandle`
+    // silently, and leave the registry stale indefinitely. Log and skip
+    // instead so one bad row doesn't sink the whole snapshot.
+    let agents: Vec<AgentInfo> = rows
         .into_iter()
-        .map(|row| AgentInfo {
-            id: row.id,
-            display_name: row.display_name,
-            location: row.location,
-            ip: row.ip,
-            lat: row.lat,
-            lon: row.lon,
-            agent_version: row.agent_version,
-            registered_at: row.registered_at,
-            last_seen_at: row.last_seen_at,
+        .filter_map(|row| {
+            let tcp_probe_port = match u16::try_from(row.tcp_probe_port) {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    tracing::error!(
+                        agent_id = %row.id,
+                        value = row.tcp_probe_port,
+                        "skipping agent with out-of-range tcp_probe_port",
+                    );
+                    return None;
+                }
+            };
+            let udp_probe_port = match u16::try_from(row.udp_probe_port) {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    tracing::error!(
+                        agent_id = %row.id,
+                        value = row.udp_probe_port,
+                        "skipping agent with out-of-range udp_probe_port",
+                    );
+                    return None;
+                }
+            };
+            Some(AgentInfo {
+                id: row.id,
+                display_name: row.display_name,
+                location: row.location,
+                ip: row.ip,
+                lat: row.lat,
+                lon: row.lon,
+                agent_version: row.agent_version,
+                tcp_probe_port,
+                udp_probe_port,
+                registered_at: row.registered_at,
+                last_seen_at: row.last_seen_at,
+            })
         })
         .collect();
 

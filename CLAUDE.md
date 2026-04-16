@@ -40,6 +40,18 @@ Key patterns:
 - `AgentRuntime<A: ServiceApi>` owns supervisors, config broadcast, cancel token
 - Retry with exponential backoff + jitter for all bootstrap RPCs
 - `CancellationToken` tree for graceful shutdown propagation
+- UDP prober uses shared-socket dispatcher pool (`UdpProberPool`) rather
+  than per-target sockets — O(1) fd count as targets grow
+- Trippy driver uses `spawn_blocking` + a global `Semaphore`
+  (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32) to cap raw-socket + thread use
+- Agents run TCP + UDP echo listeners on `MESHMON_TCP_PROBE_PORT` /
+  `MESHMON_UDP_PROBE_PORT`. Both listeners (and the `UdpProberPool`'s
+  shared sender socket) bind `[::]` dual-stack (`IPV6_V6ONLY=false`) so
+  a single socket serves both IPv4 and IPv6 peers; the receiver paths
+  normalize v4-mapped-v6 peer addresses via `IpAddr::to_canonical()`
+  before allowlist / dispatch-map lookups. UDP is secret-gated (8-byte
+  secret from `ConfigResponse`) + allowlist-gated (IPs from
+  `GetTargets`).
 
 ## Conventions
 

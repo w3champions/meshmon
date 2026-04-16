@@ -12,8 +12,8 @@ async fn touch_writes_last_seen() {
     let agent_id = format!("a-{}", uuid::Uuid::new_v4().simple());
 
     sqlx::query(
-        "INSERT INTO agents (id, display_name, ip, last_seen_at) \
-         VALUES ($1, 'A', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+         VALUES ($1, 'A', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
     )
     .bind(&agent_id)
     .execute(&pool)
@@ -54,8 +54,8 @@ async fn second_touch_within_debounce_skips_db_write() {
     let agent_id = format!("a-{}", uuid::Uuid::new_v4().simple());
 
     sqlx::query(
-        "INSERT INTO agents (id, display_name, ip, last_seen_at) \
-         VALUES ($1, 'A', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+         VALUES ($1, 'A', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
     )
     .bind(&agent_id)
     .execute(&pool)

@@ -169,6 +169,22 @@ grpcurl -plaintext \
 
 See `meshmon.toml` (canonical form lives in the deploy/ example). Secrets go through `*_env` indirection.
 
+### `[probing]` — UDP probe secret
+
+The `[probing]` section requires a `udp_probe_secret` — exactly 8 bytes,
+encoded as `hex:` or `base64:`. Agents embed this secret in their UDP
+probe packets; the UDP echo listener drops traffic that does not match
+it. Rotate by setting `udp_probe_previous_secret` to the outgoing value;
+listeners accept either during the rotation window.
+
+```toml
+[probing]
+# Exactly 8 bytes, hex: or base64: prefix. Required.
+udp_probe_secret = "hex:0011223344556677"
+# Optional rotation companion — listeners accept either.
+# udp_probe_previous_secret = "hex:ffeeddccbbaa9988"
+```
+
 ## Observability
 
 - `GET /healthz` — liveness. 200 while the process is up. No auth.

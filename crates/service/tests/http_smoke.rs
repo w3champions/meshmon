@@ -19,6 +19,9 @@ async fn make_state(pool: PgPool) -> AppState {
             r#"
 [database]
 url = "postgres://ignored@localhost/nope"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
             "synthetic.toml",
         )

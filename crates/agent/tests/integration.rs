@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
@@ -76,7 +76,10 @@ impl AgentApi for MockAgentApiServer {
         &self,
         _request: Request<GetConfigRequest>,
     ) -> Result<Response<ConfigResponse>, Status> {
-        Ok(Response::new(ConfigResponse::default()))
+        Ok(Response::new(ConfigResponse {
+            udp_probe_secret: vec![0u8; 8].into(),
+            ..Default::default()
+        }))
     }
 
     async fn get_targets(
@@ -91,6 +94,8 @@ impl AgentApi for MockAgentApiServer {
                 location: "Test".to_string(),
                 lat: 1.0,
                 lon: 2.0,
+                tcp_probe_port: 3555,
+                udp_probe_port: 3552,
             },
             Target {
                 id: "peer-b".to_string(),
@@ -99,6 +104,8 @@ impl AgentApi for MockAgentApiServer {
                 location: "Test".to_string(),
                 lat: 3.0,
                 lon: 4.0,
+                tcp_probe_port: 3555,
+                udp_probe_port: 3552,
             },
         ];
         Ok(Response::new(TargetsResponse { targets }))
@@ -149,6 +156,15 @@ async fn start_mock_server() -> (SocketAddr, Arc<MockCounters>) {
 async fn bootstrap_against_real_grpc_server() {
     let (addr, counters) = start_mock_server().await;
 
+    // Allocate ephemeral probe ports so the listeners don't collide with
+    // parallel tests or other processes on well-known ports.
+    let tcp_sock = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_probe_port = tcp_sock.local_addr().unwrap().port();
+    drop(tcp_sock);
+    let udp_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_probe_port = udp_sock.local_addr().unwrap().port();
+    drop(udp_sock);
+
     let env = AgentEnv {
         service_url: format!("http://{addr}"),
         agent_token: "test-token".to_string(),
@@ -161,6 +177,9 @@ async fn bootstrap_against_real_grpc_server() {
             lon: 0.0,
         },
         agent_version: "0.0.0-test".to_string(),
+        tcp_probe_port,
+        udp_probe_port,
+        icmp_target_concurrency: 32,
     };
 
     let api = GrpcServiceApi::connect(&env.service_url, &env.agent_token)

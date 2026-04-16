@@ -16,6 +16,8 @@ fn sample(id: &str, ip4: [u8; 4]) -> RegisterRequest {
         lat: 52.52,
         lon: 13.405,
         agent_version: "0.1.0".into(),
+        tcp_probe_port: 3555,
+        udp_probe_port: 3552,
     }
 }
 
@@ -282,4 +284,127 @@ async fn register_without_auth_returns_unauthenticated() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn register_rejects_zero_tcp_port() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 5, 1])).await;
+
+    let mut req = sample("agent-reg-tcp-zero", [10, 9, 5, 1]);
+    req.tcp_probe_port = 0;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(
+        err.message().contains("tcp_probe_port"),
+        "message was {:?}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn register_rejects_zero_udp_port() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 5, 2])).await;
+
+    let mut req = sample("agent-reg-udp-zero", [10, 9, 5, 2]);
+    req.udp_probe_port = 0;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(
+        err.message().contains("udp_probe_port"),
+        "message was {:?}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn register_rejects_out_of_range_tcp_port() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 5, 3])).await;
+
+    let mut req = sample("agent-reg-tcp-too-big", [10, 9, 5, 3]);
+    req.tcp_probe_port = 70_000;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(
+        err.message().contains("tcp_probe_port"),
+        "message was {:?}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn register_rejects_out_of_range_udp_port() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 5, 4])).await;
+
+    let mut req = sample("agent-reg-udp-too-big", [10, 9, 5, 4]);
+    req.udp_probe_port = 70_000;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(
+        err.message().contains("udp_probe_port"),
+        "message was {:?}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn register_persists_probe_ports() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool.clone()).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 6, 1])).await;
+
+    let mut req = sample("agent-reg-ports", [10, 9, 6, 1]);
+    req.tcp_probe_port = 4001;
+    req.udp_probe_port = 4002;
+    let _ = client.register(req).await.expect("register");
+
+    let row = sqlx::query("SELECT tcp_probe_port, udp_probe_port FROM agents WHERE id = $1")
+        .bind("agent-reg-ports")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let tcp: i32 = row.get(0);
+    let udp: i32 = row.get(1);
+    assert_eq!(tcp, 4001);
+    assert_eq!(udp, 4002);
+}
+
+#[tokio::test]
+async fn register_upsert_updates_probe_ports() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool.clone()).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 6, 2])).await;
+
+    let mut first = sample("agent-reg-ports-upsert", [10, 9, 6, 2]);
+    first.tcp_probe_port = 5001;
+    first.udp_probe_port = 5002;
+    let _ = client.register(first).await.expect("first");
+
+    let mut second = sample("agent-reg-ports-upsert", [10, 9, 6, 2]);
+    second.tcp_probe_port = 6001;
+    second.udp_probe_port = 6002;
+    let _ = client.register(second).await.expect("second");
+
+    let row = sqlx::query("SELECT tcp_probe_port, udp_probe_port FROM agents WHERE id = $1")
+        .bind("agent-reg-ports-upsert")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let tcp: i32 = row.get(0);
+    let udp: i32 = row.get(1);
+    assert_eq!(tcp, 6001);
+    assert_eq!(udp, 6002);
 }

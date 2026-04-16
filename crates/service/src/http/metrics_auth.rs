@@ -171,6 +171,9 @@ mod tests {
 [database]
 url = "postgres://ignored@h/d"
 
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
 [service.metrics_auth]
 username = "prom"
 password_hash = "{PHC_HASH}"
@@ -180,6 +183,9 @@ password_hash = "{PHC_HASH}"
             r#"
 [database]
 url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#
             .to_owned()
         };

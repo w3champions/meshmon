@@ -165,12 +165,25 @@ async fn migrations_are_idempotent_on_plain_postgres() {
     run_migrations(&db.pool).await.expect("first run");
     run_migrations(&db.pool).await.expect("second run");
 
-    // sqlx tracks applied migrations — exactly one version recorded.
+    // sqlx tracks applied migrations — the count must match the number of
+    // files actually committed under `crates/service/migrations/` (grows by
+    // one every migration we add). Counting versions on disk beats hard-
+    // coding the number here, which silently drifts with every new
+    // migration.
+    let expected_versions = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+        .expect("read migrations dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".up.sql"))
+        .count() as i64;
+
     let applied: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM _sqlx_migrations")
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(applied.0, 1, "exactly one migration should be recorded");
+    assert_eq!(
+        applied.0, expected_versions,
+        "one row per `*.up.sql` migration should be recorded, re-run must be idempotent",
+    );
 
     db.close().await;
 }
@@ -188,13 +201,15 @@ async fn schema_constraints_behave_correctly() {
     {
         let mut tx = pool.begin().await.unwrap();
         sqlx::query(
-            "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+             VALUES ('a', 'Agent A', '10.0.0.1', 3555, 3552)",
         )
         .execute(&mut *tx)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO agents (id, display_name, ip) VALUES ('b', 'Agent B', '10.0.0.2')",
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+             VALUES ('b', 'Agent B', '10.0.0.2', 3555, 3552)",
         )
         .execute(&mut *tx)
         .await
@@ -224,7 +239,8 @@ async fn schema_constraints_behave_correctly() {
     {
         let mut tx = pool.begin().await.unwrap();
         sqlx::query(
-            "INSERT INTO agents (id, display_name, ip) VALUES ('a', 'Agent A', '10.0.0.1')",
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+             VALUES ('a', 'Agent A', '10.0.0.1', 3555, 3552)",
         )
         .execute(&mut *tx)
         .await

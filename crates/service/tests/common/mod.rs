@@ -71,8 +71,9 @@
 //! async fn my_dml_test() {
 //!     let pool = common::shared_migrated_pool().await;
 //!     let mut tx = pool.begin().await.unwrap();
-//!     sqlx::query("INSERT INTO agents (id, display_name, ip) \
-//!                  VALUES ('a', 'Agent A', '10.0.0.1')")
+//!     sqlx::query("INSERT INTO agents (id, display_name, ip, \
+//!                                      tcp_probe_port, udp_probe_port) \
+//!                  VALUES ('a', 'Agent A', '10.0.0.1', 3555, 3552)")
 //!         .execute(&mut *tx).await.unwrap();
 //!     // ... more work on &mut *tx ...
 //!     tx.rollback().await.unwrap();
@@ -380,6 +381,11 @@ pub fn dummy_registry(
     ))
 }
 
+/// Fixed synthetic UDP probe secret used by every `state_with_*` helper.
+/// `[probing].udp_probe_secret` is required at config parse time (T12); the
+/// exact bytes don't matter for these tests because no probing is exercised.
+pub const TEST_UDP_PROBE_SECRET_TOML: &str = "hex:0011223344556677";
+
 /// Construct an `AppState` with a single `admin` user whose password is
 /// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
 /// set a stable client IP via `X-Forwarded-For` without needing to inject a
@@ -396,6 +402,9 @@ trust_forwarded_headers = true
 [[auth.users]]
 username = "admin"
 password_hash = "{AUTH_TEST_HASH}"
+
+[probing]
+udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
 "#
     );
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
@@ -423,6 +432,9 @@ pub async fn state_with_admin_and_metrics_auth(pool: PgPool) -> AppState {
         r#"
 [database]
 url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 
 [service]
 trust_forwarded_headers = true
@@ -459,6 +471,9 @@ pub async fn state_with_admin_and_alertmanager(pool: PgPool, alertmanager_url: &
 [database]
 url = "postgres://ignored@h/d"
 
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
 [service]
 trust_forwarded_headers = true
 
@@ -492,6 +507,9 @@ pub async fn state_with_admin_and_vm(pool: PgPool, vm_url: &str) -> AppState {
         r#"
 [database]
 url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 
 [service]
 trust_forwarded_headers = true
@@ -544,6 +562,9 @@ pub async fn state_with_admin_and_web(
 [database]
 url = "postgres://ignored@h/d"
 
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
 [service]
 trust_forwarded_headers = true
 
@@ -585,6 +606,9 @@ url = "postgres://ignored@h/d"
 [[auth.users]]
 username = "admin"
 password_hash = "{AUTH_TEST_HASH}"
+
+[probing]
+udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
 "#
     );
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
@@ -626,6 +650,9 @@ password_hash = "{AUTH_TEST_HASH}"
 shared_token = "{TEST_AGENT_TOKEN}"
 rate_limit_per_minute = 600
 rate_limit_burst = 300
+
+[probing]
+udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
 "#
     );
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
