@@ -108,6 +108,14 @@ async fn metrics_exposes_registered_agent_info_and_last_seen() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_agent_token(pool.clone()).await;
 
+    // NOTE: this test mutates the shared migrated pool. The `register`
+    // call below commits the `obs-test-agent` row and it persists for
+    // the lifetime of the test binary. None of the current tests in
+    // this binary assert on agent counts, so the contamination is
+    // latent. If a future test here needs clean isolation, switch its
+    // pool to `common::acquire(true)` (fresh DB per test) or add an
+    // explicit `DELETE FROM agents WHERE id = 'obs-test-agent'` cleanup
+    // step.
     let mut client =
         common::grpc_harness::in_process_agent_client(state.clone(), IpAddr::from([10, 99, 0, 1]))
             .await;
