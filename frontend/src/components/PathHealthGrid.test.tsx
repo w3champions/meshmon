@@ -27,9 +27,9 @@ describe("PathHealthGrid", () => {
     renderWithProviders(<PathHealthGrid agents={AGENTS} matrix={new Map()} />);
 
     // 3 agents → 3×3 = 9 cells total (including self-cells).
-    // Each cell is a <Link> with aria-label "X to Y, stale".
-    const links = await screen.findAllByRole("link");
-    expect(links).toHaveLength(9);
+    // Each cell is a Link with role="gridcell" and aria-label "X to Y: stale".
+    const cells = await screen.findAllByRole("gridcell");
+    expect(cells).toHaveLength(9);
 
     // Row and column headers for each agent ID.
     const rowHeaders = screen.getAllByTestId("row-header");
@@ -49,34 +49,34 @@ describe("PathHealthGrid", () => {
     renderWithProviders(<PathHealthGrid agents={AGENTS} matrix={m} />);
 
     // Wait for the grid to render.
-    await screen.findAllByRole("link");
+    await screen.findAllByRole("gridcell");
 
-    const normalLink = screen.getByRole("link", {
-      name: "alpha to beta, normal",
+    const normalCell = screen.getByRole("gridcell", {
+      name: "alpha to beta: normal",
     });
-    expect(normalLink).toHaveAttribute("data-state", "normal");
+    expect(normalCell).toHaveAttribute("data-state", "normal");
 
-    const degradedLink = screen.getByRole("link", {
-      name: "alpha to gamma, degraded",
+    const degradedCell = screen.getByRole("gridcell", {
+      name: "alpha to gamma: degraded",
     });
-    expect(degradedLink).toHaveAttribute("data-state", "degraded");
+    expect(degradedCell).toHaveAttribute("data-state", "degraded");
 
-    const unreachableLink = screen.getByRole("link", {
-      name: "beta to alpha, unreachable",
+    const unreachableCell = screen.getByRole("gridcell", {
+      name: "beta to alpha: unreachable",
     });
-    expect(unreachableLink).toHaveAttribute("data-state", "unreachable");
+    expect(unreachableCell).toHaveAttribute("data-state", "unreachable");
   });
 
   // Test 3: clicking a cell navigates to /paths/$source/$target (Link href).
   test("each cell is a link with the correct /paths/$source/$target href", async () => {
     renderWithProviders(<PathHealthGrid agents={[agent("a"), agent("b")]} matrix={new Map()} />);
 
-    // 2 agents → 4 links
-    const link = await screen.findByRole("link", { name: "a to b, stale" });
-    expect(link).toHaveAttribute("href", "/paths/a/b");
+    // 2 agents → 4 cells
+    const cell = await screen.findByRole("gridcell", { name: "a to b: stale" });
+    expect(cell).toHaveAttribute("href", "/paths/a/b");
 
-    const selfLink = screen.getByRole("link", { name: "a to a, stale" });
-    expect(selfLink).toHaveAttribute("href", "/paths/a/a");
+    const selfCell = screen.getByRole("gridcell", { name: "a to a: stale" });
+    expect(selfCell).toHaveAttribute("href", "/paths/a/a");
   });
 
   // Test 4: missing matrix entry → data-state="stale".
@@ -86,19 +86,19 @@ describe("PathHealthGrid", () => {
 
     renderWithProviders(<PathHealthGrid agents={AGENTS} matrix={m} />);
 
-    await screen.findAllByRole("link");
+    await screen.findAllByRole("gridcell");
 
-    const staleLink = screen.getByRole("link", {
-      name: "alpha to beta, stale",
+    const staleCell = screen.getByRole("gridcell", {
+      name: "alpha to beta: stale",
     });
-    expect(staleLink).toHaveAttribute("data-state", "stale");
+    expect(staleCell).toHaveAttribute("data-state", "stale");
   });
 
   // Test 5a: sourceFilter renders only one row.
   test("sourceFilter renders only matching source rows", async () => {
     renderWithProviders(<PathHealthGrid agents={AGENTS} matrix={new Map()} sourceFilter="alpha" />);
 
-    await screen.findAllByRole("link");
+    await screen.findAllByRole("gridcell");
 
     // Only 1 row header, 3 column headers.
     const rowHeaders = screen.getAllByTestId("row-header");
@@ -106,15 +106,15 @@ describe("PathHealthGrid", () => {
     expect(rowHeaders[0].textContent).toBe("alpha");
 
     // 1 row × 3 cols = 3 cells.
-    const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(3);
+    const cells = screen.getAllByRole("gridcell");
+    expect(cells).toHaveLength(3);
   });
 
   // Test 5b: targetFilter renders only one column.
   test("targetFilter renders only matching target columns", async () => {
     renderWithProviders(<PathHealthGrid agents={AGENTS} matrix={new Map()} targetFilter="beta" />);
 
-    await screen.findAllByRole("link");
+    await screen.findAllByRole("gridcell");
 
     // 3 row headers, 1 column header.
     const rowHeaders = screen.getAllByTestId("row-header");
@@ -124,8 +124,8 @@ describe("PathHealthGrid", () => {
     expect(colHeaders[0].textContent).toBe("beta");
 
     // 3 rows × 1 col = 3 cells.
-    const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(3);
+    const cells = screen.getAllByRole("gridcell");
+    expect(cells).toHaveLength(3);
   });
 
   // Test 6: empty agents array → fallback text.
@@ -133,6 +133,6 @@ describe("PathHealthGrid", () => {
     renderWithProviders(<PathHealthGrid agents={[]} matrix={new Map()} />);
 
     expect(await screen.findByText("No agents registered yet.")).toBeInTheDocument();
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.queryByRole("gridcell")).not.toBeInTheDocument();
   });
 });

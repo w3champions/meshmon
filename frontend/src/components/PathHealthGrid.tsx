@@ -32,7 +32,10 @@ export function PathHealthGrid({
 
   return (
     <TooltipProvider delayDuration={150}>
+      {/* biome-ignore lint/a11y/useSemanticElements: role="grid" is intentional on a CSS grid; <table> would break the layout */}
       <div
+        role="grid"
+        aria-label="Path health matrix"
         className={cn("inline-grid gap-1", className)}
         style={{
           gridTemplateColumns: `minmax(4rem, auto) repeat(${cols.length}, 1.5rem)`,
@@ -42,8 +45,11 @@ export function PathHealthGrid({
         <div />
         {/* Column headers */}
         {cols.map((col) => (
+          /* biome-ignore lint/a11y/useSemanticElements: role="columnheader" on div is intentional for ARIA grid; <th> cannot be used in CSS grid layout */
           <div
             key={`h-${col}`}
+            role="columnheader"
+            tabIndex={-1}
             className="text-xs font-mono rotate-[-60deg] origin-bottom-left whitespace-nowrap text-muted-foreground"
             data-testid="col-header"
           >
@@ -67,7 +73,10 @@ interface RowProps {
 function Row({ source, cols, matrix }: RowProps) {
   return (
     <>
+      {/* biome-ignore lint/a11y/useSemanticElements: role="rowheader" on div is intentional for ARIA grid; <th> cannot be used in CSS grid layout */}
       <div
+        role="rowheader"
+        tabIndex={-1}
         className="text-xs font-mono text-right pr-2 text-muted-foreground truncate"
         data-testid="row-header"
       >

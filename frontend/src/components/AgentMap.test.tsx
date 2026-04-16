@@ -1,13 +1,13 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
+import type { AgentSummary } from "@/api/hooks/agents";
+import type { HealthMatrix } from "@/api/hooks/health-matrix";
 
 vi.mock("react-leaflet", async () => {
   const { LeafletMock } = await import("@/test/leaflet-mock");
   return LeafletMock;
 });
 
-import type { AgentSummary } from "@/api/hooks/agents";
-import type { HealthMatrix } from "@/api/hooks/health-matrix";
 import { AgentMap } from "@/components/AgentMap";
 import { renderWithProviders } from "@/test/query-wrapper";
 
@@ -63,9 +63,10 @@ describe("AgentMap", () => {
     ]);
     renderWithProviders(<AgentMap agents={agents} matrix={matrix} />);
     const popups = await screen.findAllByTestId("popup");
-    // Agent "a" has worst outgoing = unreachable
+    // Agent "a" has worst outgoing = unreachable → StatusBadge renders "Unreachable"
     expect(popups[0].textContent).toContain("a");
-    // Agent "b" has no outgoing entries → stale or online depending on fallback
+    expect(popups[0].textContent).toContain("Unreachable");
+    // Agent "b" has no outgoing entries → falls back to stale
     expect(popups[1].textContent).toContain("b");
   });
 });

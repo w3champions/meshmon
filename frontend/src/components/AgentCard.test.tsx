@@ -79,4 +79,11 @@ describe("AgentCard", () => {
     expect(screen.getByText(/ago/)).toBeInTheDocument();
     expect(screen.getByText(/v0\.1\.0/)).toBeInTheDocument();
   });
+
+  test("non-compact shows last-seen but no version text when agent_version is absent", () => {
+    render(<AgentCard agent={MINIMAL_AGENT} />);
+    expect(screen.getByText(/ago/)).toBeInTheDocument();
+    expect(screen.queryByText(/·\s*v/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/v\d/)).not.toBeInTheDocument();
+  });
 });

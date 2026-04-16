@@ -33,9 +33,10 @@ export function PathHealthCell({ source, target, state, failureRate }: PathHealt
         <Link
           to={"/paths/$source/$target"}
           params={{ source, target }}
+          role="gridcell"
           className={cn("block h-6 w-6 rounded-sm transition-colors", COLOUR[state])}
           data-state={state}
-          aria-label={`${source} to ${target}, ${state}`}
+          aria-label={`${source} to ${target}: ${state}`}
         />
       </TooltipTrigger>
       <TooltipContent>{tooltipText}</TooltipContent>

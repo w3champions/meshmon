@@ -19,7 +19,7 @@ export default function AgentDetail() {
   if (!agent) {
     return (
       <div className="p-6 flex flex-col gap-3">
-        <p className="text-lg font-semibold">Agent not found</p>
+        <h2 className="text-lg font-semibold">Agent not found</h2>
         <Link to="/agents" className="text-sm underline underline-offset-2">
           Back to agents
         </Link>

@@ -91,11 +91,13 @@ export function AgentsTable({ agents, className }: AgentsTableProps) {
                   onClick={h.column.getCanSort() ? h.column.getToggleSortingHandler() : undefined}
                   className={h.column.getCanSort() ? "cursor-pointer select-none" : undefined}
                   aria-sort={
-                    h.column.getIsSorted() === "asc"
-                      ? "ascending"
-                      : h.column.getIsSorted() === "desc"
-                        ? "descending"
-                        : "none"
+                    h.column.getCanSort()
+                      ? h.column.getIsSorted() === "asc"
+                        ? "ascending"
+                        : h.column.getIsSorted() === "desc"
+                          ? "descending"
+                          : "none"
+                      : undefined
                   }
                 >
                   {flexRender(h.column.columnDef.header, h.getContext())}

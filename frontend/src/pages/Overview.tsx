@@ -8,8 +8,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export default function Overview() {
   const { data: agents, isLoading: agentsLoading } = useAgents();
-  const { data: matrix } = useHealthMatrix();
+  const { data: matrix, isLoading: matrixLoading } = useHealthMatrix();
 
+  const loading = agentsLoading || matrixLoading;
   const empty = (agents ?? []).length === 0;
 
   return (
@@ -22,12 +23,12 @@ export default function Overview() {
       </header>
       <AlertSummaryStrip />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {agentsLoading ? (
+        {loading ? (
           <Skeleton data-testid="map-skeleton" className="h-[400px] md:h-[500px] w-full" />
         ) : (
           <AgentMap agents={agents ?? []} matrix={matrix ?? new Map()} />
         )}
-        {agentsLoading ? (
+        {loading ? (
           <Skeleton data-testid="grid-skeleton" className="h-[400px] w-full" />
         ) : (
           <div className="overflow-auto">
@@ -37,7 +38,7 @@ export default function Overview() {
       </div>
       <section className="flex flex-col gap-2">
         <h2 className="text-lg font-semibold">Recent route changes</h2>
-        {empty && !agentsLoading ? (
+        {empty && !loading ? (
           <p className="text-sm text-muted-foreground">No recent route changes</p>
         ) : (
           <RecentRoutesTable />

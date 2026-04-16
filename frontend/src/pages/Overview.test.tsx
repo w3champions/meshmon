@@ -121,12 +121,9 @@ describe("Overview", () => {
     test("renders PathHealthGrid cells with data-state", async () => {
       setupPopulatedMocks();
       renderWithProviders(<Overview />);
-      // PathHealthGrid renders links with data-state attribute
-      const links = await screen.findAllByRole("link", {
-        name: /to .*, (normal|degraded|unreachable|stale)/,
-      });
+      // PathHealthGrid renders gridcells (Links) with data-state attribute
+      const links = await screen.findAllByRole("gridcell");
       expect(links.length).toBeGreaterThan(0);
-      // Each cell link has a data-state attribute
       for (const link of links) {
         expect(link).toHaveAttribute("data-state");
       }
@@ -217,6 +214,7 @@ describe("Overview", () => {
       renderWithProviders(<Overview />);
 
       expect(await screen.findByText("No agents registered yet.")).toBeInTheDocument();
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
     });
   });
 });
