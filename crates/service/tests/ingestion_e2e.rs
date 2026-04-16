@@ -89,8 +89,8 @@ async fn full_pipeline_metrics_and_snapshot() {
     let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
     for id in [&src, &tgt] {
         sqlx::query(
-            "INSERT INTO agents (id, display_name, ip, last_seen_at) \
-                     VALUES ($1, 'X', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+                     VALUES ($1, 'X', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
         )
         .bind(id)
         .execute(&pool)
@@ -210,8 +210,8 @@ async fn shutdown_drain_inserts_snapshot_and_emits_route_changes_counter() {
     let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
     for id in [&src, &tgt] {
         sqlx::query(
-            "INSERT INTO agents (id, display_name, ip, last_seen_at) \
-                     VALUES ($1, 'X', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+                     VALUES ($1, 'X', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
         )
         .bind(id)
         .execute(&pool)
@@ -313,8 +313,8 @@ async fn shutdown_waits_for_slow_snapshot_inserts() {
     let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
     for id in [&src, &tgt] {
         sqlx::query(
-            "INSERT INTO agents (id, display_name, ip, last_seen_at) \
-                     VALUES ($1, 'X', '10.0.0.1', NOW() - INTERVAL '1 hour')",
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+                     VALUES ($1, 'X', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
         )
         .bind(id)
         .execute(&pool)

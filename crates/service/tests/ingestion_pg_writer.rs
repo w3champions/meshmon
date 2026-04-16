@@ -41,11 +41,14 @@ async fn insert_writes_row_with_jsonb_hops() {
     let src = format!("a-{}", uuid::Uuid::new_v4().simple());
     let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
     for id in [&src, &tgt] {
-        sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ($1, 'X', '10.0.0.1')")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+             VALUES ($1, 'X', '10.0.0.1', 3555, 3552)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     let mut s = validated();
@@ -75,11 +78,14 @@ async fn insert_rejects_out_of_range_observed_at() {
     let src = format!("a-{}", uuid::Uuid::new_v4().simple());
     let tgt = format!("a-{}", uuid::Uuid::new_v4().simple());
     for id in [&src, &tgt] {
-        sqlx::query("INSERT INTO agents (id, display_name, ip) VALUES ($1, 'X', '10.0.0.1')")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+             VALUES ($1, 'X', '10.0.0.1', 3555, 3552)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     let mut s = validated(); // reuse existing helper

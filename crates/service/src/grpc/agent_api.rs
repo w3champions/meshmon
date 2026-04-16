@@ -298,9 +298,8 @@ impl AgentApi for AgentApiImpl {
                 location: a.location.unwrap_or_default(),
                 lat: a.lat.unwrap_or(0.0),
                 lon: a.lon.unwrap_or(0.0),
-                // Task 12.5/12.6 will wire real probe ports from the registry.
-                tcp_probe_port: 0,
-                udp_probe_port: 0,
+                tcp_probe_port: u32::from(a.tcp_probe_port),
+                udp_probe_port: u32::from(a.udp_probe_port),
             })
             .collect();
         Ok(Response::new(TargetsResponse { targets }))

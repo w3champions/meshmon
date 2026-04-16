@@ -71,8 +71,9 @@
 //! async fn my_dml_test() {
 //!     let pool = common::shared_migrated_pool().await;
 //!     let mut tx = pool.begin().await.unwrap();
-//!     sqlx::query("INSERT INTO agents (id, display_name, ip) \
-//!                  VALUES ('a', 'Agent A', '10.0.0.1')")
+//!     sqlx::query("INSERT INTO agents (id, display_name, ip, \
+//!                                      tcp_probe_port, udp_probe_port) \
+//!                  VALUES ('a', 'Agent A', '10.0.0.1', 3555, 3552)")
 //!         .execute(&mut *tx).await.unwrap();
 //!     // ... more work on &mut *tx ...
 //!     tx.rollback().await.unwrap();

@@ -33,6 +33,10 @@ pub struct AgentInfo {
     pub lon: Option<f64>,
     /// Optional `agent_version` string reported on register.
     pub agent_version: Option<String>,
+    /// Advertised TCP echo-listener port (1-65535, enforced by DB CHECK).
+    pub tcp_probe_port: u16,
+    /// Advertised UDP echo-listener port (1-65535, enforced by DB CHECK).
+    pub udp_probe_port: u16,
     /// When this agent first registered.
     pub registered_at: DateTime<Utc>,
     /// Last successful push (register/metrics/snapshot).
@@ -129,6 +133,8 @@ struct AgentRow {
     lat: Option<f64>,
     lon: Option<f64>,
     agent_version: Option<String>,
+    tcp_probe_port: i32,
+    udp_probe_port: i32,
     registered_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
 }
@@ -140,7 +146,9 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
         r#"
         SELECT id, display_name, location,
                ip as "ip: IpNetwork",
-               lat, lon, agent_version, registered_at, last_seen_at
+               lat, lon, agent_version,
+               tcp_probe_port, udp_probe_port,
+               registered_at, last_seen_at
         FROM agents
         "#,
     )
@@ -157,6 +165,10 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
             lat: row.lat,
             lon: row.lon,
             agent_version: row.agent_version,
+            tcp_probe_port: u16::try_from(row.tcp_probe_port)
+                .expect("tcp_probe_port DB CHECK 1-65535"),
+            udp_probe_port: u16::try_from(row.udp_probe_port)
+                .expect("udp_probe_port DB CHECK 1-65535"),
             registered_at: row.registered_at,
             last_seen_at: row.last_seen_at,
         })
