@@ -61,6 +61,24 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// supervisor per target. Each step retries with exponential backoff until
     /// success or cancellation.
     pub async fn bootstrap(env: AgentEnv, api: Arc<A>, cancel: CancellationToken) -> Result<Self> {
+        // Derive a child cancel token. Every task spawned here (listeners,
+        // UDP pool receiver/sweeper, trippy driver semaphore holders,
+        // per-target supervisors) uses `child.clone()` so either (a) the
+        // parent `cancel` firing or (b) us hitting the drop-guard on an
+        // error-return propagates a stop signal. The parent's cancel flows
+        // through `child` automatically via the child-token relationship;
+        // storing `child` as `self.cancel` ensures `runtime.shutdown()`
+        // only cancels our own sub-tree, not a token the caller still uses
+        // for other work.
+        let child = cancel.child_token();
+        // Drop-guard: any `?`-return below cancels `child`, which tears
+        // down every task we've spawned so far. Disarmed immediately
+        // before the successful `Ok(Self{..})`. Without this, a late
+        // bootstrap error (e.g. invalid `ConfigResponse` secret length)
+        // would leave the listener tasks running and the ports bound,
+        // making retries fail with `AddrInUse`.
+        let cancel_guard = child.clone().drop_guard();
+
         // -- Spawn echo listeners FIRST so there is no window where peer
         // probes silently time out. Bind is eager: if a port is already in
         // use, bootstrap fails rather than registering against a dead
@@ -69,7 +87,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
         // steps below populate the watch channels).
         let (secret_tx, secret_rx) = watch::channel(SecretSnapshot::default());
         let (allowlist_tx, allowlist_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new()));
-        let tcp_listener = echo_tcp::spawn(env.tcp_probe_port, cancel.clone())
+        let tcp_listener = echo_tcp::spawn(env.tcp_probe_port, child.clone())
             .await
             .with_context(|| {
                 format!(
@@ -81,7 +99,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
             env.udp_probe_port,
             secret_rx.clone(),
             allowlist_rx,
-            cancel.clone(),
+            child.clone(),
         )
         .await
         .with_context(|| {
@@ -93,10 +111,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
 
         // UDP prober pool + trippy prober. Handles are owned by the runtime;
         // supervisors will attach targets via `spawn_target` in a later task.
-        let udp_pool = UdpProberPool::new(secret_rx.clone(), cancel.clone())
+        let udp_pool = UdpProberPool::new(secret_rx.clone(), child.clone())
             .await
             .context("UDP prober pool bind failed")?;
-        let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, cancel.clone());
+        let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, child.clone());
 
         // -- Register --
         let reg_req = build_register_request(
@@ -114,7 +132,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                     Ok(())
                 }
             },
-            &cancel,
+            &child,
             "register",
         )
         .await?;
@@ -125,7 +143,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 let api = Arc::clone(&api);
                 async move { api.get_config().await }
             },
-            &cancel,
+            &child,
             "get_config",
         )
         .await?;
@@ -151,7 +169,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 let sid = source_id.clone();
                 async move { api.get_targets(&sid).await }
             },
-            &cancel,
+            &child,
             "get_targets",
         )
         .await?;
@@ -167,7 +185,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 continue;
             }
             let id = target.id.clone();
-            let handle = supervisor::spawn(target, config_rx.clone(), cancel.clone());
+            let handle = supervisor::spawn(target, config_rx.clone(), child.clone());
             supervisors.insert(id, handle);
         }
 
@@ -175,6 +193,11 @@ impl<A: ServiceApi> AgentRuntime<A> {
             supervisor_count = supervisors.len(),
             "bootstrap complete — supervisors spawned",
         );
+
+        // Success: disarm the drop-guard so our spawned tasks keep running.
+        // `child` (stored below as `self.cancel`) remains linked to the
+        // parent, so the caller's token still cascades into shutdown.
+        let cancel = cancel_guard.disarm();
 
         Ok(Self {
             env,
@@ -849,6 +872,85 @@ mod tests {
             "unexpected error: {msg}",
         );
         drop(squatter);
+    }
+
+    // -- BadConfigApi --------------------------------------------------------
+
+    /// Returns a `ConfigResponse` whose `udp_probe_secret` is the wrong
+    /// length (not 8 bytes). `ProbeConfig::from_proto` rejects this, and
+    /// the bootstrap `?`-return fires AFTER the listener tasks are bound.
+    struct BadConfigApi;
+
+    impl ServiceApi for BadConfigApi {
+        async fn register(&self, _req: RegisterRequest) -> Result<RegisterResponse> {
+            Ok(RegisterResponse {})
+        }
+
+        async fn get_config(&self) -> Result<ConfigResponse> {
+            Ok(ConfigResponse {
+                udp_probe_secret: vec![0u8; 3].into(),
+                ..Default::default()
+            })
+        }
+
+        async fn get_targets(&self, _source_id: &str) -> Result<TargetsResponse> {
+            Ok(TargetsResponse { targets: vec![] })
+        }
+
+        async fn push_metrics(&self, _batch: MetricsBatch) -> Result<PushMetricsResponse> {
+            Ok(PushMetricsResponse {})
+        }
+
+        async fn push_route_snapshot(
+            &self,
+            _req: RouteSnapshotRequest,
+        ) -> Result<PushRouteSnapshotResponse> {
+            Ok(PushRouteSnapshotResponse {})
+        }
+    }
+
+    /// Regression test: when bootstrap fails *after* the listener tasks have
+    /// already bound their ports, the spawned tasks must be cancelled
+    /// (via the internal drop-guard + child cancel token) so the ports are
+    /// released and a subsequent attempt at the same ports can succeed.
+    /// Prior to the fix, the listener tasks stayed up indefinitely.
+    #[tokio::test]
+    async fn bootstrap_releases_ports_on_late_failure() {
+        let env = test_env().await;
+        let tcp_port = env.tcp_probe_port;
+        let udp_port = env.udp_probe_port;
+
+        let api = Arc::new(BadConfigApi);
+        let res = AgentRuntime::bootstrap(env, api, CancellationToken::new()).await;
+        let err = match res {
+            Ok(_) => panic!("bootstrap should fail on invalid ConfigResponse"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ConfigResponse") || msg.contains("udp_probe_secret"),
+            "unexpected error: {msg}",
+        );
+
+        // The listener tasks should have been cancelled by the drop-guard.
+        // Wait for them to release the ports, polling to avoid a flaky
+        // scheduling race. Without the fix, this loop times out because
+        // the listener tasks stay alive on the leaked cancel token.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let tcp_free = TcpListener::bind(("0.0.0.0", tcp_port)).await.is_ok();
+            let udp_free = UdpSocket::bind(("0.0.0.0", udp_port)).await.is_ok();
+            if tcp_free && udp_free {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!(
+                    "listener ports still held after bootstrap failure \
+                     (tcp_free={tcp_free}, udp_free={udp_free})"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Same as above for UDP.

@@ -683,6 +683,13 @@ fn decode_prefixed_bytes(field: &str, raw: &str) -> Result<Vec<u8>, String> {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    // Guard against non-ASCII input (e.g. multi-byte UTF-8). Without this
+    // check the byte-slice below (`&s[i..i + 2]`) panics on a boundary
+    // that splits a multi-byte character, which turns a malformed operator
+    // config value into a crash instead of a validation error.
+    if !s.is_ascii() {
+        return Err("hex input must be ASCII".to_string());
+    }
     if !s.len().is_multiple_of(2) {
         return Err(format!("odd length {}", s.len()));
     }
@@ -1001,5 +1008,21 @@ mod tests {
         let raw: RawProbingSection = toml::from_str("").unwrap();
         let err = ProbingSection::try_from(raw).unwrap_err();
         assert!(err.contains("udp_probe_secret"), "{err}");
+    }
+
+    #[test]
+    fn rejects_non_ascii_hex_secret() {
+        // Non-ASCII bytes cannot be safely byte-indexed by the hex decoder.
+        // A malformed operator config must surface as a validation error
+        // rather than a panic. The emoji is a 4-byte UTF-8 sequence that
+        // under naive byte-slicing would land mid-codepoint and panic.
+        let toml_src = "udp_probe_secret = \"hex:001122\u{1F600}0033\"";
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ASCII") || msg.contains("ascii"),
+            "expected ASCII validation error, got: {msg}",
+        );
     }
 }
