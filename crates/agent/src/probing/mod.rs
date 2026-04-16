@@ -6,6 +6,7 @@
 //! data types; prober implementations live in sibling files.
 
 pub mod echo_tcp;
+pub mod echo_udp;
 pub mod wire;
 
 use std::net::IpAddr;

@@ -1,0 +1,214 @@
+//! UDP echo listener (spec 02 § Agent echo listeners).
+//!
+//! Binds `0.0.0.0:port` and services 12-byte probes from peer agents:
+//!
+//! * len != 12                      → drop silent
+//! * secret mismatch (current OR previous) → drop silent
+//! * source IP not in allowlist     → send rejection response (0xFFFFFFFF nonce)
+//! * else                           → echo verbatim
+//!
+//! Secret is delivered via a `watch` channel so rotation propagates without
+//! restart. Allowlist is a `watch::Receiver<Arc<HashSet<IpAddr>>>` populated
+//! by the bootstrap refresh loop.
+
+use std::collections::HashSet;
+use std::net::IpAddr;
+use std::sync::Arc;
+
+use tokio::net::UdpSocket;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+use crate::probing::wire::{decode_probe, encode_rejection, PACKET_LEN};
+
+/// Secret snapshot delivered to the listener.
+#[derive(Debug, Clone, Default)]
+pub struct SecretSnapshot {
+    pub current: Option<[u8; 8]>,
+    pub previous: Option<[u8; 8]>,
+}
+
+/// Spawn the UDP echo listener. Returns its join handle.
+pub fn spawn(
+    port: u16,
+    secret_rx: watch::Receiver<SecretSnapshot>,
+    allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run(port, secret_rx, allowlist_rx, cancel))
+}
+
+async fn run(
+    port: u16,
+    secret_rx: watch::Receiver<SecretSnapshot>,
+    allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
+    cancel: CancellationToken,
+) {
+    let socket = match UdpSocket::bind(("0.0.0.0", port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                port,
+                error = %e,
+                "udp echo listener failed to bind; UDP probing will not work"
+            );
+            return;
+        }
+    };
+    tracing::info!(port, "udp echo listener ready");
+
+    let mut buf = [0u8; 32]; // small slack above PACKET_LEN to detect oversized
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("udp echo listener stopping");
+                return;
+            }
+            r = socket.recv_from(&mut buf) => {
+                let (n, peer) = match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "udp echo recv failed");
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        continue;
+                    }
+                };
+                if n != PACKET_LEN {
+                    // Oversize / undersize → silent drop. Tracing at trace
+                    // so scanner floods don't fill logs.
+                    tracing::trace!(bytes = n, %peer, "udp echo: wrong length");
+                    continue;
+                }
+
+                let secret = secret_rx.borrow().clone();
+                let Some(current) = secret.current.as_ref() else {
+                    // Pre-GetConfig: drop everything.
+                    continue;
+                };
+                let packet = &buf[..PACKET_LEN];
+                if decode_probe(packet, current, secret.previous.as_ref()).is_none() {
+                    // Secret mismatch.
+                    continue;
+                }
+
+                let allowed = allowlist_rx.borrow().contains(&peer.ip());
+                if !allowed {
+                    let reject = encode_rejection(current);
+                    if let Err(e) = socket.send_to(&reject, peer).await {
+                        tracing::debug!(error = %e, %peer, "udp rejection send failed");
+                    }
+                    continue;
+                }
+
+                // Echo verbatim.
+                if let Err(e) = socket.send_to(packet, peer).await {
+                    tracing::debug!(error = %e, %peer, "udp echo send failed");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use crate::probing::wire::{decode_response, encode_probe, DecodedResponse};
+
+    const SECRET: [u8; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+
+    async fn start_listener() -> (u16, CancellationToken) {
+        // Pick a free port.
+        let probe_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = probe_sock.local_addr().unwrap().port();
+        drop(probe_sock);
+
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot {
+            current: Some(SECRET),
+            previous: None,
+        });
+        std::mem::forget(sec_tx); // keep the channel alive for the test duration
+        let (al_tx, al_rx) = watch::channel(Arc::new({
+            let mut h = HashSet::new();
+            h.insert("127.0.0.1".parse().unwrap());
+            h
+        }));
+        std::mem::forget(al_tx);
+        let cancel = CancellationToken::new();
+        spawn(port, sec_rx, al_rx, cancel.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (port, cancel)
+    }
+
+    #[tokio::test]
+    async fn echoes_valid_probe() {
+        let (port, cancel) = start_listener().await;
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(("127.0.0.1", port)).await.unwrap();
+        let probe = encode_probe(&SECRET, 777);
+        sock.send(&probe).await.unwrap();
+
+        let mut buf = [0u8; 12];
+        let n = tokio::time::timeout(Duration::from_secs(1), sock.recv(&mut buf))
+            .await
+            .expect("no response")
+            .unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(
+            decode_response(&buf[..n], &SECRET, None),
+            Some(DecodedResponse::Echo { nonce: 777 }),
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn drops_wrong_secret_silently() {
+        let (port, cancel) = start_listener().await;
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(("127.0.0.1", port)).await.unwrap();
+        let probe = encode_probe(&[0u8; 8], 42);
+        sock.send(&probe).await.unwrap();
+
+        let mut buf = [0u8; 12];
+        let r = tokio::time::timeout(Duration::from_millis(200), sock.recv(&mut buf)).await;
+        assert!(r.is_err(), "should time out (silent drop)");
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn rejects_off_allowlist_source() {
+        // Swap allowlist to something that excludes 127.0.0.1 mid-flight.
+        let probe_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = probe_sock.local_addr().unwrap().port();
+        drop(probe_sock);
+
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot {
+            current: Some(SECRET),
+            previous: None,
+        });
+        std::mem::forget(sec_tx);
+        let (al_tx, al_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new())); // empty allowlist
+        std::mem::forget(al_tx);
+        let cancel = CancellationToken::new();
+        spawn(port, sec_rx, al_rx, cancel.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(("127.0.0.1", port)).await.unwrap();
+        let probe = encode_probe(&SECRET, 99);
+        sock.send(&probe).await.unwrap();
+
+        let mut buf = [0u8; 12];
+        let n = tokio::time::timeout(Duration::from_secs(1), sock.recv(&mut buf))
+            .await
+            .expect("no response")
+            .unwrap();
+        assert_eq!(
+            decode_response(&buf[..n], &SECRET, None),
+            Some(DecodedResponse::Rejection),
+        );
+        cancel.cancel();
+    }
+}
