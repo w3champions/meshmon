@@ -5,6 +5,7 @@
 //! the per-target supervisor's mpsc channel. This module owns the shared
 //! data types; prober implementations live in sibling files.
 
+pub mod echo_tcp;
 pub mod wire;
 
 use std::net::IpAddr;
