@@ -4,6 +4,98 @@
  */
 
 export interface paths {
+    "/api/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/agents` — return every agent known to the registry.
+         * @description The response is a flat JSON array sorted by `id` for determinism.
+         *     Empty when no agents have registered yet.
+         */
+        get: operations["list_agents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/agents/{id}` — return a single agent by id.
+         * @description Returns 404 with a JSON error body when the id is not found in the
+         *     current registry snapshot.
+         */
+        get: operations["get_agent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/alerts` — proxy active alerts from Alertmanager.
+         * @description Returns a normalized `Vec<AlertSummary>`. Upstream query parameters
+         *     (`active`, `silenced`, `inhibited`, `unprocessed`, `filter`) are
+         *     forwarded verbatim.
+         *
+         *     - **503** when `upstream.alertmanager_url` is not configured.
+         *     - **502** when the upstream is unreachable or returns a non-2xx status.
+         */
+        get: operations["list_alerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{fingerprint}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/alerts/{fingerprint}` — single alert by fingerprint.
+         * @description Fetches the full alert list from Alertmanager and filters client-side
+         *     by fingerprint (the v2 API has no single-alert endpoint).
+         *
+         *     - **404** when no alert matches the fingerprint.
+         *     - **502** when the upstream is unreachable or returns a non-2xx status.
+         *     - **503** when `upstream.alertmanager_url` is not configured.
+         */
+        get: operations["get_alert"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/login": {
         parameters: {
             query?: never;
@@ -47,6 +139,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/metrics/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/metrics/query` -- proxy an instant query to VictoriaMetrics.
+         * @description The query expression must start with `meshmon_` followed by a valid
+         *     identifier character (ASCII lowercase or underscore). Queries that do
+         *     not match are rejected with 400.
+         *
+         *     - **400** when the query doesn't start with `meshmon_<ident>`.
+         *     - **502** when the upstream is unreachable or returns an error.
+         *     - **503** when `upstream.vm_url` is not configured.
+         */
+        get: operations["query_instant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics/query_range": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/metrics/query_range` -- proxy a range query to VictoriaMetrics.
+         * @description The query expression must start with `meshmon_` followed by a valid
+         *     identifier character (ASCII lowercase or underscore). Queries that do
+         *     not match are rejected with 400.
+         *
+         *     - **400** when the query doesn't start with `meshmon_<ident>`.
+         *     - **502** when the upstream is unreachable or returns an error.
+         *     - **503** when `upstream.vm_url` is not configured.
+         */
+        get: operations["query_range"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paths/{src}/{tgt}/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/paths/{src}/{tgt}/routes` — return a paginated, time-filtered
+         *     list of route snapshot summaries (without hop detail).
+         */
+        get: operations["list_routes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paths/{src}/{tgt}/routes/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/paths/{src}/{tgt}/routes/latest` — return the most recent
+         *     route snapshot for the given source, target, and protocol.
+         */
+        get: operations["get_route_latest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paths/{src}/{tgt}/routes/{snapshot_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/paths/{src}/{tgt}/routes/{snapshot_id}` — return a single
+         *     route snapshot by database id.
+         */
+        get: operations["get_route_by_id"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/web-config": {
         parameters: {
             query?: never;
@@ -74,6 +278,117 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description Summary of a single agent, returned by the list and detail endpoints.
+         *
+         *     Write-only on the server (constructed and serialized, never parsed) so
+         *     only `Serialize` is derived.
+         */
+        AgentSummary: {
+            /** @description Optional agent version string. */
+            agent_version?: string | null;
+            /** @description Human-readable display label. */
+            display_name: string;
+            /** @description Unique agent identifier (matches the agent's `AGENT_ID` env var). */
+            id: string;
+            /** @description Agent source IP (host address only, CIDR prefix stripped). */
+            ip: string;
+            /**
+             * Format: date-time
+             * @description Last successful push (register/metrics/snapshot).
+             */
+            last_seen_at: string;
+            /**
+             * Format: double
+             * @description Optional latitude.
+             */
+            lat?: number | null;
+            /** @description Optional free-form location string. */
+            location?: string | null;
+            /**
+             * Format: double
+             * @description Optional longitude.
+             */
+            lon?: number | null;
+            /**
+             * Format: date-time
+             * @description When this agent first registered.
+             */
+            registered_at: string;
+        };
+        /**
+         * @description Normalized alert summary exposed by the meshmon API.
+         *
+         *     Derived from the Alertmanager v2 alert model, keeping only the fields
+         *     the frontend needs. `generatorURL` and other upstream-only fields are
+         *     intentionally dropped.
+         */
+        AlertSummary: {
+            /** @description Longer description from the `description` annotation. */
+            description?: string | null;
+            /**
+             * @description RFC 3339 timestamp when the alert resolved (may be empty/zero for
+             *     active alerts).
+             */
+            ends_at: string;
+            /** @description Alertmanager fingerprint (hex string), unique per alert group. */
+            fingerprint: string;
+            /** @description Label set attached to the alert (alertname, severity, etc.). */
+            labels: {
+                [key: string]: string;
+            };
+            /** @description RFC 3339 timestamp when the alert started firing. */
+            starts_at: string;
+            /** @description Alert state: `active`, `suppressed`, or `unprocessed`. */
+            state: string;
+            /** @description Short human-readable summary from the `summary` annotation. */
+            summary?: string | null;
+        };
+        /** @description JSON representation of an observed IP at a hop. */
+        HopIpJson: {
+            /**
+             * Format: double
+             * @description Fraction of probes that observed this IP at this hop.
+             */
+            freq: number;
+            /** @description Human-readable IP string (IPv4 or IPv6 `to_string()` form). */
+            ip: string;
+        };
+        /**
+         * @description JSON representation of a single traceroute hop as stored in
+         *     `route_snapshots.hops`.
+         */
+        HopJson: {
+            /**
+             * Format: int32
+             * @description Mean RTT to this hop, in microseconds.
+             */
+            avg_rtt_micros: number;
+            /**
+             * Format: double
+             * @description Fraction of probes with no response at this hop.
+             */
+            loss_pct: number;
+            /** @description IP addresses observed at this hop and their frequencies. */
+            observed_ips: components["schemas"]["HopIpJson"][];
+            /**
+             * Format: int32
+             * @description 1-indexed TTL / hop position (matches the protocol contract).
+             */
+            position: number;
+            /**
+             * Format: int32
+             * @description Standard deviation of RTT to this hop, in microseconds.
+             */
+            stddev_rtt_micros: number;
+        };
+        /** @description Query parameters for `GET /api/metrics/query` (instant query). */
+        InstantQuery: {
+            /** @description PromQL expression. Must start with `meshmon_`. */
+            query: string;
+            /** @description Optional evaluation timestamp (RFC 3339 or Unix epoch). */
+            time?: string | null;
+        };
         /** @description POST body for `/api/auth/login`. */
         LoginRequest: {
             /**
@@ -88,6 +403,95 @@ export interface components {
         LoginResponse: {
             /** @description Echoed username on success. */
             username: string;
+        };
+        /**
+         * @description JSON representation of the aggregated path summary stored in
+         *     `route_snapshots.path_summary`.
+         */
+        PathSummaryJson: {
+            /**
+             * Format: int32
+             * @description Mean RTT across all hops, in microseconds.
+             */
+            avg_rtt_micros: number;
+            /**
+             * Format: int32
+             * @description Total number of hops in the route.
+             */
+            hop_count: number;
+            /**
+             * Format: double
+             * @description Overall path loss fraction.
+             */
+            loss_pct: number;
+        };
+        /** @description Query parameters for `GET /api/metrics/query_range` (range query). */
+        RangeQuery: {
+            /** @description End timestamp (RFC 3339 or Unix epoch). */
+            end: string;
+            /** @description PromQL expression. Must start with `meshmon_`. */
+            query: string;
+            /** @description Start timestamp (RFC 3339 or Unix epoch). */
+            start: string;
+            /** @description Query resolution step (e.g. `15s`, `1m`). */
+            step: string;
+        };
+        /** @description Full detail of a single route snapshot (includes hops). */
+        RouteSnapshotDetail: {
+            /** @description Hop-by-hop detail. */
+            hops: components["schemas"]["HopJson"][];
+            /**
+             * Format: int64
+             * @description Database row id.
+             */
+            id: number;
+            /**
+             * Format: date-time
+             * @description When the snapshot was observed.
+             */
+            observed_at: string;
+            path_summary?: null | components["schemas"]["PathSummaryJson"];
+            /** @description Protocol used for the traceroute (icmp, tcp, udp). */
+            protocol: string;
+            /** @description Source agent identifier. */
+            source_id: string;
+            /** @description Target agent identifier. */
+            target_id: string;
+        };
+        /** @description Summary of a route snapshot (no hops — used in list responses). */
+        RouteSnapshotSummary: {
+            /**
+             * Format: int64
+             * @description Database row id.
+             */
+            id: number;
+            /**
+             * Format: date-time
+             * @description When the snapshot was observed.
+             */
+            observed_at: string;
+            path_summary?: null | components["schemas"]["PathSummaryJson"];
+            /** @description Protocol used for the traceroute (icmp, tcp, udp). */
+            protocol: string;
+            /** @description Source agent identifier. */
+            source_id: string;
+            /** @description Target agent identifier. */
+            target_id: string;
+        };
+        /** @description Paginated response of route snapshot summaries. */
+        RoutesPage: {
+            /** @description Snapshot summaries in descending `observed_at` order. */
+            items: components["schemas"]["RouteSnapshotSummary"][];
+            /**
+             * Format: int64
+             * @description Applied limit.
+             */
+            limit: number;
+            /**
+             * Format: int64
+             * @description Current offset.
+             */
+            offset: number;
         };
         /**
          * @description Runtime config the frontend needs before it can render dashboards.
@@ -129,6 +533,178 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_agents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of all registered agents */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentSummary"][];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent identifier */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Agent detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentSummary"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_alerts: {
+        parameters: {
+            query?: {
+                /** @description Include active alerts. */
+                active?: boolean | null;
+                /** @description Include silenced alerts. */
+                silenced?: boolean | null;
+                /** @description Include inhibited alerts. */
+                inhibited?: boolean | null;
+                /** @description Include unprocessed alerts. */
+                unprocessed?: boolean | null;
+                /**
+                 * @description Single PromQL-style label matcher expression, e.g.
+                 *     `alertname="HighLatency"`. Multiple matchers must be combined into
+                 *     one expression by the caller (Alertmanager accepts comma-separated
+                 *     matchers inside a single `filter` value).
+                 */
+                filter?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active alerts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertSummary"][];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Alertmanager not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_alert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Alert fingerprint (hex) */
+                fingerprint: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Alert detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertSummary"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Alert not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Alertmanager not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     login: {
         parameters: {
             query?: never;
@@ -178,6 +754,252 @@ export interface operations {
         responses: {
             /** @description Logged out */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    query_instant: {
+        parameters: {
+            query: {
+                /** @description PromQL expression (must start with meshmon_) */
+                query: string;
+                /** @description Evaluation timestamp */
+                time?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instant query result (VM JSON pass-through) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Query rejected by whitelist */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description VictoriaMetrics not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    query_range: {
+        parameters: {
+            query: {
+                /** @description PromQL expression (must start with meshmon_) */
+                query: string;
+                /** @description Start timestamp */
+                start: string;
+                /** @description End timestamp */
+                end: string;
+                /** @description Query resolution step */
+                step: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Range query result (VM JSON pass-through) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Query rejected by whitelist */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description VictoriaMetrics not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_routes: {
+        parameters: {
+            query?: {
+                /** @description Start of the time window (inclusive). Defaults to 24 h ago. */
+                from?: string | null;
+                /** @description End of the time window (inclusive). Defaults to now. */
+                to?: string | null;
+                /** @description Maximum rows to return (1..=500, default 100). */
+                limit?: number | null;
+                /** @description Offset for pagination (>= 0, default 0). */
+                offset?: number | null;
+                /** @description Protocol filter: icmp, tcp, or udp. */
+                protocol?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Source agent id */
+                src: string;
+                /** @description Target agent id */
+                tgt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated route snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutesPage"];
+                };
+            };
+            /** @description Invalid parameters */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_route_latest: {
+        parameters: {
+            query?: {
+                /** @description Protocol filter: icmp, tcp, or udp. */
+                protocol?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Source agent id */
+                src: string;
+                /** @description Target agent id */
+                tgt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest route snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteSnapshotDetail"];
+                };
+            };
+            /** @description Invalid protocol */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No snapshot found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_route_by_id: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Source agent id */
+                src: string;
+                /** @description Target agent id */
+                tgt: string;
+                /** @description Snapshot database id */
+                snapshot_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Route snapshot detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteSnapshotDetail"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Snapshot not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

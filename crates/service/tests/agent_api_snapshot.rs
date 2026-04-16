@@ -53,7 +53,7 @@ async fn register_agent(state: meshmon_service::state::AppState, id: &str, ip4: 
 #[tokio::test]
 async fn snapshot_happy_path() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool.clone());
+    let state = common::state_with_agent_token(pool.clone()).await;
     register_agent(state.clone(), "s-src", [10, 2, 0, 1]).await;
     register_agent(state.clone(), "s-tgt", [10, 2, 0, 2]).await;
 
@@ -83,7 +83,7 @@ async fn snapshot_happy_path() {
 #[tokio::test]
 async fn snapshot_unknown_source_returns_permission_denied() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 2, 0, 3])).await;
 
@@ -97,7 +97,7 @@ async fn snapshot_unknown_source_returns_permission_denied() {
 #[tokio::test]
 async fn snapshot_bad_hop_returns_invalid_argument() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     register_agent(state.clone(), "s-bad", [10, 2, 0, 4]).await;
 
     let mut client =
@@ -113,7 +113,7 @@ async fn snapshot_empty_source_id_returns_invalid_argument() {
     // Validator runs before the registry check; empty source_id is a
     // client-side data bug and must surface as InvalidArgument.
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 2, 0, 5])).await;
 

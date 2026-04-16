@@ -6,3 +6,19 @@
 
 [alias]
 xtask = "run --package xtask --"
+
+# axum-prometheus 0.10 renames its HTTP metrics via compile-time env vars —
+# see crate-level docs. We rename the defaults (`axum_http_*`) to the
+# `meshmon_service_*` family so the /metrics exposition uses one
+# consistent prefix across self-metrics and HTTP request counters. This
+# is preferred over the runtime `.with_prefix(..).build()` path, which
+# silently drops the prefix in 0.10 (prefix propagation requires the
+# `Paired` builder state).
+[env]
+AXUM_HTTP_REQUESTS_TOTAL = "meshmon_service_http_requests_total"
+AXUM_HTTP_REQUESTS_DURATION_SECONDS = "meshmon_service_http_requests_duration_seconds"
+AXUM_HTTP_REQUESTS_PENDING = "meshmon_service_http_requests_pending"
+# AXUM_HTTP_RESPONSE_BODY_SIZE is intentionally omitted — response-body-size
+# tracking is disabled by default (PrometheusMetricLayerBuilder's
+# enable_body_size = false). If we ever enable it, add this fourth env var
+# below with the meshmon_service_ prefix so naming stays consistent.

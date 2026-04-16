@@ -44,8 +44,18 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     paths(crate::http::auth::login, crate::http::auth::logout),
     components(schemas(
+        crate::http::alerts_proxy::AlertSummary,
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
+        crate::http::metrics_proxy::InstantQuery,
+        crate::http::metrics_proxy::RangeQuery,
+        crate::http::user_api::AgentSummary,
+        crate::http::user_api::RouteSnapshotDetail,
+        crate::http::user_api::RouteSnapshotSummary,
+        crate::http::user_api::RoutesPage,
+        crate::ingestion::json_shapes::HopJson,
+        crate::ingestion::json_shapes::HopIpJson,
+        crate::ingestion::json_shapes::PathSummaryJson,
         crate::http::web_config::WebConfigResponse,
     )),
 )]
@@ -63,7 +73,24 @@ struct ApiDoc;
 /// own sub-router and document it via `paths(...)` on `ApiDoc` above.
 pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
+        .routes(utoipa_axum::routes!(crate::http::user_api::list_agents))
+        .routes(utoipa_axum::routes!(crate::http::user_api::get_agent))
+        // routes/latest MUST come before routes/{snapshot_id} so the static
+        // segment "latest" is matched before the catch-all path parameter.
+        .routes(utoipa_axum::routes!(
+            crate::http::user_api::get_route_latest
+        ))
+        .routes(utoipa_axum::routes!(crate::http::user_api::get_route_by_id))
+        .routes(utoipa_axum::routes!(crate::http::user_api::list_routes))
         .routes(utoipa_axum::routes!(crate::http::web_config::web_config))
+        .routes(utoipa_axum::routes!(crate::http::alerts_proxy::list_alerts))
+        .routes(utoipa_axum::routes!(crate::http::alerts_proxy::get_alert))
+        .routes(utoipa_axum::routes!(
+            crate::http::metrics_proxy::query_instant
+        ))
+        .routes(utoipa_axum::routes!(
+            crate::http::metrics_proxy::query_range
+        ))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

@@ -272,6 +272,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-prometheus"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd44522c72edf6a45dfdd73ea201937bdaa8610cdf473151f694900837ab3879"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "matchit",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "pin-project-lite",
+ "tokio",
+ "tower",
+ "tower-http",
+]
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1875,6 +1895,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-login",
+ "axum-prometheus",
  "base64 0.22.1",
  "chrono",
  "ctor",
@@ -1883,6 +1904,7 @@ dependencies = [
  "hyper-util",
  "meshmon-protocol",
  "metrics",
+ "metrics-exporter-prometheus",
  "metrics-util",
  "password-hash 0.6.1",
  "prometheus-reqwest-remote-write",
@@ -1923,6 +1945,20 @@ checksum = "5d5312e9ba3771cfa961b585728215e3d972c950a3eed9252aa093d6301277e8"
 dependencies = [
  "ahash",
  "portable-atomic",
+]
+
+[[package]]
+name = "metrics-exporter-prometheus"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3589659543c04c7dc5526ec858591015b87cd8746583b51b48ef4353f99dbcda"
+dependencies = [
+ "base64 0.22.1",
+ "indexmap 2.14.0",
+ "metrics",
+ "metrics-util",
+ "quanta",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

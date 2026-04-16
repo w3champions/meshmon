@@ -60,7 +60,7 @@ async fn register_agent(state: meshmon_service::state::AppState, id: &str, ip4: 
 #[tokio::test]
 async fn two_agents_push_concurrently() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     register_agent(state.clone(), "cc-a", [10, 5, 0, 1]).await;
     register_agent(state.clone(), "cc-b", [10, 5, 0, 2]).await;
     register_agent(state.clone(), "cc-c", [10, 5, 0, 3]).await;

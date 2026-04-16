@@ -12,22 +12,22 @@
 //! - [`pg_writer`] — single-row `route_snapshots` inserter.
 //! - [`last_seen`] — debounced `agents.last_seen_at` updater.
 //! - [`queue`] — drop-oldest bounded queue primitive.
-//! - [`metrics`] — `metrics` facade handles for self-observability.
 //! - [`json_shapes`] — serde shapes for the JSONB columns.
+//!
+//! Self-metric accessors live in [`crate::metrics`].
 
 pub mod json_shapes;
 pub mod last_seen;
-pub mod metrics;
 pub mod pg_writer;
 pub mod queue;
 pub mod validator;
 pub mod vm_writer;
 
 use crate::ingestion::last_seen::LastSeenUpdater;
-use crate::ingestion::metrics::{ingest_dropped, DropSource};
 use crate::ingestion::queue::DropOldest;
 use crate::ingestion::validator::{ValidatedMetrics, ValidatedSnapshot};
 use crate::ingestion::vm_writer::{PromSample, VmWriterCfg};
+use crate::metrics::{ingest_dropped, DropSource};
 use meshmon_protocol::Protocol;
 use sqlx::PgPool;
 use std::sync::Arc;
