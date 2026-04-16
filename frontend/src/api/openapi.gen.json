@@ -127,7 +127,7 @@
       },
       "WebConfigResponse": {
         "type": "object",
-        "description": "Runtime config the frontend needs before it can render dashboards.\n\nReturned from `GET /api/web-config`; doubles as the SPA's session probe\n(401 when the caller has no valid session cookie).",
+        "description": "Runtime config the frontend needs before it can render dashboards.\n\nReturned from `GET /api/web-config`; doubles as the SPA's session probe\n(401 when the caller has no valid session cookie).\n\nWrite-only on the server — we only ever construct and serialize this\ntype, never parse one back in — so only `Serialize` is derived.\nMatches the pattern used by [`crate::http::auth::LoginResponse`].",
         "required": [
           "version",
           "grafana_dashboards"

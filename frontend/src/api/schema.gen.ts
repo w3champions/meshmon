@@ -94,6 +94,10 @@ export interface components {
          *
          *     Returned from `GET /api/web-config`; doubles as the SPA's session probe
          *     (401 when the caller has no valid session cookie).
+         *
+         *     Write-only on the server — we only ever construct and serialize this
+         *     type, never parse one back in — so only `Serialize` is derived.
+         *     Matches the pattern used by [`crate::http::auth::LoginResponse`].
          */
         WebConfigResponse: {
             /**
