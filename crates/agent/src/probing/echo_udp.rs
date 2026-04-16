@@ -57,7 +57,13 @@ async fn run(
     };
     tracing::info!(port, "udp echo listener ready");
 
-    let mut buf = [0u8; 32]; // small slack above PACKET_LEN to detect oversized
+    // Small slack above PACKET_LEN so oversized packets are detectable.
+    let mut buf = [0u8; 32];
+    // One-shot pre-config flag: log the *first* probe that arrives before
+    // the secret is published, so operators can distinguish "listener is
+    // down" from "listener is up but no secret yet". Subsequent pre-config
+    // drops stay silent to avoid scanner floods filling logs.
+    let mut pre_config_logged = false;
 
     loop {
         tokio::select! {
@@ -83,7 +89,15 @@ async fn run(
 
                 let secret = secret_rx.borrow().clone();
                 let Some(current) = secret.current.as_ref() else {
-                    // Pre-GetConfig: drop everything.
+                    // Pre-GetConfig: drop everything, but surface the first
+                    // occurrence so operators notice if bootstrap is stuck.
+                    if !pre_config_logged {
+                        tracing::warn!(
+                            %peer,
+                            "udp echo listener received probe before GetConfig completed; dropping until secret is published",
+                        );
+                        pre_config_logged = true;
+                    }
                     continue;
                 };
                 let packet = &buf[..PACKET_LEN];

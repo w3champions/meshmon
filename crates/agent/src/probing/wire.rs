@@ -7,6 +7,14 @@
 //! 0       8       secret (deployment-wide shared secret)
 //! 8       4       nonce  (big-endian u32; 0xFFFFFFFF is the rejection marker)
 //! ```
+//!
+//! Secret comparison in the decoders is constant-time
+//! ([`subtle::ConstantTimeEq`]). The secret is short and shared, but there
+//! is no reason to leak timing information about which prefix bytes matched
+//! — an off-path observer with enough samples could otherwise learn the
+//! secret byte by byte.
+
+use subtle::ConstantTimeEq;
 
 /// Wire size of every probe, echo, and rejection packet.
 pub const PACKET_LEN: usize = 12;
@@ -56,6 +64,9 @@ pub fn encode_rejection(secret: &[u8; SECRET_LEN]) -> [u8; PACKET_LEN] {
 /// * length is not exactly 12 bytes;
 /// * the secret prefix matches neither `current_secret` nor `previous_secret`.
 ///
+/// Secret comparison uses [`subtle::ConstantTimeEq`]; no short-circuit on
+/// the first differing byte.
+///
 /// Otherwise returns either [`DecodedResponse::Rejection`] (nonce ==
 /// `REJECTION_MARKER`) or [`DecodedResponse::Echo`] carrying the received
 /// nonce. Callers still correlate the echo against their own pending map —
@@ -70,8 +81,7 @@ pub fn decode_response(
         return None;
     }
     let (secret, nonce_bytes) = bytes.split_at(SECRET_LEN);
-    if secret != current_secret.as_slice() && previous_secret.is_none_or(|s| secret != s.as_slice())
-    {
+    if !secret_matches(secret, current_secret, previous_secret) {
         return None;
     }
     let nonce = u32::from_be_bytes(nonce_bytes.try_into().expect("4 bytes"));
@@ -85,6 +95,9 @@ pub fn decode_response(
 /// Try to decode a received packet as a *probe* from a peer (listener
 /// side). Validates length + secret; returns the nonce on match. Returns
 /// `None` for drops.
+///
+/// Secret comparison uses [`subtle::ConstantTimeEq`]; no short-circuit on
+/// the first differing byte.
 pub fn decode_probe(
     bytes: &[u8],
     current_secret: &[u8; SECRET_LEN],
@@ -94,11 +107,30 @@ pub fn decode_probe(
         return None;
     }
     let (secret, nonce_bytes) = bytes.split_at(SECRET_LEN);
-    if secret != current_secret.as_slice() && previous_secret.is_none_or(|s| secret != s.as_slice())
-    {
+    if !secret_matches(secret, current_secret, previous_secret) {
         return None;
     }
     Some(u32::from_be_bytes(nonce_bytes.try_into().expect("4 bytes")))
+}
+
+/// Constant-time check that `candidate` matches `current` or, if supplied,
+/// `previous`. Uses [`subtle::ConstantTimeEq`] so the comparison cost does
+/// not depend on how many leading bytes of the candidate matched. The
+/// check may short-circuit on `current` without probing `previous` — but
+/// each individual comparison is already constant-time, so the rotation
+/// path never leaks byte-level information about either secret.
+fn secret_matches(
+    candidate: &[u8],
+    current: &[u8; SECRET_LEN],
+    previous: Option<&[u8; SECRET_LEN]>,
+) -> bool {
+    if bool::from(candidate.ct_eq(current.as_slice())) {
+        return true;
+    }
+    match previous {
+        Some(prev) => bool::from(candidate.ct_eq(prev.as_slice())),
+        None => false,
+    }
 }
 
 /// Advance a nonce counter, skipping the reserved [`REJECTION_MARKER`].

@@ -155,22 +155,50 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
     .fetch_all(pool)
     .await?;
 
-    let agents = rows
+    // DB has CHECK (port BETWEEN 1 AND 65535) on both columns, so the cast
+    // below always succeeds on a well-formed database. We still guard here:
+    // a constraint drift (`ALTER TABLE ... NOT VALID`, replica skew, manual
+    // tamper) would otherwise panic the refresh task, kill the `JoinHandle`
+    // silently, and leave the registry stale indefinitely. Log and skip
+    // instead so one bad row doesn't sink the whole snapshot.
+    let agents: Vec<AgentInfo> = rows
         .into_iter()
-        .map(|row| AgentInfo {
-            id: row.id,
-            display_name: row.display_name,
-            location: row.location,
-            ip: row.ip,
-            lat: row.lat,
-            lon: row.lon,
-            agent_version: row.agent_version,
-            tcp_probe_port: u16::try_from(row.tcp_probe_port)
-                .expect("tcp_probe_port DB CHECK 1-65535"),
-            udp_probe_port: u16::try_from(row.udp_probe_port)
-                .expect("udp_probe_port DB CHECK 1-65535"),
-            registered_at: row.registered_at,
-            last_seen_at: row.last_seen_at,
+        .filter_map(|row| {
+            let tcp_probe_port = match u16::try_from(row.tcp_probe_port) {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    tracing::error!(
+                        agent_id = %row.id,
+                        value = row.tcp_probe_port,
+                        "skipping agent with out-of-range tcp_probe_port",
+                    );
+                    return None;
+                }
+            };
+            let udp_probe_port = match u16::try_from(row.udp_probe_port) {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    tracing::error!(
+                        agent_id = %row.id,
+                        value = row.udp_probe_port,
+                        "skipping agent with out-of-range udp_probe_port",
+                    );
+                    return None;
+                }
+            };
+            Some(AgentInfo {
+                id: row.id,
+                display_name: row.display_name,
+                location: row.location,
+                ip: row.ip,
+                lat: row.lat,
+                lon: row.lon,
+                agent_version: row.agent_version,
+                tcp_probe_port,
+                udp_probe_port,
+                registered_at: row.registered_at,
+                last_seen_at: row.last_seen_at,
+            })
         })
         .collect();
 

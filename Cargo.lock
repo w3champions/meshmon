@@ -1840,6 +1840,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "socket2 0.6.3",
+ "subtle",
  "tokio",
  "tokio-stream",
  "tokio-util",

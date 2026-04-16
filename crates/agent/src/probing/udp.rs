@@ -114,7 +114,21 @@ impl UdpProberPool {
             paused_until: None,
             obs_tx,
         }));
-        self.targets.insert(ip, state.clone());
+        if let Some(prev) = self.targets.insert(ip, state.clone()) {
+            // Duplicate `spawn_target` for the same IP without an
+            // intervening `forget_if_owner`. The receiver now dispatches
+            // to the new state; the old sender (if still running) will
+            // eventually exit on cancel. Without this guard its final
+            // `forget_if_owner` would correctly leave our new entry in
+            // place, but its inflight/sweeper state becomes orphaned —
+            // log loudly so operators can investigate the caller.
+            tracing::warn!(
+                %ip,
+                "udp prober spawn_target called while prior target still active; \
+                 dispatch now points at the new state",
+            );
+            drop(prev);
+        }
 
         let pool = Arc::clone(self);
         tokio::spawn(async move {
@@ -122,10 +136,18 @@ impl UdpProberPool {
         })
     }
 
-    /// Remove a target from dispatch (called when its supervisor is torn
-    /// down in the refresh loop).
+    /// Remove a target from dispatch. Kept for call-sites that own the
+    /// target outright and know no replacement has been spawned.
     pub fn forget(&self, ip: &IpAddr) {
         self.targets.remove(ip);
+    }
+
+    /// Remove a target from dispatch only if the registered state is still
+    /// the one the caller owns. Prevents a lame-duck sender from evicting
+    /// its replacement after a late `spawn_target` clobber (see the warn
+    /// inside [`UdpProberPool::spawn_target`]).
+    fn forget_if_owner(&self, ip: &IpAddr, owned: &Arc<Mutex<TargetState>>) {
+        self.targets.remove_if(ip, |_k, v| Arc::ptr_eq(v, owned));
     }
 }
 
@@ -173,40 +195,50 @@ async fn handle_response(
     _peer_ip: IpAddr,
     decoded: DecodedResponse,
 ) {
-    let mut s = state.lock().await;
-    match decoded {
-        DecodedResponse::Rejection => {
-            // Latch: only emit Refused the first time per pause window.
-            let now = tokio::time::Instant::now();
-            if s.paused_until.is_none_or(|u| u < now) {
+    // Hold the target mutex only long enough to mutate state; release it
+    // before awaiting `obs_tx.send` so a full observation channel cannot
+    // back-pressure into the sender (which grabs this same mutex on every
+    // iteration to check `paused_until`).
+    let now = tokio::time::Instant::now();
+    let (obs_tx, to_send): (mpsc::Sender<ProbeObservation>, Option<ProbeObservation>) = {
+        let mut s = state.lock().await;
+        match decoded {
+            DecodedResponse::Rejection => {
+                let first_rejection_in_window = s.paused_until.is_none_or(|u| u < now);
                 s.paused_until = Some(now + REJECTION_PAUSE);
-                let obs = ProbeObservation {
-                    protocol: Protocol::Udp,
-                    target_id: s.target_id.clone(),
-                    outcome: ProbeOutcome::Refused,
-                    hops: None,
-                    observed_at: now,
+                let obs = if first_rejection_in_window {
+                    Some(ProbeObservation {
+                        protocol: Protocol::Udp,
+                        target_id: s.target_id.clone(),
+                        outcome: ProbeOutcome::Refused,
+                        hops: None,
+                        observed_at: now,
+                    })
+                } else {
+                    // Still rejecting; the pause has been extended above.
+                    // No duplicate Refused emit inside the same window.
+                    None
                 };
-                let _ = s.obs_tx.send(obs).await;
-            } else {
-                // Extend the pause (target still rejecting us).
-                s.paused_until = Some(now + REJECTION_PAUSE);
+                (s.obs_tx.clone(), obs)
+            }
+            DecodedResponse::Echo { nonce } => {
+                let obs = s.pending.remove(&nonce).map(|sent_at| {
+                    let rtt_micros = sent_at.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                    ProbeObservation {
+                        protocol: Protocol::Udp,
+                        target_id: s.target_id.clone(),
+                        outcome: ProbeOutcome::Success { rtt_micros },
+                        hops: None,
+                        observed_at: sent_at,
+                    }
+                });
+                // else: stale / duplicate / post-timeout — drop silently.
+                (s.obs_tx.clone(), obs)
             }
         }
-        DecodedResponse::Echo { nonce } => {
-            if let Some(sent_at) = s.pending.remove(&nonce) {
-                let rtt_micros = sent_at.elapsed().as_micros().min(u32::MAX as u128) as u32;
-                let obs = ProbeObservation {
-                    protocol: Protocol::Udp,
-                    target_id: s.target_id.clone(),
-                    outcome: ProbeOutcome::Success { rtt_micros },
-                    hops: None,
-                    observed_at: sent_at,
-                };
-                let _ = s.obs_tx.send(obs).await;
-            }
-            // else: stale / duplicate / post-timeout — drop silently.
-        }
+    };
+    if let Some(obs) = to_send {
+        let _ = obs_tx.send(obs).await;
     }
 }
 
@@ -233,23 +265,40 @@ async fn run_sweeper(
 }
 
 async fn sweep_one(state: Arc<Mutex<TargetState>>) {
+    // Drop the target mutex before awaiting `obs_tx.send`. See the
+    // matching comment in `handle_response`: holding the mutex across
+    // an async send lets a backed-up obs channel stall the sender loop.
+    // Each expired entry's stored `sent_at` is preserved and re-used as
+    // `observed_at`, per the `ProbeObservation::observed_at` contract
+    // ("monotonic instant when the probe was sent").
     let now = tokio::time::Instant::now();
-    let mut s = state.lock().await;
-    let expired: Vec<u32> = s
-        .pending
-        .iter()
-        .filter_map(|(nonce, sent)| (now.duration_since(*sent) > PROBE_TIMEOUT).then_some(*nonce))
-        .collect();
-    for nonce in expired {
-        s.pending.remove(&nonce);
+    let (target_id, obs_tx, expired): (
+        String,
+        mpsc::Sender<ProbeObservation>,
+        Vec<tokio::time::Instant>,
+    ) = {
+        let mut s = state.lock().await;
+        let cutoff = now - PROBE_TIMEOUT;
+        let mut expired: Vec<tokio::time::Instant> = Vec::new();
+        s.pending.retain(|_nonce, sent_at| {
+            if *sent_at < cutoff {
+                expired.push(*sent_at);
+                false
+            } else {
+                true
+            }
+        });
+        (s.target_id.clone(), s.obs_tx.clone(), expired)
+    };
+    for sent_at in expired {
         let obs = ProbeObservation {
             protocol: Protocol::Udp,
-            target_id: s.target_id.clone(),
+            target_id: target_id.clone(),
             outcome: ProbeOutcome::Timeout,
             hops: None,
-            observed_at: now,
+            observed_at: sent_at,
         };
-        let _ = s.obs_tx.send(obs).await;
+        let _ = obs_tx.send(obs).await;
     }
 }
 
@@ -310,8 +359,13 @@ async fn run_sender(
                 };
                 let packet = encode_probe(&secret, nonce);
                 if let Err(e) = pool.socket.send_to(&packet, target_addr).await {
-                    let mut s = state.lock().await;
-                    s.pending.remove(&nonce);
+                    // Drop the mutex before awaiting the obs channel so a
+                    // full channel can't back-pressure into other callers.
+                    let obs_tx = {
+                        let mut s = state.lock().await;
+                        s.pending.remove(&nonce);
+                        s.obs_tx.clone()
+                    };
                     let obs = ProbeObservation {
                         protocol: Protocol::Udp,
                         target_id: target_id.clone(),
@@ -319,12 +373,15 @@ async fn run_sender(
                         hops: None,
                         observed_at: tokio::time::Instant::now(),
                     };
-                    let _ = s.obs_tx.send(obs).await;
+                    let _ = obs_tx.send(obs).await;
                 }
             }
         }
     }
-    pool.forget(&target_ip);
+    // Only forget if the dispatch map still points at our state. Guards
+    // against a newer `spawn_target` having already installed a
+    // replacement for this IP (see the warn in `spawn_target`).
+    pool.forget_if_owner(&target_ip, &state);
 }
 
 async fn maybe_sleep(interval: Option<Duration>) {
@@ -507,10 +564,118 @@ mod tests {
             .expect("no obs")
             .expect("channel");
         assert!(matches!(obs.outcome, ProbeOutcome::Timeout), "{obs:?}");
+        // `observed_at` must be the probe's *sent* time, not when the
+        // sweeper swept it — downstream stats depend on that contract
+        // (`ProbeObservation::observed_at` docstring).
+        let age = obs.observed_at.elapsed();
+        assert!(
+            age >= TD::from_secs(2),
+            "expected observed_at ~= sent_at (>=PROBE_TIMEOUT old), got age {age:?}",
+        );
 
         tgt_cancel.cancel();
         pool_cancel.cancel();
         drop(rate_tx);
+        drop(sec_tx);
+    }
+
+    /// A supervisor that stops draining the obs channel must not be able
+    /// to stall the prober's send loop. Before Fix 2/3, `handle_response`
+    /// and `sweep_one` held the target mutex across `obs_tx.send().await`,
+    /// so a full channel would back-pressure into the sender's
+    /// `state.lock().await` calls.
+    #[tokio::test]
+    async fn full_obs_channel_does_not_stall_sender() {
+        let (echo_port, echo_h, echo_cancel) = start_echo_server().await;
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot {
+            current: Some(SECRET),
+            previous: None,
+        });
+        let pool_cancel = CancellationToken::new();
+        let pool = UdpProberPool::new(sec_rx, pool_cancel.clone())
+            .await
+            .unwrap();
+
+        let (rate_tx, rate_rx) = watch::channel(ProbeRate(50.0));
+        // Capacity 1: the second unread obs will block any sender that
+        // holds the target mutex across `obs_tx.send().await`.
+        let (obs_tx, mut obs_rx) = mpsc::channel(1);
+        let tgt_cancel = CancellationToken::new();
+        pool.spawn_target(
+            target("peer", [127, 0, 0, 1], echo_port),
+            rate_rx,
+            obs_tx,
+            tgt_cancel.clone(),
+        );
+
+        // Let the sender run while nobody drains obs_rx — this fills the
+        // channel and exercises the "send blocks" path in handle_response.
+        tokio::time::sleep(TD::from_millis(200)).await;
+
+        // The sender should still be able to reconfigure (rate change
+        // needs to grab the target mutex). If it's stuck inside a
+        // `handle_response` that's awaiting `obs_tx.send`, this notify
+        // never propagates and no new obs ever arrives.
+        rate_tx.send(ProbeRate(100.0)).unwrap();
+
+        // Drain one obs to unblock anything queued, then expect another
+        // obs to arrive well under the supervisor's shutdown deadline.
+        let _ = tokio::time::timeout(TD::from_secs(2), obs_rx.recv())
+            .await
+            .expect("first obs never arrived");
+        let _ = tokio::time::timeout(TD::from_secs(2), obs_rx.recv())
+            .await
+            .expect("sender was stalled by a full obs channel");
+
+        tgt_cancel.cancel();
+        pool_cancel.cancel();
+        echo_cancel.cancel();
+        drop(rate_tx);
+        drop(sec_tx);
+        let _ = echo_h.await;
+    }
+
+    /// `forget_if_owner` must not evict a newer state that a clobbering
+    /// `spawn_target` installed. This exercises the Fix 5 path.
+    #[tokio::test]
+    async fn forget_if_owner_ignores_foreign_state() {
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot::default());
+        let pool_cancel = CancellationToken::new();
+        let pool = UdpProberPool::new(sec_rx, pool_cancel.clone())
+            .await
+            .unwrap();
+
+        let ip: IpAddr = "127.0.0.50".parse().unwrap();
+        let (old_obs, _old_rx) = mpsc::channel(1);
+        let old_state = Arc::new(Mutex::new(TargetState {
+            target_id: "old".into(),
+            nonce_counter: 0,
+            pending: HashMap::new(),
+            paused_until: None,
+            obs_tx: old_obs,
+        }));
+        let (new_obs, _new_rx) = mpsc::channel(1);
+        let new_state = Arc::new(Mutex::new(TargetState {
+            target_id: "new".into(),
+            nonce_counter: 0,
+            pending: HashMap::new(),
+            paused_until: None,
+            obs_tx: new_obs,
+        }));
+
+        pool.targets.insert(ip, new_state.clone());
+        // Stale sender's forget must leave `new_state` in place.
+        pool.forget_if_owner(&ip, &old_state);
+        assert!(pool.targets.get(&ip).is_some(), "foreign forget evicted");
+
+        // Owner's forget does evict.
+        pool.forget_if_owner(&ip, &new_state);
+        assert!(
+            pool.targets.get(&ip).is_none(),
+            "owner forget did not evict"
+        );
+
+        pool_cancel.cancel();
         drop(sec_tx);
     }
 }
