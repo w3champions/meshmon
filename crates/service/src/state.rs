@@ -4,11 +4,13 @@
 
 use crate::config::Config;
 use crate::ingestion::IngestionPipeline;
+use crate::metrics::Handle as PrometheusHandle;
 use crate::registry::AgentRegistry;
 use arc_swap::ArcSwap;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::watch;
 
 /// Build info populated at compile time. Used by `/metrics` and
@@ -60,6 +62,12 @@ pub struct AppState {
     /// known agent and their last-seen timestamps. Used by handler endpoints
     /// that need to validate source agents or list active targets.
     pub registry: Arc<AgentRegistry>,
+    /// Moment state was constructed. Baseline for
+    /// `meshmon_service_uptime_seconds`.
+    pub started_at: Instant,
+    /// Prometheus render handle. Cheap clone; handlers call
+    /// `prom.render()` at scrape time.
+    pub prom: PrometheusHandle,
 }
 
 impl AppState {
@@ -70,6 +78,7 @@ impl AppState {
         pool: PgPool,
         ingestion: IngestionPipeline,
         registry: Arc<AgentRegistry>,
+        prom: PrometheusHandle,
     ) -> Self {
         Self {
             config,
@@ -79,6 +88,8 @@ impl AppState {
             build: BuildInfo::compile_time(),
             ingestion,
             registry,
+            started_at: Instant::now(),
+            prom,
         }
     }
 
