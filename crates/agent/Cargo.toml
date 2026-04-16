@@ -7,6 +7,25 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "meshmon-agent"
 path = "src/main.rs"
+
+[dependencies]
+meshmon-protocol = { path = "../protocol" }
+anyhow.workspace = true
+prost.workspace = true
+rand.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util.workspace = true
+tonic = { workspace = true, features = ["tls-native-roots"] }
+tonic-prost.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

@@ -1,0 +1,7 @@
+//! meshmon-agent: lightweight network-monitoring agent.
+
+pub mod api;
+pub mod bootstrap;
+pub mod config;
+pub mod probing;
+pub mod supervisor;
