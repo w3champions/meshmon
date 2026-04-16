@@ -59,6 +59,16 @@ async fn run() -> anyhow::Result<()> {
         "meshmon-service starting"
     );
 
+    // --- Step 2b: Metrics recorder ---
+    // Install BEFORE ingestion/registry subsystems emit anything —
+    // once installed, every `metrics::*` call in those modules feeds
+    // this handle. `install_recorder` sets the process-global
+    // recorder; a second call is an error, which is fine for a
+    // long-lived binary.
+    let prom = meshmon_service::metrics::install_recorder();
+    meshmon_service::metrics::describe_service_metrics();
+    meshmon_service::metrics::emit_build_info(&meshmon_service::state::BuildInfo::compile_time());
+
     // --- Step 3: Postgres + migrations ---
     let pool = db::connect(initial_config.database.url())
         .await
@@ -192,20 +202,18 @@ async fn run() -> anyhow::Result<()> {
         ingestion_token.clone(),
     );
 
-    // TODO(T10.11): move recorder install earlier in startup, alongside
-    // `describe_service_metrics()` and `spawn_upkeep`. For now install it
-    // here just so `AppState::new` has a handle to hold.
-    let prom = meshmon_service::metrics::install_recorder();
     let state = AppState::new(
         config_handle,
         config_rx,
         pool,
         ingestion.clone(),
         registry.clone(),
-        prom,
+        prom.clone(),
     );
     state.mark_ready();
     let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());
+    let upkeep_handle =
+        meshmon_service::metrics::spawn_upkeep(prom.clone(), shutdown_token.clone());
     let app = http::router(state.clone());
 
     // --- Step 8: Serve with a bounded drain ---
@@ -356,6 +364,16 @@ async fn run() -> anyhow::Result<()> {
         }
     }
     info!("agent registry refresh loop drained");
+
+    match tokio::time::timeout(deadline, upkeep_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "metrics upkeep task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "metrics upkeep did not drain within shutdown_deadline; aborting",
+        ),
+    }
+    info!("metrics upkeep loop drained");
 
     serve_result.context("HTTP server")?;
 
