@@ -3,9 +3,10 @@
 //! The endpoint is the frontend's session probe: unauthenticated callers
 //! must see 401 (so the SPA can bounce them to `/login`), while
 //! authenticated callers must see a JSON payload with at least a
-//! `version` string and a `grafana_dashboards` object. MVP ships an empty
-//! `grafana_dashboards` map and omits `grafana_base_url` — a later task
-//! populates them from config.
+//! `version` string and a `grafana_dashboards` object. When the `[web]`
+//! config section populates `grafana_base_url` and `grafana_dashboards`,
+//! the endpoint surfaces those values; absent Grafana config yields an
+//! empty dashboards map and omits `grafana_base_url` from the JSON body.
 //!
 //! `X-Forwarded-For` IP allocations for this binary live in
 //! `tests/common/mod.rs` alongside the auth-flow helpers.

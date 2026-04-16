@@ -424,6 +424,7 @@ impl Config {
             raw.agent_api.shared_token,
             raw.agent_api.shared_token_env,
             "agent_api.shared_token",
+            path,
         )?;
         let defaults = AgentApiSection::default();
         let rate_limit_per_minute = raw
@@ -494,6 +495,7 @@ impl Config {
             raw.web.grafana_base_url,
             raw.web.grafana_base_url_env,
             "web.grafana_base_url",
+            path,
         )?;
         let web = WebSection {
             grafana_base_url,
@@ -556,6 +558,7 @@ fn resolve_optional_secret(
     inline: Option<String>,
     env_name: Option<String>,
     key: &str,
+    path: &str,
 ) -> Result<Option<String>, BootError> {
     if let Some(v) = inline.filter(|s| !s.is_empty()) {
         return Ok(Some(v));
@@ -563,9 +566,9 @@ fn resolve_optional_secret(
     if let Some(name) = env_name {
         return match std::env::var(&name) {
             Ok(v) if !v.is_empty() => Ok(Some(v)),
-            Ok(_) => Err(BootError::EnvMissing {
-                name,
-                key: key.to_string(),
+            Ok(_) => Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: format!("env var {name} (for {key}) is set but empty"),
             }),
             Err(_) => Err(BootError::EnvMissing {
                 name,
