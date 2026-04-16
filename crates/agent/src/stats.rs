@@ -40,9 +40,6 @@ use crate::probing::ProbeObservation;
 #[derive(Debug, Clone, Copy)]
 struct Sample {
     /// Monotonic instant the probe was observed (== `ProbeObservation.observed_at`).
-    // Written by `insert`; read by `purge_old` in Task 5. Suppress
-    // until then so `cargo clippy -D warnings` stays green.
-    #[allow(dead_code)]
     t: Instant,
     /// `Some(rtt)` on success, `None` on failure (`Timeout` / `Error`).
     /// `Refused` is filtered upstream and never reaches `insert`.
@@ -202,8 +199,46 @@ impl RollingStats {
     /// Drop samples older than `now - self.window`. Amortized O(1) per
     /// purged entry. Marks min/max dirty if the purged sample held the
     /// current extremum.
-    pub fn purge_old(&mut self, _now: Instant) {
-        unimplemented!("Task 5")
+    pub fn purge_old(&mut self, now: Instant) {
+        // Anything observed at or before `cutoff` is too old. Use checked
+        // subtraction because `tokio::time::Instant::checked_sub` returns
+        // None when the result would be before the runtime epoch — in
+        // that case nothing is old enough to purge yet.
+        let Some(cutoff) = now.checked_sub(self.window) else {
+            return;
+        };
+        while let Some(front) = self.samples.front() {
+            if front.t > cutoff {
+                break;
+            }
+            // Pop and roll back the running counters.
+            let s = self.samples.pop_front().expect("front existed");
+            self.sent -= 1;
+            if let Some(rtt) = s.rtt_micros {
+                self.successful -= 1;
+                self.sum_rtt_micros -= rtt as u64;
+                self.sum_rtt_sq_micros -= (rtt as u128) * (rtt as u128);
+                // Mark min/max dirty if the purged sample equalled the
+                // current cached extremum. We don't know if there are
+                // duplicates without a scan; the dirty bit just means
+                // "the cached value MAY be stale" — `summary_with_percentiles`
+                // resolves it by rescanning.
+                if Some(rtt) == self.min_rtt_micros {
+                    self.min_rtt_dirty = true;
+                }
+                if Some(rtt) == self.max_rtt_micros {
+                    self.max_rtt_dirty = true;
+                }
+            }
+        }
+        // After a purge, if the window is empty the extremum is also
+        // empty; eagerly clear the cached values + dirty bits.
+        if self.samples.is_empty() {
+            self.min_rtt_micros = None;
+            self.max_rtt_micros = None;
+            self.min_rtt_dirty = false;
+            self.max_rtt_dirty = false;
+        }
     }
 
     /// O(1) summary for state-eval. Min/max are returned as `None` while
@@ -458,7 +493,9 @@ mod tests {
         stats
     }
 
-    #[ignore = "purge_old in Task 5; summary_with_percentiles dirty-resolve in Task 6"]
+    // Still ignored — un-ignored in Task 6 once summary_with_percentiles
+    // recomputes min/max.
+    #[ignore = "summary_with_percentiles dirty-bit recompute implemented in Task 6"]
     #[test]
     fn purge_of_extremum_marks_dirty_then_lazy_recomputes() {
         let base = Instant::now();
@@ -507,7 +544,6 @@ mod tests {
         assert_eq!(s.max_rtt_micros, Some(5_000));
     }
 
-    #[ignore = "purge_old in Task 5"]
     #[test]
     fn purge_of_non_extremum_leaves_min_max_clean() {
         let base = Instant::now();
@@ -519,14 +555,18 @@ mod tests {
             &[(0, 3_000), (10, 1_000), (20, 5_000), (30, 4_000)],
         );
 
-        stats.purge_old(base + Duration::from_secs(90));
+        // Purge at t+60 — cutoff = t+0, so only the t+0 sample (the
+        // non-extremum) falls out. (The originally-staged purge time of
+        // t+90 would have purged all four samples under the chosen
+        // `<=` boundary semantics, leaving the window empty and
+        // contradicting the test's stated intent.)
+        stats.purge_old(base + Duration::from_secs(60));
         let s = stats.summary_fast();
         // Min (1000 at t+10) and max (5000 at t+20) both still in window.
         assert_eq!(s.min_rtt_micros, Some(1_000));
         assert_eq!(s.max_rtt_micros, Some(5_000));
     }
 
-    #[ignore = "purge_old in Task 5"]
     #[test]
     fn purging_all_samples_clears_min_max() {
         let base = Instant::now();
@@ -538,5 +578,74 @@ mod tests {
         assert_eq!(resolved.sample_count, 0);
         assert_eq!(resolved.min_rtt_micros, None);
         assert_eq!(resolved.max_rtt_micros, None);
+    }
+
+    #[test]
+    fn purge_does_not_drop_in_window_samples() {
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = rolling_with_samples(win, base, &[(0, 1_000), (30, 2_000), (59, 3_000)]);
+        // At t+59, the window covers (t-1, t+59] — all three remain.
+        stats.purge_old(base + Duration::from_secs(59));
+        assert_eq!(stats.summary_fast().sample_count, 3);
+    }
+
+    #[test]
+    fn purge_at_window_boundary_removes_equal_age_samples() {
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = rolling_with_samples(win, base, &[(0, 1_000)]);
+        // Sample at t+0 is exactly window-old at t+60. cutoff = t.
+        // front.t (= t+0) > cutoff (= t) is false, so we purge it.
+        stats.purge_old(base + Duration::from_secs(60));
+        assert_eq!(stats.summary_fast().sample_count, 0);
+    }
+
+    #[test]
+    fn purge_with_no_samples_is_noop() {
+        let mut stats = RollingStats::new(Duration::from_secs(60));
+        stats.purge_old(Instant::now());
+        assert_eq!(stats.summary_fast().sample_count, 0);
+    }
+
+    #[test]
+    fn purge_running_counters_match_remaining_samples() {
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = RollingStats::new(win);
+        stats.insert(&ok(base + Duration::from_secs(0), 1_000));
+        stats.insert(&timeout(base + Duration::from_secs(10)));
+        stats.insert(&ok(base + Duration::from_secs(20), 3_000));
+        stats.insert(&ok(base + Duration::from_secs(50), 5_000));
+
+        // Purge at t+90 → cutoff = t+30; samples at t+0/t+10/t+20 fall out.
+        stats.purge_old(base + Duration::from_secs(90));
+
+        // Surviving samples: only t+50 (rtt=5000, success).
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 1);
+        assert_eq!(s.successful, 1);
+        assert_eq!(s.mean_rtt_micros, Some(5_000.0));
+        assert_eq!(s.failure_rate, 0.0);
+    }
+
+    #[test]
+    fn set_window_changes_purge_threshold() {
+        let base = Instant::now();
+        let mut stats = RollingStats::new(Duration::from_secs(60));
+        stats.insert(&ok(base + Duration::from_secs(0), 1_000));
+        stats.insert(&ok(base + Duration::from_secs(30), 2_000));
+
+        // 60s window, now=t+50: both samples in window.
+        stats.purge_old(base + Duration::from_secs(50));
+        assert_eq!(stats.summary_fast().sample_count, 2);
+
+        // Shrink to 20s. At t+50 the cutoff becomes t+30. Samples with
+        // t <= cutoff are purged → both fall out (t+0 < t+30, and t+30
+        // is exactly the cutoff so the `front.t > cutoff` break-condition
+        // is false).
+        stats.set_window(Duration::from_secs(20));
+        stats.purge_old(base + Duration::from_secs(50));
+        assert_eq!(stats.summary_fast().sample_count, 0);
     }
 }
