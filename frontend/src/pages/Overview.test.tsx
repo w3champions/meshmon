@@ -121,11 +121,14 @@ describe("Overview", () => {
     test("renders PathHealthGrid cells with data-state", async () => {
       setupPopulatedMocks();
       renderWithProviders(<Overview />);
-      // PathHealthGrid renders gridcells (Links) with data-state attribute
-      const links = await screen.findAllByRole("gridcell");
-      expect(links.length).toBeGreaterThan(0);
-      for (const link of links) {
-        expect(link).toHaveAttribute("data-state");
+      // PathHealthGrid renders gridcells. Wait for any gridcell to appear, then
+      // verify that interactive (non-self) cells carry data-state.
+      const allCells = await screen.findAllByRole("gridcell");
+      expect(allCells.length).toBeGreaterThan(0);
+      const interactiveCells = allCells.filter((cell) => cell.hasAttribute("href"));
+      expect(interactiveCells.length).toBeGreaterThan(0);
+      for (const cell of interactiveCells) {
+        expect(cell).toHaveAttribute("data-state");
       }
     });
 
@@ -213,7 +216,11 @@ describe("Overview", () => {
 
       renderWithProviders(<Overview />);
 
+      // PathHealthGrid shows its own empty state when agents is empty.
       expect(await screen.findByText("No agents registered yet.")).toBeInTheDocument();
+      // RecentRoutesTable is always rendered; with empty routes it shows its own
+      // "No recent route changes" paragraph — not a <table> element.
+      expect(await screen.findByText("No recent route changes")).toBeInTheDocument();
       expect(screen.queryByRole("table")).not.toBeInTheDocument();
     });
   });

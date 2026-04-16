@@ -63,4 +63,19 @@ describe("AlertSummaryStrip", () => {
     expect(await screen.findByTestId("alert-summary-skeleton")).toBeInTheDocument();
     expect(screen.queryByText("No active alerts")).not.toBeInTheDocument();
   });
+
+  test("shows error alert when hook errors", async () => {
+    vi.mocked(alertsHook.useAlertSummary).mockReturnValue({
+      data: undefined as unknown as ReturnType<typeof alertsHook.useAlertSummary>["data"],
+      isLoading: false,
+      isError: true,
+    });
+
+    renderWithProviders(<AlertSummaryStrip />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load alerts");
+    expect(screen.queryByText("No active alerts")).not.toBeInTheDocument();
+    expect(screen.queryByText("View all")).not.toBeInTheDocument();
+  });
 });

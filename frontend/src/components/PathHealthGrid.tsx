@@ -41,21 +41,26 @@ export function PathHealthGrid({
           gridTemplateColumns: `minmax(4rem, auto) repeat(${cols.length}, 1.5rem)`,
         }}
       >
-        {/* Top-left corner */}
-        <div />
-        {/* Column headers */}
-        {cols.map((col) => (
-          /* biome-ignore lint/a11y/useSemanticElements: role="columnheader" on div is intentional for ARIA grid; <th> cannot be used in CSS grid layout */
-          <div
-            key={`h-${col}`}
-            role="columnheader"
-            tabIndex={-1}
-            className="text-xs font-mono rotate-[-60deg] origin-bottom-left whitespace-nowrap text-muted-foreground"
-            data-testid="col-header"
-          >
-            {col}
-          </div>
-        ))}
+        {/* Header row: top-left corner + column headers */}
+        {/* biome-ignore lint/a11y/useFocusableInteractive: role="row" is a structural ARIA grouping inside a CSS grid; focusability is on the cell children */}
+        {/* biome-ignore lint/a11y/useSemanticElements: role="row" on div is intentional — <tr> cannot be used in a CSS grid layout */}
+        <div role="row" style={{ display: "contents" }}>
+          {/* Top-left corner */}
+          <div />
+          {/* Column headers */}
+          {cols.map((col) => (
+            /* biome-ignore lint/a11y/useSemanticElements: role="columnheader" on div is intentional for ARIA grid; <th> cannot be used in CSS grid layout */
+            <div
+              key={`h-${col}`}
+              role="columnheader"
+              tabIndex={-1}
+              className="text-xs font-mono rotate-[-60deg] origin-bottom-left whitespace-nowrap text-muted-foreground"
+              data-testid="col-header"
+            >
+              {col}
+            </div>
+          ))}
+        </div>
         {rows.map((source) => (
           <Row key={source} source={source} cols={cols} matrix={matrix} />
         ))}
@@ -72,7 +77,9 @@ interface RowProps {
 
 function Row({ source, cols, matrix }: RowProps) {
   return (
-    <>
+    /* biome-ignore lint/a11y/useFocusableInteractive: role="row" is a structural ARIA grouping inside a CSS grid; focusability is on the cell children */
+    /* biome-ignore lint/a11y/useSemanticElements: role="row" on div is intentional — <tr> cannot be used in a CSS grid layout */
+    <div role="row" style={{ display: "contents" }}>
       {/* biome-ignore lint/a11y/useSemanticElements: role="rowheader" on div is intentional for ARIA grid; <th> cannot be used in CSS grid layout */}
       <div
         role="rowheader"
@@ -95,6 +102,6 @@ function Row({ source, cols, matrix }: RowProps) {
           />
         );
       })}
-    </>
+    </div>
   );
 }

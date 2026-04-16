@@ -972,12 +972,34 @@ async fn recent_routes_returns_latest_across_pairs() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let items = body.as_array().expect("array");
-    // Our three inserted rows should be the most-recent; latest first.
-    assert!(items.len() >= 3, "expected >= 3, got {}", items.len());
-    // First row must be pair A's newer snapshot (1 min ago).
-    assert_eq!(items[0]["source_id"], "src-a");
-    assert_eq!(items[0]["target_id"], "tgt-a");
-    // observed_at must strictly descend.
+
+    // After the DISTINCT ON fix only the latest snapshot per pair is returned.
+    // The seeded pairs are: src-a/tgt-a (60m ago, 1m ago) and src-b/tgt-b (30m ago).
+    // DISTINCT ON picks: src-a/tgt-a at 1m ago + src-b/tgt-b at 30m ago → 2 items.
+    // Other tests may contribute pre-existing pairs, so we assert >= 2.
+    assert!(
+        items.len() >= 2,
+        "expected >= 2 pair-unique items, got {}",
+        items.len()
+    );
+
+    // No two items should share the same (source_id, target_id) pair.
+    let mut seen_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for item in items {
+        let src = item["source_id"].as_str().unwrap().to_string();
+        let tgt = item["target_id"].as_str().unwrap().to_string();
+        assert!(
+            seen_pairs.insert((src.clone(), tgt.clone())),
+            "duplicate pair ({src}, {tgt}) — DISTINCT ON not working"
+        );
+    }
+
+    // The very first item must be src-a/tgt-a (1 min ago — the globally latest pair).
+    assert_eq!(items[0]["source_id"], "src-a", "first item should be src-a");
+    assert_eq!(items[0]["target_id"], "tgt-a", "first item should be tgt-a");
+
+    // observed_at must globally descend across all items.
     for w in items.windows(2) {
         let a = w[0]["observed_at"].as_str().unwrap();
         let b = w[1]["observed_at"].as_str().unwrap();
@@ -1014,6 +1036,18 @@ async fn recent_routes_respects_limit_cap() {
         .await
         .unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("limit must be between 1 and 100"),
+        "expected error mentioning 'limit must be between 1 and 100', got: {body}"
+    );
 }
 
 #[tokio::test]
@@ -1035,6 +1069,18 @@ async fn recent_routes_rejects_invalid_limit() {
         .await
         .unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("limit must be between 1 and 100"),
+        "expected error mentioning 'limit must be between 1 and 100', got: {body}"
+    );
 }
 
 #[tokio::test]

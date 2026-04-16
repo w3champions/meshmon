@@ -453,18 +453,28 @@ pub struct RecentRoutesParams {
 }
 
 /// Fetch the most recent route snapshots across all source/target pairs.
+///
+/// Uses a CTE with `DISTINCT ON` to return exactly one (the latest) snapshot
+/// per `(source_id, target_id)` pair, then orders the result set globally by
+/// `observed_at DESC` so the caller sees the most recently active pairs first.
 async fn fetch_recent_routes(
     pool: &sqlx::PgPool,
     limit: i64,
 ) -> Result<Vec<RouteSnapshotSummary>, sqlx::Error> {
     let rows = sqlx::query!(
-        r#"SELECT id AS "id!",
+        r#"WITH latest AS (
+               SELECT DISTINCT ON (source_id, target_id)
+                      id, source_id, target_id, protocol, observed_at, path_summary
+               FROM route_snapshots
+               ORDER BY source_id, target_id, observed_at DESC
+           )
+           SELECT id AS "id!",
                   source_id,
                   target_id,
                   protocol,
                   observed_at,
                   path_summary AS "path_summary: SqlxJson<PathSummaryJson>"
-           FROM route_snapshots
+           FROM latest
            ORDER BY observed_at DESC
            LIMIT $1"#,
         limit,
@@ -485,8 +495,9 @@ async fn fetch_recent_routes(
         .collect())
 }
 
-/// `GET /api/routes/recent` — return the most recent route snapshots across
-/// all source/target pairs, ordered by `observed_at DESC`.
+/// `GET /api/routes/recent` — returns the latest route snapshot per
+/// `(source_id, target_id)` pair, newest first, up to `limit` rows
+/// (default 10, max 100).
 #[utoipa::path(
     get,
     path = "/api/routes/recent",

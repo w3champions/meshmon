@@ -9,10 +9,18 @@ interface AlertSummaryStripProps {
 }
 
 export function AlertSummaryStrip({ className }: AlertSummaryStripProps) {
-  const { data, isLoading } = useAlertSummary();
+  const { data, isLoading, isError } = useAlertSummary();
 
   if (isLoading) {
     return <Skeleton className={cn("h-8 w-64", className)} data-testid="alert-summary-skeleton" />;
+  }
+
+  if (isError) {
+    return (
+      <p role="alert" className={cn("text-sm text-destructive", className)}>
+        Failed to load alerts
+      </p>
+    );
   }
 
   if (data.total === 0) {

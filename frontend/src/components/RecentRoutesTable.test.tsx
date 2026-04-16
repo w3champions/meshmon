@@ -127,6 +127,21 @@ describe("RecentRoutesTable", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
+  test("shows error alert when hook errors", async () => {
+    vi.mocked(recentRoutesHook.useRecentRouteChanges).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    } as ReturnType<typeof recentRoutesHook.useRecentRouteChanges>);
+
+    renderWithProviders(<RecentRoutesTable />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load recent route changes");
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("recent-routes-skeleton")).not.toBeInTheDocument();
+  });
+
   test("shows 'No recent route changes' for empty array", async () => {
     vi.mocked(recentRoutesHook.useRecentRouteChanges).mockReturnValue({
       data: [] as RouteSnapshotSummary[],

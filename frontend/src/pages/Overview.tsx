@@ -7,11 +7,11 @@ import { RecentRoutesTable } from "@/components/RecentRoutesTable";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function Overview() {
-  const { data: agents, isLoading: agentsLoading } = useAgents();
-  const { data: matrix, isLoading: matrixLoading } = useHealthMatrix();
+  const { data: agents, isLoading: agentsLoading, isError: agentsError } = useAgents();
+  const { data: matrix, isLoading: matrixLoading, isError: matrixError } = useHealthMatrix();
 
   const loading = agentsLoading || matrixLoading;
-  const empty = (agents ?? []).length === 0;
+  const hasError = agentsError || matrixError;
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -21,6 +21,11 @@ export default function Overview() {
           Mesh-network health across all registered agents.
         </p>
       </header>
+      {hasError && (
+        <p role="alert" className="text-sm text-destructive">
+          Failed to load one or more data sources.
+        </p>
+      )}
       <AlertSummaryStrip />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {loading ? (
@@ -38,11 +43,7 @@ export default function Overview() {
       </div>
       <section className="flex flex-col gap-2">
         <h2 className="text-lg font-semibold">Recent route changes</h2>
-        {empty && !loading ? (
-          <p className="text-sm text-muted-foreground">No recent route changes</p>
-        ) : (
-          <RecentRoutesTable />
-        )}
+        <RecentRoutesTable />
       </section>
     </div>
   );

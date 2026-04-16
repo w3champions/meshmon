@@ -39,4 +39,10 @@ describe("isStale", () => {
   test("returns true for unparseable strings", () => {
     expect(isStale("garbage", now)).toBe(true);
   });
+
+  test("returns false at exactly 5 min boundary (exclusive)", () => {
+    const fiveMinutesAgo = "2026-04-16T11:55:00Z";
+    // 5 * 60 * 1000 ms apart — the check is `> STALE_MS` (strict), so returns false.
+    expect(isStale(fiveMinutesAgo, now)).toBe(false);
+  });
 });

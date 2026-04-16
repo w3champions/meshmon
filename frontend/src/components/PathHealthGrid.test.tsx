@@ -24,10 +24,12 @@ function matrix(pairs: Array<[string, string, number]>): HealthMatrix {
 describe("PathHealthGrid", () => {
   // Test 1: renders one cell per (source, target) pair including self-cells.
   test("renders one cell per (source, target) pair for provided agents", async () => {
-    renderWithProviders(<PathHealthGrid agents={AGENTS} matrix={new Map()} />);
+    const { container } = renderWithProviders(
+      <PathHealthGrid agents={AGENTS} matrix={new Map()} />,
+    );
 
     // 3 agents → 3×3 = 9 cells total (including self-cells).
-    // Each cell is a Link with role="gridcell" and aria-label "X to Y: stale".
+    // Each cell has role="gridcell" (self-cells are divs, others are Links).
     const cells = await screen.findAllByRole("gridcell");
     expect(cells).toHaveLength(9);
 
@@ -36,6 +38,10 @@ describe("PathHealthGrid", () => {
     expect(rowHeaders).toHaveLength(3);
     const colHeaders = screen.getAllByTestId("col-header");
     expect(colHeaders).toHaveLength(3);
+
+    // 3 data rows + 1 header row = 4 role="row" wrappers.
+    const rows = container.querySelectorAll('[role="row"]');
+    expect(rows).toHaveLength(AGENTS.length + 1);
   });
 
   // Test 2: cell data-state attribute reflects the HealthState from the matrix.
@@ -67,16 +73,19 @@ describe("PathHealthGrid", () => {
     expect(unreachableCell).toHaveAttribute("data-state", "unreachable");
   });
 
-  // Test 3: clicking a cell navigates to /paths/$source/$target (Link href).
-  test("each cell is a link with the correct /paths/$source/$target href", async () => {
+  // Test 3: non-self cells are links; self-cells are non-interactive placeholders.
+  test("non-self cells are links; self-cells are plain divs without href", async () => {
     renderWithProviders(<PathHealthGrid agents={[agent("a"), agent("b")]} matrix={new Map()} />);
 
     // 2 agents → 4 cells
     const cell = await screen.findByRole("gridcell", { name: "a to b: stale" });
     expect(cell).toHaveAttribute("href", "/paths/a/b");
 
-    const selfCell = screen.getByRole("gridcell", { name: "a to a: stale" });
-    expect(selfCell).toHaveAttribute("href", "/paths/a/a");
+    // Self-cell renders as a plain div — it has role="gridcell" but no href.
+    const selfCellA = screen.getByRole("gridcell", { name: "a (self)" });
+    expect(selfCellA).not.toHaveAttribute("href");
+    const selfCellB = screen.getByRole("gridcell", { name: "b (self)" });
+    expect(selfCellB).not.toHaveAttribute("href");
   });
 
   // Test 4: missing matrix entry → data-state="stale".

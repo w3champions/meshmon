@@ -179,6 +179,34 @@ describe("AgentDetail", () => {
     expect(rowHeaders[2]).toHaveTextContent("agent-b");
   });
 
+  test("shows 'Failed to load agent' alert with back link when useAgent errors", async () => {
+    vi.mocked(agentsHook.useAgent).mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as ReturnType<typeof agentsHook.useAgent>);
+
+    vi.mocked(agentsHook.useAgents).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+    } as ReturnType<typeof agentsHook.useAgents>);
+
+    vi.mocked(healthMatrixHook.useHealthMatrix).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+    } as ReturnType<typeof healthMatrixHook.useHealthMatrix>);
+
+    renderWithProviders(<AgentDetail />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load agent");
+    const backLink = screen.getByRole("link", { name: /back to agents/i });
+    expect(backLink).toHaveAttribute("href", "/agents");
+    expect(screen.queryByText("Agent not found")).not.toBeInTheDocument();
+  });
+
   test("renders 'Incoming paths' section heading", async () => {
     vi.mocked(agentsHook.useAgent).mockReturnValue({
       data: AGENT_A,

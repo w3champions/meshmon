@@ -13,6 +13,11 @@ export interface HealthMatrixEntry {
 
 export type HealthMatrix = Map<string, HealthMatrixEntry>;
 
+// VictoriaMetrics proxies VM's instant-query response shape, which the service's
+// OpenAPI spec only annotates as `content?: never` (opaque pass-through). The
+// hand-authored interface below is the compile-time contract; a VM upstream
+// change (e.g., `value` → `values`) won't be caught statically. The `?? []`
+// fallback at the iteration site guards against runtime shape drift.
 interface VmInstantResponse {
   status: string;
   data: {
@@ -33,6 +38,7 @@ export function useHealthMatrix() {
       });
       if (response?.status === 503) return new Map();
       if (error) throw new Error("failed to fetch health matrix", { cause: error });
+      // The OpenAPI schema types /api/metrics/query's 200 response as unknown; narrow to the VictoriaMetrics/Prometheus instant-vector shape we expect here.
       const body = data as unknown as VmInstantResponse;
       const out: HealthMatrix = new Map();
       for (const series of body?.data?.result ?? []) {

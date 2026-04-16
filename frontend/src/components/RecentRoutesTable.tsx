@@ -18,11 +18,19 @@ interface RecentRoutesTableProps {
 }
 
 export function RecentRoutesTable({ className, limit = 10 }: RecentRoutesTableProps) {
-  const { data, isLoading } = useRecentRouteChanges(limit);
+  const { data, isLoading, isError } = useRecentRouteChanges(limit);
 
   if (isLoading) {
     return (
       <Skeleton className={cn("h-40 w-full", className)} data-testid="recent-routes-skeleton" />
+    );
+  }
+
+  if (isError) {
+    return (
+      <p role="alert" className={cn("text-sm text-destructive", className)}>
+        Failed to load recent route changes
+      </p>
     );
   }
 

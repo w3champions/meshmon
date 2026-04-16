@@ -22,6 +22,19 @@ function formatRate(rate: number): string {
 }
 
 export function PathHealthCell({ source, target, state, failureRate }: PathHealthCellProps) {
+  // An agent does not probe itself — render a non-interactive placeholder.
+  if (source === target) {
+    return (
+      /* biome-ignore lint/a11y/useFocusableInteractive: self-cell is intentionally non-interactive; aria-hidden could hide useful label from screen readers */
+      /* biome-ignore lint/a11y/useSemanticElements: role="gridcell" on div is intentional — <td> cannot be used in a CSS grid layout */
+      <div
+        className="block h-6 w-6 rounded-sm bg-muted/30"
+        role="gridcell"
+        aria-label={`${source} (self)`}
+      />
+    );
+  }
+
   const tooltipText =
     state === "stale" || failureRate === undefined
       ? "No data"
