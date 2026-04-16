@@ -43,7 +43,12 @@ pub(crate) fn parse_xff_client_ip(header: &str) -> Option<std::net::IpAddr> {
 pub(crate) fn parse_forwarded_client_ip(header: &str) -> Option<std::net::IpAddr> {
     let first_element = header.split(',').next()?;
     for pair in first_element.split(';') {
-        let (key, value) = pair.trim().split_once('=')?;
+        // Skip malformed pairs (no `=`) rather than bailing out of the
+        // whole parse — a leading `;` or a stray token before `for=`
+        // should not make the parser forget what comes after.
+        let Some((key, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
         if !key.trim().eq_ignore_ascii_case("for") {
             continue;
         }
@@ -961,6 +966,17 @@ url = "postgres://ignored@localhost/db"
         assert_eq!(parse_forwarded_client_ip("proto=http;by=10.0.0.1"), None);
         // Malformed → None.
         assert_eq!(parse_forwarded_client_ip("garbage"), None);
+        // Malformed pair before a valid `for=` must not short-circuit the
+        // search for subsequent pairs (defensive — real proxies don't
+        // emit this shape).
+        assert_eq!(
+            parse_forwarded_client_ip(";for=192.0.2.60"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        assert_eq!(
+            parse_forwarded_client_ip("stray;for=192.0.2.60"),
+            Some("192.0.2.60".parse().unwrap())
+        );
     }
 
     #[test]
