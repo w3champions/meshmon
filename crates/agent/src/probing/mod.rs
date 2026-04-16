@@ -8,6 +8,7 @@
 pub mod echo_tcp;
 pub mod echo_udp;
 pub mod tcp;
+pub mod trippy;
 pub mod udp;
 pub mod wire;
 
