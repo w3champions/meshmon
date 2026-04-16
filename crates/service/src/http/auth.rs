@@ -12,13 +12,111 @@
 
 use crate::config::Config;
 use arc_swap::ArcSwap;
+use axum::http::request::Parts;
 use axum_login::{AuthUser as AxumAuthUser, AuthnBackend, UserId};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tower_governor::errors::GovernorError;
 use tower_governor::key_extractor::KeyExtractor;
 use utoipa::ToSchema;
+
+/// Extract the leftmost client IP from an `X-Forwarded-For` value.
+///
+/// Accepts the de-facto syntax `client, proxy1, proxy2`. Returns the
+/// first parseable `IpAddr`; returns `None` if the header is malformed
+/// or contains no parseable address.
+pub(crate) fn parse_xff_client_ip(header: &str) -> Option<std::net::IpAddr> {
+    header
+        .split(',')
+        .next()
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+}
+
+/// Extract the leftmost `for=<ip>` from an RFC 7239 `Forwarded` value.
+///
+/// Handles the common real-world shapes: `for=1.2.3.4`,
+/// `for="1.2.3.4"`, `for="1.2.3.4:5678"`, `for="[::1]:4711"`,
+/// `for=[2001:db8::1]`. Port is stripped. Returns `None` when no
+/// parseable `for=` parameter is found.
+pub(crate) fn parse_forwarded_client_ip(header: &str) -> Option<std::net::IpAddr> {
+    let first_element = header.split(',').next()?;
+    for pair in first_element.split(';') {
+        // Skip malformed pairs (no `=`) rather than bailing out of the
+        // whole parse — a leading `;` or a stray token before `for=`
+        // should not make the parser forget what comes after.
+        let Some((key, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("for") {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        // Bracketed IPv6: [addr] or [addr]:port.
+        let stripped = if let Some(rest) = value.strip_prefix('[') {
+            rest.split(']').next().unwrap_or(rest)
+        } else if let Some((host, maybe_port)) = value.rsplit_once(':') {
+            // IPv4 with port (`host:port`) — IPv6 is only valid with
+            // brackets per RFC 7239 §6. `maybe_port` must parse as u16
+            // to distinguish `host:port` from bare `::1`.
+            if maybe_port.chars().all(|c| c.is_ascii_digit()) {
+                host
+            } else {
+                value
+            }
+        } else {
+            value
+        };
+        if let Ok(ip) = stripped.parse::<std::net::IpAddr>() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Client-IP extraction shared between the login rate limit, the agent
+/// rate limit, and the tonic register handler's IP identity check.
+///
+/// When `trust_forwarded = true`, try the leftmost entry of
+/// `X-Forwarded-For` first; if missing or malformed, try RFC 7239
+/// `Forwarded: for=...`. On any fallback, use the `ConnectInfo` peer.
+/// When `trust_forwarded = false`, only `ConnectInfo` is read.
+#[allow(dead_code)]
+pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net::IpAddr> {
+    if trust_forwarded {
+        if let Some(ip) = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_xff_client_ip)
+        {
+            return Some(ip);
+        }
+        if let Some(ip) = parts
+            .headers
+            .get("forwarded")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_forwarded_client_ip)
+        {
+            return Some(ip);
+        }
+    }
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
+
+/// Constant-time equality with explicit length gate (`ct_eq` panics on
+/// unequal lengths). Leaks "token-not-empty-but-wrong-length" by design —
+/// cheap to discover by trial-and-error anyway.
+pub(crate) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    bool::from(a.ct_eq(b))
+}
 
 /// Principal returned by the backend on successful authentication. Stored in
 /// the session by `axum-login`; retrieved via the `AuthSession` extractor.
@@ -395,6 +493,107 @@ pub fn login_rate_limit_layer(trust_forwarded_headers: bool) -> LoginRateLimitLa
     }
 }
 
+use crate::state::AppState;
+use tonic::{Request as TonicRequest, Status};
+
+/// Bearer-token gate for the tonic `AgentApi` service (design §3.4).
+///
+/// Returns a cloneable closure so `AgentApiServer::with_interceptor` can
+/// accept it. The closure reads `state.config()` on every call so SIGHUP
+/// rotations take effect on the next RPC without rebuilding the server.
+pub fn agent_grpc_interceptor(
+    state: AppState,
+) -> impl Fn(TonicRequest<()>) -> Result<TonicRequest<()>, Status> + Clone {
+    move |req: TonicRequest<()>| -> Result<TonicRequest<()>, Status> {
+        let cfg = state.config();
+        let Some(expected) = cfg.agent_api.shared_token.as_deref() else {
+            return Err(Status::unavailable("agent api not configured"));
+        };
+        let Some(header) = req.metadata().get("authorization") else {
+            return Err(Status::unauthenticated("missing bearer token"));
+        };
+        let Ok(raw) = header.to_str() else {
+            return Err(Status::unauthenticated("malformed authorization metadata"));
+        };
+        // HTTP auth schemes are case-insensitive (RFC 7235 §2.1). Accept
+        // "Bearer", "bearer", "BEARER", etc. before the single required
+        // space — clients that normalize scheme case should not be
+        // rejected as unauthenticated.
+        let Some(presented) = raw
+            .get(..7)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("Bearer "))
+            .and_then(|_| raw.get(7..))
+        else {
+            return Err(Status::unauthenticated("missing bearer prefix"));
+        };
+        if !constant_time_eq_bytes(presented.as_bytes(), expected.as_bytes()) {
+            return Err(Status::unauthenticated("invalid bearer token"));
+        }
+        Ok(req)
+    }
+}
+
+/// Agent-API rate-limit layer (same shape as the login layer). Applied via
+/// `tonic::transport::Server::builder().layer(...)` for the gRPC half.
+pub type AgentApiRateLimitLayer = tower::util::Either<
+    tower_governor::GovernorLayer<
+        tower_governor::key_extractor::SmartIpKeyExtractor,
+        governor::middleware::NoOpMiddleware,
+        axum::body::Body,
+    >,
+    tower_governor::GovernorLayer<
+        PeerAddrKeyExtractor,
+        governor::middleware::NoOpMiddleware,
+        axum::body::Body,
+    >,
+>;
+
+/// Replenish interval for the agent-API rate limiter, in nanoseconds.
+///
+/// Nanosecond precision avoids the seconds-only quantization bug where e.g.
+/// `per_minute = 59` rounded up to `per_second(2)` enforces 30 req/min, or
+/// `per_minute = 120` rounded down to `per_second(1)` enforces 60 req/min.
+/// Config parsing guarantees `per_minute > 0`; the `max(1)` calls are
+/// defense in depth so a future refactor does not produce a panic here.
+fn rate_limit_period_nanos(per_minute: u32) -> u64 {
+    60_000_000_000u64
+        .checked_div(u64::from(per_minute.max(1)))
+        .unwrap_or(1_000_000_000)
+        .max(1)
+}
+
+/// Build the rate-limit layer from resolved `[agent_api]` knobs + trust mode.
+/// Non-zero `per_minute` and `burst` are enforced at config parse time.
+pub fn agent_api_rate_limit_layer(
+    trust_forwarded: bool,
+    per_minute: u32,
+    burst: u32,
+) -> AgentApiRateLimitLayer {
+    use tower_governor::governor::GovernorConfigBuilder;
+    use tower_governor::key_extractor::SmartIpKeyExtractor;
+    use tower_governor::GovernorLayer;
+
+    let period_nanos = rate_limit_period_nanos(per_minute);
+
+    if trust_forwarded {
+        let cfg = GovernorConfigBuilder::default()
+            .per_nanosecond(period_nanos)
+            .burst_size(burst)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("governor config (smart)");
+        tower::util::Either::Left(GovernorLayer::new(cfg))
+    } else {
+        let cfg = GovernorConfigBuilder::default()
+            .per_nanosecond(period_nanos)
+            .burst_size(burst)
+            .key_extractor(PeerAddrKeyExtractor)
+            .finish()
+            .expect("governor config (peer-only)");
+        tower::util::Either::Right(GovernorLayer::new(cfg))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +714,287 @@ url = "postgres://ignored@h/d"
             .await
             .expect("no infra")
             .is_none());
+    }
+
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn parts_with_xff_and_peer(xff: Option<&str>, peer: IpAddr) -> axum::http::request::Parts {
+        let mut req = Request::builder().uri("/");
+        if let Some(v) = xff {
+            req = req.header("x-forwarded-for", v);
+        }
+        let (mut parts, _) = req.body(()).unwrap().into_parts();
+        parts
+            .extensions
+            .insert(ConnectInfo(SocketAddr::new(peer, 9999)));
+        parts
+    }
+
+    #[test]
+    fn client_ip_prefers_leftmost_xff_when_trusted() {
+        let parts = parts_with_xff_and_peer(
+            Some("198.51.100.7, 203.0.113.1"),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        assert_eq!(
+            client_ip(&parts, true).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))
+        );
+    }
+
+    #[test]
+    fn client_ip_ignores_xff_when_not_trusted() {
+        let parts =
+            parts_with_xff_and_peer(Some("198.51.100.7"), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(
+            client_ip(&parts, false).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer_on_missing_xff() {
+        let parts = parts_with_xff_and_peer(None, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            client_ip(&parts, true).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer_on_malformed_xff() {
+        let parts =
+            parts_with_xff_and_peer(Some("not-an-ip"), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+        assert_eq!(
+            client_ip(&parts, true).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_bytes_true_on_match() {
+        assert!(constant_time_eq_bytes(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_bytes_false_on_mismatch() {
+        assert!(!constant_time_eq_bytes(b"hello", b"world"));
+    }
+
+    #[test]
+    fn constant_time_eq_bytes_false_on_length_mismatch() {
+        assert!(!constant_time_eq_bytes(b"abc", b"abcd"));
+    }
+
+    // ----- interceptor tests -----
+
+    use crate::ingestion::{IngestionConfig, IngestionPipeline};
+    use crate::registry::AgentRegistry;
+    use crate::state::AppState;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// Build an `AppState` with the given optional agent token wired into
+    /// `[agent_api].shared_token`. The pool is lazy (no real DB connection),
+    /// the ingestion pipeline is spawned against a token that's immediately
+    /// cancelled so no background threads linger between tests.
+    fn agent_state_with(token: Option<&str>) -> AppState {
+        let token_line = match token {
+            Some(t) => format!(r#"shared_token = "{t}""#),
+            None => String::new(),
+        };
+        let toml = format!(
+            r#"
+[database]
+url = "postgres://ignored@localhost/db"
+
+[agent_api]
+{token_line}
+"#
+        );
+        let cfg = Arc::new(Config::from_str(&toml, "test.toml").expect("config parse"));
+        let swap = Arc::new(ArcSwap::from(cfg.clone()));
+        let (_, rx) = tokio::sync::watch::channel(cfg);
+
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://ignored@localhost/db").expect("lazy pool");
+        let ct = CancellationToken::new();
+        ct.cancel(); // cancel immediately so workers exit without doing DB work
+        let ingestion = IngestionPipeline::spawn(
+            IngestionConfig::default_with_url("http://vm-ignored:8428/api/v1/write".into()),
+            pool.clone(),
+            ct,
+        );
+        let registry = Arc::new(AgentRegistry::new(
+            pool.clone(),
+            Duration::from_secs(10),
+            Duration::from_secs(300),
+        ));
+        AppState::new(swap, rx, pool, ingestion, registry)
+    }
+
+    /// Call the interceptor with the given `Authorization` header value
+    /// (pass `None` to omit the header entirely).
+    fn run_interceptor(state: AppState, authz: Option<&str>) -> Result<TonicRequest<()>, Status> {
+        let interceptor = agent_grpc_interceptor(state);
+        let mut req = TonicRequest::new(());
+        if let Some(v) = authz {
+            req.metadata_mut()
+                .insert("authorization", v.parse().expect("valid header value"));
+        }
+        interceptor(req)
+    }
+
+    #[tokio::test]
+    async fn interceptor_unavailable_when_token_unset() {
+        let state = agent_state_with(None);
+        let err = run_interceptor(state, Some("Bearer anything")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_without_header() {
+        let state = agent_state_with(Some("secret-token"));
+        let err = run_interceptor(state, None).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_without_bearer_prefix() {
+        let state = agent_state_with(Some("secret-token"));
+        let err = run_interceptor(state, Some("secret-token")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_on_wrong_token_same_length() {
+        let state = agent_state_with(Some("secret-token"));
+        // Same length as "secret-token" but different content.
+        let err = run_interceptor(state, Some("Bearer secret-XXXXX")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_unauthenticated_on_wrong_length() {
+        let state = agent_state_with(Some("secret-token"));
+        let err = run_interceptor(state, Some("Bearer short")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn interceptor_ok_on_match() {
+        let state = agent_state_with(Some("secret-token"));
+        let result = run_interceptor(state, Some("Bearer secret-token"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn agent_rate_limit_builds_for_both_trust_modes() {
+        // Just verify construction doesn't panic — no HTTP traffic needed.
+        let _ = agent_api_rate_limit_layer(true, 60, 30);
+        let _ = agent_api_rate_limit_layer(false, 60, 30);
+    }
+
+    #[tokio::test]
+    async fn interceptor_accepts_lowercase_bearer_scheme() {
+        // HTTP auth schemes are case-insensitive (RFC 7235 §2.1); rejecting
+        // "bearer" because we only checked for "Bearer " would be an
+        // interoperability bug.
+        let state = agent_state_with(Some("secret-token"));
+        let result = run_interceptor(state, Some("bearer secret-token"));
+        assert!(result.is_ok(), "interceptor must accept lowercase scheme");
+    }
+
+    #[tokio::test]
+    async fn interceptor_rejects_bearer_without_separator() {
+        // Require the single space after the scheme; "Bearertoken" should
+        // not slice through `strip_prefix` behavior by accident.
+        let state = agent_state_with(Some("secret-token"));
+        let result = run_interceptor(state, Some("Bearersecret-token"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_xff_picks_leftmost_ip() {
+        assert_eq!(
+            parse_xff_client_ip("1.2.3.4, 10.0.0.1"),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        assert_eq!(
+            parse_xff_client_ip(" 2001:db8::1 , fe80::1"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(parse_xff_client_ip("not-an-ip"), None);
+        assert_eq!(parse_xff_client_ip(""), None);
+    }
+
+    #[test]
+    fn parse_forwarded_handles_common_shapes() {
+        // Bare IPv4.
+        assert_eq!(
+            parse_forwarded_client_ip("for=192.0.2.60;proto=http"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // Quoted IPv4.
+        assert_eq!(
+            parse_forwarded_client_ip(r#"for="192.0.2.60""#),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // IPv4 with port.
+        assert_eq!(
+            parse_forwarded_client_ip(r#"for="192.0.2.60:47011""#),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // Bracketed IPv6 with port.
+        assert_eq!(
+            parse_forwarded_client_ip(r#"for="[2001:db8::1]:4711""#),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        // Multiple forwarded-elements — take the leftmost (closest hop).
+        assert_eq!(
+            parse_forwarded_client_ip("for=192.0.2.60, for=10.0.0.1"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // Case-insensitive key.
+        assert_eq!(
+            parse_forwarded_client_ip("For=192.0.2.60"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // No `for=` → None.
+        assert_eq!(parse_forwarded_client_ip("proto=http;by=10.0.0.1"), None);
+        // Malformed → None.
+        assert_eq!(parse_forwarded_client_ip("garbage"), None);
+        // Malformed pair before a valid `for=` must not short-circuit the
+        // search for subsequent pairs (defensive — real proxies don't
+        // emit this shape).
+        assert_eq!(
+            parse_forwarded_client_ip(";for=192.0.2.60"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        assert_eq!(
+            parse_forwarded_client_ip("stray;for=192.0.2.60"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn rate_limit_period_nanos_matches_per_minute() {
+        // 60/min = 1 req/sec.
+        assert_eq!(rate_limit_period_nanos(60), 1_000_000_000);
+        // 120/min = 500ms/req — previously truncated to `per_second(1)`
+        // which enforced 60/min.
+        assert_eq!(rate_limit_period_nanos(120), 500_000_000);
+        // 59/min — previously rounded up to `per_second(2)` which
+        // enforced 30/min.
+        assert_eq!(rate_limit_period_nanos(59), 60_000_000_000 / 59);
+        // Extreme low: 1/min = 60s/req.
+        assert_eq!(rate_limit_period_nanos(1), 60_000_000_000);
+        // Extreme high: 60_000/min = 1ms/req.
+        assert_eq!(rate_limit_period_nanos(60_000), 1_000_000);
+        // Pathological zero falls back to 1/min (defensive only — config
+        // parsing rejects `per_minute = 0`).
+        assert_eq!(rate_limit_period_nanos(0), 60_000_000_000);
     }
 }

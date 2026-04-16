@@ -97,6 +97,8 @@
 //! }
 //! ```
 
+pub mod grpc_harness;
+
 use ctor::dtor;
 use meshmon_service::config::Config;
 use meshmon_service::state::AppState;
@@ -400,6 +402,40 @@ url = "postgres://ignored@h/d"
 [[auth.users]]
 username = "admin"
 password_hash = "{AUTH_TEST_HASH}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let ingestion = dummy_ingestion(pool.clone());
+    let registry = dummy_registry(pool.clone());
+    AppState::new(swap, rx, pool, ingestion, registry)
+}
+
+/// Bearer token used by the in-process gRPC harness.
+pub const TEST_AGENT_TOKEN: &str = "test-agent-token-0123456789abcdef";
+
+/// `AppState` with the standard test operator, `TEST_AGENT_TOKEN` set, and
+/// `trust_forwarded_headers = true` so tests can drive per-request IPs via
+/// `x-forwarded-for` without injecting a real `ConnectInfo`. Generous rate
+/// limit so the concurrency test doesn't trip the limiter.
+pub fn state_with_agent_token(pool: PgPool) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[service]
+trust_forwarded_headers = true
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+
+[agent_api]
+shared_token = "{TEST_AGENT_TOKEN}"
+rate_limit_per_minute = 600
+rate_limit_burst = 300
 "#
     );
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));

@@ -321,3 +321,41 @@ message TargetsResponse {
 
   reserved 15 to 31;
 }
+
+// ---------------------------------------------------------------------------
+// Agent ↔ Service: gRPC service definition
+// ---------------------------------------------------------------------------
+
+message GetConfigRequest {
+  reserved 1 to 14;
+  reserved 15 to 31;
+}
+
+message GetTargetsRequest {
+  string source_id = 1;
+
+  reserved 2 to 14;
+  reserved 15 to 31;
+}
+
+message PushMetricsResponse {
+  reserved 1 to 14;
+  reserved 15 to 31;
+}
+
+message PushRouteSnapshotResponse {
+  reserved 1 to 14;
+  reserved 15 to 31;
+}
+
+service AgentApi {
+  rpc Register          (RegisterRequest)      returns (RegisterResponse);
+  rpc PushMetrics       (MetricsBatch)         returns (PushMetricsResponse);
+  rpc PushRouteSnapshot (RouteSnapshotRequest) returns (PushRouteSnapshotResponse);
+  rpc GetConfig         (GetConfigRequest)     returns (ConfigResponse);
+  rpc GetTargets        (GetTargetsRequest)    returns (TargetsResponse);
+
+  // Reserved for server-push of one-off commands to agents. Documented so
+  // the RPC name isn't reused.
+  // rpc SubscribeCommands(SubscribeRequest) returns (stream Command);
+}

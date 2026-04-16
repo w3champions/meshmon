@@ -55,6 +55,15 @@ password-hash = { version = "0.6", features = ["alloc", "phc"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+rustls-pemfile = "2"
+subtle = "2"
+tokio-rustls = "0.26"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+
 metrics = "0.24"
 prometheus-reqwest-remote-write = "0.5"
 snap = "1"
