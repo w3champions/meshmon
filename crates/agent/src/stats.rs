@@ -38,12 +38,11 @@ use crate::probing::ProbeObservation;
 /// `VecDeque` cache-friendly and makes the per-stats memory cost
 /// independent of protocol-specific payload size.
 #[derive(Debug, Clone, Copy)]
-// Fields are consumed by `insert` / `purge_old` / `summary_with_percentiles`
-// in T13 Tasks 3, 5, and 6. The skeleton commit (this one) ships only the
-// empty-window summary path.
-#[allow(dead_code)]
 struct Sample {
     /// Monotonic instant the probe was observed (== `ProbeObservation.observed_at`).
+    // Written by `insert`; read by `purge_old` in Task 5. Suppress
+    // until then so `cargo clippy -D warnings` stays green.
+    #[allow(dead_code)]
     t: Instant,
     /// `Some(rtt)` on success, `None` on failure (`Timeout` / `Error`).
     /// `Refused` is filtered upstream and never reaches `insert`.
@@ -169,8 +168,36 @@ impl RollingStats {
     /// only UDP `Refused` (spec 02 § Probe outcomes). Other failures
     /// (`Timeout`, TCP `Refused`, `Error`) are valid samples and arrive
     /// here with `outcome.is_success() == false`.
-    pub fn insert(&mut self, _obs: &ProbeObservation) {
-        unimplemented!("Task 3")
+    pub fn insert(&mut self, obs: &ProbeObservation) {
+        let sample = Sample {
+            t: obs.observed_at,
+            rtt_micros: obs.outcome.rtt_micros(),
+        };
+        self.sent += 1;
+        if let Some(rtt) = sample.rtt_micros {
+            self.successful += 1;
+            self.sum_rtt_micros = self.sum_rtt_micros.saturating_add(rtt as u64);
+            // (rtt as u128) * (rtt as u128) cannot overflow u128 because
+            // u32::MAX² ≈ 1.84e19 ≪ u128::MAX. Adding to the u128
+            // accumulator also cannot overflow within any plausible window
+            // — see plan version-check gate.
+            self.sum_rtt_sq_micros += (rtt as u128) * (rtt as u128);
+            // Update min/max optimistically. The dirty bit only signals
+            // that a *purge* may have removed the current extremum, so
+            // it's still safe to fold a new sample into the cached value
+            // — the resolved value (after the next percentile scan) will
+            // be the min/max over the remaining + newly-inserted samples
+            // either way.
+            self.min_rtt_micros = Some(match self.min_rtt_micros {
+                Some(cur) => cur.min(rtt),
+                None => rtt,
+            });
+            self.max_rtt_micros = Some(match self.max_rtt_micros {
+                Some(cur) => cur.max(rtt),
+                None => rtt,
+            });
+        }
+        self.samples.push_back(sample);
     }
 
     /// Drop samples older than `now - self.window`. Amortized O(1) per
@@ -294,5 +321,121 @@ mod tests {
         assert_eq!(stats.window(), five_min());
         assert!(stats.is_empty());
         assert_eq!(stats.len(), 0);
+    }
+
+    use crate::probing::{ProbeObservation, ProbeOutcome};
+    use meshmon_protocol::Protocol;
+
+    fn obs_at(t: Instant, outcome: ProbeOutcome) -> ProbeObservation {
+        ProbeObservation {
+            protocol: Protocol::Icmp,
+            target_id: "peer".to_string(),
+            outcome,
+            hops: None,
+            observed_at: t,
+        }
+    }
+
+    fn ok(t: Instant, rtt_micros: u32) -> ProbeObservation {
+        obs_at(t, ProbeOutcome::Success { rtt_micros })
+    }
+
+    fn timeout(t: Instant) -> ProbeObservation {
+        obs_at(t, ProbeOutcome::Timeout)
+    }
+
+    #[test]
+    fn single_success_yields_mean_equal_to_rtt() {
+        let mut stats = RollingStats::new(five_min());
+        stats.insert(&ok(Instant::now(), 1_500));
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 1);
+        assert_eq!(s.successful, 1);
+        assert_eq!(s.failure_rate, 0.0);
+        assert_eq!(s.mean_rtt_micros, Some(1_500.0));
+        // stddev requires >= 2 samples (single-sample population stddev
+        // is always 0 and carries no signal — see field doc).
+        assert_eq!(s.stddev_rtt_micros, None);
+        assert_eq!(s.min_rtt_micros, Some(1_500));
+        assert_eq!(s.max_rtt_micros, Some(1_500));
+    }
+
+    #[test]
+    fn single_failure_yields_failure_rate_one() {
+        let mut stats = RollingStats::new(five_min());
+        stats.insert(&timeout(Instant::now()));
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 1);
+        assert_eq!(s.successful, 0);
+        assert_eq!(s.failure_rate, 1.0);
+        assert_eq!(s.mean_rtt_micros, None);
+        assert_eq!(s.min_rtt_micros, None);
+        assert_eq!(s.max_rtt_micros, None);
+    }
+
+    #[test]
+    fn mixed_observations_compute_failure_rate() {
+        let mut stats = RollingStats::new(five_min());
+        let now = Instant::now();
+        for rtt in [1_000_u32, 2_000, 3_000, 4_000] {
+            stats.insert(&ok(now, rtt));
+        }
+        stats.insert(&timeout(now));
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 5);
+        assert_eq!(s.successful, 4);
+        assert!(
+            (s.failure_rate - 0.2).abs() < 1e-9,
+            "got {}",
+            s.failure_rate
+        );
+        // mean of {1000,2000,3000,4000} = 2500.
+        assert_eq!(s.mean_rtt_micros, Some(2_500.0));
+        // Population stddev of {1000,2000,3000,4000} ≈ 1118.034 µs.
+        let stddev = s.stddev_rtt_micros.unwrap();
+        assert!(
+            (stddev - 1_118.033_988_749_895).abs() < 1e-3,
+            "got {stddev}"
+        );
+        assert_eq!(s.min_rtt_micros, Some(1_000));
+        assert_eq!(s.max_rtt_micros, Some(4_000));
+    }
+
+    #[test]
+    fn equal_rtts_have_zero_stddev() {
+        let mut stats = RollingStats::new(five_min());
+        let now = Instant::now();
+        for _ in 0..10 {
+            stats.insert(&ok(now, 5_000));
+        }
+        let s = stats.summary_fast();
+        assert_eq!(s.successful, 10);
+        // Floating-point subtraction of equal terms can produce tiny
+        // negatives; we clamped to 0 in summary_fast.
+        assert_eq!(s.stddev_rtt_micros, Some(0.0));
+    }
+
+    #[test]
+    fn error_outcome_counts_as_failure() {
+        let mut stats = RollingStats::new(five_min());
+        stats.insert(&obs_at(Instant::now(), ProbeOutcome::Error("bind".into())));
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 1);
+        assert_eq!(s.successful, 0);
+        assert_eq!(s.failure_rate, 1.0);
+    }
+
+    #[test]
+    fn tcp_refused_counts_as_failure_when_supervisor_routes_it() {
+        // RollingStats itself does NOT inspect protocol; if `Refused`
+        // reaches `insert` it is a failure (per spec 02 — TCP Refused
+        // means RST, which is genuine connect failure). The supervisor
+        // is responsible for dropping UDP Refused upstream.
+        let mut stats = RollingStats::new(five_min());
+        stats.insert(&obs_at(Instant::now(), ProbeOutcome::Refused));
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 1);
+        assert_eq!(s.successful, 0);
+        assert_eq!(s.failure_rate, 1.0);
     }
 }
