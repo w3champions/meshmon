@@ -29,3 +29,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio-stream = "0.1"
+tonic.workspace = true

@@ -1794,6 +1794,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic",
  "tonic-prost",
