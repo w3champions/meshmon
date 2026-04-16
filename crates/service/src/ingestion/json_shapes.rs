@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 /// `route_snapshots.hops`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HopJson {
-    /// Zero-based hop position in the route.
+    /// 1-indexed TTL / hop position (matches the protocol contract).
     pub position: u32,
     /// IP addresses observed at this hop and their frequencies.
     pub observed_ips: Vec<HopIpJson>,

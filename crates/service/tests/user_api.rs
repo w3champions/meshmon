@@ -21,6 +21,8 @@
 //! | `.116` | `routes_by_id_404_when_id_unknown`                         |
 //! | `.117` | `routes_list_returns_recent_snapshots_descending`           |
 //! | `.118` | `routes_list_rejects_limit_over_cap`                       |
+//! | `.121` | `routes_latest_returns_404_when_no_snapshot_exists`         |
+//! | `.122` | `routes_latest_rejects_invalid_protocol`                    |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -171,6 +173,14 @@ async fn agent_detail_returns_registry_snapshot_fields() {
 // ---------------------------------------------------------------------------
 // Shared helpers for route-snapshot tests (Tasks 5–7)
 // ---------------------------------------------------------------------------
+
+// NOTE: These tests seed data directly into the shared pool and clean up
+// via explicit DELETE rather than transaction rollback. The handlers under
+// test read from the PgPool (not from a test transaction), so committed
+// rows are required for the HTTP layer to see them. Unique per-test
+// agent/snapshot IDs (t5-src-*, t6-src-*, t7-src-*) prevent cross-test
+// interference. If a test panics before cleanup, leaked rows are benign
+// within a single test-binary run (the next invocation gets a fresh DB).
 
 /// Seed two route-snapshot rows for the given source/target/protocol.
 /// The first is observed at NOW()-1h, the second at NOW()-1min (the "latest").
@@ -437,6 +447,52 @@ async fn routes_list_rejects_limit_over_cap() {
             Request::builder()
                 .method("GET")
                 .uri("/api/paths/a/b/routes?limit=501")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Additional coverage: 404 and validation edge cases
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn routes_latest_returns_404_when_no_snapshot_exists() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool);
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.121").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/paths/nonexistent/nonexistent/routes/latest")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn routes_latest_rejects_invalid_protocol() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool);
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.122").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/paths/a/b/routes/latest?protocol=xyz")
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
