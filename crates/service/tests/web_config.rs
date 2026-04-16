@@ -61,6 +61,7 @@ async fn web_config_returns_body_with_session() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["version"].is_string(), "body = {body}");
+    assert_eq!(body["username"], "admin", "body = {body}");
     assert!(body["grafana_dashboards"].is_object(), "body = {body}");
     // MVP contract: `grafana_base_url` is absent from the JSON body when
     // Grafana is not configured (serialized with `skip_serializing_if =

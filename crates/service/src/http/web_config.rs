@@ -11,6 +11,7 @@
 //! A later task populates them from `meshmon.toml` once the Grafana
 //! integration surface is defined in config.
 
+use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -30,6 +31,9 @@ use utoipa::ToSchema;
 pub struct WebConfigResponse {
     /// `CARGO_PKG_VERSION` of the running service.
     pub version: String,
+    /// Signed-in username. The SPA hydrates its auth store from this so the
+    /// user menu shows the right handle after a hard refresh.
+    pub username: String,
     /// Base URL for embedding Grafana panels (e.g., `https://grafana.example/`).
     /// `None` if Grafana is not configured — omitted from the JSON body.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,9 +58,23 @@ pub struct WebConfigResponse {
         (status = 401, description = "No active session"),
     ),
 )]
-pub async fn web_config(State(state): State<AppState>) -> Json<WebConfigResponse> {
+pub async fn web_config(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+) -> Json<WebConfigResponse> {
+    // `login_required!` on this router guarantees an authenticated user
+    // before the handler runs. If `user` is `None` here, the layer config
+    // is broken — expect-panic is the right response because a 200 with
+    // no identity would silently leak config to anonymous callers.
+    let username = auth_session
+        .user
+        .as_ref()
+        .expect("login_required guarantees an authenticated user")
+        .username
+        .clone();
     Json(WebConfigResponse {
         version: state.build.version.to_string(),
+        username,
         grafana_base_url: None,
         grafana_dashboards: HashMap::new(),
     })
