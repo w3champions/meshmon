@@ -65,7 +65,8 @@ pub struct FastSummary {
     /// `successful == 0`.
     pub mean_rtt_micros: Option<f64>,
     /// Population standard deviation of RTT across successful samples.
-    /// `None` when `successful < 2` (variance undefined for one sample).
+    /// `None` when `successful < 2` — a single-sample population stddev
+    /// is always 0.0 and carries no signal, so we omit it here.
     pub stddev_rtt_micros: Option<f64>,
     /// Smallest RTT in the window. `None` when `successful == 0` OR when
     /// the lazy recompute is pending — callers needing a guaranteed
@@ -76,8 +77,10 @@ pub struct FastSummary {
     pub max_rtt_micros: Option<u32>,
 }
 
-/// Full summary including percentiles. Always exact (never gated on a
-/// dirty bit) because the percentile path scans the deque already.
+/// Full summary including percentiles. Once Task 6 fills in the percentile
+/// scan, min/max will always be exact (resolved via that scan and the
+/// dirty-bit clear). Until then, min/max inherit `summary_fast`'s
+/// `None`-when-dirty semantics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Summary {
     pub sample_count: u64,
@@ -225,9 +228,14 @@ impl RollingStats {
         }
     }
 
-    /// O(N log N) summary including percentiles. Resolves any pending
-    /// min/max dirty bits in the same scan.
+    /// O(N log N) summary including percentiles. Once Task 6 lands the
+    /// percentile scan, this also resolves any pending min/max dirty
+    /// bits in the same pass.
     pub fn summary_with_percentiles(&mut self) -> Summary {
+        // `&mut self` is intentional even before Task 6: that task will
+        // clear `min_rtt_dirty` / `max_rtt_dirty` here during the deque
+        // scan, so the receiver type cannot change later without breaking
+        // call sites.
         let f = self.summary_fast();
         Summary {
             sample_count: f.sample_count,
