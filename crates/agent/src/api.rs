@@ -67,9 +67,7 @@ impl Interceptor for BearerInterceptor {
         let value = format!("Bearer {}", self.token)
             .parse()
             .map_err(|_| tonic::Status::internal("invalid bearer token"))?;
-        request
-            .metadata_mut()
-            .insert("authorization", value);
+        request.metadata_mut().insert("authorization", value);
         Ok(request)
     }
 }
@@ -82,6 +80,10 @@ impl Interceptor for BearerInterceptor {
 ///
 /// The inner `AgentApiClient` requires `&mut self` for every RPC, so it is
 /// wrapped in a [`Mutex`] to allow shared access from `Arc<Self>`.
+///
+/// TODO(T12): When probers call `push_metrics` concurrently, the single
+/// `Mutex` serializes all outbound RPCs. Consider cloning the tonic
+/// `Channel` (which is cheap and inherently concurrent) instead.
 pub struct GrpcServiceApi {
     client: Mutex<AgentApiClient<InterceptedService<Channel, BearerInterceptor>>>,
 }

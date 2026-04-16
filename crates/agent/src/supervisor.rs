@@ -153,7 +153,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The task should still be running.
-        assert!(!handle.join.is_finished(), "supervisor should still be running");
+        assert!(
+            !handle.join.is_finished(),
+            "supervisor should still be running"
+        );
 
         // Request shutdown via the parent token.
         parent_cancel.cancel();
