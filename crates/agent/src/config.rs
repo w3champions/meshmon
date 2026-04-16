@@ -203,6 +203,12 @@ pub struct ProbeConfig {
     pub udp_probe_secret: [u8; 8],
     /// Previous UDP probe secret during rotation; `None` when absent.
     pub udp_probe_previous_secret: Option<[u8; 8]>,
+    /// Window size (seconds) used by `RollingStats` for the protocol
+    /// currently primary on a path. Spec 02 default: 300.
+    pub primary_window_sec: u32,
+    /// Window size (seconds) for non-primary (diversity) protocols.
+    /// Spec 02 default: 900.
+    pub diversity_window_sec: u32,
 }
 
 impl ProbeConfig {
@@ -218,10 +224,20 @@ impl ProbeConfig {
                 "udp_probe_previous_secret",
             )?)
         };
+        // Defaults match spec 02 § Window size by role. The service is
+        // authoritative here (its parser enforces > 0); we only fall back
+        // to defaults if the field is missing entirely (e.g. an old
+        // service or a deliberately partial test fixture).
+        let (primary_window_sec, diversity_window_sec) = match resp.windows.as_ref() {
+            Some(w) => (w.primary_sec, w.diversity_sec),
+            None => (300, 900),
+        };
         Ok(Self {
             raw: resp,
             udp_probe_secret,
             udp_probe_previous_secret,
+            primary_window_sec,
+            diversity_window_sec,
         })
     }
 }
@@ -528,5 +544,32 @@ mod tests {
             err.to_string().contains("udp_probe_previous_secret"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn probe_config_extracts_windows() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+            windows: Some(meshmon_protocol::Windows {
+                primary_sec: 120,
+                diversity_sec: 600,
+            }),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).expect("valid");
+        assert_eq!(cfg.primary_window_sec, 120);
+        assert_eq!(cfg.diversity_window_sec, 600);
+    }
+
+    #[test]
+    fn probe_config_falls_back_to_default_windows() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+            windows: None,
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).expect("valid");
+        assert_eq!(cfg.primary_window_sec, 300);
+        assert_eq!(cfg.diversity_window_sec, 900);
     }
 }
