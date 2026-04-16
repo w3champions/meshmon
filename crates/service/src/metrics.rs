@@ -325,9 +325,14 @@ mod tests {
         ingest_batches(BatchOutcome::Ok).increment(1);
         ingest_batches(BatchOutcome::Ok).increment(2);
         let body = h.render();
+        // Match the full Prometheus sample line so a different test that
+        // also bumps this counter (running in the same binary) turns the
+        // value into e.g. "30" and this assertion fails instead of
+        // silently passing via `contains`.
+        let expected = r#"meshmon_service_ingest_batches_total{outcome="ok"} 3"#;
         assert!(
-            body.contains(r#"meshmon_service_ingest_batches_total{outcome="ok"} 3"#),
-            "body = {body}"
+            body.lines().any(|l| l == expected),
+            "expected line {expected:?} not found in:\n{body}"
         );
     }
 
@@ -345,6 +350,10 @@ mod tests {
         registry_agents(AgentState::Active).set(0.0);
         registry_last_refresh_age_seconds().set(0.0);
         registry_refresh_errors().increment(0);
+        // BUILD_INFO is intentionally not in ALL_METRIC_NAMES (it's a
+        // one-shot with non-enumerable labels). Exercise it separately so
+        // this test's name ("every metric") doesn't lie.
+        emit_build_info(&BuildInfo::compile_time());
 
         let body = h.render();
         for name in ALL_METRIC_NAMES {
@@ -357,5 +366,14 @@ mod tests {
                 "missing TYPE for {name} in:\n{body}"
             );
         }
+        // BUILD_INFO: same HELP/TYPE contract, verified inline.
+        assert!(
+            body.contains(&format!("# HELP {BUILD_INFO}")),
+            "missing HELP for {BUILD_INFO} in:\n{body}"
+        );
+        assert!(
+            body.contains(&format!("# TYPE {BUILD_INFO}")),
+            "missing TYPE for {BUILD_INFO} in:\n{body}"
+        );
     }
 }
