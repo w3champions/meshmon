@@ -7,6 +7,9 @@
 use std::net::IpAddr;
 
 use anyhow::{bail, Result};
+use meshmon_protocol::{
+    PathHealth as PbPathHealth, PathHealthThresholds, Protocol, ProtocolThresholds, RateEntry,
+};
 
 // ---------------------------------------------------------------------------
 // Agent identity
@@ -239,6 +242,97 @@ impl ProbeConfig {
             primary_window_sec,
             diversity_window_sec,
         })
+    }
+
+    pub fn priority_list(&self) -> Vec<Protocol> {
+        let list: Vec<Protocol> = self
+            .raw
+            .priority
+            .iter()
+            .filter_map(|n| Protocol::try_from(*n).ok())
+            .filter(|p| *p != Protocol::Unspecified)
+            .collect();
+        if list.is_empty() {
+            vec![Protocol::Icmp, Protocol::Tcp, Protocol::Udp]
+        } else {
+            list
+        }
+    }
+
+    pub fn thresholds_for(&self, protocol: Protocol) -> ProtocolThresholds {
+        match protocol {
+            Protocol::Icmp => self
+                .raw
+                .icmp_thresholds
+                .clone()
+                .unwrap_or_else(default_icmp_thresholds),
+            Protocol::Tcp => self
+                .raw
+                .tcp_thresholds
+                .clone()
+                .unwrap_or_else(default_tcp_thresholds),
+            Protocol::Udp => self
+                .raw
+                .udp_thresholds
+                .clone()
+                .unwrap_or_else(default_udp_thresholds),
+            Protocol::Unspecified => default_icmp_thresholds(),
+        }
+    }
+
+    pub fn path_thresholds(&self) -> PathHealthThresholds {
+        self.raw
+            .path_health_thresholds
+            .clone()
+            .unwrap_or_else(default_path_thresholds)
+    }
+
+    pub fn rates_for(&self, primary: Protocol, health: PbPathHealth) -> Option<RateEntry> {
+        self.raw
+            .rates
+            .iter()
+            .find(|r| {
+                Protocol::try_from(r.primary).ok() == Some(primary)
+                    && PbPathHealth::try_from(r.health).ok() == Some(health)
+            })
+            .cloned()
+    }
+}
+
+fn default_icmp_thresholds() -> ProtocolThresholds {
+    ProtocolThresholds {
+        unhealthy_trigger_pct: 0.9,
+        healthy_recovery_pct: 0.1,
+        unhealthy_hysteresis_sec: 30,
+        healthy_hysteresis_sec: 60,
+    }
+}
+
+fn default_tcp_thresholds() -> ProtocolThresholds {
+    ProtocolThresholds {
+        unhealthy_trigger_pct: 0.5,
+        healthy_recovery_pct: 0.05,
+        unhealthy_hysteresis_sec: 30,
+        healthy_hysteresis_sec: 60,
+    }
+}
+
+fn default_udp_thresholds() -> ProtocolThresholds {
+    ProtocolThresholds {
+        unhealthy_trigger_pct: 0.9,
+        healthy_recovery_pct: 0.1,
+        unhealthy_hysteresis_sec: 30,
+        healthy_hysteresis_sec: 60,
+    }
+}
+
+fn default_path_thresholds() -> PathHealthThresholds {
+    PathHealthThresholds {
+        degraded_trigger_pct: 0.05,
+        degraded_trigger_sec: 120,
+        degraded_min_samples: 30,
+        normal_recovery_pct: 0.02,
+        normal_recovery_sec: 300,
     }
 }
 
@@ -571,5 +665,71 @@ mod tests {
         let cfg = ProbeConfig::from_proto(resp).expect("valid");
         assert_eq!(cfg.primary_window_sec, 300);
         assert_eq!(cfg.diversity_window_sec, 900);
+    }
+
+    #[test]
+    fn priority_list_defaults_when_empty() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1u8; 8].into(),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).unwrap();
+        assert_eq!(
+            cfg.priority_list(),
+            vec![Protocol::Icmp, Protocol::Tcp, Protocol::Udp]
+        );
+    }
+
+    #[test]
+    fn priority_list_honors_service_order() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1u8; 8].into(),
+            priority: vec![Protocol::Udp as i32, Protocol::Icmp as i32],
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).unwrap();
+        assert_eq!(cfg.priority_list(), vec![Protocol::Udp, Protocol::Icmp]);
+    }
+
+    #[test]
+    fn rates_for_returns_none_when_missing() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1u8; 8].into(),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).unwrap();
+        assert!(cfg.rates_for(Protocol::Icmp, PbPathHealth::Normal).is_none());
+    }
+
+    #[test]
+    fn rates_for_finds_matching_row() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1u8; 8].into(),
+            rates: vec![meshmon_protocol::RateEntry {
+                primary: Protocol::Icmp as i32,
+                health: PbPathHealth::Normal as i32,
+                icmp_pps: 0.2,
+                tcp_pps: 0.05,
+                udp_pps: 0.05,
+            }],
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).unwrap();
+        let row = cfg.rates_for(Protocol::Icmp, PbPathHealth::Normal).unwrap();
+        assert_eq!(row.icmp_pps, 0.2);
+        assert_eq!(row.tcp_pps, 0.05);
+        assert_eq!(row.udp_pps, 0.05);
+    }
+
+    #[test]
+    fn thresholds_for_returns_tcp_defaults() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1u8; 8].into(),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).unwrap();
+        let t = cfg.thresholds_for(Protocol::Tcp);
+        assert!((t.unhealthy_trigger_pct - 0.5).abs() < 1e-9);
+        assert!((t.healthy_recovery_pct - 0.05).abs() < 1e-9);
     }
 }

@@ -15,7 +15,8 @@ use tokio::time::Instant;
 use crate::config::ProbeConfig;
 use crate::stats::FastSummary;
 use meshmon_protocol::{
-    PathHealth as PbPathHealth, Protocol, ProtocolHealth as PbProtocolHealth, ProtocolThresholds,
+    PathHealth as PbPathHealth, PathHealthThresholds, Protocol, ProtocolHealth as PbProtocolHealth,
+    ProtocolThresholds,
 };
 
 /// Floor on samples-per-window required to transition in either direction.
@@ -242,6 +243,67 @@ impl Default for TargetStateMachine {
     }
 }
 
+/// Resolve `(primary, path_health)` → `RateTriple`. Rules:
+/// - `primary = Some(p)` → lookup `(p, path_health)`.
+/// - `primary = None` → lookup `(priority[0], Unreachable)`.
+/// - Lookup miss → `RateTriple::zero()` + WARN.
+pub fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
+    let priority = config.priority_list();
+    let (lookup_primary, lookup_health) = match mode.primary {
+        Some(p) => (p, path_to_proto(mode.path_health)),
+        None => (
+            priority.first().copied().unwrap_or(Protocol::Icmp),
+            PbPathHealth::Unreachable,
+        ),
+    };
+    match config.rates_for(lookup_primary, lookup_health) {
+        Some(row) => RateTriple {
+            icmp_pps: row.icmp_pps,
+            tcp_pps: row.tcp_pps,
+            udp_pps: row.udp_pps,
+        },
+        None => {
+            tracing::warn!(
+                primary = ?lookup_primary,
+                health = ?lookup_health,
+                "no RateEntry for mode; publishing zero rates",
+            );
+            RateTriple::zero()
+        }
+    }
+}
+
+fn path_to_proto(state: PathHealthState) -> PbPathHealth {
+    match state {
+        PathHealthState::Normal => PbPathHealth::Normal,
+        PathHealthState::Degraded => PbPathHealth::Degraded,
+        PathHealthState::Unreachable => PbPathHealth::Unreachable,
+    }
+}
+
+pub fn select_primary(
+    priority: &[Protocol],
+    healths: &[(Protocol, ProtoHealth)],
+) -> Option<Protocol> {
+    for p in priority {
+        if let Some((_, h)) = healths.iter().find(|(proto, _)| proto == p) {
+            if *h == ProtoHealth::Healthy {
+                return Some(*p);
+            }
+        }
+    }
+    None
+}
+
+pub fn trippy_pps_for(protocol: Protocol, rates: RateTriple) -> f64 {
+    match protocol {
+        Protocol::Icmp => rates.icmp_pps,
+        Protocol::Tcp => rates.tcp_pps,
+        Protocol::Udp => rates.udp_pps,
+        Protocol::Unspecified => 0.0,
+    }
+}
+
 #[cfg(test)]
 impl ProtocolStateMachine {
     /// Test-only: seed the machine into a specific state, skipping
@@ -362,5 +424,117 @@ mod tests {
                 to: ProtoHealth::Healthy,
             }),
         );
+    }
+
+    fn config_with_rates(rates: Vec<meshmon_protocol::RateEntry>) -> ProbeConfig {
+        ProbeConfig::from_proto(meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![1u8; 8].into(),
+            priority: vec![
+                Protocol::Icmp as i32,
+                Protocol::Tcp as i32,
+                Protocol::Udp as i32,
+            ],
+            rates,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn rate_row(
+        primary: Protocol,
+        health: meshmon_protocol::PathHealth,
+        icmp: f64,
+        tcp: f64,
+        udp: f64,
+    ) -> meshmon_protocol::RateEntry {
+        meshmon_protocol::RateEntry {
+            primary: primary as i32,
+            health: health as i32,
+            icmp_pps: icmp,
+            tcp_pps: tcp,
+            udp_pps: udp,
+        }
+    }
+
+    #[test]
+    fn rates_for_mode_picks_matching_row() {
+        let cfg = config_with_rates(vec![
+            rate_row(
+                Protocol::Icmp,
+                meshmon_protocol::PathHealth::Normal,
+                0.2,
+                0.05,
+                0.05,
+            ),
+            rate_row(
+                Protocol::Icmp,
+                meshmon_protocol::PathHealth::Degraded,
+                1.0,
+                0.05,
+                0.05,
+            ),
+        ]);
+        let r = rates_for_mode(
+            &cfg,
+            Mode {
+                primary: Some(Protocol::Icmp),
+                path_health: PathHealthState::Degraded,
+            },
+        );
+        assert_eq!(r.icmp_pps, 1.0);
+    }
+
+    #[test]
+    fn rates_for_mode_falls_back_to_priority_zero_when_primary_none() {
+        let cfg = config_with_rates(vec![rate_row(
+            Protocol::Icmp,
+            meshmon_protocol::PathHealth::Unreachable,
+            1.0,
+            0.05,
+            0.05,
+        )]);
+        let r = rates_for_mode(
+            &cfg,
+            Mode {
+                primary: None,
+                path_health: PathHealthState::Unreachable,
+            },
+        );
+        assert_eq!(r.icmp_pps, 1.0);
+    }
+
+    #[test]
+    fn rates_for_mode_returns_zero_triple_when_row_missing() {
+        let cfg = config_with_rates(vec![]);
+        let r = rates_for_mode(
+            &cfg,
+            Mode {
+                primary: Some(Protocol::Udp),
+                path_health: PathHealthState::Normal,
+            },
+        );
+        assert_eq!(r, RateTriple::zero());
+    }
+
+    #[test]
+    fn select_primary_prefers_priority_order() {
+        let prio = [Protocol::Icmp, Protocol::Tcp, Protocol::Udp];
+        let healths = [
+            (Protocol::Icmp, ProtoHealth::Unhealthy),
+            (Protocol::Tcp, ProtoHealth::Healthy),
+            (Protocol::Udp, ProtoHealth::Healthy),
+        ];
+        assert_eq!(select_primary(&prio, &healths), Some(Protocol::Tcp));
+    }
+
+    #[test]
+    fn select_primary_returns_none_when_all_unhealthy() {
+        let prio = [Protocol::Icmp, Protocol::Tcp, Protocol::Udp];
+        let healths = [
+            (Protocol::Icmp, ProtoHealth::Unhealthy),
+            (Protocol::Tcp, ProtoHealth::Unhealthy),
+            (Protocol::Udp, ProtoHealth::Unhealthy),
+        ];
+        assert_eq!(select_primary(&prio, &healths), None);
     }
 }
