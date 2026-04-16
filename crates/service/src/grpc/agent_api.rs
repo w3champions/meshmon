@@ -123,10 +123,17 @@ impl AgentApi for AgentApiImpl {
             }
         }
 
-        // Step 5: upsert (ip NOT in SET list).
+        // Step 5: atomic upsert with IP guard. The `WHERE agents.ip = EXCLUDED.ip`
+        // clause on the conflict branch closes the race where two concurrent
+        // Register calls for the same `id` with different `ip` both pass the
+        // preflight (both see `None`) — PostgreSQL serializes the conflict,
+        // and the second caller's WHERE predicate evaluates against the
+        // already-inserted row's `ip`, which now differs. In that case the
+        // UPDATE is skipped, RETURNING yields zero rows, and we surface the
+        // same ALREADY_EXISTS status as the preflight path.
         let location = (!req.location.is_empty()).then(|| req.location.clone());
         let agent_version = (!req.agent_version.is_empty()).then(|| req.agent_version.clone());
-        sqlx::query!(
+        let upsert_row = sqlx::query!(
             r#"INSERT INTO agents
                   (id, display_name, location, ip, lat, lon, agent_version,
                    registered_at, last_seen_at)
@@ -137,7 +144,9 @@ impl AgentApi for AgentApiImpl {
                    lat           = EXCLUDED.lat,
                    lon           = EXCLUDED.lon,
                    agent_version = EXCLUDED.agent_version,
-                   last_seen_at  = NOW()"#,
+                   last_seen_at  = NOW()
+                 WHERE agents.ip = EXCLUDED.ip
+               RETURNING id"#,
             req.id,
             req.display_name,
             location,
@@ -146,12 +155,22 @@ impl AgentApi for AgentApiImpl {
             req.lon,
             agent_version,
         )
-        .execute(&self.state.pool)
+        .fetch_optional(&self.state.pool)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "register upsert failed");
             Status::internal("register upsert failed")
         })?;
+        if upsert_row.is_none() {
+            tracing::warn!(
+                agent_id = %req.id,
+                claimed_ip = %claimed_ip,
+                "register: atomic conflict guard fired; id already registered with a different IP",
+            );
+            return Err(Status::already_exists(
+                "id already registered with a different IP",
+            ));
+        }
 
         // Step 6: synchronous registry refresh so the next push sees it.
         if let Err(e) = self.state.registry.force_refresh().await {

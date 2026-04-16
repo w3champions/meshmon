@@ -172,6 +172,65 @@ async fn register_rejects_bad_ip_length() {
 }
 
 #[tokio::test]
+async fn concurrent_register_same_id_different_ip_yields_single_winner() {
+    // Two callers race to claim the same fresh `id` from different peer IPs.
+    // Depending on thread scheduling one is caught by the preflight SELECT
+    // (if the first upsert has already committed by the time the second
+    // preflights) and one is caught by the atomic `ON CONFLICT ... WHERE
+    // agents.ip = EXCLUDED.ip` guard (if both preflights see no row and
+    // race to the upsert). Either way exactly one caller must succeed and
+    // the other must receive ALREADY_EXISTS; without the guard, both
+    // could silently succeed with only the non-ip fields overwritten.
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool.clone());
+
+    let mut client_a = common::grpc_harness::in_process_agent_client(
+        state.clone(),
+        IpAddr::from([10, 7, 0, 20]),
+    )
+    .await;
+    let mut client_b = common::grpc_harness::in_process_agent_client(
+        state.clone(),
+        IpAddr::from([10, 7, 0, 21]),
+    )
+    .await;
+
+    let req_a = sample("agent-reg-race", [10, 7, 0, 20]);
+    let req_b = sample("agent-reg-race", [10, 7, 0, 21]);
+
+    let (res_a, res_b) = tokio::join!(client_a.register(req_a), client_b.register(req_b));
+
+    let a_ok = res_a.is_ok();
+    let b_ok = res_b.is_ok();
+    assert_eq!(
+        usize::from(a_ok) + usize::from(b_ok),
+        1,
+        "exactly one caller must win the race; a_ok={a_ok} b_ok={b_ok}",
+    );
+
+    let loser_err = if a_ok { res_b.unwrap_err() } else { res_a.unwrap_err() };
+    assert_eq!(
+        loser_err.code(),
+        Code::AlreadyExists,
+        "losing caller must see ALREADY_EXISTS, got {loser_err:?}",
+    );
+
+    // The stored row must reflect the winning IP, not be silently overwritten.
+    let stored_ip: sqlx::types::ipnetwork::IpNetwork =
+        sqlx::query_scalar("SELECT ip FROM agents WHERE id = $1")
+            .bind("agent-reg-race")
+            .fetch_one(&pool)
+            .await
+            .expect("row exists");
+    let winner_ip = if a_ok {
+        IpAddr::from([10, 7, 0, 20])
+    } else {
+        IpAddr::from([10, 7, 0, 21])
+    };
+    assert_eq!(stored_ip.ip(), winner_ip, "DB must reflect the winner's IP");
+}
+
+#[tokio::test]
 async fn register_without_auth_returns_unauthenticated() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_agent_token(pool);
