@@ -918,23 +918,20 @@ async fn recent_routes_returns_latest_across_pairs() {
     let app = meshmon_service::http::router(state);
     let cookie = common::login_as_admin(&app, "203.0.113.150").await;
 
+    // Test-unique IDs so we can filter our rows out of the shared pool's
+    // route_snapshots table (other integration tests also seed this table).
+    let src_a = "t18recent-src-a";
+    let tgt_a = "t18recent-tgt-a";
+    let src_b = "t18recent-src-b";
+    let tgt_b = "t18recent-tgt-b";
+
     // Two source/target pairs, three snapshots total.
     // Pair A: one old + one new. Pair B: one mid.
     let now = chrono::Utc::now();
     let rows: [(&str, &str, &str, chrono::DateTime<chrono::Utc>); 3] = [
-        (
-            "src-a",
-            "tgt-a",
-            "icmp",
-            now - chrono::Duration::minutes(60),
-        ),
-        ("src-a", "tgt-a", "icmp", now - chrono::Duration::minutes(1)),
-        (
-            "src-b",
-            "tgt-b",
-            "icmp",
-            now - chrono::Duration::minutes(30),
-        ),
+        (src_a, tgt_a, "icmp", now - chrono::Duration::minutes(60)),
+        (src_a, tgt_a, "icmp", now - chrono::Duration::minutes(1)),
+        (src_b, tgt_b, "icmp", now - chrono::Duration::minutes(30)),
     ];
     for (src, tgt, proto, ts) in rows {
         // Register the agents first so the FK holds.
@@ -954,11 +951,13 @@ async fn recent_routes_returns_latest_across_pairs() {
         .expect("insert snapshot");
     }
 
+    // Request enough rows to survive shared-pool pollution — other tests may
+    // insert their own "latest" pairs that rank ahead of ours.
     let resp = app
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri("/api/routes/recent?limit=10")
+                .uri("/api/routes/recent?limit=100")
                 .header(axum::http::header::COOKIE, &cookie)
                 .body(axum::body::Body::empty())
                 .unwrap(),
@@ -967,23 +966,14 @@ async fn recent_routes_returns_latest_across_pairs() {
         .unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let items = body.as_array().expect("array");
 
-    // After the DISTINCT ON fix only the latest snapshot per pair is returned.
-    // The seeded pairs are: src-a/tgt-a (60m ago, 1m ago) and src-b/tgt-b (30m ago).
-    // DISTINCT ON picks: src-a/tgt-a at 1m ago + src-b/tgt-b at 30m ago → 2 items.
-    // Other tests may contribute pre-existing pairs, so we assert >= 2.
-    assert!(
-        items.len() >= 2,
-        "expected >= 2 pair-unique items, got {}",
-        items.len()
-    );
-
-    // No two items should share the same (source_id, target_id) pair.
+    // DISTINCT ON globally: no (source_id, target_id) pair repeats in the response,
+    // regardless of which test inserted the row.
     let mut seen_pairs: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     for item in items {
@@ -995,23 +985,47 @@ async fn recent_routes_returns_latest_across_pairs() {
         );
     }
 
-    // The very first item must be src-a/tgt-a (1 min ago — the globally latest pair).
-    assert_eq!(items[0]["source_id"], "src-a", "first item should be src-a");
-    assert_eq!(items[0]["target_id"], "tgt-a", "first item should be tgt-a");
-
-    // observed_at must globally descend across all items.
+    // observed_at must globally descend across all items — the ORDER BY contract
+    // must hold regardless of how many foreign rows sit between ours.
     for w in items.windows(2) {
         let a = w[0]["observed_at"].as_str().unwrap();
         let b = w[1]["observed_at"].as_str().unwrap();
         assert!(a >= b, "expected descending: {a} >= {b}");
     }
 
+    // Everything below is about OUR seeded rows — filter the response so foreign
+    // rows from other tests in the same binary can't flake the assertions.
+    let mine: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|i| {
+            let s = i["source_id"].as_str().unwrap_or("");
+            s == src_a || s == src_b
+        })
+        .collect();
+
+    // DISTINCT ON must collapse src-a's two snapshots to one row, plus one for src-b.
+    assert_eq!(
+        mine.len(),
+        2,
+        "expected exactly 2 rows for our pairs, got {}: {mine:#?}",
+        mine.len()
+    );
+
+    // Within our rows: src-a (1m ago) is newer than src-b (30m ago).
+    assert_eq!(
+        mine[0]["source_id"], src_a,
+        "src-a (1m ago) must rank first among our rows"
+    );
+    assert_eq!(mine[0]["target_id"], tgt_a);
+    assert_eq!(mine[1]["source_id"], src_b);
+    assert_eq!(mine[1]["target_id"], tgt_b);
+
     // Cleanup seeded rows.
-    sqlx::query("DELETE FROM route_snapshots WHERE source_id IN ('src-a', 'src-b')")
+    sqlx::query("DELETE FROM route_snapshots WHERE source_id LIKE 't18recent-%'")
         .execute(&pool)
         .await
         .expect("cleanup snapshots");
-    sqlx::query("DELETE FROM agents WHERE id IN ('src-a', 'tgt-a', 'src-b', 'tgt-b')")
+    sqlx::query("DELETE FROM agents WHERE id LIKE 't18recent-%'")
         .execute(&pool)
         .await
         .expect("cleanup agents");
