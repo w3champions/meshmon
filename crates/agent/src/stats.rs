@@ -1,0 +1,290 @@
+//! Rolling-window stats per `(target, protocol)`.
+//!
+//! See spec 02 § "Aggregation: 5-minute sliding window with running
+//! counters". Owned by the per-target supervisor: one `RollingStats` per
+//! enabled protocol. The supervisor routes incoming
+//! [`ProbeObservation`](crate::probing::ProbeObservation)s into the matching
+//! stats via [`insert`](RollingStats::insert), runs
+//! [`purge_old`](RollingStats::purge_old) on every 10s eval tick, and reads
+//! [`summary_fast`](RollingStats::summary_fast) on the same tick to feed
+//! the T14 state machine. T16 calls
+//! [`summary_with_percentiles`](RollingStats::summary_with_percentiles)
+//! once per 60s emit tick.
+//!
+//! ## Complexity targets (spec 02)
+//! - `insert`: O(1)
+//! - `purge_old`: amortized O(1) per purged entry
+//! - `summary_fast`: O(1) (returns `None` for min/max while their dirty
+//!   bit is set so callers tolerate the lazy recompute)
+//! - `summary_with_percentiles`: O(N log N) (clone live RTT values, sort,
+//!   index p50/p95/p99; also clears any pending min/max dirty bits in the
+//!   single scan)
+//!
+//! ## What lands here vs. what doesn't
+//! Protocol semantics (e.g. UDP `Refused` is not a sample) are the
+//! supervisor's responsibility, not this module's — see
+//! [`supervisor`](crate::supervisor) for the routing rules.
+
+use std::collections::VecDeque;
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use crate::probing::ProbeObservation;
+
+/// One observation as stored internally — projected from
+/// [`ProbeObservation`] to drop fields `RollingStats` does not need
+/// (`protocol`, `target_id`, `hops`). Storing only what we use keeps the
+/// `VecDeque` cache-friendly and makes the per-stats memory cost
+/// independent of protocol-specific payload size.
+#[derive(Debug, Clone, Copy)]
+// Fields are consumed by `insert` / `purge_old` / `summary_with_percentiles`
+// in T13 Tasks 3, 5, and 6. The skeleton commit (this one) ships only the
+// empty-window summary path.
+#[allow(dead_code)]
+struct Sample {
+    /// Monotonic instant the probe was observed (== `ProbeObservation.observed_at`).
+    t: Instant,
+    /// `Some(rtt)` on success, `None` on failure (`Timeout` / `Error`).
+    /// `Refused` is filtered upstream and never reaches `insert`.
+    rtt_micros: Option<u32>,
+}
+
+/// Fast O(1) summary for the supervisor's 10s state-eval tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FastSummary {
+    /// Total observations in the current window (after the last purge).
+    pub sample_count: u64,
+    /// Successful observations in the window.
+    pub successful: u64,
+    /// `1.0 - successful/sample_count`. Returns `0.0` when `sample_count == 0`
+    /// (treated as "no data, neutral state" by the T14 state machine, per
+    /// spec 02 § Aggregation: zero-handling).
+    pub failure_rate: f64,
+    /// Mean RTT across successful samples in microseconds. `None` when
+    /// `successful == 0`.
+    pub mean_rtt_micros: Option<f64>,
+    /// Population standard deviation of RTT across successful samples.
+    /// `None` when `successful < 2` (variance undefined for one sample).
+    pub stddev_rtt_micros: Option<f64>,
+    /// Smallest RTT in the window. `None` when `successful == 0` OR when
+    /// the lazy recompute is pending — callers needing a guaranteed
+    /// non-`None` value should call [`RollingStats::summary_with_percentiles`]
+    /// instead, which clears the dirty bit and recomputes.
+    pub min_rtt_micros: Option<u32>,
+    /// Largest RTT in the window. Same semantics as `min_rtt_micros`.
+    pub max_rtt_micros: Option<u32>,
+}
+
+/// Full summary including percentiles. Always exact (never gated on a
+/// dirty bit) because the percentile path scans the deque already.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Summary {
+    pub sample_count: u64,
+    pub successful: u64,
+    pub failure_rate: f64,
+    pub mean_rtt_micros: Option<f64>,
+    pub stddev_rtt_micros: Option<f64>,
+    pub min_rtt_micros: Option<u32>,
+    pub max_rtt_micros: Option<u32>,
+    pub p50_rtt_micros: Option<u32>,
+    pub p95_rtt_micros: Option<u32>,
+    pub p99_rtt_micros: Option<u32>,
+}
+
+/// Sliding-window stats, one instance per `(target, protocol)`.
+#[derive(Debug)]
+pub struct RollingStats {
+    window: Duration,
+    samples: VecDeque<Sample>,
+
+    // Running counters (updated O(1) on insert/purge).
+    sent: u64,
+    successful: u64,
+    sum_rtt_micros: u64,
+    /// `u128` chosen so the worst-case sum-of-squares (900 samples × max
+    /// `u32` RTT² ≈ 1.66e22) cannot overflow. See plan version-check gate.
+    sum_rtt_sq_micros: u128,
+
+    // Lazy min/max with dirty bits.
+    min_rtt_micros: Option<u32>,
+    max_rtt_micros: Option<u32>,
+    min_rtt_dirty: bool,
+    max_rtt_dirty: bool,
+}
+
+impl RollingStats {
+    /// Create a new empty stats instance with the given window size.
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            samples: VecDeque::new(),
+            sent: 0,
+            successful: 0,
+            sum_rtt_micros: 0,
+            sum_rtt_sq_micros: 0,
+            min_rtt_micros: None,
+            max_rtt_micros: None,
+            min_rtt_dirty: false,
+            max_rtt_dirty: false,
+        }
+    }
+
+    /// Replace the active window without discarding samples or counters.
+    /// The next `purge_old` call applies the new threshold.
+    ///
+    /// Used by the supervisor when the T14 state machine swaps which
+    /// protocol is primary — the previously-primary stats becomes a
+    /// diversity stats, and vice versa, without losing history (which
+    /// would create a "no data" gap right after a transition and risk
+    /// flapping).
+    pub fn set_window(&mut self, window: Duration) {
+        self.window = window;
+    }
+
+    /// Currently configured window size.
+    pub fn window(&self) -> Duration {
+        self.window
+    }
+
+    /// Number of buffered samples (post last `purge_old`). Public for tests
+    /// and operator metrics; the canonical sample count for callers is
+    /// `summary_fast().sample_count`.
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// `true` when no samples are buffered.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Insert a single observation. O(1).
+    ///
+    /// The caller (supervisor) is responsible for filtering protocol
+    /// outcomes that should not contribute to rolling stats — currently
+    /// only UDP `Refused` (spec 02 § Probe outcomes). Other failures
+    /// (`Timeout`, TCP `Refused`, `Error`) are valid samples and arrive
+    /// here with `outcome.is_success() == false`.
+    pub fn insert(&mut self, _obs: &ProbeObservation) {
+        unimplemented!("Task 3")
+    }
+
+    /// Drop samples older than `now - self.window`. Amortized O(1) per
+    /// purged entry. Marks min/max dirty if the purged sample held the
+    /// current extremum.
+    pub fn purge_old(&mut self, _now: Instant) {
+        unimplemented!("Task 5")
+    }
+
+    /// O(1) summary for state-eval. Min/max are returned as `None` while
+    /// dirty — call `summary_with_percentiles` for the resolved values.
+    pub fn summary_fast(&self) -> FastSummary {
+        let sample_count = self.sent;
+        let successful = self.successful;
+        let failure_rate = if sample_count == 0 {
+            0.0
+        } else {
+            1.0 - (successful as f64 / sample_count as f64)
+        };
+        let mean_rtt_micros = if successful == 0 {
+            None
+        } else {
+            Some(self.sum_rtt_micros as f64 / successful as f64)
+        };
+        let stddev_rtt_micros = if successful < 2 {
+            None
+        } else {
+            // Population variance: E[X²] - E[X]². Both terms in f64 to
+            // keep the subtraction stable; clamp negative results to 0
+            // (can occur from rounding when all samples are equal).
+            let n = successful as f64;
+            let mean = mean_rtt_micros.expect("checked successful >= 2");
+            let mean_sq = self.sum_rtt_sq_micros as f64 / n;
+            let var = (mean_sq - mean * mean).max(0.0);
+            Some(var.sqrt())
+        };
+        let min_rtt_micros = if self.min_rtt_dirty {
+            None
+        } else {
+            self.min_rtt_micros
+        };
+        let max_rtt_micros = if self.max_rtt_dirty {
+            None
+        } else {
+            self.max_rtt_micros
+        };
+        FastSummary {
+            sample_count,
+            successful,
+            failure_rate,
+            mean_rtt_micros,
+            stddev_rtt_micros,
+            min_rtt_micros,
+            max_rtt_micros,
+        }
+    }
+
+    /// O(N log N) summary including percentiles. Resolves any pending
+    /// min/max dirty bits in the same scan.
+    pub fn summary_with_percentiles(&mut self) -> Summary {
+        let f = self.summary_fast();
+        Summary {
+            sample_count: f.sample_count,
+            successful: f.successful,
+            failure_rate: f.failure_rate,
+            mean_rtt_micros: f.mean_rtt_micros,
+            stddev_rtt_micros: f.stddev_rtt_micros,
+            min_rtt_micros: f.min_rtt_micros,
+            max_rtt_micros: f.max_rtt_micros,
+            p50_rtt_micros: None,
+            p95_rtt_micros: None,
+            p99_rtt_micros: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn five_min() -> Duration {
+        Duration::from_secs(300)
+    }
+
+    #[test]
+    fn empty_window_returns_neutral_summary() {
+        let stats = RollingStats::new(five_min());
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 0);
+        assert_eq!(s.successful, 0);
+        assert_eq!(s.failure_rate, 0.0);
+        assert_eq!(s.mean_rtt_micros, None);
+        assert_eq!(s.stddev_rtt_micros, None);
+        assert_eq!(s.min_rtt_micros, None);
+        assert_eq!(s.max_rtt_micros, None);
+    }
+
+    #[test]
+    fn empty_window_percentiles_are_none() {
+        let mut stats = RollingStats::new(five_min());
+        let s = stats.summary_with_percentiles();
+        assert_eq!(s.sample_count, 0);
+        assert_eq!(s.p50_rtt_micros, None);
+        assert_eq!(s.p95_rtt_micros, None);
+        assert_eq!(s.p99_rtt_micros, None);
+    }
+
+    #[test]
+    fn new_stats_reports_window_and_emptiness() {
+        let stats = RollingStats::new(five_min());
+        assert_eq!(stats.window(), five_min());
+        assert!(stats.is_empty());
+        assert_eq!(stats.len(), 0);
+    }
+}
