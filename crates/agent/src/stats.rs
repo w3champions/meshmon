@@ -744,4 +744,136 @@ mod tests {
         assert_eq!(s.p95_rtt_micros, Some(1_234));
         assert_eq!(s.p99_rtt_micros, Some(1_234));
     }
+
+    /// Ground-truth recompute: scan the still-in-window samples directly
+    /// and rebuild the FastSummary fields. Slow (O(N) scan) but correct
+    /// — used as the oracle the running counters must agree with.
+    #[allow(clippy::type_complexity)]
+    fn ground_truth(
+        stats: &RollingStats,
+    ) -> (
+        u64,
+        u64,
+        f64,
+        Option<f64>,
+        Option<f64>,
+        Option<u32>,
+        Option<u32>,
+    ) {
+        let mut sent = 0u64;
+        let mut successful = 0u64;
+        let mut sum: u128 = 0;
+        let mut sum_sq: u128 = 0;
+        let mut min: Option<u32> = None;
+        let mut max: Option<u32> = None;
+        for s in &stats.samples {
+            sent += 1;
+            if let Some(rtt) = s.rtt_micros {
+                successful += 1;
+                sum += rtt as u128;
+                sum_sq += (rtt as u128) * (rtt as u128);
+                min = Some(match min {
+                    Some(c) => c.min(rtt),
+                    None => rtt,
+                });
+                max = Some(match max {
+                    Some(c) => c.max(rtt),
+                    None => rtt,
+                });
+            }
+        }
+        let failure_rate = if sent == 0 {
+            0.0
+        } else {
+            1.0 - (successful as f64 / sent as f64)
+        };
+        let mean = if successful == 0 {
+            None
+        } else {
+            Some(sum as f64 / successful as f64)
+        };
+        let stddev = if successful < 2 {
+            None
+        } else {
+            let n = successful as f64;
+            let m = mean.unwrap();
+            let var = (sum_sq as f64 / n - m * m).max(0.0);
+            Some(var.sqrt())
+        };
+        (sent, successful, failure_rate, mean, stddev, min, max)
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // 256 cases is enough to catch sign/order/overflow bugs without
+        // making the test suite slow.
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// For any random sequence of (offset, success_or_failure) events
+        /// followed by an arbitrary `purge_old`, the running-counter
+        /// summary must match the ground-truth recompute. Catches:
+        ///   - arithmetic skew between insert and purge
+        ///   - failure to roll back min/max dirty bits
+        ///   - off-by-one boundary errors in purge
+        #[test]
+        fn insert_purge_summary_matches_ground_truth(
+            ops in proptest::collection::vec(
+                (0u64..=1200, proptest::option::of(0u32..=1_000_000)),
+                0..=200,
+            ),
+            window_secs in 30u64..=900,
+            purge_at_secs in 0u64..=2400,
+        ) {
+            // Resolve the dirty min/max so we compare apples-to-apples.
+            // (summary_fast hides them as None when dirty; the ground-truth
+            // recompute always returns the resolved value.)
+            let base = Instant::now();
+            let mut stats = RollingStats::new(Duration::from_secs(window_secs));
+            for (offset, rtt) in &ops {
+                let obs = match rtt {
+                    Some(r) => ok(base + Duration::from_secs(*offset), *r),
+                    None => timeout(base + Duration::from_secs(*offset)),
+                };
+                stats.insert(&obs);
+            }
+            stats.purge_old(base + Duration::from_secs(purge_at_secs));
+
+            // Force min/max resolution so the comparison is meaningful.
+            let resolved = stats.summary_with_percentiles();
+            let (gt_sent, gt_succ, gt_fr, gt_mean, gt_std, gt_min, gt_max) =
+                ground_truth(&stats);
+
+            prop_assert_eq!(resolved.sample_count, gt_sent);
+            prop_assert_eq!(resolved.successful, gt_succ);
+            prop_assert!((resolved.failure_rate - gt_fr).abs() < 1e-9);
+            // Mean / stddev are floats — equality with epsilon.
+            match (resolved.mean_rtt_micros, gt_mean) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    prop_assert!((a - b).abs() < 1e-6, "mean drift {a} vs {b}")
+                }
+                (a, b) => prop_assert!(false, "mean shape mismatch {a:?} vs {b:?}"),
+            }
+            match (resolved.stddev_rtt_micros, gt_std) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    prop_assert!((a - b).abs() < 1e-3, "stddev drift {a} vs {b}")
+                }
+                (a, b) => prop_assert!(false, "stddev shape mismatch {a:?} vs {b:?}"),
+            }
+            prop_assert_eq!(resolved.min_rtt_micros, gt_min);
+            prop_assert_eq!(resolved.max_rtt_micros, gt_max);
+
+            // Percentile ordering invariant under arbitrary distribution.
+            if let (Some(p50), Some(p95), Some(p99)) = (
+                resolved.p50_rtt_micros,
+                resolved.p95_rtt_micros,
+                resolved.p99_rtt_micros,
+            ) {
+                prop_assert!(p50 <= p95);
+                prop_assert!(p95 <= p99);
+            }
+        }
+    }
 }
