@@ -2,8 +2,12 @@
 # Local smoke-test harness for the meshmon service + frontend.
 #
 # Spins up Postgres + VictoriaMetrics containers, seeds a handful of agents
-# and route snapshots, writes a config with a throwaway admin user, and then
-# launches the service in the foreground. Ctrl-C tears down the containers.
+# and route snapshots, starts the service in the background, and runs the
+# Vite dev server in the foreground (which proxies /api to the service).
+# Ctrl-C tears everything down.
+#
+# The service binary does not yet serve the SPA itself; until the embed
+# task lands, the dev server is the only way to exercise the UI.
 #
 # Not for production. For the full stack (vmalert, alertmanager, grafana)
 # see deploy/docker-compose.yml once T24 fills it in.
@@ -18,16 +22,23 @@ VM_CONTAINER=meshmon-smoke-vm
 DB_PORT=${MESHMON_SMOKE_DB_PORT:-5432}
 VM_PORT=${MESHMON_SMOKE_VM_PORT:-8428}
 SERVICE_PORT=${MESHMON_SMOKE_SERVICE_PORT:-8080}
+FRONTEND_PORT=${MESHMON_SMOKE_FRONTEND_PORT:-5173}
 CONFIG_PATH=${MESHMON_SMOKE_CONFIG:-/tmp/meshmon-smoke.toml}
 ADMIN_USER=${MESHMON_SMOKE_USER:-admin}
 ADMIN_PASSWORD=${MESHMON_SMOKE_PASSWORD:-smoketest}
+SERVICE_LOG=${MESHMON_SMOKE_SERVICE_LOG:-/tmp/meshmon-smoke-service.log}
 
 TIMESCALE_IMAGE=timescale/timescaledb:2.26.3-pg16
 VM_IMAGE=victoriametrics/victoria-metrics:v1.104.0
 
+SERVICE_PID=
 teardown() {
   echo
-  echo "[smoke] tearing down containers"
+  echo "[smoke] tearing down"
+  if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" 2>/dev/null; then
+    kill "$SERVICE_PID" 2>/dev/null || true
+    wait "$SERVICE_PID" 2>/dev/null || true
+  fi
   docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$VM_CONTAINER" >/dev/null 2>&1 || true
 }
@@ -44,6 +55,8 @@ require cargo
 require argon2
 require openssl
 require psql
+require sqlx
+require npm
 
 # ---- Postgres -----------------------------------------------------------
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
@@ -124,20 +137,42 @@ VALUES
   ('fra-01', 'nrt-01', 'tcp',  now() - interval '10 minutes', '[]'::jsonb, NULL);
 SQL
 
-# ---- Service ------------------------------------------------------------
+# ---- Service (background) ----------------------------------------------
+echo "[smoke] starting service on :${SERVICE_PORT} (log: ${SERVICE_LOG})"
+MESHMON_CONFIG="$CONFIG_PATH" cargo run --quiet --package meshmon-service >"$SERVICE_LOG" 2>&1 &
+SERVICE_PID=$!
+
+echo "[smoke] waiting for service to be ready"
+until curl -fs "http://127.0.0.1:${SERVICE_PORT}/readyz" >/dev/null 2>&1; do
+  if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
+    echo "[smoke] service exited unexpectedly; tail of log:"
+    tail -20 "$SERVICE_LOG"
+    exit 1
+  fi
+  sleep 0.5
+done
+
+# ---- Frontend node_modules (one-time) ----------------------------------
+if [[ ! -d frontend/node_modules ]]; then
+  echo "[smoke] installing frontend dependencies (first run)"
+  npm --prefix frontend install
+fi
+
+# ---- Frontend dev server (foreground) ----------------------------------
 cat <<EOF
 
 [smoke] infra ready
   Postgres:          127.0.0.1:${DB_PORT}   (user: meshmon, db: meshmon)
   VictoriaMetrics:   127.0.0.1:${VM_PORT}
-  Service config:    ${CONFIG_PATH}
+  Service:           127.0.0.1:${SERVICE_PORT}   (log: ${SERVICE_LOG})
+  Config:            ${CONFIG_PATH}
 
-Open http://127.0.0.1:${SERVICE_PORT}/ and log in as:
+Open http://127.0.0.1:${FRONTEND_PORT}/ and log in as:
   username: ${ADMIN_USER}
   password: ${ADMIN_PASSWORD}
 
-Ctrl-C tears everything down.
+Ctrl-C tears everything down (service + containers).
 
 EOF
 
-exec env MESHMON_CONFIG="$CONFIG_PATH" cargo run --package meshmon-service
+exec npm --prefix frontend run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT"

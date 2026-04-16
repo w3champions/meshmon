@@ -87,17 +87,20 @@ The service binds on `service.listen_addr` (default `0.0.0.0:8080`). Useful endp
 ### One-command smoke harness
 
 `scripts/smoke.sh` brings up Postgres + VictoriaMetrics in Docker, writes a
-throwaway config, seeds a few agents and route snapshots, and launches the
-service in the foreground. Ctrl-C tears the containers down. Intended for
-local UI smoke-testing only — see `deploy/docker-compose.yml` for the full
-production stack.
+throwaway config, seeds a few agents and route snapshots, starts the service
+in the background, and runs the Vite dev server in the foreground (which
+proxies `/api` to the service). Ctrl-C tears everything down.
 
 ```bash
 ./scripts/smoke.sh
-# Open http://127.0.0.1:8080/  —  login: admin / smoketest
+# Open http://127.0.0.1:5173/  —  login: admin / smoketest
 ```
 
-Requires `docker`, `cargo`, `argon2`, `openssl`, `psql`, and `sqlx` on `$PATH`.
+Intended for local UI smoke-testing only — see `deploy/docker-compose.yml`
+for the full production stack.
+
+Requires `docker`, `cargo`, `argon2`, `openssl`, `psql`, `sqlx`, and `npm`
+on `$PATH`.
 
 Signals:
 - `SIGINT`, `SIGTERM` — graceful shutdown.
