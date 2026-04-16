@@ -103,42 +103,54 @@ async fn run() -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
     info!(addr = %local_addr, "HTTP listener bound");
 
-    // Optionally load TLS config for standalone mode.
-    let tls_acceptor = initial_config
-        .agent_api
-        .tls
-        .as_ref()
-        .map(|tls_cfg| {
-            let cfg =
-                meshmon_service::tls::load_rustls_config(&tls_cfg.cert_path, &tls_cfg.key_path)?;
-            Ok::<_, meshmon_service::error::BootError>(tokio_rustls::TlsAcceptor::from(cfg))
-        })
-        .transpose()
-        .context("load TLS config")?;
-    if tls_acceptor.is_some() {
+    // Optionally load TLS config for standalone mode. The acceptor is
+    // stored in an `ArcSwap` so SIGHUP reloads can swap in new certs
+    // (e.g. after a Let's Encrypt renewal) without a process restart.
+    // A failed reload keeps the previous acceptor and logs a warning
+    // rather than forcing an outage.
+    let initial_tls_acceptor = build_tls_acceptor(&initial_config).context("load TLS config")?;
+    if initial_tls_acceptor.is_some() {
         info!(addr = %local_addr, "standalone TLS enabled");
     }
+    let tls_swap: Arc<ArcSwap<Option<Arc<tokio_rustls::TlsAcceptor>>>> =
+        Arc::new(ArcSwap::from(Arc::new(initial_tls_acceptor)));
 
     // --- Shutdown coordination ---
     // on_reload: re-read the config file and swap the ArcSwap. Detached by
     // shutdown.rs to keep the signal loop responsive, so rapid SIGHUPs could
     // otherwise race. A tokio Mutex serializes the spawned tasks — each
     // acquires the guard in FIFO order, so the most recent file read is the
-    // last to land in ArcSwap.
+    // last to land in ArcSwap. The TLS acceptor is rebuilt from the new
+    // config's cert/key paths so certificate rotation on disk takes effect
+    // without a process restart; a failed rebuild keeps the previous
+    // acceptor so a broken reload can't take the service down.
     let reload_path = config_path.clone();
     let reload_handle = config_handle.clone();
     let reload_tx = config_tx.clone();
     let reload_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let reload_tls_swap = tls_swap.clone();
     let shutdown_token = shutdown::spawn(move || {
         let reload_path = reload_path.clone();
         let reload_handle = reload_handle.clone();
         let reload_tx = reload_tx.clone();
         let reload_lock = reload_lock.clone();
+        let reload_tls_swap = reload_tls_swap.clone();
         async move {
             let _guard = reload_lock.lock().await;
             match Config::from_file(&reload_path) {
                 Ok(new_cfg) => {
                     let new_cfg = Arc::new(new_cfg);
+                    match build_tls_acceptor(&new_cfg) {
+                        Ok(new_acceptor) => {
+                            reload_tls_swap.store(Arc::new(new_acceptor));
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "tls reload failed; keeping previous TLS acceptor",
+                            );
+                        }
+                    }
                     reload_handle.store(new_cfg.clone());
                     let _ = reload_tx.send(new_cfg);
                     info!("config reloaded");
@@ -225,8 +237,11 @@ async fn run() -> anyhow::Result<()> {
                             continue;
                         }
                     };
-                    if let Some(ref acceptor) = tls_acceptor {
-                        let acceptor = acceptor.clone();
+                    // Read the current TLS acceptor once per connection; a
+                    // concurrent SIGHUP reload will be visible on the next
+                    // accept without interrupting this handshake.
+                    let maybe_acceptor = tls_swap.load_full();
+                    if let Some(acceptor) = maybe_acceptor.as_ref().clone() {
                         let app = app.clone();
                         let builder = builder.clone();
                         conn_set.spawn(async move {
@@ -338,6 +353,21 @@ async fn run() -> anyhow::Result<()> {
 
 /// Drive a single accepted connection to completion.
 ///
+/// Build a `TlsAcceptor` from the currently-resolved `[agent_api.tls]`
+/// section, or `None` when TLS is not configured. Called at startup and
+/// re-called from the SIGHUP reload closure so that cert/key files
+/// replaced on disk are picked up without a process restart.
+fn build_tls_acceptor(
+    cfg: &Config,
+) -> Result<Option<Arc<tokio_rustls::TlsAcceptor>>, meshmon_service::error::BootError> {
+    let Some(tls_cfg) = cfg.agent_api.tls.as_ref() else {
+        return Ok(None);
+    };
+    let server_cfg =
+        meshmon_service::tls::load_rustls_config(&tls_cfg.cert_path, &tls_cfg.key_path)?;
+    Ok(Some(Arc::new(tokio_rustls::TlsAcceptor::from(server_cfg))))
+}
+
 /// Injects `ConnectInfo<SocketAddr>` into every request's extensions so that
 /// axum's `ConnectInfo` extractor and the tonic interceptor both see the peer
 /// address without needing `into_make_service_with_connect_info`.
