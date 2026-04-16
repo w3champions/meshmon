@@ -356,6 +356,7 @@ impl RollingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::time::Duration;
 
     fn five_min() -> Duration {
@@ -803,8 +804,6 @@ mod tests {
         (sent, successful, failure_rate, mean, stddev, min, max)
     }
 
-    use proptest::prelude::*;
-
     proptest! {
         // 256 cases is enough to catch sign/order/overflow bugs without
         // making the test suite slow.
@@ -858,7 +857,12 @@ mod tests {
             match (resolved.stddev_rtt_micros, gt_std) {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
-                    prop_assert!((a - b).abs() < 1e-3, "stddev drift {a} vs {b}")
+                    // Inputs (rtt ≤ 1e6, n ≤ 200) keep `sum_sq < 2^53`, so
+                    // both ground_truth and summary_fast compute the same
+                    // expression in exact f64. Drift comes from FP op order
+                    // alone (~5 ops × eps ≈ 1e-9). Tight tolerance catches
+                    // formula mutations that loose 1e-3 would mask.
+                    prop_assert!((a - b).abs() < 1e-6, "stddev drift {a} vs {b}")
                 }
                 (a, b) => prop_assert!(false, "stddev shape mismatch {a:?} vs {b:?}"),
             }
@@ -883,7 +887,9 @@ mod tests {
     /// difference would indicate accidental O(N) behavior).
     ///
     /// `#[ignore]` because it's timing-based and noisy on shared CI;
-    /// run with `cargo test -p meshmon-agent --lib stats::tests::insert_is_o1 -- --ignored`.
+    /// run with `cargo test --release -p meshmon-agent --lib stats::tests::insert_is_o1 -- --ignored`.
+    /// `--release` matters: debug builds inflate per-call latency unevenly
+    /// and can produce false failures even though the ratio is sound.
     #[test]
     #[ignore = "timing-sensitive; run on demand"]
     fn insert_is_o1() {
