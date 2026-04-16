@@ -43,11 +43,12 @@ pub struct RangeQuery {
 // Whitelist
 // ---------------------------------------------------------------------------
 
-/// Return true when `q` begins with `meshmon_<ident>` where `<ident>` is
-/// one or more ASCII lowercase letters or underscores.
+/// Return true when `q` starts with `meshmon_` followed by at least one
+/// ASCII lowercase letter or underscore. The remainder of the query string
+/// is forwarded as-is; this check is prefix-only defense-in-depth, not a
+/// full PromQL parser (spec 03 § proxy endpoints).
 fn is_meshmon_query(q: &str) -> bool {
-    let trimmed = q.trim_start();
-    let Some(rest) = trimmed.strip_prefix("meshmon_") else {
+    let Some(rest) = q.strip_prefix("meshmon_") else {
         return false;
     };
     matches!(rest.chars().next(), Some(c) if c.is_ascii_lowercase() || c == '_')
@@ -57,9 +58,25 @@ fn is_meshmon_query(q: &str) -> bool {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read the configured VictoriaMetrics base URL, if any.
+/// Read the configured VictoriaMetrics base URL, if any. Any trailing
+/// slash is stripped so we don't build URLs like `http://vm:8428//api/v1/…`.
 fn vm_base(state: &AppState) -> Option<String> {
-    state.config().upstream.vm_url.clone()
+    state
+        .config()
+        .upstream
+        .vm_url
+        .as_deref()
+        .map(|u| u.trim_end_matches('/').to_owned())
+}
+
+/// Shared 502 response used when the upstream request cannot be completed
+/// or its body cannot be read.
+fn upstream_error_response() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({ "error": "upstream request failed" })),
+    )
+        .into_response()
 }
 
 /// Forward a GET request to VictoriaMetrics and pass through the response
@@ -72,11 +89,7 @@ async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "vm proxy: upstream request failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": "upstream request failed" })),
-            )
-                .into_response();
+            return upstream_error_response();
         }
     };
 
@@ -86,11 +99,7 @@ async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(error = %e, "vm proxy: failed to read upstream body");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": "upstream request failed" })),
-            )
-                .into_response();
+            return upstream_error_response();
         }
     };
 
@@ -190,10 +199,7 @@ pub async fn query_instant(
         (status = 503, description = "VictoriaMetrics not configured"),
     ),
 )]
-pub async fn query_range(
-    State(state): State<AppState>,
-    Query(q): Query<RangeQuery>,
-) -> Response {
+pub async fn query_range(State(state): State<AppState>, Query(q): Query<RangeQuery>) -> Response {
     if !is_meshmon_query(&q.query) {
         return (
             StatusCode::BAD_REQUEST,
@@ -214,7 +220,7 @@ pub async fn query_range(
     };
 
     let url = format!("{base}/api/v1/query_range");
-    let params: Vec<(&str, &str)> = vec![
+    let params: [(&str, &str); 4] = [
         ("query", &q.query),
         ("start", &q.start),
         ("end", &q.end),
@@ -235,9 +241,18 @@ mod tests {
     #[test]
     fn whitelist_accepts_meshmon_metric() {
         assert!(is_meshmon_query("meshmon_path_rtt_avg_micros"));
-        assert!(is_meshmon_query(
-            "  meshmon_path_failure_rate{source=\"a\"}"
-        ));
+        assert!(is_meshmon_query("meshmon_path_failure_rate{source=\"a\"}"));
+        // Operator expressions are allowed — whitelist is prefix-only
+        // defense-in-depth, not a full PromQL parser.
+        assert!(is_meshmon_query("meshmon_rtt > 0"));
+    }
+
+    #[test]
+    fn whitelist_rejects_leading_whitespace() {
+        // Valid PromQL at the wire doesn't start with whitespace; reject
+        // to avoid unicode-whitespace bypass.
+        assert!(!is_meshmon_query(" meshmon_foo"));
+        assert!(!is_meshmon_query("\tmeshmon_foo"));
     }
 
     #[test]

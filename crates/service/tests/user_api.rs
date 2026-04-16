@@ -32,6 +32,7 @@
 //! | `.140` | `metrics_proxy_rejects_non_meshmon_query`                   |
 //! | `.141` | `metrics_proxy_forwards_meshmon_query_to_vm`                |
 //! | `.142` | `metrics_proxy_range_forwards_all_params`                   |
+//! | `.143` | `metrics_proxy_returns_503_when_vm_not_configured`          |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -838,4 +839,25 @@ async fn metrics_proxy_range_forwards_all_params() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["status"], "success", "body = {body}");
     assert_eq!(body["data"]["resultType"], "matrix", "body = {body}");
+}
+
+#[tokio::test]
+async fn metrics_proxy_returns_503_when_vm_not_configured() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool); // no vm_url
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.143").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/metrics/query?query=meshmon_foo")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
