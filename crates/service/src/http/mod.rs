@@ -87,11 +87,14 @@ pub fn router(state: AppState) -> Router {
     // redirect target rather than following a server-issued 307.
     let api_protected = api_axum.route_layer(login_required!(ConfigAuthBackend));
 
+    let grpc_router = crate::grpc::routes(state.clone());
+
     Router::new()
         .merge(health::router())
         .merge(openapi::swagger_router(api_schema))
         .merge(login_router)
         .merge(logout_router)
+        .merge(grpc_router)
         .merge(api_protected)
         .layer(auth_layer)
         .layer(CompressionLayer::new())

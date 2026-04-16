@@ -142,6 +142,15 @@ pub enum ValidationError {
     /// A path entry carries `Protocol::Unspecified`.
     #[error("protocol is unspecified")]
     UnspecifiedProtocol,
+    /// A path entry carries `ProtocolHealth::Unspecified`. The proto
+    /// explicitly labels UNSPECIFIED as a decode error at the application
+    /// layer, so agents emitting it must be rejected rather than silently
+    /// accepted as `Unspecified`.
+    #[error("path health is unspecified for target={target}")]
+    UnspecifiedPathHealth {
+        /// Target ID of the offending path entry.
+        target: String,
+    },
     /// The batch contains more paths than `MAX_PATHS_PER_BATCH`.
     #[error("batch contains {count} paths; cap is {MAX_PATHS_PER_BATCH}")]
     TooManyPaths {
@@ -444,6 +453,11 @@ fn validate_path(p: PathMetrics) -> Result<ValidPath, ValidationError> {
         });
     }
     let health = ProtocolHealth::try_from(p.health).unwrap_or(ProtocolHealth::Unspecified);
+    if matches!(health, ProtocolHealth::Unspecified) {
+        return Err(ValidationError::UnspecifiedPathHealth {
+            target: p.target_id,
+        });
+    }
 
     Ok(ValidPath {
         target_id: p.target_id,
