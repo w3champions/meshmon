@@ -112,6 +112,11 @@ export interface components {
             grafana_dashboards: {
                 [key: string]: string;
             };
+            /**
+             * @description Signed-in username. The SPA hydrates its auth store from this so the
+             *     user menu shows the right handle after a hard refresh.
+             */
+            username: string;
             /** @description `CARGO_PKG_VERSION` of the running service. */
             version: string;
         };
