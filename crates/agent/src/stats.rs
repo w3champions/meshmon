@@ -438,4 +438,106 @@ mod tests {
         assert_eq!(s.successful, 0);
         assert_eq!(s.failure_rate, 1.0);
     }
+
+    // `Duration` is already imported at the top of `mod tests` for the
+    // `five_min()` helper — the plan-recommended `use std::time::Duration;`
+    // here would shadow-collide (E0252).
+
+    /// Helper: build a `RollingStats` and inject samples at controlled
+    /// monotonic offsets relative to a base instant. We sidestep
+    /// `tokio::time::pause()` here because `RollingStats` itself doesn't
+    /// touch the clock — tests pass the `now` argument directly.
+    fn rolling_with_samples(
+        window: Duration,
+        base: Instant,
+        rtts_with_offsets: &[(u64, u32)],
+    ) -> RollingStats {
+        let mut stats = RollingStats::new(window);
+        for (offset_secs, rtt) in rtts_with_offsets {
+            stats.insert(&ok(base + Duration::from_secs(*offset_secs), *rtt));
+        }
+        stats
+    }
+
+    #[ignore = "purge_old in Task 5; summary_with_percentiles dirty-resolve in Task 6"]
+    #[test]
+    fn purge_of_extremum_marks_dirty_then_lazy_recomputes() {
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = rolling_with_samples(
+            win,
+            base,
+            // (offset_secs, rtt_micros)
+            // Sample at t+0 holds the min (1000) AND will be purged by t+90.
+            // Sample at t+30 holds the max (5000) — still in the window at t+90.
+            &[
+                (0, 1_000),
+                (10, 2_000),
+                (20, 3_000),
+                (30, 5_000),
+                (40, 4_000),
+            ],
+        );
+
+        // Pre-purge sanity.
+        let s = stats.summary_fast();
+        assert_eq!(s.min_rtt_micros, Some(1_000));
+        assert_eq!(s.max_rtt_micros, Some(5_000));
+
+        // Advance 90s — only the t+0 sample falls out of the 60s window.
+        // (t+90 - 60 = t+30, so anything with `t < t+30` is purged → only
+        // t+0 is dropped.)
+        stats.purge_old(base + Duration::from_secs(90));
+
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 4, "one sample purged");
+        // min was held by the purged sample — dirty bit set → None.
+        assert_eq!(s.min_rtt_micros, None, "min should be dirty");
+        // max held by t+30 (still in window) — clean.
+        assert_eq!(s.max_rtt_micros, Some(5_000));
+
+        // summary_with_percentiles must clear the dirty bit and resolve.
+        let resolved = stats.summary_with_percentiles();
+        // After purge the surviving samples have RTTs {2000,3000,5000,4000}.
+        assert_eq!(resolved.min_rtt_micros, Some(2_000));
+        assert_eq!(resolved.max_rtt_micros, Some(5_000));
+
+        // Subsequent summary_fast should now return the resolved values.
+        let s = stats.summary_fast();
+        assert_eq!(s.min_rtt_micros, Some(2_000));
+        assert_eq!(s.max_rtt_micros, Some(5_000));
+    }
+
+    #[ignore = "purge_old in Task 5"]
+    #[test]
+    fn purge_of_non_extremum_leaves_min_max_clean() {
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = rolling_with_samples(
+            win,
+            base,
+            // t+0 sample is the median, NOT the extremum.
+            &[(0, 3_000), (10, 1_000), (20, 5_000), (30, 4_000)],
+        );
+
+        stats.purge_old(base + Duration::from_secs(90));
+        let s = stats.summary_fast();
+        // Min (1000 at t+10) and max (5000 at t+20) both still in window.
+        assert_eq!(s.min_rtt_micros, Some(1_000));
+        assert_eq!(s.max_rtt_micros, Some(5_000));
+    }
+
+    #[ignore = "purge_old in Task 5"]
+    #[test]
+    fn purging_all_samples_clears_min_max() {
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = rolling_with_samples(win, base, &[(0, 1_000), (10, 2_000)]);
+        // Force every sample out.
+        stats.purge_old(base + Duration::from_secs(120));
+        let resolved = stats.summary_with_percentiles();
+        assert_eq!(resolved.sample_count, 0);
+        assert_eq!(resolved.min_rtt_micros, None);
+        assert_eq!(resolved.max_rtt_micros, None);
+    }
 }
