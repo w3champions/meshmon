@@ -10,10 +10,14 @@
 //!
 //! ## `openapi`
 //!
-//! Regenerate `frontend/src/api/openapi.json` from the service's compile-time
-//! OpenAPI schema. The frontend build (T17) reads this file to generate TS
-//! types and a typed fetch client; CI fails if the checked-in copy diverges
-//! from what `cargo xtask openapi` produces.
+//! Regenerate `frontend/src/api/openapi.gen.json` from the service's
+//! compile-time OpenAPI schema. The frontend build reads this file to
+//! generate TS types and a typed fetch client; CI fails if the
+//! checked-in copy diverges from what `cargo xtask openapi` produces.
+//!
+//! The `.gen.` infix marks the file as build-artifact output so tooling
+//! (lint ignores, codeowners, review heuristics) can filter every
+//! generated file via a single `**/*.gen.*` glob.
 //!
 //! Sort order: the emitted JSON is serialized with `serde_json::to_string_pretty`
 //! and ends with a trailing newline. Deterministic output keeps `git diff`
@@ -24,7 +28,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const OPENAPI_RELATIVE_PATH: &str = "frontend/src/api/openapi.json";
+const OPENAPI_RELATIVE_PATH: &str = "frontend/src/api/openapi.gen.json";
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
