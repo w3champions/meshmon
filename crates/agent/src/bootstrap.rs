@@ -134,9 +134,20 @@ impl<A: ServiceApi> AgentRuntime<A> {
 
     /// Re-fetch config and targets from the service. Failures are logged as
     /// warnings; the agent continues with its previous state.
+    ///
+    /// Each RPC is raced against cancellation so a hung call cannot block the
+    /// refresh loop (and therefore shutdown) during network stalls.
     async fn refresh_once(&mut self) {
         // -- Refresh config --
-        match self.api.get_config().await {
+        let config_result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                tracing::debug!("refresh: config fetch cancelled");
+                return;
+            }
+            result = self.api.get_config() => result,
+        };
+        match config_result {
             Ok(resp) => {
                 let new_config = ProbeConfig::from_proto(resp);
                 // send() only fails if all receivers are dropped, which
@@ -150,7 +161,15 @@ impl<A: ServiceApi> AgentRuntime<A> {
         }
 
         // -- Refresh targets --
-        match self.api.get_targets(&self.env.identity.id).await {
+        let targets_result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                tracing::debug!("refresh: target fetch cancelled");
+                return;
+            }
+            result = self.api.get_targets(&self.env.identity.id) => result,
+        };
+        match targets_result {
             Ok(resp) => {
                 self.reconcile_targets(resp.targets).await;
                 tracing::debug!(
@@ -273,7 +292,17 @@ where
     let max_delay = Duration::from_secs(30);
 
     loop {
-        match op().await {
+        // Race the in-flight RPC against cancellation so a hung call (stalled
+        // TCP/TLS handshake or unresponsive upstream) cannot block shutdown.
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                bail!("{label}: cancelled during RPC");
+            }
+            result = op() => result,
+        };
+
+        match outcome {
             Ok(val) => return Ok(val),
             Err(e) => {
                 // Apply ±25% jitter.
