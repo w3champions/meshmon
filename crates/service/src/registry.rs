@@ -215,6 +215,12 @@ impl AgentRegistry {
         let snap = refresh_once(&self.pool).await?;
         self.publish(&snap);
         self.snapshot.store(Arc::new(snap));
+        // Seed the refresh-age gauge so operators get an honest reading
+        // even before the periodic loop ticks. Without this, the gauge
+        // is absent (or stuck at 0) for up to `refresh_interval` after
+        // startup, which reads as "snapshot is fresh" when it's really
+        // "we haven't measured yet".
+        registry_last_refresh_age_seconds().set(0.0);
         Ok(())
     }
 
@@ -240,6 +246,10 @@ impl AgentRegistry {
         let snap = refresh_once(&self.pool).await?;
         self.publish(&snap);
         self.snapshot.store(Arc::new(snap));
+        // Keep the refresh-age gauge aligned with the snapshot just
+        // published — the periodic loop also resets it, but a force
+        // refresh between ticks should not leave the gauge stale.
+        registry_last_refresh_age_seconds().set(0.0);
         Ok(())
     }
 

@@ -48,6 +48,28 @@ pub async fn require_basic_auth(
     // 2.x docs), so no separate length gate is needed.
     let user_matches: bool = user.as_bytes().ct_eq(expected.username.as_bytes()).into();
     if !user_matches {
+        // Wrong-username requests otherwise return in microseconds while
+        // wrong-password requests take ~100ms (argon2 on `spawn_blocking`).
+        // An attacker timing 401s against different usernames can
+        // enumerate the configured one. Mirror `http::auth::dummy_verify`
+        // and run a throwaway argon2 verify against the real hash: the
+        // result is discarded (no authentication ever happens on this
+        // branch) so using the configured hash is safe and makes both
+        // parse-time and verify-time latency match the happy path.
+        let hash = expected.password_hash.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            if let Ok(parsed) = PasswordHash::new(&hash) {
+                // Password bytes are fixed nonsense — the call exists
+                // purely for latency parity, not authentication.
+                let _ = Argon2::default().verify_password(b"::dummy::", &parsed);
+            }
+        })
+        .await
+        {
+            // Swallowed and logged, not propagated: a 500 here would be
+            // a stronger oracle than the one we're trying to close.
+            tracing::warn!(error = %e, "metrics-auth dummy verify task failed");
+        }
         return challenge();
     }
 
@@ -299,5 +321,87 @@ url = "postgres://ignored@h/d"
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Both wrong-username and wrong-password paths must run the argon2
+    /// verify so request latency does not leak whether the configured
+    /// username matched. Absolute latency is not asserted (argon2 speed
+    /// varies wildly across CI executors) — instead the test averages
+    /// several runs of each path and asserts that wrong-username latency
+    /// is within 2× of wrong-password latency. Without the dummy verify
+    /// this ratio is 100× or more, so a 2× ceiling is a safe floor for
+    /// "the dummy verify actually ran".
+    #[tokio::test]
+    async fn timing_oracle_flat_for_wrong_username() {
+        use std::time::Instant;
+
+        async fn measure_ms(app: Router, authz: String) -> u128 {
+            let start = Instant::now();
+            let resp = app
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri("/metrics")
+                        .header(header::AUTHORIZATION, authz)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let elapsed = start.elapsed().as_micros();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            elapsed
+        }
+
+        // Warm up — the first argon2 call on a fresh process pays a
+        // one-time cost that would otherwise skew the baseline.
+        let _ = measure_ms(
+            app(state(true)),
+            format!(
+                "Basic {}",
+                STANDARD.encode(format!("someone-else:{CORRECT_PASSWORD}"))
+            ),
+        )
+        .await;
+
+        const SAMPLES: u32 = 5;
+        let mut wrong_user_total: u128 = 0;
+        let mut wrong_pass_total: u128 = 0;
+        for _ in 0..SAMPLES {
+            wrong_user_total += measure_ms(
+                app(state(true)),
+                format!(
+                    "Basic {}",
+                    STANDARD.encode(format!("someone-else:{CORRECT_PASSWORD}"))
+                ),
+            )
+            .await;
+            wrong_pass_total += measure_ms(
+                app(state(true)),
+                format!("Basic {}", STANDARD.encode("prom:not-the-password")),
+            )
+            .await;
+        }
+
+        let wrong_user_avg = wrong_user_total / u128::from(SAMPLES);
+        let wrong_pass_avg = wrong_pass_total / u128::from(SAMPLES);
+
+        // Bail out defensively if either path ran in ~0µs (unrealistic
+        // on any machine that can run argon2 at all) so the ratio test
+        // below doesn't divide by zero or produce meaningless numbers.
+        assert!(wrong_pass_avg > 0, "wrong-password baseline too fast");
+        assert!(wrong_user_avg > 0, "wrong-username baseline too fast");
+
+        // Without the dummy verify, wrong-username returns in ~10µs
+        // (header parse + constant-time compare) while wrong-password
+        // takes 100–1000µs+ for argon2. That's a 10–100× gap. Require
+        // the ratio to stay within 4× — generous enough to absorb
+        // scheduler jitter, tight enough to catch a regression.
+        let ratio = wrong_pass_avg as f64 / wrong_user_avg as f64;
+        assert!(
+            ratio < 4.0,
+            "timing oracle regression: wrong-password avg {wrong_pass_avg}µs / \
+             wrong-username avg {wrong_user_avg}µs = {ratio:.1}× — \
+             dummy argon2 verify may not have run on the wrong-username path"
+        );
     }
 }

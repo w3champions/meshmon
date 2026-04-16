@@ -16,8 +16,6 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
 use std::borrow::Cow;
 use std::fmt::Write;
 
@@ -113,24 +111,6 @@ fn prom_escape(s: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(out)
-}
-
-/// Test-only scaffolding that registers all three health endpoints on
-/// one router without any middleware. Kept for unit tests that want to
-/// exercise the handlers behind a plain axum `Router` without wiring
-/// the full production stack.
-///
-/// The production router in [`crate::http`] **does not call this
-/// function**. It composes `/healthz`, `/readyz`, and `/metrics`
-/// directly so it can attach `metrics_auth::require_basic_auth` to
-/// `/metrics` alone, while leaving `/healthz` and `/readyz` ungated for
-/// k8s probes. Do not add routes here expecting them to reach
-/// production traffic — add them in `http::router` instead.
-pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
 }
 
 #[cfg(test)]
