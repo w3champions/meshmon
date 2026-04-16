@@ -198,6 +198,9 @@ impl RollingStats {
     /// Drop samples older than `now - self.window`. Amortized O(1) per
     /// purged entry. Marks min/max dirty if the purged sample held the
     /// current extremum.
+    ///
+    /// Boundary semantics: a sample with `t == now - window` (exactly
+    /// window-old) is considered expired and is also purged.
     pub fn purge_old(&mut self, now: Instant) {
         // Anything observed at or before `cutoff` is too old. Use checked
         // subtraction because `tokio::time::Instant::checked_sub` returns
@@ -534,8 +537,8 @@ mod tests {
             win,
             base,
             // (offset_secs, rtt_micros)
-            // Sample at t+0 holds the min (1000) AND will be purged by t+90.
-            // Sample at t+30 holds the max (5000) — still in the window at t+90.
+            // Sample at t+0 holds the min (1000) AND will be purged at t+60.
+            // Sample at t+30 holds the max (5000) — still in the window at t+60.
             &[
                 (0, 1_000),
                 (10, 2_000),
