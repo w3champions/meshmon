@@ -24,6 +24,7 @@ axum = "0.8"
 axum-extra = "0.12"
 axum-login = "0.18"
 ctor = "0.10"
+dashmap = "6"
 # Named directly because our `LoginRateLimitLayer` alias uses
 # `governor::middleware::NoOpMiddleware`, which `tower_governor` does not
 # re-export. Bump this in lockstep with `tower_governor`: the minor
@@ -35,6 +36,7 @@ rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+socket2 = "0.6"
 sqlx = { version = "0.8", default-features = false }
 testcontainers = "0.27"
 thiserror = "2"
@@ -47,6 +49,7 @@ tower-sessions = { version = "0.14", default-features = false, features = ["memo
 tower_governor = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+trippy-core = "0.13"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
