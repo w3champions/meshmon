@@ -876,4 +876,67 @@ mod tests {
             }
         }
     }
+
+    /// Sanity check that `insert` and `summary_fast` are O(1).
+    /// Compares mean per-call latency at N≈1k vs N≈100k. The 100k
+    /// measurement should be within ~10× of the 1k measurement (a 100×
+    /// difference would indicate accidental O(N) behavior).
+    ///
+    /// `#[ignore]` because it's timing-based and noisy on shared CI;
+    /// run with `cargo test -p meshmon-agent --lib stats::tests::insert_is_o1 -- --ignored`.
+    #[test]
+    #[ignore = "timing-sensitive; run on demand"]
+    fn insert_is_o1() {
+        use std::time::Instant as StdInstant;
+        let base = Instant::now();
+        let mut small = RollingStats::new(Duration::from_secs(86_400));
+        let mut large = RollingStats::new(Duration::from_secs(86_400));
+
+        // Pre-load the "large" stats with 100k samples.
+        for i in 0..100_000u32 {
+            large.insert(&ok(base + Duration::from_micros(i as u64), i));
+        }
+
+        // Measure insert latency on small (~1k samples).
+        for i in 0..1_000u32 {
+            small.insert(&ok(base + Duration::from_micros(i as u64), i));
+        }
+        let t0 = StdInstant::now();
+        for i in 0..10_000u32 {
+            small.insert(&ok(base + Duration::from_micros(i as u64 + 1_000), i));
+        }
+        let small_per_call = t0.elapsed().as_nanos() / 10_000;
+
+        // Measure insert latency on large (~100k samples).
+        let t0 = StdInstant::now();
+        for i in 0..10_000u32 {
+            large.insert(&ok(base + Duration::from_micros(i as u64 + 100_000), i));
+        }
+        let large_per_call = t0.elapsed().as_nanos() / 10_000;
+
+        // O(1): per-call time independent of N. Allow 10× slack for cache
+        // effects, scheduler noise, deque grow-on-amortization spikes.
+        let ratio = large_per_call as f64 / small_per_call.max(1) as f64;
+        assert!(
+            ratio < 10.0,
+            "insert ratio {ratio} (small={small_per_call}ns, large={large_per_call}ns) — suggests O(N)",
+        );
+
+        // Same shape for summary_fast.
+        let t0 = StdInstant::now();
+        for _ in 0..10_000 {
+            std::hint::black_box(small.summary_fast());
+        }
+        let small_sum = t0.elapsed().as_nanos() / 10_000;
+        let t0 = StdInstant::now();
+        for _ in 0..10_000 {
+            std::hint::black_box(large.summary_fast());
+        }
+        let large_sum = t0.elapsed().as_nanos() / 10_000;
+        let ratio = large_sum as f64 / small_sum.max(1) as f64;
+        assert!(
+            ratio < 10.0,
+            "summary_fast ratio {ratio} (small={small_sum}ns, large={large_sum}ns) — suggests O(N)",
+        );
+    }
 }
