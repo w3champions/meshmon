@@ -203,6 +203,12 @@ impl<A: ServiceApi> AgentRuntime<A> {
         for id in stale_ids {
             if let Some(handle) = self.supervisors.remove(&id) {
                 handle.cancel.cancel();
+                // Keep an abort handle so we can force-kill the task if it
+                // doesn't honor cancellation within the timeout. Without this,
+                // dropping the JoinHandle on timeout would leak the task —
+                // it would keep running (still probing a removed target) with
+                // no way to stop it.
+                let abort_handle = handle.join.abort_handle();
                 match tokio::time::timeout(Duration::from_secs(5), handle.join).await {
                     Ok(Ok(())) => {
                         tracing::info!(target_id = %id, "supervisor stopped cleanly");
@@ -211,7 +217,11 @@ impl<A: ServiceApi> AgentRuntime<A> {
                         tracing::warn!(target_id = %id, error = %e, "supervisor panicked");
                     }
                     Err(_) => {
-                        tracing::warn!(target_id = %id, "supervisor did not stop within 5s");
+                        tracing::warn!(
+                            target_id = %id,
+                            "supervisor did not stop within 5s — aborting",
+                        );
+                        abort_handle.abort();
                     }
                 }
             }
@@ -237,6 +247,9 @@ impl<A: ServiceApi> AgentRuntime<A> {
         self.cancel.cancel();
 
         for (id, handle) in self.supervisors {
+            // Force-abort on timeout so stuck tasks can't outlive the runtime
+            // without being terminated.
+            let abort_handle = handle.join.abort_handle();
             match tokio::time::timeout(Duration::from_secs(10), handle.join).await {
                 Ok(Ok(())) => {
                     tracing::info!(target_id = %id, "supervisor shut down cleanly");
@@ -245,7 +258,11 @@ impl<A: ServiceApi> AgentRuntime<A> {
                     tracing::warn!(target_id = %id, error = %e, "supervisor panicked during shutdown");
                 }
                 Err(_) => {
-                    tracing::warn!(target_id = %id, "supervisor did not stop within 10s during shutdown");
+                    tracing::warn!(
+                        target_id = %id,
+                        "supervisor did not stop within 10s during shutdown — aborting",
+                    );
+                    abort_handle.abort();
                 }
             }
         }
