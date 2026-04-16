@@ -800,6 +800,13 @@ url = "postgres://ignored@h/d"
     /// `[agent_api].shared_token`. The pool is lazy (no real DB connection),
     /// the ingestion pipeline is spawned against a token that's immediately
     /// cancelled so no background threads linger between tests.
+    ///
+    /// Sync on purpose: unit tests in this module use the plain `#[test]`
+    /// harness, and `crate::metrics::test_install()` mirrors that with a
+    /// sync `OnceLock`. Integration tests have their own async
+    /// `test_prometheus_handle()` helper in `tests/common/mod.rs` —
+    /// don't "normalize" this one to async or you'll force every
+    /// surrounding `#[test]` to become `#[tokio::test]`.
     fn agent_state_with(token: Option<&str>) -> AppState {
         let token_line = match token {
             Some(t) => format!(r#"shared_token = "{t}""#),

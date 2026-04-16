@@ -110,11 +110,10 @@ use std::sync::{Arc, Mutex};
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use tokio::sync::OnceCell as AsyncOnceCell;
 use tokio::sync::{watch, OnceCell};
 use uuid::Uuid;
 
-static TEST_PROM: AsyncOnceCell<PrometheusHandle> = AsyncOnceCell::const_new();
+static TEST_PROM: OnceCell<PrometheusHandle> = OnceCell::const_new();
 
 /// Process-wide recorder install. `metrics::set_global_recorder`
 /// rejects a second call, so every test in the same binary must share
