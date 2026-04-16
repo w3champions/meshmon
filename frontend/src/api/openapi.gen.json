@@ -280,13 +280,13 @@
           "metrics"
         ],
         "summary": "`GET /api/metrics/query` -- proxy an instant query to VictoriaMetrics.",
-        "description": "The query expression must start with `meshmon_` followed by a valid\nidentifier character (ASCII lowercase or underscore). Queries that do\nnot match are rejected with 400.\n\n- **400** when the query doesn't start with `meshmon_<ident>`.\n- **502** when the upstream is unreachable or returns an error.\n- **503** when `upstream.vm_url` is not configured.",
+        "description": "The query expression must reference at least one `meshmon_<ident>`\nmetric. Aggregators and function wrappers around meshmon metrics are\nallowed. Queries that touch no meshmon metric are rejected with 400.\n\n- **400** when the query references no `meshmon_` metric.\n- **502** when the upstream is unreachable or returns an error.\n- **503** when `upstream.vm_url` is not configured.",
         "operationId": "query_instant",
         "parameters": [
           {
             "name": "query",
             "in": "query",
-            "description": "PromQL expression (must start with meshmon_)",
+            "description": "PromQL expression (must reference a meshmon_ metric)",
             "required": true,
             "schema": {
               "type": "string"
@@ -327,13 +327,13 @@
           "metrics"
         ],
         "summary": "`GET /api/metrics/query_range` -- proxy a range query to VictoriaMetrics.",
-        "description": "The query expression must start with `meshmon_` followed by a valid\nidentifier character (ASCII lowercase or underscore). Queries that do\nnot match are rejected with 400.\n\n- **400** when the query doesn't start with `meshmon_<ident>`.\n- **502** when the upstream is unreachable or returns an error.\n- **503** when `upstream.vm_url` is not configured.",
+        "description": "The query expression must reference at least one `meshmon_<ident>`\nmetric. Aggregators and function wrappers around meshmon metrics are\nallowed. Queries that touch no meshmon metric are rejected with 400.\n\n- **400** when the query references no `meshmon_` metric.\n- **502** when the upstream is unreachable or returns an error.\n- **503** when `upstream.vm_url` is not configured.",
         "operationId": "query_range",
         "parameters": [
           {
             "name": "query",
             "in": "query",
-            "description": "PromQL expression (must start with meshmon_)",
+            "description": "PromQL expression (must reference a meshmon_ metric)",
             "required": true,
             "schema": {
               "type": "string"
@@ -873,7 +873,7 @@
         "properties": {
           "query": {
             "type": "string",
-            "description": "PromQL expression. Must start with `meshmon_`."
+            "description": "PromQL expression. Must reference at least one `meshmon_` metric."
           },
           "time": {
             "type": [
@@ -959,7 +959,7 @@
           },
           "query": {
             "type": "string",
-            "description": "PromQL expression. Must start with `meshmon_`."
+            "description": "PromQL expression. Must reference at least one `meshmon_` metric."
           },
           "start": {
             "type": "string",

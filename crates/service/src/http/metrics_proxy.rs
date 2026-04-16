@@ -2,7 +2,8 @@
 //!
 //! Forwards GET /api/metrics/query -> VM /api/v1/query and
 //! GET /api/metrics/query_range -> VM /api/v1/query_range. Rejects
-//! queries that don't start with `meshmon_<ident>` as defense-in-depth.
+//! queries that don't reference any `meshmon_<ident>` metric as
+//! defense-in-depth (the endpoint is already behind `login_required!`).
 
 use crate::http::http_client::proxy_client;
 use crate::state::AppState;
@@ -20,7 +21,7 @@ use utoipa::ToSchema;
 /// Query parameters for `GET /api/metrics/query` (instant query).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct InstantQuery {
-    /// PromQL expression. Must start with `meshmon_`.
+    /// PromQL expression. Must reference at least one `meshmon_` metric.
     pub query: String,
     /// Optional evaluation timestamp (RFC 3339 or Unix epoch).
     pub time: Option<String>,
@@ -29,7 +30,7 @@ pub struct InstantQuery {
 /// Query parameters for `GET /api/metrics/query_range` (range query).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RangeQuery {
-    /// PromQL expression. Must start with `meshmon_`.
+    /// PromQL expression. Must reference at least one `meshmon_` metric.
     pub query: String,
     /// Start timestamp (RFC 3339 or Unix epoch).
     pub start: String,
@@ -43,15 +44,38 @@ pub struct RangeQuery {
 // Whitelist
 // ---------------------------------------------------------------------------
 
-/// Return true when `q` starts with `meshmon_` followed by at least one
-/// ASCII lowercase letter or underscore. The remainder of the query string
-/// is forwarded as-is; this check is prefix-only defense-in-depth, not a
-/// full PromQL parser (spec 03 § proxy endpoints).
+/// Return true when `q` contains at least one `meshmon_<ident>` token
+/// (where `<ident>` starts with an ASCII lowercase letter or underscore).
+/// Aggregators (`max by (...) (...)`), function wrappers
+/// (`max_over_time(...)`), and arithmetic (`expr > 0.05`) are all allowed as
+/// long as they reference a meshmon metric somewhere.
+///
+/// This is defense-in-depth only — the endpoint is already gated by
+/// `login_required!`. We're not trying to parse PromQL; we just want to
+/// refuse queries that don't touch any meshmon metric.
 fn is_meshmon_query(q: &str) -> bool {
-    let Some(rest) = q.strip_prefix("meshmon_") else {
-        return false;
-    };
-    matches!(rest.chars().next(), Some(c) if c.is_ascii_lowercase() || c == '_')
+    const PREFIX: &str = "meshmon_";
+    let mut idx = 0;
+    while let Some(pos) = q[idx..].find(PREFIX) {
+        // Reject if the previous character would make this part of a longer
+        // identifier (e.g. `foo_meshmon_bar`) — meshmon_ must start a token.
+        let abs = idx + pos;
+        let boundary_ok = abs == 0
+            || !q[..abs]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        let after = abs + PREFIX.len();
+        let suffix_ok = q[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+        if boundary_ok && suffix_ok {
+            return true;
+        }
+        idx = abs + 1;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -127,11 +151,11 @@ async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
 
 /// `GET /api/metrics/query` -- proxy an instant query to VictoriaMetrics.
 ///
-/// The query expression must start with `meshmon_` followed by a valid
-/// identifier character (ASCII lowercase or underscore). Queries that do
-/// not match are rejected with 400.
+/// The query expression must reference at least one `meshmon_<ident>`
+/// metric. Aggregators and function wrappers around meshmon metrics are
+/// allowed. Queries that touch no meshmon metric are rejected with 400.
 ///
-/// - **400** when the query doesn't start with `meshmon_<ident>`.
+/// - **400** when the query references no `meshmon_` metric.
 /// - **502** when the upstream is unreachable or returns an error.
 /// - **503** when `upstream.vm_url` is not configured.
 #[utoipa::path(
@@ -139,7 +163,7 @@ async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
     path = "/api/metrics/query",
     tag = "metrics",
     params(
-        ("query" = String, Query, description = "PromQL expression (must start with meshmon_)"),
+        ("query" = String, Query, description = "PromQL expression (must reference a meshmon_ metric)"),
         ("time" = Option<String>, Query, description = "Evaluation timestamp"),
     ),
     responses(
@@ -157,7 +181,9 @@ pub async fn query_instant(
     if !is_meshmon_query(&q.query) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must start with a meshmon_ metric name" })),
+            Json(
+                serde_json::json!({ "error": "query must reference at least one meshmon_ metric" }),
+            ),
         )
             .into_response();
     }
@@ -184,11 +210,11 @@ pub async fn query_instant(
 
 /// `GET /api/metrics/query_range` -- proxy a range query to VictoriaMetrics.
 ///
-/// The query expression must start with `meshmon_` followed by a valid
-/// identifier character (ASCII lowercase or underscore). Queries that do
-/// not match are rejected with 400.
+/// The query expression must reference at least one `meshmon_<ident>`
+/// metric. Aggregators and function wrappers around meshmon metrics are
+/// allowed. Queries that touch no meshmon metric are rejected with 400.
 ///
-/// - **400** when the query doesn't start with `meshmon_<ident>`.
+/// - **400** when the query references no `meshmon_` metric.
 /// - **502** when the upstream is unreachable or returns an error.
 /// - **503** when `upstream.vm_url` is not configured.
 #[utoipa::path(
@@ -196,7 +222,7 @@ pub async fn query_instant(
     path = "/api/metrics/query_range",
     tag = "metrics",
     params(
-        ("query" = String, Query, description = "PromQL expression (must start with meshmon_)"),
+        ("query" = String, Query, description = "PromQL expression (must reference a meshmon_ metric)"),
         ("start" = String, Query, description = "Start timestamp"),
         ("end" = String, Query, description = "End timestamp"),
         ("step" = String, Query, description = "Query resolution step"),
@@ -213,7 +239,9 @@ pub async fn query_range(State(state): State<AppState>, Query(q): Query<RangeQue
     if !is_meshmon_query(&q.query) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must start with a meshmon_ metric name" })),
+            Json(
+                serde_json::json!({ "error": "query must reference at least one meshmon_ metric" }),
+            ),
         )
             .into_response();
     }
@@ -252,24 +280,28 @@ mod tests {
     fn whitelist_accepts_meshmon_metric() {
         assert!(is_meshmon_query("meshmon_path_rtt_avg_micros"));
         assert!(is_meshmon_query("meshmon_path_failure_rate{source=\"a\"}"));
-        // Operator expressions are allowed — whitelist is prefix-only
-        // defense-in-depth, not a full PromQL parser.
         assert!(is_meshmon_query("meshmon_rtt > 0"));
     }
 
     #[test]
-    fn whitelist_rejects_leading_whitespace() {
-        // Valid PromQL at the wire doesn't start with whitespace; reject
-        // to avoid unicode-whitespace bypass.
-        assert!(!is_meshmon_query(" meshmon_foo"));
-        assert!(!is_meshmon_query("\tmeshmon_foo"));
+    fn whitelist_accepts_aggregated_meshmon_query() {
+        // Real dashboards wrap meshmon metrics in aggregators and
+        // functions — allow anything that references a meshmon_ metric.
+        assert!(is_meshmon_query("sum(meshmon_path_probe_count)"));
+        assert!(is_meshmon_query(
+            "max by (source, target) (max_over_time(meshmon_path_failure_rate[1m]))"
+        ));
+        assert!(is_meshmon_query(
+            "rate(meshmon_path_rtt_avg_micros[5m]) / 1000"
+        ));
+        assert!(is_meshmon_query(" meshmon_foo"));
     }
 
     #[test]
     fn whitelist_rejects_non_meshmon() {
         assert!(!is_meshmon_query("up"));
         assert!(!is_meshmon_query("node_memory_MemFree_bytes"));
-        assert!(!is_meshmon_query("sum(meshmon_path_probe_count)")); // starts with sum
+        assert!(!is_meshmon_query("sum(rate(node_cpu_seconds_total[5m]))"));
         assert!(!is_meshmon_query(""));
     }
 
@@ -277,5 +309,13 @@ mod tests {
     fn whitelist_rejects_meshmon_with_non_ident_suffix() {
         assert!(!is_meshmon_query("meshmon_"));
         assert!(!is_meshmon_query("meshmon_1foo"));
+    }
+
+    #[test]
+    fn whitelist_rejects_meshmon_as_identifier_suffix() {
+        // `foo_meshmon_bar` is a single identifier; must not count as a
+        // meshmon metric reference.
+        assert!(!is_meshmon_query("foo_meshmon_bar"));
+        assert!(!is_meshmon_query("sum(foo_meshmon_baz)"));
     }
 }

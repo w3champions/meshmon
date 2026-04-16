@@ -148,11 +148,11 @@ export interface paths {
         };
         /**
          * `GET /api/metrics/query` -- proxy an instant query to VictoriaMetrics.
-         * @description The query expression must start with `meshmon_` followed by a valid
-         *     identifier character (ASCII lowercase or underscore). Queries that do
-         *     not match are rejected with 400.
+         * @description The query expression must reference at least one `meshmon_<ident>`
+         *     metric. Aggregators and function wrappers around meshmon metrics are
+         *     allowed. Queries that touch no meshmon metric are rejected with 400.
          *
-         *     - **400** when the query doesn't start with `meshmon_<ident>`.
+         *     - **400** when the query references no `meshmon_` metric.
          *     - **502** when the upstream is unreachable or returns an error.
          *     - **503** when `upstream.vm_url` is not configured.
          */
@@ -174,11 +174,11 @@ export interface paths {
         };
         /**
          * `GET /api/metrics/query_range` -- proxy a range query to VictoriaMetrics.
-         * @description The query expression must start with `meshmon_` followed by a valid
-         *     identifier character (ASCII lowercase or underscore). Queries that do
-         *     not match are rejected with 400.
+         * @description The query expression must reference at least one `meshmon_<ident>`
+         *     metric. Aggregators and function wrappers around meshmon metrics are
+         *     allowed. Queries that touch no meshmon metric are rejected with 400.
          *
-         *     - **400** when the query doesn't start with `meshmon_<ident>`.
+         *     - **400** when the query references no `meshmon_` metric.
          *     - **502** when the upstream is unreachable or returns an error.
          *     - **503** when `upstream.vm_url` is not configured.
          */
@@ -405,7 +405,7 @@ export interface components {
         };
         /** @description Query parameters for `GET /api/metrics/query` (instant query). */
         InstantQuery: {
-            /** @description PromQL expression. Must start with `meshmon_`. */
+            /** @description PromQL expression. Must reference at least one `meshmon_` metric. */
             query: string;
             /** @description Optional evaluation timestamp (RFC 3339 or Unix epoch). */
             time?: string | null;
@@ -450,7 +450,7 @@ export interface components {
         RangeQuery: {
             /** @description End timestamp (RFC 3339 or Unix epoch). */
             end: string;
-            /** @description PromQL expression. Must start with `meshmon_`. */
+            /** @description PromQL expression. Must reference at least one `meshmon_` metric. */
             query: string;
             /** @description Start timestamp (RFC 3339 or Unix epoch). */
             start: string;
@@ -785,7 +785,7 @@ export interface operations {
     query_instant: {
         parameters: {
             query: {
-                /** @description PromQL expression (must start with meshmon_) */
+                /** @description PromQL expression (must reference a meshmon_ metric) */
                 query: string;
                 /** @description Evaluation timestamp */
                 time?: string;
@@ -836,7 +836,7 @@ export interface operations {
     query_range: {
         parameters: {
             query: {
-                /** @description PromQL expression (must start with meshmon_) */
+                /** @description PromQL expression (must reference a meshmon_ metric) */
                 query: string;
                 /** @description Start timestamp */
                 start: string;
