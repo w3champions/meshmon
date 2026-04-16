@@ -52,10 +52,15 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-fn append_agent_metrics(body: &mut String, agents: Vec<AgentInfo>) {
+fn append_agent_metrics(body: &mut String, mut agents: Vec<AgentInfo>) {
     if agents.is_empty() {
         return;
     }
+    // Stable iteration order across scrapes: `RegistrySnapshot::all()`
+    // yields agents in `HashMap` order (randomized per-process), which
+    // reshuffles Grafana legend colors and breaks body diffs. Sort once
+    // by id — O(n log n) is dwarfed by the writeln! calls that follow.
+    agents.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     body.push_str(
         "# HELP meshmon_agent_info Registered agent metadata (gauge=1 per known agent).\n",
     );
@@ -136,5 +141,87 @@ mod tests {
         let mut body = String::new();
         append_agent_metrics(&mut body, Vec::new());
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn append_agent_metrics_emits_sorted_gauges_with_help_and_type() {
+        use chrono::{DateTime, Utc};
+        use sqlx::types::ipnetwork::IpNetwork;
+        use std::str::FromStr;
+
+        fn mk(id: &str, version: Option<&str>, ts: i64) -> AgentInfo {
+            AgentInfo {
+                id: id.to_string(),
+                display_name: String::new(),
+                location: None,
+                ip: IpNetwork::from_str("127.0.0.1/32").unwrap(),
+                lat: None,
+                lon: None,
+                agent_version: version.map(str::to_string),
+                registered_at: Utc::now(),
+                last_seen_at: DateTime::from_timestamp(ts, 0).expect("valid timestamp"),
+            }
+        }
+
+        // Intentionally out of id order so the sort inside
+        // `append_agent_metrics` is the only thing that can order them
+        // as asserted below.
+        let agents = vec![
+            mk("node-2", Some("0.3.1"), 1_700_000_042),
+            mk("node-1", Some("0.2.0"), 1_700_000_000),
+        ];
+
+        let mut body = String::new();
+        append_agent_metrics(&mut body, agents);
+
+        // HELP + TYPE lines for both gauges.
+        assert!(
+            body.contains(
+                "# HELP meshmon_agent_info Registered agent metadata (gauge=1 per known agent).\n"
+            ),
+            "missing meshmon_agent_info HELP: {body}"
+        );
+        assert!(
+            body.contains("# TYPE meshmon_agent_info gauge\n"),
+            "missing meshmon_agent_info TYPE: {body}"
+        );
+        assert!(
+            body.contains(
+                "# HELP meshmon_agent_last_seen_seconds Unix timestamp of the agent's last push.\n"
+            ),
+            "missing meshmon_agent_last_seen_seconds HELP: {body}"
+        );
+        assert!(
+            body.contains("# TYPE meshmon_agent_last_seen_seconds gauge\n"),
+            "missing meshmon_agent_last_seen_seconds TYPE: {body}"
+        );
+
+        // Exact sample lines for both agents, covering the non-empty
+        // `append_agent_metrics` branch end-to-end.
+        let info_1 = r#"meshmon_agent_info{source="node-1",agent_version="0.2.0"} 1"#;
+        let info_2 = r#"meshmon_agent_info{source="node-2",agent_version="0.3.1"} 1"#;
+        let seen_1 = r#"meshmon_agent_last_seen_seconds{source="node-1"} 1700000000"#;
+        let seen_2 = r#"meshmon_agent_last_seen_seconds{source="node-2"} 1700000042"#;
+        for expected in [info_1, info_2, seen_1, seen_2] {
+            assert!(
+                body.lines().any(|l| l == expected),
+                "missing line {expected:?} in:\n{body}"
+            );
+        }
+
+        // Sort order: node-1 must precede node-2 in both sections even
+        // though the input vec was reversed.
+        let info_1_pos = body.find(info_1).expect("info_1 present");
+        let info_2_pos = body.find(info_2).expect("info_2 present");
+        assert!(
+            info_1_pos < info_2_pos,
+            "expected info lines sorted by id: node-1 before node-2\n{body}"
+        );
+        let seen_1_pos = body.find(seen_1).expect("seen_1 present");
+        let seen_2_pos = body.find(seen_2).expect("seen_2 present");
+        assert!(
+            seen_1_pos < seen_2_pos,
+            "expected last-seen lines sorted by id: node-1 before node-2\n{body}"
+        );
     }
 }
