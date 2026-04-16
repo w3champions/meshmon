@@ -298,6 +298,9 @@ impl AgentApi for AgentApiImpl {
                 location: a.location.unwrap_or_default(),
                 lat: a.lat.unwrap_or(0.0),
                 lon: a.lon.unwrap_or(0.0),
+                // Task 12.5/12.6 will wire real probe ports from the registry.
+                tcp_probe_port: 0,
+                udp_probe_port: 0,
             })
             .collect();
         Ok(Response::new(TargetsResponse { targets }))
@@ -354,5 +357,10 @@ fn probing_to_config_response(p: &crate::probing::ProbingSection) -> ConfigRespo
             normal_recovery_pct: p.path_health_thresholds.normal_recovery_pct,
             normal_recovery_sec: p.path_health_thresholds.normal_recovery_sec,
         }),
+        udp_probe_secret: p.udp_probe_secret.to_vec().into(),
+        udp_probe_previous_secret: p
+            .udp_probe_previous_secret
+            .map(|s| s.to_vec().into())
+            .unwrap_or_default(),
     }
 }

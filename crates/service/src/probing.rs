@@ -30,6 +30,13 @@ pub struct ProbingSection {
     pub diff_detection: ProbingDiffDetection,
     /// Path-level health state-machine thresholds.
     pub path_health_thresholds: PathHealthThresholds,
+    /// Current UDP probe secret (exactly 8 bytes). Broadcast to agents in
+    /// `ConfigResponse.udp_probe_secret`.
+    pub udp_probe_secret: [u8; 8],
+    /// Previous UDP probe secret during rotation. `None` when no rotation
+    /// is in progress. Echo listeners accept either; probers always send
+    /// with `udp_probe_secret`.
+    pub udp_probe_previous_secret: Option<[u8; 8]>,
 }
 
 /// One row of the probe-rate table: for a given primary protocol and path
@@ -206,6 +213,8 @@ impl Default for ProbingSection {
                 normal_recovery_pct: 0.02,
                 normal_recovery_sec: 300,
             },
+            udp_probe_secret: *b"mshmn-v1",
+            udp_probe_previous_secret: None,
         }
     }
 }
@@ -324,6 +333,8 @@ pub struct RawProbingSection {
     diff_detection: RawProbingDiffDetection,
     #[serde(default)]
     path_health_thresholds: RawPathHealthThresholds,
+    udp_probe_secret: Option<String>,
+    udp_probe_previous_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +630,14 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             }
         };
 
+        // --- udp_probe_secret (required) ---
+        let udp_probe_secret =
+            parse_secret_required("udp_probe_secret", raw.udp_probe_secret.as_deref())?;
+        let udp_probe_previous_secret = match raw.udp_probe_previous_secret.as_deref() {
+            None => None,
+            Some(s) => Some(parse_secret_required("udp_probe_previous_secret", Some(s))?),
+        };
+
         Ok(ProbingSection {
             enabled_protocols,
             priority,
@@ -629,8 +648,51 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             windows,
             diff_detection,
             path_health_thresholds,
+            udp_probe_secret,
+            udp_probe_previous_secret,
         })
     }
+}
+
+/// Parse an 8-byte secret from a `hex:...` or `base64:...` prefixed string.
+fn parse_secret_required(field: &str, raw: Option<&str>) -> Result<[u8; 8], String> {
+    let s = raw.ok_or_else(|| format!("`{field}` is required"))?;
+    let bytes = decode_prefixed_bytes(field, s)?;
+    if bytes.len() != 8 {
+        return Err(format!(
+            "`{field}` must decode to exactly 8 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn decode_prefixed_bytes(field: &str, raw: &str) -> Result<Vec<u8>, String> {
+    if let Some(hex) = raw.strip_prefix("hex:") {
+        hex_decode(hex).map_err(|e| format!("`{field}` hex decode: {e}"))
+    } else if let Some(b64) = raw.strip_prefix("base64:") {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("`{field}` base64 decode: {e}"))
+    } else {
+        Err(format!("`{field}` must start with `hex:` or `base64:`"))
+    }
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err(format!("odd length {}", s.len()));
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte =
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("at offset {i}: {e}"))?;
+        out.push(byte);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -688,7 +750,8 @@ mod tests {
 
     #[test]
     fn empty_toml_yields_defaults() {
-        let raw: RawProbingSection = toml::from_str("").unwrap();
+        let raw: RawProbingSection =
+            toml::from_str(r#"udp_probe_secret = "hex:6d73686d6e2d7631""#).unwrap();
         let cfg = ProbingSection::try_from(raw).unwrap();
         assert_eq!(cfg, ProbingSection::default());
     }
@@ -697,6 +760,8 @@ mod tests {
     fn override_primary_window() {
         let raw: RawProbingSection = toml::from_str(
             r#"
+            udp_probe_secret = "hex:6d73686d6e2d7631"
+
             [windows]
             primary_sec = 120
         "#,
@@ -886,5 +951,55 @@ mod tests {
             err.to_lowercase().contains("icmp_pps"),
             "expected 'icmp_pps' in error, got: {err}"
         );
+    }
+
+    #[test]
+    fn parses_hex_secret() {
+        let toml_src = r#"udp_probe_secret = "hex:0011223344556677""#;
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let parsed = ProbingSection::try_from(raw).unwrap();
+        assert_eq!(
+            parsed.udp_probe_secret,
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]
+        );
+        assert!(parsed.udp_probe_previous_secret.is_none());
+    }
+
+    #[test]
+    fn parses_base64_secret_and_previous() {
+        let toml_src = r#"
+            udp_probe_secret = "base64:AAECAwQFBgc="
+            udp_probe_previous_secret = "hex:7766554433221100"
+        "#;
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let parsed = ProbingSection::try_from(raw).unwrap();
+        assert_eq!(parsed.udp_probe_secret, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            parsed.udp_probe_previous_secret,
+            Some([0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00]),
+        );
+    }
+
+    #[test]
+    fn rejects_secret_wrong_length() {
+        let toml_src = r#"udp_probe_secret = "hex:0011""#;
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(err.contains("8 bytes"), "{err}");
+    }
+
+    #[test]
+    fn rejects_secret_bad_prefix() {
+        let toml_src = r#"udp_probe_secret = "plain:abcd""#;
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(err.contains("hex:"), "{err}");
+    }
+
+    #[test]
+    fn rejects_missing_secret() {
+        let raw: RawProbingSection = toml::from_str("").unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(err.contains("udp_probe_secret"), "{err}");
     }
 }

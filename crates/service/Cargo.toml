@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 argon2 = { workspace = true }
 axum = { workspace = true }
+base64 = "0.22"
 metrics = { workspace = true }
 meshmon-protocol = { path = "../protocol" }
 prometheus-reqwest-remote-write = { workspace = true }

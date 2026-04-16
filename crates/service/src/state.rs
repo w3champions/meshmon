@@ -116,6 +116,9 @@ mod tests {
                 r#"
 [database]
 url = "postgres://a@b/c"
+
+[probing]
+udp_probe_secret = "hex:6d73686d6e2d7631"
 "#,
                 "test.toml",
             )
