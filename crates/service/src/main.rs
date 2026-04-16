@@ -195,9 +195,12 @@ async fn run() -> anyhow::Result<()> {
     // extractors (`ConnectInfo`) and the tonic interceptor both see the peer IP.
     //
     // Graceful shutdown: when `shutdown_token` fires we stop accepting new
-    // connections and let the `shutdown_deadline` timer bound the drain window.
-    // In-flight connection tasks were spawned with `tokio::spawn` and will
-    // complete or be aborted by the tokio runtime when the process exits.
+    // connections and enter an explicit drain phase. Per-connection tasks
+    // are tracked in a `JoinSet`; we poll `join_next()` until the set is
+    // empty or `shutdown_deadline` expires, at which point `conn_set.shutdown()`
+    // aborts any stragglers. This gives unary RPCs time to finish writing
+    // their response and is a prerequisite for long-lived streaming RPCs
+    // (e.g. future T25 SubscribeCommands).
     let deadline = state.config().service.shutdown_deadline;
 
     let graceful_token = shutdown_token.clone();
@@ -207,75 +210,93 @@ async fn run() -> anyhow::Result<()> {
         let builder = auto::Builder::new(TokioExecutor::new());
         // Clone once; each spawned task clones again from this handle.
         let app = app;
+        let mut conn_set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-        let accept_loop = async move {
-            loop {
-                let (tcp_stream, peer_addr) = tokio::select! {
-                    result = listener.accept() => {
-                        match result {
-                            Ok(pair) => pair,
-                            Err(e) => {
-                                warn!(error = %e, "accept error; continuing");
-                                continue;
+        // Accept phase: run until the shutdown token fires. Also reap
+        // finished connection tasks opportunistically so `conn_set` does
+        // not grow unbounded on a long-lived server.
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    let (tcp_stream, peer_addr) = match accept_result {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            warn!(error = %e, "accept error; continuing");
+                            continue;
+                        }
+                    };
+                    if let Some(ref acceptor) = tls_acceptor {
+                        let acceptor = acceptor.clone();
+                        let app = app.clone();
+                        let builder = builder.clone();
+                        conn_set.spawn(async move {
+                            match acceptor.accept(tcp_stream).await {
+                                Ok(tls_stream) => {
+                                    let io = TokioIo::new(tls_stream);
+                                    serve_connection(io, peer_addr, app, builder).await;
+                                }
+                                Err(e) => {
+                                    warn!(peer = %peer_addr, error = %e, "TLS handshake failed");
+                                }
                             }
+                        });
+                    } else {
+                        let io = TokioIo::new(tcp_stream);
+                        let app = app.clone();
+                        let builder = builder.clone();
+                        conn_set.spawn(async move {
+                            serve_connection(io, peer_addr, app, builder).await;
+                        });
+                    }
+                }
+                Some(join_result) = conn_set.join_next() => {
+                    if let Err(e) = join_result {
+                        if e.is_panic() {
+                            warn!(error = %e, "connection task panicked");
                         }
                     }
-                    _ = graceful_token.cancelled() => {
-                        graceful_state.mark_not_ready();
-                        info!("HTTP server draining");
-                        break;
-                    }
-                };
-
-                // Optionally wrap in TLS.
-                let serve_fut = if let Some(ref acceptor) = tls_acceptor {
-                    let acceptor = acceptor.clone();
-                    let app = app.clone();
-                    let builder = builder.clone();
-                    tokio::spawn(async move {
-                        match acceptor.accept(tcp_stream).await {
-                            Ok(tls_stream) => {
-                                let io = TokioIo::new(tls_stream);
-                                serve_connection(io, peer_addr, app, builder).await;
-                            }
-                            Err(e) => {
-                                warn!(peer = %peer_addr, error = %e, "TLS handshake failed");
-                            }
-                        }
-                    })
-                } else {
-                    let io = TokioIo::new(tcp_stream);
-                    let app = app.clone();
-                    let builder = builder.clone();
-                    tokio::spawn(async move {
-                        serve_connection(io, peer_addr, app, builder).await;
-                    })
-                };
-
-                // We detach the task handle. The `shutdown_deadline` timer
-                // below provides the hard upper bound on how long we wait for
-                // in-flight connections to finish.
-                drop(serve_fut);
-            }
-            Ok(())
-        };
-
-        let deadline_token = shutdown_token.clone();
-        let deadline_timer = async move {
-            deadline_token.cancelled().await;
-            tokio::time::sleep(deadline).await;
-        };
-
-        tokio::select! {
-            result = accept_loop => result,
-            _ = deadline_timer => {
-                warn!(
-                    deadline_ms = deadline.as_millis() as u64,
-                    "HTTP server did not drain within shutdown_deadline; aborting in-flight connections"
-                );
-                Ok(())
+                }
+                _ = graceful_token.cancelled() => {
+                    graceful_state.mark_not_ready();
+                    info!(pending = conn_set.len(), "HTTP server draining");
+                    break;
+                }
             }
         }
+
+        // Drain phase: wait for in-flight connections to finish, bounded by
+        // `shutdown_deadline`. On timeout we abort any stragglers so the
+        // process can make progress.
+        let drain_start = std::time::Instant::now();
+        let drain_deadline = tokio::time::sleep(deadline);
+        tokio::pin!(drain_deadline);
+        loop {
+            tokio::select! {
+                join_result = conn_set.join_next() => match join_result {
+                    Some(Err(e)) if e.is_panic() => {
+                        warn!(error = %e, "connection task panicked during drain");
+                    }
+                    Some(_) => {}
+                    None => {
+                        info!(
+                            elapsed_ms = drain_start.elapsed().as_millis() as u64,
+                            "HTTP server drained cleanly",
+                        );
+                        break;
+                    }
+                },
+                _ = &mut drain_deadline => {
+                    warn!(
+                        deadline_ms = deadline.as_millis() as u64,
+                        pending = conn_set.len(),
+                        "HTTP server did not drain within shutdown_deadline; aborting in-flight connections",
+                    );
+                    conn_set.shutdown().await;
+                    break;
+                }
+            }
+        }
+        Ok(())
     };
 
     // If the accept loop returned an error before a signal fired, shutdown_token
