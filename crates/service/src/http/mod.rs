@@ -103,14 +103,22 @@ pub fn router(state: AppState) -> Router {
     let grpc_router = crate::grpc::routes(state.clone());
 
     // axum-prometheus: emits
-    //   <prefix>_http_requests_total{method, endpoint, status}
-    //   <prefix>_http_requests_duration_seconds{...}
-    //   <prefix>_http_requests_pending{...}
-    // `.build()` (not `.build_pair()`) because main.rs installs the
-    // global recorder; this layer just reads from it.
-    let prom_layer = PrometheusMetricLayerBuilder::new()
-        .with_prefix(crate::metrics::HTTP_PREFIX)
-        .build();
+    //   meshmon_service_http_requests_total{method, endpoint, status}
+    //   meshmon_service_http_requests_duration_seconds{...}
+    //   meshmon_service_http_requests_pending{...}
+    //
+    // The metric names are renamed at build time via the `AXUM_HTTP_*`
+    // env vars in `.cargo/config.toml`. We intentionally do NOT use
+    // `PrometheusMetricLayerBuilder::with_prefix` — in axum-prometheus 0.10
+    // that path only activates (`set_prefix` via `from_layer_only`) when
+    // the builder transitions through `with_default_metrics` /
+    // `with_metrics_from_fn` to land in the `Paired` state. The plain
+    // `.build()` path silently drops the prefix. The build-time env-var
+    // knob is the simplest consistent mechanism and is additionally
+    // idempotent across integration tests that rebuild the router many
+    // times per process (`set_prefix` is `OnceLock::set`-backed and would
+    // panic on the second call).
+    let prom_layer = PrometheusMetricLayerBuilder::new().build();
 
     // Split health endpoints so Basic auth attaches to `/metrics` only.
     // `/healthz` and `/readyz` stay ungated so k8s probes and readiness

@@ -46,14 +46,14 @@ pub const REGISTRY_LAST_REFRESH_AGE_SECONDS: &str =
 /// Counter: periodic registry refreshes that failed.
 pub const REGISTRY_REFRESH_ERRORS_TOTAL: &str = "meshmon_service_registry_refresh_errors_total";
 
-/// HTTP request counter prefix used by `axum-prometheus`. The crate
-/// appends `_http_requests_total` / `_http_requests_duration_seconds`
-/// / `_http_requests_pending` to this prefix, so after the layer runs
-/// we get:
-///   - meshmon_service_http_requests_total{method, endpoint, status}
-///   - meshmon_service_http_requests_duration_seconds{...}
-///   - meshmon_service_http_requests_pending{...}
-pub const HTTP_PREFIX: &str = "meshmon_service";
+// HTTP request counter names (`meshmon_service_http_requests_total`,
+// `..._duration_seconds`, `..._pending`) are not declared here — they
+// are renamed at compile time via the `AXUM_HTTP_*` env vars in
+// `.cargo/config.toml`. That is the only mechanism in axum-prometheus 0.10
+// that propagates a static prefix without requiring the builder's
+// `Paired` transition, which uses an `OnceLock` and therefore can only
+// fire once per process (incompatible with integration tests that
+// instantiate the router from multiple `#[tokio::test]`s).
 
 #[cfg(test)]
 pub(crate) const ALL_METRIC_NAMES: &[&str] = &[
@@ -257,7 +257,8 @@ pub fn describe_service_metrics() {
         "Periodic registry refreshes that failed (snapshot retained on failure)"
     );
     // HTTP request metrics: described by axum-prometheus at layer-build
-    // time, so nothing to describe here. Layer uses HTTP_PREFIX.
+    // time. Metric names are renamed at compile time via
+    // `AXUM_HTTP_*` env vars in `.cargo/config.toml`.
 }
 
 // ---------------------------------------------------------------------------
