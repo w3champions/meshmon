@@ -110,11 +110,11 @@ DATABASE_URL="postgres://meshmon:meshmon@127.0.0.1:${DB_PORT}/meshmon" \
 
 echo "[smoke] seeding agents + route snapshots"
 PGPASSWORD=meshmon psql -h 127.0.0.1 -p "$DB_PORT" -U meshmon -d meshmon -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-INSERT INTO agents (id, display_name, location, ip, lat, lon, agent_version, registered_at, last_seen_at)
+INSERT INTO agents (id, display_name, location, ip, lat, lon, agent_version, registered_at, last_seen_at, tcp_probe_port, udp_probe_port)
 VALUES
-  ('fra-01', 'Frankfurt 01', 'Frankfurt, DE', '10.10.0.1', 50.11,   8.68, '0.1.0', now() - interval '1 day', now()),
-  ('lon-01', 'London 01',    'London, UK',    '10.10.0.2', 51.51,  -0.13, '0.1.0', now() - interval '1 day', now() - interval '1 minute'),
-  ('nrt-01', 'Tokyo 01',     'Tokyo, JP',     '10.10.0.3', 35.68, 139.69, '0.1.0', now() - interval '1 day', now() - interval '30 minutes')
+  ('fra-01', 'Frankfurt 01', 'Frankfurt, DE', '10.10.0.1', 50.11,   8.68, '0.1.0', now() - interval '1 day', now(),                         7676, 7677),
+  ('lon-01', 'London 01',    'London, UK',    '10.10.0.2', 51.51,  -0.13, '0.1.0', now() - interval '1 day', now() - interval '1 minute',   7676, 7677),
+  ('nrt-01', 'Tokyo 01',     'Tokyo, JP',     '10.10.0.3', 35.68, 139.69, '0.1.0', now() - interval '1 day', now() - interval '30 minutes', 7676, 7677)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO route_snapshots (source_id, target_id, protocol, observed_at, hops, path_summary)
