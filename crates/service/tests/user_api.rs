@@ -5,6 +5,8 @@
 //! - `GET /api/paths/{src}/{tgt}/routes/latest` — latest route snapshot
 //! - `GET /api/paths/{src}/{tgt}/routes/{id}` — snapshot by id
 //! - `GET /api/paths/{src}/{tgt}/routes` — paginated route list
+//! - `GET /api/metrics/query` — PromQL instant query proxy
+//! - `GET /api/metrics/query_range` — PromQL range query proxy
 //!
 //! All tests drive the real axum router via `tower::ServiceExt::oneshot`.
 //!
@@ -26,6 +28,10 @@
 //! | `.130` | `alerts_proxy_forwards_active_alerts_and_filters_unused_…`  |
 //! | `.131` | `alerts_proxy_returns_502_when_upstream_fails`              |
 //! | `.132` | `alerts_proxy_single_returns_404_when_fingerprint_missing`  |
+//! | `.133` | `alerts_proxy_returns_503_when_alertmanager_not_configured` |
+//! | `.140` | `metrics_proxy_rejects_non_meshmon_query`                   |
+//! | `.141` | `metrics_proxy_forwards_meshmon_query_to_vm`                |
+//! | `.142` | `metrics_proxy_range_forwards_all_params`                   |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -545,6 +551,7 @@ async fn alerts_proxy_forwards_active_alerts_and_filters_unused_fields() {
     Mock::given(wm_method("GET"))
         .and(wm_path("/api/v2/alerts"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
@@ -627,9 +634,9 @@ async fn alerts_proxy_returns_502_when_upstream_fails() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(
-        body["error"].as_str().is_some(),
-        "expected error message in body: {body}"
+    assert_eq!(
+        body["error"], "upstream request failed",
+        "expected generic error, got: {body}"
     );
 }
 
@@ -644,6 +651,7 @@ async fn alerts_proxy_single_returns_404_when_fingerprint_missing() {
     Mock::given(wm_method("GET"))
         .and(wm_path("/api/v2/alerts"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
@@ -671,4 +679,163 @@ async fn alerts_proxy_single_returns_404_when_fingerprint_missing() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"], "alert not found");
+}
+
+#[tokio::test]
+async fn alerts_proxy_returns_503_when_alertmanager_not_configured() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool); // no alertmanager_url
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.133").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---------------------------------------------------------------------------
+// Task 9: VM PromQL proxy with meshmon_ prefix whitelist
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn metrics_proxy_rejects_non_meshmon_query() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_vm(pool, "http://127.0.0.1:1");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.140").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/metrics/query?query=up")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["error"], "query must start with a meshmon_ metric name",
+        "body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn metrics_proxy_forwards_meshmon_query_to_vm() {
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    let vm_response = serde_json::json!({
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": []
+        }
+    });
+
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v1/query"))
+        .and(query_param("query", "meshmon_path_rtt_avg_micros"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&vm_response))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_vm(pool, &mock_server.uri());
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.141").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/metrics/query?query=meshmon_path_rtt_avg_micros")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "success", "body = {body}");
+    assert_eq!(body["data"]["resultType"], "vector", "body = {body}");
+}
+
+#[tokio::test]
+async fn metrics_proxy_range_forwards_all_params() {
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    let vm_response = serde_json::json!({
+        "status": "success",
+        "data": {
+            "resultType": "matrix",
+            "result": []
+        }
+    });
+
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v1/query_range"))
+        .and(query_param("query", "meshmon_path_rtt_avg_micros"))
+        .and(query_param("start", "1700000000"))
+        .and(query_param("end", "1700003600"))
+        .and(query_param("step", "15s"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&vm_response))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_vm(pool, &mock_server.uri());
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.142").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/metrics/query_range?query=meshmon_path_rtt_avg_micros&start=1700000000&end=1700003600&step=15s")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "success", "body = {body}");
+    assert_eq!(body["data"]["resultType"], "matrix", "body = {body}");
 }
