@@ -187,6 +187,63 @@ impl PathStateMachine {
     pub fn state(&self) -> PathHealthState {
         self.state
     }
+
+    pub fn evaluate(
+        &mut self,
+        primary_stats: Option<&FastSummary>,
+        t: &PathHealthThresholds,
+        now: Instant,
+    ) -> Option<(PathHealthState, PathHealthState)> {
+        let from = self.state;
+        let new_state = match (self.state, primary_stats) {
+            (_, None) => {
+                self.condition_since = None;
+                PathHealthState::Unreachable
+            }
+            (PathHealthState::Unreachable, Some(_)) => {
+                self.condition_since = None;
+                PathHealthState::Normal
+            }
+            (PathHealthState::Normal, Some(stats)) => {
+                if stats.sample_count < t.degraded_min_samples as u64
+                    || stats.failure_rate < t.degraded_trigger_pct
+                {
+                    self.condition_since = None;
+                    PathHealthState::Normal
+                } else {
+                    let since = *self.condition_since.get_or_insert(now);
+                    let dwell = Duration::from_secs(t.degraded_trigger_sec as u64);
+                    if now.duration_since(since) >= dwell {
+                        self.condition_since = None;
+                        PathHealthState::Degraded
+                    } else {
+                        PathHealthState::Normal
+                    }
+                }
+            }
+            (PathHealthState::Degraded, Some(stats)) => {
+                if stats.failure_rate > t.normal_recovery_pct {
+                    self.condition_since = None;
+                    PathHealthState::Degraded
+                } else {
+                    let since = *self.condition_since.get_or_insert(now);
+                    let dwell = Duration::from_secs(t.normal_recovery_sec as u64);
+                    if now.duration_since(since) >= dwell {
+                        self.condition_since = None;
+                        PathHealthState::Normal
+                    } else {
+                        PathHealthState::Degraded
+                    }
+                }
+            }
+        };
+        self.state = new_state;
+        if new_state == from {
+            None
+        } else {
+            Some((from, new_state))
+        }
+    }
 }
 
 impl Default for PathStateMachine {
@@ -310,6 +367,14 @@ impl ProtocolStateMachine {
     /// hysteresis. Used to set up Unhealthy starting states for recovery
     /// tests without simulating the full inbound transition path.
     pub fn force_state_for_tests(&mut self, state: ProtoHealth) {
+        self.state = state;
+        self.condition_since = None;
+    }
+}
+
+#[cfg(test)]
+impl PathStateMachine {
+    pub fn force_state_for_tests(&mut self, state: PathHealthState) {
         self.state = state;
         self.condition_since = None;
     }
@@ -536,5 +601,100 @@ mod tests {
             (Protocol::Udp, ProtoHealth::Unhealthy),
         ];
         assert_eq!(select_primary(&prio, &healths), None);
+    }
+
+    fn path_thresholds() -> PathHealthThresholds {
+        PathHealthThresholds {
+            degraded_trigger_pct: 0.05,
+            degraded_trigger_sec: 120,
+            degraded_min_samples: 30,
+            normal_recovery_pct: 0.02,
+            normal_recovery_sec: 300,
+        }
+    }
+
+    #[test]
+    fn path_stays_normal_when_primary_healthy() {
+        let mut p = PathStateMachine::new();
+        let stats = summary(100, 100);
+        assert_eq!(
+            p.evaluate(Some(&stats), &path_thresholds(), Instant::now()),
+            None
+        );
+        assert_eq!(p.state(), PathHealthState::Normal);
+    }
+
+    #[test]
+    fn path_degrades_after_dwell_with_enough_samples() {
+        let mut p = PathStateMachine::new();
+        let t0 = Instant::now();
+        let th = path_thresholds();
+        let stats = summary(30, 27); // failure_rate = 0.1 > 0.05 trigger, 30 >= min_samples
+
+        assert_eq!(p.evaluate(Some(&stats), &th, t0), None);
+        assert_eq!(
+            p.evaluate(Some(&stats), &th, t0 + Duration::from_secs(119)),
+            None
+        );
+        assert_eq!(
+            p.evaluate(Some(&stats), &th, t0 + Duration::from_secs(120)),
+            Some((PathHealthState::Normal, PathHealthState::Degraded)),
+        );
+    }
+
+    #[test]
+    fn path_does_not_degrade_below_min_samples() {
+        let mut p = PathStateMachine::new();
+        let t0 = Instant::now();
+        let th = path_thresholds();
+        for offset in [0u64, 60, 130, 200] {
+            let r = p.evaluate(
+                Some(&summary(10, 0)),
+                &th,
+                t0 + Duration::from_secs(offset),
+            );
+            assert_eq!(r, None);
+        }
+        assert_eq!(p.state(), PathHealthState::Normal);
+    }
+
+    #[test]
+    fn path_recovers_after_normal_dwell() {
+        let mut p = PathStateMachine::new();
+        p.force_state_for_tests(PathHealthState::Degraded);
+        let t0 = Instant::now();
+        let th = path_thresholds();
+        let stats = summary(100, 99); // failure_rate = 0.01 <= 0.02
+
+        p.evaluate(Some(&stats), &th, t0);
+        assert_eq!(
+            p.evaluate(Some(&stats), &th, t0 + Duration::from_secs(299)),
+            None
+        );
+        assert_eq!(
+            p.evaluate(Some(&stats), &th, t0 + Duration::from_secs(300)),
+            Some((PathHealthState::Degraded, PathHealthState::Normal)),
+        );
+    }
+
+    #[test]
+    fn path_is_unreachable_when_no_primary() {
+        let mut p = PathStateMachine::new();
+        assert_eq!(
+            p.evaluate(None, &path_thresholds(), Instant::now()),
+            Some((PathHealthState::Normal, PathHealthState::Unreachable)),
+        );
+        assert_eq!(p.state(), PathHealthState::Unreachable);
+    }
+
+    #[test]
+    fn path_snaps_from_unreachable_back_to_normal_on_recovered_primary() {
+        let mut p = PathStateMachine::new();
+        p.force_state_for_tests(PathHealthState::Unreachable);
+        let stats = summary(100, 100);
+        assert_eq!(
+            p.evaluate(Some(&stats), &path_thresholds(), Instant::now()),
+            Some((PathHealthState::Unreachable, PathHealthState::Normal)),
+        );
     }
 }
