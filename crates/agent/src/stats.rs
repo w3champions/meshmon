@@ -73,10 +73,9 @@ pub struct FastSummary {
     pub max_rtt_micros: Option<u32>,
 }
 
-/// Full summary including percentiles. Once Task 6 fills in the percentile
-/// scan, min/max will always be exact (resolved via that scan and the
-/// dirty-bit clear). Until then, min/max inherit `summary_fast`'s
-/// `None`-when-dirty semantics.
+/// Full summary including percentiles. Always exact (never gated on a
+/// dirty bit) because the percentile path scans the deque already and
+/// resolves any pending min/max dirty bits in the same pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Summary {
     pub sample_count: u64,
@@ -289,14 +288,48 @@ impl RollingStats {
         }
     }
 
-    /// O(N log N) summary including percentiles. Once Task 6 lands the
-    /// percentile scan, this also resolves any pending min/max dirty
-    /// bits in the same pass.
+    /// O(N log N) summary including percentiles. Resolves any pending
+    /// min/max dirty bits in the same scan.
     pub fn summary_with_percentiles(&mut self) -> Summary {
-        // `&mut self` is intentional even before Task 6: that task will
-        // clear `min_rtt_dirty` / `max_rtt_dirty` here during the deque
-        // scan, so the receiver type cannot change later without breaking
-        // call sites.
+        // Step 1: Collect successful RTTs into a temp vec (cloned, sorted).
+        // Step 2: Resolve any pending min/max dirty bits in the same scan.
+        let mut rtts: Vec<u32> = Vec::with_capacity(self.successful as usize);
+        let mut min_rescan: Option<u32> = None;
+        let mut max_rescan: Option<u32> = None;
+        for s in &self.samples {
+            if let Some(rtt) = s.rtt_micros {
+                rtts.push(rtt);
+                min_rescan = Some(match min_rescan {
+                    Some(cur) => cur.min(rtt),
+                    None => rtt,
+                });
+                max_rescan = Some(match max_rescan {
+                    Some(cur) => cur.max(rtt),
+                    None => rtt,
+                });
+            }
+        }
+        // Update cached extrema and clear the dirty bits — we just
+        // reseated the truth.
+        self.min_rtt_micros = min_rescan;
+        self.max_rtt_micros = max_rescan;
+        self.min_rtt_dirty = false;
+        self.max_rtt_dirty = false;
+
+        // Step 3: Sort once, then index. Empty list → all percentiles None.
+        rtts.sort_unstable();
+        let p = |frac: f64| -> Option<u32> {
+            if rtts.is_empty() {
+                return None;
+            }
+            // Nearest-rank with `ceil(frac * n) - 1`, clamped into bounds.
+            let n = rtts.len();
+            let raw = (frac * n as f64).ceil() as usize;
+            let idx = raw.saturating_sub(1).min(n - 1);
+            Some(rtts[idx])
+        };
+
+        // Step 4: Reuse the (now-clean) summary_fast for the rest.
         let f = self.summary_fast();
         Summary {
             sample_count: f.sample_count,
@@ -306,9 +339,9 @@ impl RollingStats {
             stddev_rtt_micros: f.stddev_rtt_micros,
             min_rtt_micros: f.min_rtt_micros,
             max_rtt_micros: f.max_rtt_micros,
-            p50_rtt_micros: None,
-            p95_rtt_micros: None,
-            p99_rtt_micros: None,
+            p50_rtt_micros: p(0.50),
+            p95_rtt_micros: p(0.95),
+            p99_rtt_micros: p(0.99),
         }
     }
 }
@@ -493,9 +526,6 @@ mod tests {
         stats
     }
 
-    // Still ignored — un-ignored in Task 6 once summary_with_percentiles
-    // recomputes min/max.
-    #[ignore = "summary_with_percentiles dirty-bit recompute implemented in Task 6"]
     #[test]
     fn purge_of_extremum_marks_dirty_then_lazy_recomputes() {
         let base = Instant::now();
@@ -520,10 +550,12 @@ mod tests {
         assert_eq!(s.min_rtt_micros, Some(1_000));
         assert_eq!(s.max_rtt_micros, Some(5_000));
 
-        // Advance 90s — only the t+0 sample falls out of the 60s window.
-        // (t+90 - 60 = t+30, so anything with `t < t+30` is purged → only
-        // t+0 is dropped.)
-        stats.purge_old(base + Duration::from_secs(90));
+        // Advance to t+60 — cutoff = t+0, so only the t+0 sample (the
+        // current min) falls out under the chosen `<=` boundary
+        // semantics. (The originally-staged purge time of t+90 would
+        // have purged samples through t+30, draining the deque and
+        // contradicting the test's stated intent.)
+        stats.purge_old(base + Duration::from_secs(60));
 
         let s = stats.summary_fast();
         assert_eq!(s.sample_count, 4, "one sample purged");
@@ -647,5 +679,66 @@ mod tests {
         stats.set_window(Duration::from_secs(20));
         stats.purge_old(base + Duration::from_secs(50));
         assert_eq!(stats.summary_fast().sample_count, 0);
+    }
+
+    #[test]
+    fn percentiles_satisfy_ordering_invariant() {
+        let mut stats = RollingStats::new(five_min());
+        let now = Instant::now();
+        // 100 samples with distinct RTTs so p50/p95/p99 land on different values.
+        for i in 1..=100u32 {
+            stats.insert(&ok(now, i * 100));
+        }
+        let s = stats.summary_with_percentiles();
+        let p50 = s.p50_rtt_micros.expect("p50");
+        let p95 = s.p95_rtt_micros.expect("p95");
+        let p99 = s.p99_rtt_micros.expect("p99");
+        assert!(p50 <= p95, "p50={p50}, p95={p95}");
+        assert!(p95 <= p99, "p95={p95}, p99={p99}");
+    }
+
+    #[test]
+    fn percentiles_for_known_distribution() {
+        let mut stats = RollingStats::new(five_min());
+        let now = Instant::now();
+        // Insert RTTs 1..=100 (in micros). Nearest-rank percentile method:
+        //   index = ceil(p * n) - 1.
+        // p50 → ceil(0.50 * 100) = 50 → index 49 → value 50.
+        // p95 → ceil(0.95 * 100) = 95 → index 94 → value 95.
+        // p99 → ceil(0.99 * 100) = 99 → index 98 → value 99.
+        for i in 1..=100u32 {
+            stats.insert(&ok(now, i));
+        }
+        let s = stats.summary_with_percentiles();
+        assert_eq!(s.p50_rtt_micros, Some(50));
+        assert_eq!(s.p95_rtt_micros, Some(95));
+        assert_eq!(s.p99_rtt_micros, Some(99));
+    }
+
+    #[test]
+    fn percentiles_none_when_all_failed() {
+        let mut stats = RollingStats::new(five_min());
+        let now = Instant::now();
+        for _ in 0..10 {
+            stats.insert(&timeout(now));
+        }
+        let s = stats.summary_with_percentiles();
+        assert_eq!(s.sample_count, 10);
+        assert_eq!(s.successful, 0);
+        assert_eq!(s.failure_rate, 1.0);
+        // No successful samples → no RTT distribution → no percentiles.
+        assert_eq!(s.p50_rtt_micros, None);
+        assert_eq!(s.p95_rtt_micros, None);
+        assert_eq!(s.p99_rtt_micros, None);
+    }
+
+    #[test]
+    fn percentiles_single_sample_collapses_to_value() {
+        let mut stats = RollingStats::new(five_min());
+        stats.insert(&ok(Instant::now(), 1_234));
+        let s = stats.summary_with_percentiles();
+        assert_eq!(s.p50_rtt_micros, Some(1_234));
+        assert_eq!(s.p95_rtt_micros, Some(1_234));
+        assert_eq!(s.p99_rtt_micros, Some(1_234));
     }
 }
