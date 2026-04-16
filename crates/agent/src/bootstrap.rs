@@ -254,49 +254,14 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// Each RPC is raced against cancellation and a per-attempt timeout so a
     /// hung call cannot block the refresh loop (and therefore shutdown) during
     /// network stalls.
+    ///
+    /// Ordering invariant: targets (→ allowlist) are refreshed BEFORE config
+    /// (→ secret), mirroring the bootstrap invariant. Swapping them
+    /// reintroduces a window where a freshly-registered peer passes the
+    /// secret check but is absent from the allowlist, triggering a 60s
+    /// `REJECTION_PAUSE` on that peer every refresh cycle.
     async fn refresh_once(&mut self) {
-        // -- Refresh config --
-        let config_result: Result<ConfigResponse> = tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => {
-                tracing::debug!("refresh: config fetch cancelled");
-                return;
-            }
-            _ = tokio::time::sleep(RPC_ATTEMPT_TIMEOUT) => {
-                Err(anyhow::anyhow!(
-                    "get_config timed out after {}s",
-                    RPC_ATTEMPT_TIMEOUT.as_secs(),
-                ))
-            }
-            result = self.api.get_config() => result,
-        };
-        match config_result {
-            Ok(resp) => match ProbeConfig::from_proto(resp) {
-                Ok(new_config) => {
-                    // Re-publish the UDP secret so rotation propagates to the
-                    // listener and the prober pool without a restart.
-                    let _ = self.secret_tx.send(SecretSnapshot {
-                        current: Some(new_config.udp_probe_secret),
-                        previous: new_config.udp_probe_previous_secret,
-                    });
-                    // send() only fails if all receivers are dropped, which
-                    // cannot happen while we still hold config_rx.
-                    self.config_tx.send(new_config).ok();
-                    tracing::debug!("config refreshed");
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "refresh config failed validation — keeping old",
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to refresh config — keeping old");
-            }
-        }
-
-        // -- Refresh targets --
+        // -- Refresh targets (and allowlist) FIRST --
         let targets_result: Result<TargetsResponse> = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => {
@@ -325,6 +290,49 @@ impl<A: ServiceApi> AgentRuntime<A> {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to refresh targets — keeping old");
+            }
+        }
+
+        // -- Refresh config (and secret) SECOND --
+        let config_result: Result<ConfigResponse> = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                tracing::debug!("refresh: config fetch cancelled");
+                return;
+            }
+            _ = tokio::time::sleep(RPC_ATTEMPT_TIMEOUT) => {
+                Err(anyhow::anyhow!(
+                    "get_config timed out after {}s",
+                    RPC_ATTEMPT_TIMEOUT.as_secs(),
+                ))
+            }
+            result = self.api.get_config() => result,
+        };
+        match config_result {
+            Ok(resp) => match ProbeConfig::from_proto(resp) {
+                Ok(new_config) => {
+                    // Re-publish the UDP secret so rotation propagates to the
+                    // listener and the prober pool without a restart. By the
+                    // time we get here the allowlist is already up to date
+                    // (see ordering invariant on the function doc).
+                    let _ = self.secret_tx.send(SecretSnapshot {
+                        current: Some(new_config.udp_probe_secret),
+                        previous: new_config.udp_probe_previous_secret,
+                    });
+                    // send() only fails if all receivers are dropped, which
+                    // cannot happen while we still hold config_rx.
+                    self.config_tx.send(new_config).ok();
+                    tracing::debug!("config refreshed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "refresh config failed validation — keeping old",
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to refresh config — keeping old");
             }
         }
     }

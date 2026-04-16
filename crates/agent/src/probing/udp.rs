@@ -213,6 +213,14 @@ async fn handle_response(
             DecodedResponse::Rejection => {
                 let first_rejection_in_window = s.paused_until.is_none_or(|u| u < now);
                 s.paused_until = Some(now + REJECTION_PAUSE);
+                // Clear the pending map: any recent probes are also being
+                // rejected by this peer (the listener refuses every packet
+                // until the allowlist includes us again), so their echo
+                // responses will never arrive. Without this the sweeper
+                // emits spurious `Timeout` observations for each pending
+                // nonce after `PROBE_TIMEOUT`, double-counting failures on
+                // top of the `Refused` we emit below.
+                s.pending.clear();
                 let obs = if first_rejection_in_window {
                     Some(ProbeObservation {
                         protocol: Protocol::Udp,
@@ -560,6 +568,66 @@ mod tests {
 
         let r = tokio::time::timeout(TD::from_millis(500), obs_rx.recv()).await;
         assert!(r.is_err(), "should be silent during pause window");
+
+        tgt_cancel.cancel();
+        pool_cancel.cancel();
+        rej_cancel.cancel();
+        drop(rate_tx);
+        drop(sec_tx);
+        let _ = rej_h.await;
+    }
+
+    /// Regression: a `Rejection` must clear `pending` so the sweeper does
+    /// not later emit `Timeout` observations for the same probes. Prior to
+    /// the fix, the sender would fire several probes before the first
+    /// rejection arrived, the rejection would latch the pause without
+    /// touching `pending`, and the sweeper would then emit `PROBE_TIMEOUT`
+    /// entries — double-counting failures as `Refused` + `Timeout`.
+    #[tokio::test]
+    async fn rejection_clears_pending_to_prevent_ghost_timeouts() {
+        let (rej_port, rej_h, rej_cancel) = start_rejection_server().await;
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot {
+            current: Some(SECRET),
+            previous: None,
+        });
+        let pool_cancel = CancellationToken::new();
+        let pool = UdpProberPool::new(sec_rx, pool_cancel.clone())
+            .await
+            .unwrap();
+
+        // High rate so multiple probes land in `pending` before the first
+        // rejection is observed.
+        let (rate_tx, rate_rx) = watch::channel(ProbeRate(200.0));
+        let (obs_tx, mut obs_rx) = mpsc::channel(32);
+        let tgt_cancel = CancellationToken::new();
+        pool.spawn_target(
+            target("peer", [127, 0, 0, 1], rej_port),
+            rate_rx,
+            obs_tx,
+            tgt_cancel.clone(),
+        );
+
+        // Expect exactly one `Refused`.
+        let first = tokio::time::timeout(TD::from_secs(2), obs_rx.recv())
+            .await
+            .expect("no obs")
+            .expect("channel");
+        assert!(matches!(first.outcome, ProbeOutcome::Refused), "{first:?}",);
+
+        // Wait past `PROBE_TIMEOUT` (2s). With the fix, `pending` was
+        // cleared so the sweeper finds nothing and emits no observation.
+        // Without the fix, `Timeout`s would pour in here.
+        let r = tokio::time::timeout(TD::from_millis(2500), obs_rx.recv()).await;
+        match r {
+            Err(_) => {
+                // timed out waiting — expected
+            }
+            Ok(Some(obs)) => panic!(
+                "ghost observation after Rejection: {:?} (expected silent pause)",
+                obs
+            ),
+            Ok(None) => panic!("obs channel closed unexpectedly"),
+        }
 
         tgt_cancel.cancel();
         pool_cancel.cancel();
