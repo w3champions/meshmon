@@ -28,6 +28,7 @@
 pub mod auth;
 pub mod health;
 pub mod openapi;
+pub mod user_api;
 pub mod web_config;
 
 use crate::state::AppState;

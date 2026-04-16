@@ -46,6 +46,7 @@ use utoipa_swagger_ui::SwaggerUi;
     components(schemas(
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
+        crate::http::user_api::AgentSummary,
         crate::http::web_config::WebConfigResponse,
     )),
 )]
@@ -63,6 +64,7 @@ struct ApiDoc;
 /// own sub-router and document it via `paths(...)` on `ApiDoc` above.
 pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
+        .routes(utoipa_axum::routes!(crate::http::user_api::list_agents))
         .routes(utoipa_axum::routes!(crate::http::web_config::web_config))
 }
 
