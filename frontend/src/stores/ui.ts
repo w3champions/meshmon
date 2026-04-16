@@ -13,6 +13,8 @@ export const useUiStore = create<UiState>()(
     (set) => ({
       theme: "dark",
       sidebarCollapsed: false,
+      // Callers must also sync document.documentElement.classList ('dark');
+      // see ThemeToggle / main.tsx.
       setTheme: (theme) => set({ theme }),
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
     }),
