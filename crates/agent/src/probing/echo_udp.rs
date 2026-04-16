@@ -59,6 +59,9 @@ fn bind_dual_stack(port: u16) -> std::io::Result<UdpSocket> {
     let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, None)?;
     socket.set_only_v6(false)?;
+    // Match the stdlib/tokio default so a restarted agent can rebind the
+    // port without waiting for TIME_WAIT to drain.
+    socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::V6(addr).into())?;
     let std_socket: std::net::UdpSocket = socket.into();
@@ -120,12 +123,16 @@ async fn run(
                     continue;
                 }
 
-                // Normalize v4-mapped-v6 (::ffff:a.b.c.d) back to Ipv4Addr
-                // before the allowlist lookup. The allowlist is built from
-                // `to_ipaddr(&target.ip)` which preserves the wire's native
-                // form (4 bytes → V4, 16 bytes → V6); when a dual-stack
-                // socket delivers an IPv4 peer as its v4-mapped form, a
-                // naive `contains(&peer.ip())` would miss the v4 entry.
+                // Canonicalize v4-mapped-v6 (`::ffff:a.b.c.d`) back to
+                // `Ipv4Addr` before the allowlist lookup. Both the
+                // allowlist (built in `bootstrap::publish_allowlist`) and
+                // the peer address here are canonicalized via
+                // `IpAddr::to_canonical()` so a v4 peer delivered as
+                // `::ffff:a.b.c.d` by the dual-stack socket still matches
+                // the allowlist entry regardless of wire form. Note that
+                // `to_canonical()` does NOT unwrap RFC 4291 v4-compatible
+                // addresses (`::a.b.c.d`); that form is deprecated and we
+                // deliberately don't accept it.
                 // Sends reuse the original `peer` — the kernel accepts
                 // either form, so don't rewrite it unnecessarily.
                 let peer_ip = peer.ip().to_canonical();
@@ -253,10 +260,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_fails_when_port_in_use() {
-        // Hold the port on `[::]` — same dual-stack address the listener
-        // binds on — so the collision is unambiguous across platforms.
-        // See the matching comment in `echo_tcp::tests::bind_fails_when_port_in_use`
-        // for why `[::]` on both sides is the reliable conflict pair.
+        // See `echo_tcp::tests::bind_fails_when_port_in_use`: `[::]` vs
+        // `[::]` is always a conflict independent of `IPV6_V6ONLY`, so
+        // it's the portable choice for the squatter.
         let held = UdpSocket::bind(("::", 0)).await.unwrap();
         let port = held.local_addr().unwrap().port();
 

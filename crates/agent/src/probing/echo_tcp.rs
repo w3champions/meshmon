@@ -15,9 +15,9 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Backlog passed to `listen()` on the dual-stack socket. Matches the
-/// default `tokio::net::TcpListener::bind` behavior (tokio uses 1024 on
-/// Linux, 128 on macOS via the libc `SOMAXCONN`); a fixed `128` is a safe
-/// lower bound that the kernel clamps to the platform cap if larger.
+/// value mio / rust-std pick by default on every Unix target — the
+/// kernel clamps down to `SOMAXCONN` if smaller, so this is a safe
+/// lower bound.
 const TCP_LISTEN_BACKLOG: i32 = 128;
 
 /// Bind the TCP echo listener and spawn its task. Bind happens eagerly so
@@ -42,6 +42,10 @@ fn bind_dual_stack(port: u16) -> std::io::Result<TcpListener> {
     let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
     let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
     socket.set_only_v6(false)?;
+    // Match the stdlib/tokio default so a restarted agent can rebind the
+    // port without waiting for TIME_WAIT to drain. mio's `TcpListener`
+    // enables this implicitly; socket2 does not.
+    socket.set_reuse_address(true)?;
     // Required for conversion into a tokio listener.
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::V6(addr).into())?;
@@ -133,12 +137,11 @@ mod tests {
 
     #[tokio::test]
     async fn bind_fails_when_port_in_use() {
-        // Hold the port on `[::]` — same dual-stack address the listener
-        // binds on — so the collision is unambiguous across platforms.
-        // Binding a v4 squatter on `0.0.0.0` is a weaker test: Linux and
-        // macOS *do* refuse the subsequent dual-stack `[::]` bind, but
-        // some kernels honor `IPV6_V6ONLY=false` by leaving v4 addresses
-        // for v4-only sockets. `[::]` on both sides is always a conflict.
+        // `[::]` vs `[::]` is always a conflict because both sockets
+        // claim identical address families and kernel state regardless
+        // of the `IPV6_V6ONLY` setting. A `0.0.0.0` squatter collides
+        // on Linux and macOS today but relies on kernel-specific
+        // v4/v6 cross-family behavior — `[::]` is the portable choice.
         let held = TcpListener::bind(("::", 0)).await.unwrap();
         let port = held.local_addr().unwrap().port();
 

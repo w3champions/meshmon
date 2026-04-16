@@ -55,12 +55,12 @@ struct TargetState {
 /// target's listener port — replies always come from there, so the tuple
 /// uniquely disambiguates two targets that share an IP (NAT).
 ///
-/// The `IpAddr` is always the target's *native* form from
-/// `to_ipaddr(&target.ip)` (4-byte wire → V4, 16-byte wire → V6). The
-/// receiver normalizes incoming peer addresses via
-/// [`IpAddr::to_canonical`] before lookup because a dual-stack socket may
-/// deliver an IPv4 peer's reply as the v4-mapped-v6 form
-/// (`::ffff:a.b.c.d`) on some platforms (notably Linux).
+/// The `IpAddr` is always in canonical form: `spawn_target` calls
+/// `IpAddr::to_canonical()` before inserting, and the receiver applies
+/// the same canonicalization to incoming peer addresses before lookup.
+/// That way a target whose wire form is `::ffff:a.b.c.d` (16-byte v4-
+/// mapped-v6) still matches when the dual-stack kernel delivers its
+/// reply as either `Ipv4Addr` (macOS) or `::ffff:a.b.c.d` (Linux).
 type DispatchMap = DashMap<(IpAddr, u16), Arc<Mutex<TargetState>>>;
 
 /// Shared UDP prober. Hold an `Arc<UdpProberPool>` for the lifetime of the
@@ -106,7 +106,10 @@ impl UdpProberPool {
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let ip = match meshmon_protocol::ip::to_ipaddr(&target.ip) {
-            Ok(ip) => ip,
+            // Canonicalize so v4-mapped-v6 wire forms don't bypass the
+            // receiver-side lookup (which also canonicalizes); see the
+            // `DispatchMap` docstring for the invariant.
+            Ok(ip) => ip.to_canonical(),
             Err(e) => {
                 tracing::error!(target_id = %target.id, error = %e, "invalid target ip");
                 return tokio::spawn(async {});
@@ -173,6 +176,10 @@ fn bind_dual_stack_ephemeral() -> std::io::Result<UdpSocket> {
     let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, None)?;
     socket.set_only_v6(false)?;
+    // Match the stdlib/tokio default. The ephemeral bind makes this
+    // mostly academic, but keeps the three dual-stack bind helpers
+    // consistent in the socket options they apply.
+    socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::V6(addr).into())?;
     let std_socket: std::net::UdpSocket = socket.into();
@@ -224,31 +231,25 @@ async fn run_receiver(
                 // targets that share an IP (NAT) but listen on different
                 // ports route responses to the correct `TargetState`.
                 //
-                // Normalize v4-mapped-v6 (`::ffff:a.b.c.d`) back to the
-                // native `Ipv4Addr` before lookup: on a dual-stack socket
-                // the kernel may deliver an IPv4 peer's reply as the
-                // mapped form, but the dispatch-map key is the target's
-                // *native* address from `to_ipaddr(&target.ip)` (v4 from
-                // a 4-byte wire, v6 from a 16-byte wire). Without this,
-                // IPv4 targets would silently drop every reply on
-                // platforms that deliver the mapped form.
+                // Canonicalize v4-mapped-v6 (`::ffff:a.b.c.d`) before
+                // dispatch-map lookup. The map is keyed by the target's
+                // canonical address (see `DispatchMap` docstring and
+                // `spawn_target`); without matching canonicalization
+                // here, a dual-stack kernel that delivers IPv4 replies
+                // as the mapped form would miss every lookup.
                 let peer_ip = peer.ip().to_canonical();
                 let Some(state_ref) = targets.get(&(peer_ip, peer.port())) else {
                     continue;
                 };
                 let state = state_ref.clone();
                 drop(state_ref);
-                handle_response(state, peer_ip, decoded).await;
+                handle_response(state, decoded).await;
             }
         }
     }
 }
 
-async fn handle_response(
-    state: Arc<Mutex<TargetState>>,
-    _peer_ip: IpAddr,
-    decoded: DecodedResponse,
-) {
+async fn handle_response(state: Arc<Mutex<TargetState>>, decoded: DecodedResponse) {
     // Hold the target mutex only long enough to mutate state; release it
     // before awaiting `obs_tx.send` so a full observation channel cannot
     // back-pressure into the sender (which grabs this same mutex on every

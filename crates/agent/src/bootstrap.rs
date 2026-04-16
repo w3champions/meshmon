@@ -460,10 +460,15 @@ fn build_register_request(
 /// will simply be omitted from the allowlist (peers with bogus IPs cannot
 /// talk to us anyway).
 fn publish_allowlist(allowlist_tx: &watch::Sender<Arc<HashSet<IpAddr>>>, targets: &[Target]) {
+    // Canonicalize entries (`::ffff:a.b.c.d` → `Ipv4Addr`) so `contains()`
+    // on the receiver side — which also canonicalizes — matches regardless
+    // of whether the wire form was 4-byte v4 or 16-byte v4-mapped-v6. The
+    // UDP echo listener applies the same canonicalization to incoming peer
+    // IPs before the lookup.
     let allowlist: HashSet<IpAddr> = targets
         .iter()
         .filter_map(|t| match meshmon_protocol::ip::to_ipaddr(&t.ip) {
-            Ok(ip) => Some(ip),
+            Ok(ip) => Some(ip.to_canonical()),
             Err(e) => {
                 tracing::warn!(
                     target_id = %t.id,
@@ -1023,5 +1028,37 @@ mod tests {
         assert_eq!(runtime.supervisor_count(), 1);
 
         runtime.shutdown().await;
+    }
+
+    /// A target registered with a 16-byte v4-mapped-v6 wire IP
+    /// (`::ffff:a.b.c.d`) must land in the allowlist as its canonical
+    /// `Ipv4Addr`, so the UDP echo listener — which canonicalizes each
+    /// incoming peer address — finds it on lookup.
+    #[tokio::test]
+    async fn publish_allowlist_canonicalizes_v4_mapped_v6() {
+        use std::net::Ipv4Addr;
+
+        let (tx, rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new()));
+        // 16-byte wire: 10 zero bytes + 0xff 0xff + 4 v4 octets.
+        let mut wire = vec![0u8; 10];
+        wire.extend_from_slice(&[0xff, 0xff, 10, 0, 0, 1]);
+        let target = Target {
+            id: "peer-mapped".to_string(),
+            ip: wire.into(),
+            display_name: "Mapped".to_string(),
+            location: "Test".to_string(),
+            lat: 0.0,
+            lon: 0.0,
+            tcp_probe_port: 3555,
+            udp_probe_port: 3552,
+        };
+
+        publish_allowlist(&tx, &[target]);
+
+        let allowlist = rx.borrow().clone();
+        assert!(
+            allowlist.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            "canonical v4 form must be in the allowlist; got {allowlist:?}",
+        );
     }
 }
