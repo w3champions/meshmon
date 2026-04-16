@@ -778,7 +778,7 @@ async fn metrics_proxy_rejects_non_meshmon_query() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        body["error"], "query must start with a meshmon_ metric name",
+        body["error"], "query must reference at least one meshmon_ metric",
         "body = {body}"
     );
 }
