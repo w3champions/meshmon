@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { api } from "@/api/client";
 import { AppShell } from "@/components/layout/AppShell";
+import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
@@ -85,6 +86,18 @@ const agentsRoute = createRoute({
   component: AgentsList,
 });
 
+export const agentDetailRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/agents/$id",
+  component: AgentDetail,
+});
+
+const pathsPlaceholderRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/paths/$source/$target",
+  component: () => <p className="p-6 text-sm text-muted-foreground">Coming in T19.</p>,
+});
+
 const alertsRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/alerts",
@@ -93,7 +106,13 @@ const alertsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
-  authRoute.addChildren([overviewRoute, agentsRoute, alertsRoute]),
+  authRoute.addChildren([
+    overviewRoute,
+    agentsRoute,
+    agentDetailRoute,
+    pathsPlaceholderRoute,
+    alertsRoute,
+  ]),
 ]);
 
 export function createAppRouter(queryClient: QueryClient) {

@@ -31,10 +31,8 @@ export function PathHealthCell({ source, target, state, failureRate }: PathHealt
     <Tooltip>
       <TooltipTrigger asChild>
         <Link
-          // biome-ignore lint/suspicious/noExplicitAny: route not yet in Register
-          to={"/paths/$source/$target" as any}
-          // biome-ignore lint/suspicious/noExplicitAny: params follow unregistered route
-          params={{ source, target } as any}
+          to={"/paths/$source/$target"}
+          params={{ source, target }}
           className={cn("block h-6 w-6 rounded-sm transition-colors", COLOUR[state])}
           data-state={state}
           aria-label={`${source} to ${target}, ${state}`}

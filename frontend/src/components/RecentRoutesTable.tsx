@@ -56,12 +56,9 @@ export function RecentRoutesTable({ className, limit = 10 }: RecentRoutesTablePr
               })}
             </TableCell>
             <TableCell className="text-right">
-              {/* Route /paths/$source/$target is not yet registered — cast until the paths page is added */}
               <Link
-                // biome-ignore lint/suspicious/noExplicitAny: route not yet in Register
-                to={"/paths/$source/$target" as any}
-                // biome-ignore lint/suspicious/noExplicitAny: params follow unregistered route
-                params={{ source: row.source_id, target: row.target_id } as any}
+                to={"/paths/$source/$target"}
+                params={{ source: row.source_id, target: row.target_id }}
                 className="text-sm underline underline-offset-2"
               >
                 view

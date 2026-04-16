@@ -62,10 +62,8 @@ export function AgentMap({ agents, matrix, className, onMarkerClick }: AgentMapP
                   <StatusBadge state={state === "normal" ? "online" : state} />
                   <AgentCard agent={agent} compact />
                   <Link
-                    // biome-ignore lint/suspicious/noExplicitAny: route not yet in Register
-                    to={"/agents/$id" as any}
-                    // biome-ignore lint/suspicious/noExplicitAny: params follow unregistered route
-                    params={{ id: agent.id } as any}
+                    to={"/agents/$id"}
+                    params={{ id: agent.id }}
                     className="text-xs underline underline-offset-2"
                   >
                     View detail

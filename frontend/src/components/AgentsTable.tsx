@@ -116,10 +116,8 @@ export function AgentsTable({ agents, className }: AgentsTableProps) {
                 <TableCell key={cell.id} className={idx === 0 ? "font-mono text-xs" : ""}>
                   {idx === 0 ? (
                     <Link
-                      // biome-ignore lint/suspicious/noExplicitAny: /agents/$id not yet registered
-                      to={"/agents/$id" as any}
-                      // biome-ignore lint/suspicious/noExplicitAny: /agents/$id not yet registered
-                      params={{ id: row.original.id } as any}
+                      to={"/agents/$id"}
+                      params={{ id: row.original.id }}
                       className="block w-full"
                     >
                       {flexRender(cell.column.columnDef.cell, cell.getContext()) ?? row.original.id}
