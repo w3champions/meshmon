@@ -44,6 +44,7 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     paths(crate::http::auth::login, crate::http::auth::logout),
     components(schemas(
+        crate::http::alerts_proxy::AlertSummary,
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
         crate::http::user_api::AgentSummary,
@@ -80,6 +81,8 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(crate::http::user_api::get_route_by_id))
         .routes(utoipa_axum::routes!(crate::http::user_api::list_routes))
         .routes(utoipa_axum::routes!(crate::http::web_config::web_config))
+        .routes(utoipa_axum::routes!(crate::http::alerts_proxy::list_alerts))
+        .routes(utoipa_axum::routes!(crate::http::alerts_proxy::get_alert))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

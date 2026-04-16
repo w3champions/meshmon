@@ -23,6 +23,9 @@
 //! | `.118` | `routes_list_rejects_limit_over_cap`                       |
 //! | `.121` | `routes_latest_returns_404_when_no_snapshot_exists`         |
 //! | `.122` | `routes_latest_rejects_invalid_protocol`                    |
+//! | `.130` | `alerts_proxy_forwards_active_alerts_and_filters_unused_…`  |
+//! | `.131` | `alerts_proxy_returns_502_when_upstream_fails`              |
+//! | `.132` | `alerts_proxy_single_returns_404_when_fingerprint_missing`  |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -500,4 +503,172 @@ async fn routes_latest_rejects_invalid_protocol() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Task 8: Alertmanager proxy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn alerts_proxy_forwards_active_alerts_and_filters_unused_fields() {
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    // Alertmanager v2 JSON array with all fields (including generatorURL
+    // which should be dropped by the proxy normalization).
+    let am_response = serde_json::json!([
+        {
+            "fingerprint": "abc123",
+            "labels": {
+                "alertname": "HighLatency",
+                "severity": "critical"
+            },
+            "annotations": {
+                "summary": "Latency is high",
+                "description": "p99 latency exceeds 500ms"
+            },
+            "status": {
+                "state": "active",
+                "silencedBy": [],
+                "inhibitedBy": []
+            },
+            "startsAt": "2025-01-15T10:00:00Z",
+            "endsAt": "0001-01-01T00:00:00Z",
+            "generatorURL": "http://prometheus:9090/graph?g0.expr=high_latency",
+            "receivers": [{"name": "default"}],
+            "updatedAt": "2025-01-15T10:05:00Z"
+        }
+    ]);
+
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri());
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.130").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let alerts = body.as_array().expect("expected JSON array");
+    assert_eq!(alerts.len(), 1);
+
+    let alert = &alerts[0];
+    // Normalized fields present.
+    assert_eq!(alert["fingerprint"], "abc123");
+    assert_eq!(alert["labels"]["alertname"], "HighLatency");
+    assert_eq!(alert["labels"]["severity"], "critical");
+    assert_eq!(alert["summary"], "Latency is high");
+    assert_eq!(alert["description"], "p99 latency exceeds 500ms");
+    assert_eq!(alert["state"], "active");
+    assert_eq!(alert["starts_at"], "2025-01-15T10:00:00Z");
+    assert_eq!(alert["ends_at"], "0001-01-01T00:00:00Z");
+
+    // Upstream-only fields should NOT be present.
+    assert!(
+        alert.get("generatorURL").is_none(),
+        "generatorURL should be dropped: {alert}"
+    );
+    assert!(
+        alert.get("receivers").is_none(),
+        "receivers should be dropped: {alert}"
+    );
+    assert!(
+        alert.get("updatedAt").is_none(),
+        "updatedAt should be dropped: {alert}"
+    );
+}
+
+#[tokio::test]
+async fn alerts_proxy_returns_502_when_upstream_fails() {
+    let pool = common::shared_migrated_pool().await.clone();
+    // Point at a closed port — reqwest will fail to connect.
+    let state = common::state_with_admin_and_alertmanager(pool, "http://127.0.0.1:1");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.131").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"].as_str().is_some(),
+        "expected error message in body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn alerts_proxy_single_returns_404_when_fingerprint_missing() {
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    // Return empty array — no alerts match.
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&mock_server)
+        .await;
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri());
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.132").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts/nonexistent")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "alert not found");
 }
