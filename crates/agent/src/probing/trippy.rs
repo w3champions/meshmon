@@ -37,18 +37,18 @@ use crate::probing::{HopObservation, ProbeObservation, ProbeOutcome, TrippyRate}
 const MAX_TTL: u8 = 30;
 
 /// Per-probe read timeout inside a round.
-const READ_TIMEOUT: Duration = Duration::from_millis(500);
+const READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Grace period after the target responds before the round is considered
 /// complete (allows a few additional late responses to be collected).
 const GRACE_DURATION: Duration = Duration::from_millis(100);
 
-/// Port used for TCP/UDP tracing when the target has not published one.
+/// Sentinel value indicating a target has not published a TCP/UDP port.
 ///
-/// We require a valid port for TCP/UDP tracing; if the target doesn't
+/// We require a concrete port for TCP/UDP tracing; if the target doesn't
 /// carry one the prober emits an error observation rather than probing a
 /// bogus port.
-const INVALID_PORT: u16 = 0;
+const UNSET_PORT: u16 = 0;
 
 /// Shared trippy prober. One instance per agent; `spawn_target` attaches
 /// a per-target task. The internal semaphore caps concurrent raw-socket
@@ -85,10 +85,10 @@ impl TrippyProber {
         };
         let tcp_port = u16::try_from(target.tcp_probe_port)
             .ok()
-            .filter(|&p| p != INVALID_PORT);
+            .filter(|&p| p != UNSET_PORT);
         let udp_port = u16::try_from(target.udp_probe_port)
             .ok()
-            .filter(|&p| p != INVALID_PORT);
+            .filter(|&p| p != UNSET_PORT);
 
         let pool = Arc::clone(self);
         let target_id = target.id.clone();
@@ -183,6 +183,20 @@ async fn run(
                     }
                     Err(join_err) => {
                         tracing::warn!(%join_err, "trippy blocking task panicked");
+                        // Preserve "one round tick → one observation" invariant
+                        // so downstream rolling-stats stay aligned with rate.
+                        let obs = ProbeObservation {
+                            protocol: snapshot.protocol,
+                            target_id: target_id.clone(),
+                            outcome: ProbeOutcome::Error(format!(
+                                "trippy panicked: {join_err}"
+                            )),
+                            hops: None,
+                            observed_at: tokio::time::Instant::now(),
+                        };
+                        if obs_tx.send(obs).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -286,6 +300,9 @@ fn run_one_round(
     })
 }
 
+/// Convert milliseconds to microseconds as `u32`. Returns `0` for
+/// non-finite or non-positive inputs; saturates at [`u32::MAX`] on
+/// overflow.
 fn ms_to_micros(ms: f64) -> u32 {
     if !ms.is_finite() || ms <= 0.0 {
         return 0;
