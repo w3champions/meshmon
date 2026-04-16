@@ -438,6 +438,84 @@ async fn fetch_list(
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// T18: GET /api/routes/recent — cross-pair recent snapshots
+// ---------------------------------------------------------------------------
+
+const RECENT_ROUTES_MAX_LIMIT: i64 = 100;
+const RECENT_ROUTES_DEFAULT_LIMIT: i64 = 10;
+
+/// Query parameters for the recent-routes endpoint.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct RecentRoutesParams {
+    /// Maximum rows to return (1..=100, default 10).
+    pub limit: Option<i64>,
+}
+
+/// `GET /api/routes/recent` — return the most recent route snapshots across
+/// all source/target pairs, ordered by `observed_at DESC`.
+#[utoipa::path(
+    get,
+    path = "/api/routes/recent",
+    tag = "routes",
+    params(RecentRoutesParams),
+    responses(
+        (status = 200, description = "Recent route snapshots across all pairs", body = Vec<RouteSnapshotSummary>),
+        (status = 400, description = "Invalid limit"),
+        (status = 401, description = "No active session"),
+    ),
+)]
+pub async fn list_recent_routes(
+    State(state): State<AppState>,
+    Query(q): Query<RecentRoutesParams>,
+) -> Response {
+    let limit = q.limit.unwrap_or(RECENT_ROUTES_DEFAULT_LIMIT);
+    if !(1..=RECENT_ROUTES_MAX_LIMIT).contains(&limit) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("limit must be between 1 and {RECENT_ROUTES_MAX_LIMIT}")
+            })),
+        )
+            .into_response();
+    }
+
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!",
+                  source_id,
+                  target_id,
+                  protocol,
+                  observed_at,
+                  path_summary AS "path_summary: SqlxJson<PathSummaryJson>"
+           FROM route_snapshots
+           ORDER BY observed_at DESC
+           LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|r| RouteSnapshotSummary {
+                    id: r.id,
+                    source_id: r.source_id,
+                    target_id: r.target_id,
+                    protocol: r.protocol,
+                    observed_at: r.observed_at,
+                    path_summary: r.path_summary.map(|s| s.0),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "list_recent_routes failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 /// `GET /api/paths/{src}/{tgt}/routes` — return a paginated, time-filtered
 /// list of route snapshot summaries (without hop detail).
 #[utoipa::path(

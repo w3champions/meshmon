@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id AS \"id!\",\n                  source_id,\n                  target_id,\n                  protocol,\n                  observed_at,\n                  path_summary AS \"path_summary: SqlxJson<PathSummaryJson>\"\n           FROM route_snapshots\n           ORDER BY observed_at DESC\n           LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "protocol",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "observed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "path_summary: SqlxJson<PathSummaryJson>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "432269e8c5c41b1132370d13bd4487253213a5d91ab3e6a3236ffd8861281134"
+}

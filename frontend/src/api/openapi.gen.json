@@ -611,6 +611,51 @@
         }
       }
     },
+    "/api/routes/recent": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "`GET /api/routes/recent` — return the most recent route snapshots across\nall source/target pairs, ordered by `observed_at DESC`.",
+        "operationId": "list_recent_routes",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows to return (1..=100, default 10).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent route snapshots across all pairs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RouteSnapshotSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit"
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
     "/api/web-config": {
       "get": {
         "tags": [

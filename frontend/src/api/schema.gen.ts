@@ -251,6 +251,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/routes/recent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/routes/recent` — return the most recent route snapshots across
+         *     all source/target pairs, ordered by `observed_at DESC`.
+         */
+        get: operations["list_recent_routes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/web-config": {
         parameters: {
             query?: never;
@@ -1000,6 +1020,43 @@ export interface operations {
             };
             /** @description Snapshot not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_recent_routes: {
+        parameters: {
+            query?: {
+                /** @description Maximum rows to return (1..=100, default 10). */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recent route snapshots across all pairs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteSnapshotSummary"][];
+                };
+            };
+            /** @description Invalid limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

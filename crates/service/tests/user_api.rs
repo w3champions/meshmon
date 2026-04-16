@@ -34,6 +34,10 @@
 //! | `.142` | `metrics_proxy_range_forwards_all_params`                   |
 //! | `.143` | `metrics_proxy_returns_503_when_vm_not_configured`          |
 //! | `.144` | `alerts_proxy_forwards_query_params_to_upstream`            |
+//! | `.150` | `recent_routes_returns_latest_across_pairs`                 |
+//! | `.151` | `recent_routes_respects_limit_cap`                          |
+//! | `.152` | `recent_routes_rejects_invalid_limit`                       |
+//! | `.153` | (reserved for future)                                       |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -901,4 +905,153 @@ async fn metrics_proxy_returns_503_when_vm_not_configured() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---------------------------------------------------------------------------
+// T18: GET /api/routes/recent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn recent_routes_returns_latest_across_pairs() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.150").await;
+
+    // Two source/target pairs, three snapshots total.
+    // Pair A: one old + one new. Pair B: one mid.
+    let now = chrono::Utc::now();
+    let rows: [(&str, &str, &str, chrono::DateTime<chrono::Utc>); 3] = [
+        (
+            "src-a",
+            "tgt-a",
+            "icmp",
+            now - chrono::Duration::minutes(60),
+        ),
+        ("src-a", "tgt-a", "icmp", now - chrono::Duration::minutes(1)),
+        (
+            "src-b",
+            "tgt-b",
+            "icmp",
+            now - chrono::Duration::minutes(30),
+        ),
+    ];
+    for (src, tgt, proto, ts) in rows {
+        // Register the agents first so the FK holds.
+        common::insert_agent(&pool, src).await;
+        common::insert_agent(&pool, tgt).await;
+        sqlx::query(
+            "INSERT INTO route_snapshots \
+             (source_id, target_id, protocol, observed_at, hops, path_summary) \
+             VALUES ($1, $2, $3, $4, '[]'::jsonb, NULL)",
+        )
+        .bind(src)
+        .bind(tgt)
+        .bind(proto)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("insert snapshot");
+    }
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent?limit=10")
+                .header(axum::http::header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let items = body.as_array().expect("array");
+    // Our three inserted rows should be the most-recent; latest first.
+    assert!(items.len() >= 3, "expected >= 3, got {}", items.len());
+    // First row must be pair A's newer snapshot (1 min ago).
+    assert_eq!(items[0]["source_id"], "src-a");
+    assert_eq!(items[0]["target_id"], "tgt-a");
+    // observed_at must strictly descend.
+    for w in items.windows(2) {
+        let a = w[0]["observed_at"].as_str().unwrap();
+        let b = w[1]["observed_at"].as_str().unwrap();
+        assert!(a >= b, "expected descending: {a} >= {b}");
+    }
+
+    // Cleanup seeded rows.
+    sqlx::query("DELETE FROM route_snapshots WHERE source_id IN ('src-a', 'src-b')")
+        .execute(&pool)
+        .await
+        .expect("cleanup snapshots");
+    sqlx::query("DELETE FROM agents WHERE id IN ('src-a', 'tgt-a', 'src-b', 'tgt-b')")
+        .execute(&pool)
+        .await
+        .expect("cleanup agents");
+}
+
+#[tokio::test]
+async fn recent_routes_respects_limit_cap() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.151").await;
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent?limit=500")
+                .header(axum::http::header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recent_routes_rejects_invalid_limit() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.152").await;
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent?limit=0")
+                .header(axum::http::header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recent_routes_requires_session() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool).await;
+    let app = meshmon_service::http::router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
 }
