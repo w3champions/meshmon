@@ -6,13 +6,16 @@
 //! document, served at `/api/openapi.json`. Swagger UI at `/api/docs`
 //! loads that document at runtime.
 //!
-//! T04 registers **zero** annotated handlers — the document ships with an
-//! empty `paths` object. T06 (agent API is Protobuf-only, excluded) and T09
-//! (user API) are the first producers.
+//! Handlers that live *outside* the `utoipa_axum`-collected router
+//! (login, logout — both hosted on dedicated sub-routers so they can
+//! bypass the `login_required!` gate) still need their `#[utoipa::path]`
+//! metadata in the emitted schema, so they're listed explicitly in the
+//! `paths(...)` attribute on `ApiDoc` below. Handlers that live on
+//! [`api_router`] are picked up automatically.
 //!
 //! The `cargo xtask openapi` command (see `xtask/`) imports
-//! [`openapi_document`] to regenerate `frontend/src/api/openapi.json` for
-//! the TS codegen pipeline (T17).
+//! [`openapi_document`] to regenerate `frontend/src/api/openapi.gen.json`
+//! for the TS codegen pipeline.
 
 use crate::state::AppState;
 use axum::Router;
@@ -24,12 +27,12 @@ use utoipa_swagger_ui::SwaggerUi;
 /// specs into this at build time; the `info` block below is the only
 /// hand-authored part of the schema.
 ///
-/// `/api/auth/login` is documented here via the `paths(...)` attribute
-/// because its handler is wired into a standalone router (outside
-/// [`api_router`]) so the per-IP rate-limit layer can attach to just that
-/// path. Its `#[utoipa::path]` metadata still needs to land in the OpenAPI
-/// document, so we list it explicitly. `/api/auth/logout` lives on
-/// [`api_router`] via `utoipa_axum::routes!` and is picked up automatically.
+/// `/api/auth/login` and `/api/auth/logout` are listed in `paths(...)`
+/// because their handlers are wired onto standalone sub-routers
+/// (unauthenticated; login has its own rate-limit layer). The
+/// `#[utoipa::path]` metadata still has to land in the document, so we
+/// name the handlers explicitly. Everything else comes from
+/// [`api_router`].
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -39,22 +42,28 @@ use utoipa_swagger_ui::SwaggerUi;
                        `crates/protocol/proto/meshmon.proto`.",
         version = env!("CARGO_PKG_VERSION"),
     ),
-    paths(crate::http::auth::login),
+    paths(crate::http::auth::login, crate::http::auth::logout),
     components(schemas(
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
+        crate::http::web_config::WebConfigResponse,
     )),
 )]
 struct ApiDoc;
 
-/// Assemble the `/api/*` router seeded with the `ApiDoc` metadata. T06+
-/// add handlers here via `.routes(utoipa_axum::routes!(...))` chained onto
-/// the returned value; callers split the result into the axum `Router`
-/// and the collected [`utoipa::openapi::OpenApi`] via `.split_for_parts()`
-/// at wire-up time.
+/// Assemble the `/api/*` router seeded with the `ApiDoc` metadata. Later
+/// tasks add handlers here via `.routes(utoipa_axum::routes!(...))`
+/// chained onto the returned value; callers split the result into the
+/// axum `Router` and the collected [`utoipa::openapi::OpenApi`] via
+/// `.split_for_parts()` at wire-up time.
+///
+/// Every handler registered through this router runs behind the
+/// `login_required!` layer once assembled by [`crate::http::router`]. If
+/// a handler must stay anonymous (like login/logout), mount it on its
+/// own sub-router and document it via `paths(...)` on `ApiDoc` above.
 pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
-        .routes(utoipa_axum::routes!(crate::http::auth::logout))
+        .routes(utoipa_axum::routes!(crate::http::web_config::web_config))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

@@ -445,3 +445,70 @@ rate_limit_burst = 300
     let registry = dummy_registry(pool.clone());
     AppState::new(swap, rx, pool, ingestion, registry)
 }
+
+// ---------------------------------------------------------------------------
+// Auth-flow helpers.
+//
+// `X-Forwarded-For` IP allocation (RFC 5737 TEST-NET-3, `203.0.113.0/24`) so
+// the per-IP rate-limit bucket cannot contaminate neighbouring tests:
+//
+// | Octet  | Test                                                      |
+// |--------|-----------------------------------------------------------|
+// | `.1`   | `auth::login_with_correct_credentials_returns_200_…`      |
+// | `.2`   | `auth::login_response_body_echoes_username`               |
+// | `.3`   | `auth::login_with_wrong_password_returns_401`             |
+// | `.4`   | `auth::login_with_unknown_user_returns_401`               |
+// | `.50`  | `auth::rate_limit_kicks_in_after_burst`                   |
+// | `.60`  | `auth::rate_limit_does_not_leak_between_ips` (burn IP)    |
+// | `.61`  | `auth::rate_limit_does_not_leak_between_ips` (fresh IP)   |
+// | `.80`  | `auth::peer_addr_extractor_reads_connect_info_…`          |
+// | `.100` | `web_config::web_config_returns_body_with_session`        |
+//
+// Pick a fresh octet when adding a new test that hits the login endpoint.
+// ---------------------------------------------------------------------------
+
+/// Build a JSON-bodied POST request to `/api/auth/login` with the given
+/// credentials and `X-Forwarded-For` client IP. Use this when the test
+/// asserts the *response* of the login call (e.g. 200, 401, 429,
+/// `Set-Cookie` flags). For tests that just need an authenticated cookie
+/// to reach a downstream endpoint, reach for [`login_as_admin`] instead.
+pub fn login_req(
+    username: &str,
+    password: &str,
+    client_ip: &str,
+) -> axum::http::Request<axum::body::Body> {
+    let body = serde_json::json!({ "username": username, "password": password });
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", client_ip)
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("build login request")
+}
+
+/// Drive a successful login as the default `admin` user on `app` and
+/// return the `Set-Cookie` value so the caller can attach it to follow-up
+/// requests. Panics if the login fails — callers use this as test setup,
+/// not as the unit under test.
+pub async fn login_as_admin(app: &axum::Router, client_ip: &str) -> String {
+    use axum::http::{header, StatusCode};
+    use tower::util::ServiceExt;
+
+    let resp = app
+        .clone()
+        .oneshot(login_req("admin", AUTH_TEST_PASSWORD, client_ip))
+        .await
+        .expect("login oneshot");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "login setup failed (client_ip = {client_ip})"
+    );
+    resp.headers()
+        .get(header::SET_COOKIE)
+        .expect("login set a session cookie")
+        .to_str()
+        .expect("session cookie is valid utf-8")
+        .to_string()
+}

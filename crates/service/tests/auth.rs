@@ -4,11 +4,12 @@
 //!
 //! Each test uses a unique client IP inside RFC 5737 TEST-NET-3
 //! (`203.0.113.0/24`) so the per-IP rate-limit bucket cannot contaminate
-//! other tests. Allocated so far: `.1`, `.2`, `.3`, `.4`, `.50`, `.60`,
-//! `.61`, `.80`. Pick a fresh octet for new tests. Cross-test bucket
-//! contamination is already prevented by each test building its own
-//! router, so this is defense-in-depth rather than a correctness
-//! requirement.
+//! other tests. The authoritative allocation list lives in
+//! `tests/common/mod.rs` alongside [`common::login_req`] /
+//! [`common::login_as_admin`]; update it when you reserve a new octet.
+//! Cross-test bucket contamination is already prevented by each test
+//! building its own router, so this is defense-in-depth rather than a
+//! correctness requirement.
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -16,16 +17,7 @@ use tower::util::ServiceExt;
 
 mod common;
 
-fn login_req(username: &str, password: &str, client_ip: &str) -> Request<Body> {
-    let body = serde_json::json!({ "username": username, "password": password });
-    Request::builder()
-        .method("POST")
-        .uri("/api/auth/login")
-        .header("content-type", "application/json")
-        .header("x-forwarded-for", client_ip)
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
+use common::login_req;
 
 #[tokio::test]
 async fn login_with_correct_credentials_returns_200_and_sets_cookie() {

@@ -65,6 +65,31 @@
           }
         }
       }
+    },
+    "/api/web-config": {
+      "get": {
+        "tags": [
+          "web"
+        ],
+        "summary": "`GET /api/web-config` — return the frontend runtime config.",
+        "description": "This handler is registered behind the `login_required!` layer, so\nunauthenticated requests never reach it — they are short-circuited by\nthe middleware with a plain 401. The 401 response is documented here so\nthe generated OpenAPI schema tells SPA clients exactly what to expect.",
+        "operationId": "web_config",
+        "responses": {
+          "200": {
+            "description": "Frontend runtime config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebConfigResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -97,6 +122,42 @@
           "username": {
             "type": "string",
             "description": "Echoed username on success."
+          }
+        }
+      },
+      "WebConfigResponse": {
+        "type": "object",
+        "description": "Runtime config the frontend needs before it can render dashboards.\n\nReturned from `GET /api/web-config`; doubles as the SPA's session probe\n(401 when the caller has no valid session cookie).\n\nWrite-only on the server — we only ever construct and serialize this\ntype, never parse one back in — so only `Serialize` is derived.\nMatches the pattern used by [`crate::http::auth::LoginResponse`].",
+        "required": [
+          "version",
+          "username",
+          "grafana_dashboards"
+        ],
+        "properties": {
+          "grafana_base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base URL for embedding Grafana panels (e.g., `https://grafana.example/`).\n`None` if Grafana is not configured — omitted from the JSON body."
+          },
+          "grafana_dashboards": {
+            "type": "object",
+            "description": "Map of logical dashboard name → Grafana dashboard UID. Empty\nwhen Grafana integration is not configured.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "username": {
+            "type": "string",
+            "description": "Signed-in username. The SPA hydrates its auth store from this so the\nuser menu shows the right handle after a hard refresh."
+          },
+          "version": {
+            "type": "string",
+            "description": "`CARGO_PKG_VERSION` of the running service."
           }
         }
       }

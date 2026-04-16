@@ -1,13 +1,17 @@
 //! Axum router assembly.
 //!
 //! Composition:
-//! - `/healthz`, `/readyz`, `/metrics` — no auth, no OpenAPI (Task 9).
+//! - `/healthz`, `/readyz`, `/metrics` — no auth, no OpenAPI.
 //! - `/api/openapi.json`, `/api/docs/*` — served from the OpenAPI spec
-//!   collected across `#[utoipa::path]` handlers (Task 10).
+//!   collected across `#[utoipa::path]` handlers.
 //! - `/api/auth/login` — session-issuing handler on its own sub-router so a
-//!   per-IP rate limit attaches to just that path (T05).
-//! - `/api/auth/logout` and other `/api/*` handlers — live on the
-//!   OpenAPI-collected router (T05, T06, T09).
+//!   per-IP rate limit attaches to just that path.
+//! - `/api/auth/logout` — its own sub-router, unauthenticated, no rate
+//!   limit. Logout must stay idempotent for anonymous callers (e.g.
+//!   stale tab clicking "Log out" after cookie expiry); placing it
+//!   behind `login_required!` would break that UX.
+//! - Every other `/api/*` handler — collected by `utoipa_axum::routes!`
+//!   and gated by `axum_login::login_required!` at the router layer.
 //!
 //! Middleware layering (outside → in on the assembled router):
 //! 1. `tower_http::trace::TraceLayer` — request/response logs.
@@ -15,12 +19,16 @@
 //! 3. `axum_login::AuthManagerLayer` (wrapping the `tower_sessions`
 //!    session layer) — applied to the full app so every handler can
 //!    extract an optional [`auth::AuthSession`].
-//! 4. `auth::login_rate_limit_layer` — attached to the login sub-router
+//! 4. `login_required!(ConfigAuthBackend)` — attached to the
+//!    OpenAPI-collected `/api/*` sub-router. Returns 401 for anonymous
+//!    callers (API-friendly: SPAs bounce to `/login` themselves).
+//! 5. `auth::login_rate_limit_layer` — attached to the login sub-router
 //!    only.
 
 pub mod auth;
 pub mod health;
 pub mod openapi;
+pub mod web_config;
 
 use crate::state::AppState;
 use axum::Router;
@@ -32,11 +40,19 @@ use tower_http::trace::TraceLayer;
 /// whatever `#[utoipa::path]` handlers are currently attached to
 /// [`openapi::api_router`], then served at `/api/openapi.json` via Swagger UI.
 ///
-/// `/api/auth/login` is wired through a standalone sub-router so the per-IP
-/// login rate-limit layer attaches to that single path; every other route
-/// (including `/api/auth/logout`) sees only the global session/auth layer.
-/// The session middleware is transparent for requests that don't touch the
-/// session (health, metrics, OpenAPI JSON, Swagger UI).
+/// Router composition:
+///
+/// - `/api/auth/login` lives on a standalone sub-router so the per-IP
+///   login rate-limit layer attaches to just that path.
+/// - `/api/auth/logout` lives on a second standalone sub-router —
+///   unauthenticated and unrate-limited so it remains idempotent for
+///   anonymous callers.
+/// - Everything else under `/api/*` (including [`web_config::web_config`])
+///   is collected via `utoipa_axum::routes!` and guarded by the
+///   `login_required!` layer, which returns 401 when no session is
+///   present.
+/// - Health, metrics, OpenAPI JSON and Swagger UI stay outside the
+///   authenticated surface.
 ///
 /// Callers must hand the returned router to
 /// `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())`
@@ -44,9 +60,10 @@ use tower_http::trace::TraceLayer;
 /// `ConnectInfo<SocketAddr>`.
 pub fn router(state: AppState) -> Router {
     use crate::http::auth::{
-        auth_manager_layer, login, login_rate_limit_layer, session_layer, ConfigAuthBackend,
+        auth_manager_layer, login, login_rate_limit_layer, logout, session_layer, ConfigAuthBackend,
     };
     use axum::routing::post;
+    use axum_login::login_required;
 
     let (api_axum, api_schema) = openapi::api_router().split_for_parts();
 
@@ -59,14 +76,26 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(login))
         .layer(login_limit);
 
+    // Logout stays unauthenticated so anonymous or already-expired
+    // sessions can still hit it without hitting the 401 wall — no rate
+    // limit (sessions are scarce to begin with).
+    let logout_router = Router::<AppState>::new().route("/api/auth/logout", post(logout));
+
+    // Every handler registered via `utoipa_axum::routes!` on
+    // [`openapi::api_router`] is protected. Returning a bare 401 (no
+    // `login_url`) keeps this API-friendly: SPAs decide their own
+    // redirect target rather than following a server-issued 307.
+    let api_protected = api_axum.route_layer(login_required!(ConfigAuthBackend));
+
     let grpc_router = crate::grpc::routes(state.clone());
 
     Router::new()
         .merge(health::router())
         .merge(openapi::swagger_router(api_schema))
         .merge(login_router)
+        .merge(logout_router)
         .merge(grpc_router)
-        .merge(api_axum)
+        .merge(api_protected)
         .layer(auth_layer)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
