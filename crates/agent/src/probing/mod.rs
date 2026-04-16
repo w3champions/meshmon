@@ -21,7 +21,10 @@ pub struct ProbeObservation {
     /// Hop-level detail from traceroute probes (trippy). `None` for TCP/UDP
     /// direct pings.
     pub hops: Option<Vec<HopObservation>>,
-    /// Wall-clock instant when the probe was sent.
+    /// Monotonic instant when the probe was sent. Used for window math
+    /// (rolling stats, state-machine dwell timers). This is NOT wall-clock
+    /// time — convert to `SystemTime::now()` at emit-tick time if a
+    /// wall-clock timestamp is needed on the wire.
     pub observed_at: tokio::time::Instant,
 }
 
