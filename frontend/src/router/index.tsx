@@ -94,15 +94,6 @@ export function createAppRouter(queryClient: QueryClient) {
   return createRouter({ routeTree, context: { queryClient } });
 }
 
-// Default export for backwards-compatibility during migration (no queryClient context).
-// main.tsx should use createAppRouter instead.
-export const router = createAppRouter(
-  // Lazy import at module level isn't possible; this placeholder will be
-  // replaced when main.tsx passes the real QueryClient via createAppRouter.
-  // biome-ignore lint/suspicious/noExplicitAny: bootstrap placeholder
-  undefined as any,
-);
-
 declare module "@tanstack/react-router" {
   interface Register {
     router: ReturnType<typeof createAppRouter>;
