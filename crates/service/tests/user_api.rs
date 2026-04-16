@@ -33,6 +33,7 @@
 //! | `.141` | `metrics_proxy_forwards_meshmon_query_to_vm`                |
 //! | `.142` | `metrics_proxy_range_forwards_all_params`                   |
 //! | `.143` | `metrics_proxy_returns_503_when_vm_not_configured`          |
+//! | `.144` | `alerts_proxy_forwards_query_params_to_upstream`            |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -607,6 +608,46 @@ async fn alerts_proxy_forwards_active_alerts_and_filters_unused_fields() {
         alert.get("updatedAt").is_none(),
         "updatedAt should be dropped: {alert}"
     );
+}
+
+#[tokio::test]
+async fn alerts_proxy_forwards_query_params_to_upstream() {
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    // Wiremock asserts every query_param matcher is satisfied, proving the
+    // proxy forwards the user-supplied query string to the upstream
+    // Alertmanager verbatim.
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .and(query_param("active", "true"))
+        .and(query_param("silenced", "false"))
+        .and(query_param("filter", "alertname=\"Foo\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_alertmanager(pool, &mock_server.uri());
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.144").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts?active=true&silenced=false&filter=alertname%3D%22Foo%22")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

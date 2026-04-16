@@ -79,9 +79,13 @@ fn upstream_error_response() -> Response {
         .into_response()
 }
 
-/// Forward a GET request to VictoriaMetrics and pass through the response
-/// body as-is with `application/json` content-type. Maps the VM status code
-/// to an axum `StatusCode`. On connect failure returns 502.
+/// Forward a GET request to VictoriaMetrics and pass through a successful
+/// response body as-is with `application/json` content-type and 200 OK.
+///
+/// - On reqwest send error -> 502.
+/// - On VM returning non-2xx -> 502 (upstream status logged, body dropped to
+///   avoid leaking upstream internals to the client).
+/// - On VM returning 2xx -> pass through body as-is with 200 OK.
 async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
     let result = proxy_client().get(url).query(params).send().await;
 
@@ -93,7 +97,13 @@ async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
         }
     };
 
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !resp.status().is_success() {
+        tracing::warn!(
+            upstream_status = %resp.status(),
+            "vm proxy: upstream returned non-2xx"
+        );
+        return upstream_error_response();
+    }
 
     let body = match resp.bytes().await {
         Ok(b) => b,
@@ -104,7 +114,7 @@ async fn forward(url: &str, params: &[(&str, &str)]) -> Response {
     };
 
     (
-        status,
+        StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         body,
     )
