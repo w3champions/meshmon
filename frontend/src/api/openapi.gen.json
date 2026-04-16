@@ -616,7 +616,7 @@
         "tags": [
           "routes"
         ],
-        "summary": "`GET /api/routes/recent` — return the most recent route snapshots across\nall source/target pairs, ordered by `observed_at DESC`.",
+        "summary": "`GET /api/routes/recent` — returns the latest route snapshot per\n`(source_id, target_id)` pair, newest first, up to `limit` rows\n(default 10, max 100).",
         "operationId": "list_recent_routes",
         "parameters": [
           {

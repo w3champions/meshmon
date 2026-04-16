@@ -259,8 +259,9 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/routes/recent` — return the most recent route snapshots across
-         *     all source/target pairs, ordered by `observed_at DESC`.
+         * `GET /api/routes/recent` — returns the latest route snapshot per
+         *     `(source_id, target_id)` pair, newest first, up to `limit` rows
+         *     (default 10, max 100).
          */
         get: operations["list_recent_routes"];
         put?: never;
