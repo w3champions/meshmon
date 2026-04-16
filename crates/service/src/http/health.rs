@@ -21,11 +21,16 @@ use axum::Router;
 use std::borrow::Cow;
 use std::fmt::Write;
 
-async fn healthz() -> &'static str {
+/// `/healthz` — liveness probe. Returns 200 for as long as the process
+/// is up. Never gated by auth.
+pub async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz(State(state): State<AppState>) -> Response {
+/// `/readyz` — readiness probe. 200 once [`AppState::is_ready`] is set
+/// (DB migrations applied, registry warmed), otherwise 503 so k8s keeps
+/// draining traffic from the pod. Never gated by auth.
+pub async fn readyz(State(state): State<AppState>) -> Response {
     if state.is_ready() {
         StatusCode::OK.into_response()
     } else {

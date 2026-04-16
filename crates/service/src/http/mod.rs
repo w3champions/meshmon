@@ -67,8 +67,9 @@ pub fn router(state: AppState) -> Router {
     use crate::http::auth::{
         auth_manager_layer, login, login_rate_limit_layer, logout, session_layer, ConfigAuthBackend,
     };
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use axum_login::login_required;
+    use axum_prometheus::PrometheusMetricLayerBuilder;
 
     let (api_axum, api_schema) = openapi::api_router().split_for_parts();
 
@@ -94,14 +95,43 @@ pub fn router(state: AppState) -> Router {
 
     let grpc_router = crate::grpc::routes(state.clone());
 
+    // axum-prometheus: emits
+    //   <prefix>_http_requests_total{method, endpoint, status}
+    //   <prefix>_http_requests_duration_seconds{...}
+    //   <prefix>_http_requests_pending{...}
+    // `.build()` (not `.build_pair()`) because main.rs installs the
+    // global recorder; this layer just reads from it.
+    let prom_layer = PrometheusMetricLayerBuilder::new()
+        .with_prefix(crate::metrics::HTTP_PREFIX)
+        .build();
+
+    // Split health endpoints so Basic auth attaches to `/metrics` only.
+    // `/healthz` and `/readyz` stay ungated so k8s probes and readiness
+    // checks never get a 401.
+    let metrics_route = Router::<AppState>::new()
+        .route("/metrics", get(health::metrics))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics_auth::require_basic_auth,
+        ));
+    let health_router = Router::<AppState>::new()
+        .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
+        .merge(metrics_route);
+
+    // Layer order (inside → out): auth_layer wraps the routes first so
+    // handlers can see the session, then prom_layer so unauthenticated
+    // 401s still get counted in the request metrics, then compression,
+    // then trace at the outside so logs cover every request.
     Router::new()
-        .merge(health::router())
+        .merge(health_router)
         .merge(openapi::swagger_router(api_schema))
         .merge(login_router)
         .merge(logout_router)
         .merge(grpc_router)
         .merge(api_protected)
         .layer(auth_layer)
+        .layer(prom_layer)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
