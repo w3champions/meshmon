@@ -107,6 +107,23 @@ impl AgentApi for AgentApiImpl {
                 req.lon
             )));
         }
+        // Probe ports are wire-encoded as `uint32`, but the valid TCP/UDP port
+        // range is 1-65535. Zero is rejected because the DB column has a
+        // CHECK constraint for [1, 65535]; `> 65535` is rejected because
+        // `uint32` on the wire allows out-of-range values even though the
+        // logical type is u16.
+        if req.tcp_probe_port == 0 || req.tcp_probe_port > 65535 {
+            return Err(Status::invalid_argument(format!(
+                "tcp_probe_port {} out of range [1, 65535]",
+                req.tcp_probe_port
+            )));
+        }
+        if req.udp_probe_port == 0 || req.udp_probe_port > 65535 {
+            return Err(Status::invalid_argument(format!(
+                "udp_probe_port {} out of range [1, 65535]",
+                req.udp_probe_port
+            )));
+        }
         let claimed_ip = proto_ip::to_ipaddr(&req.ip)
             .map_err(|e| Status::invalid_argument(format!("invalid ip bytes: {e}")))?;
 
@@ -158,18 +175,24 @@ impl AgentApi for AgentApiImpl {
         // same ALREADY_EXISTS status as the preflight path.
         let location = (!req.location.is_empty()).then(|| req.location.clone());
         let agent_version = (!req.agent_version.is_empty()).then(|| req.agent_version.clone());
+        // Validated to be in [1, 65535] above; narrow to the DB's i32 column.
+        let tcp_port_i32 = req.tcp_probe_port as i32;
+        let udp_port_i32 = req.udp_probe_port as i32;
         let upsert_row = sqlx::query!(
             r#"INSERT INTO agents
                   (id, display_name, location, ip, lat, lon, agent_version,
+                   tcp_probe_port, udp_probe_port,
                    registered_at, last_seen_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
                ON CONFLICT (id) DO UPDATE SET
-                   display_name  = EXCLUDED.display_name,
-                   location      = EXCLUDED.location,
-                   lat           = EXCLUDED.lat,
-                   lon           = EXCLUDED.lon,
-                   agent_version = EXCLUDED.agent_version,
-                   last_seen_at  = NOW()
+                   display_name   = EXCLUDED.display_name,
+                   location       = EXCLUDED.location,
+                   lat            = EXCLUDED.lat,
+                   lon            = EXCLUDED.lon,
+                   agent_version  = EXCLUDED.agent_version,
+                   tcp_probe_port = EXCLUDED.tcp_probe_port,
+                   udp_probe_port = EXCLUDED.udp_probe_port,
+                   last_seen_at   = NOW()
                  WHERE agents.ip = EXCLUDED.ip
                RETURNING id"#,
             req.id,
@@ -179,6 +202,8 @@ impl AgentApi for AgentApiImpl {
             req.lat,
             req.lon,
             agent_version,
+            tcp_port_i32,
+            udp_port_i32,
         )
         .fetch_optional(&self.state.pool)
         .await
