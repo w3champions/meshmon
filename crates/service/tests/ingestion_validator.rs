@@ -80,6 +80,20 @@ fn unspecified_protocol_rejected() {
 }
 
 #[test]
+fn unspecified_path_health_rejected() {
+    // Proto docs (meshmon.proto ProtocolHealth) declare UNSPECIFIED a
+    // decode error at the application layer; mirror the Protocol check.
+    let mut b = good_batch();
+    b.paths[0].health = ProtocolHealth::Unspecified as i32;
+    match validate_metrics(b).unwrap_err() {
+        ValidationError::UnspecifiedPathHealth { target } => {
+            assert_eq!(target, "agent-b");
+        }
+        other => panic!("expected UnspecifiedPathHealth, got {other:?}"),
+    }
+}
+
+#[test]
 fn failure_rate_above_one_rejected() {
     let mut b = good_batch();
     b.paths[0].failure_rate = 1.5;
