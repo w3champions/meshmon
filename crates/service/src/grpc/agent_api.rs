@@ -62,13 +62,22 @@ impl AgentApi for AgentApiImpl {
                 .map(|a| a.ip())
         };
         let peer_ip = if trust_forwarded {
-            // Check metadata first (proxies inject XFF); fall back to remote_addr.
+            // Check metadata first (proxies inject XFF or RFC 7239
+            // `Forwarded`); fall back to the raw peer addr from the
+            // transport. Shared helpers keep gRPC and REST in sync on
+            // which header shapes they honor.
             request
                 .metadata()
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                .and_then(crate::http::auth::parse_xff_client_ip)
+                .or_else(|| {
+                    request
+                        .metadata()
+                        .get("forwarded")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(crate::http::auth::parse_forwarded_client_ip)
+                })
                 .or_else(|| extract_peer_addr(&request))
         } else {
             extract_peer_addr(&request)

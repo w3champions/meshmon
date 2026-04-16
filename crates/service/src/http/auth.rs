@@ -22,23 +22,79 @@ use tower_governor::errors::GovernorError;
 use tower_governor::key_extractor::KeyExtractor;
 use utoipa::ToSchema;
 
+/// Extract the leftmost client IP from an `X-Forwarded-For` value.
+///
+/// Accepts the de-facto syntax `client, proxy1, proxy2`. Returns the
+/// first parseable `IpAddr`; returns `None` if the header is malformed
+/// or contains no parseable address.
+pub(crate) fn parse_xff_client_ip(header: &str) -> Option<std::net::IpAddr> {
+    header
+        .split(',')
+        .next()
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+}
+
+/// Extract the leftmost `for=<ip>` from an RFC 7239 `Forwarded` value.
+///
+/// Handles the common real-world shapes: `for=1.2.3.4`,
+/// `for="1.2.3.4"`, `for="1.2.3.4:5678"`, `for="[::1]:4711"`,
+/// `for=[2001:db8::1]`. Port is stripped. Returns `None` when no
+/// parseable `for=` parameter is found.
+pub(crate) fn parse_forwarded_client_ip(header: &str) -> Option<std::net::IpAddr> {
+    let first_element = header.split(',').next()?;
+    for pair in first_element.split(';') {
+        let (key, value) = pair.trim().split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("for") {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        // Bracketed IPv6: [addr] or [addr]:port.
+        let stripped = if let Some(rest) = value.strip_prefix('[') {
+            rest.split(']').next().unwrap_or(rest)
+        } else if let Some((host, maybe_port)) = value.rsplit_once(':') {
+            // IPv4 with port (`host:port`) — IPv6 is only valid with
+            // brackets per RFC 7239 §6. `maybe_port` must parse as u16
+            // to distinguish `host:port` from bare `::1`.
+            if maybe_port.chars().all(|c| c.is_ascii_digit()) {
+                host
+            } else {
+                value
+            }
+        } else {
+            value
+        };
+        if let Ok(ip) = stripped.parse::<std::net::IpAddr>() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
 /// Client-IP extraction shared between the login rate limit, the agent
 /// rate limit, and the tonic register handler's IP identity check.
 ///
-/// When `trust_forwarded = true`, the leftmost parseable entry in
-/// `X-Forwarded-For` wins; falls back to `ConnectInfo` peer on malformed
-/// headers. When `trust_forwarded = false`, only `ConnectInfo` is read.
+/// When `trust_forwarded = true`, try the leftmost entry of
+/// `X-Forwarded-For` first; if missing or malformed, try RFC 7239
+/// `Forwarded: for=...`. On any fallback, use the `ConnectInfo` peer.
+/// When `trust_forwarded = false`, only `ConnectInfo` is read.
 #[allow(dead_code)]
 pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net::IpAddr> {
     if trust_forwarded {
-        if let Some(val) = parts.headers.get("x-forwarded-for") {
-            if let Ok(s) = val.to_str() {
-                if let Some(first) = s.split(',').next() {
-                    if let Ok(ip) = first.trim().parse::<std::net::IpAddr>() {
-                        return Some(ip);
-                    }
-                }
-            }
+        if let Some(ip) = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_xff_client_ip)
+        {
+            return Some(ip);
+        }
+        if let Some(ip) = parts
+            .headers
+            .get("forwarded")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_forwarded_client_ip)
+        {
+            return Some(ip);
         }
     }
     parts
@@ -454,7 +510,15 @@ pub fn agent_grpc_interceptor(
         let Ok(raw) = header.to_str() else {
             return Err(Status::unauthenticated("malformed authorization metadata"));
         };
-        let Some(presented) = raw.strip_prefix("Bearer ") else {
+        // HTTP auth schemes are case-insensitive (RFC 7235 §2.1). Accept
+        // "Bearer", "bearer", "BEARER", etc. before the single required
+        // space — clients that normalize scheme case should not be
+        // rejected as unauthenticated.
+        let Some(presented) = raw
+            .get(..7)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("Bearer "))
+            .and_then(|_| raw.get(7..))
+        else {
             return Err(Status::unauthenticated("missing bearer prefix"));
         };
         if !constant_time_eq_bytes(presented.as_bytes(), expected.as_bytes()) {
@@ -826,6 +890,77 @@ url = "postgres://ignored@localhost/db"
         // Just verify construction doesn't panic — no HTTP traffic needed.
         let _ = agent_api_rate_limit_layer(true, 60, 30);
         let _ = agent_api_rate_limit_layer(false, 60, 30);
+    }
+
+    #[tokio::test]
+    async fn interceptor_accepts_lowercase_bearer_scheme() {
+        // HTTP auth schemes are case-insensitive (RFC 7235 §2.1); rejecting
+        // "bearer" because we only checked for "Bearer " would be an
+        // interoperability bug.
+        let state = agent_state_with(Some("secret-token"));
+        let result = run_interceptor(state, Some("bearer secret-token"));
+        assert!(result.is_ok(), "interceptor must accept lowercase scheme");
+    }
+
+    #[tokio::test]
+    async fn interceptor_rejects_bearer_without_separator() {
+        // Require the single space after the scheme; "Bearertoken" should
+        // not slice through `strip_prefix` behavior by accident.
+        let state = agent_state_with(Some("secret-token"));
+        let result = run_interceptor(state, Some("Bearersecret-token"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_xff_picks_leftmost_ip() {
+        assert_eq!(
+            parse_xff_client_ip("1.2.3.4, 10.0.0.1"),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        assert_eq!(
+            parse_xff_client_ip(" 2001:db8::1 , fe80::1"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(parse_xff_client_ip("not-an-ip"), None);
+        assert_eq!(parse_xff_client_ip(""), None);
+    }
+
+    #[test]
+    fn parse_forwarded_handles_common_shapes() {
+        // Bare IPv4.
+        assert_eq!(
+            parse_forwarded_client_ip("for=192.0.2.60;proto=http"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // Quoted IPv4.
+        assert_eq!(
+            parse_forwarded_client_ip(r#"for="192.0.2.60""#),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // IPv4 with port.
+        assert_eq!(
+            parse_forwarded_client_ip(r#"for="192.0.2.60:47011""#),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // Bracketed IPv6 with port.
+        assert_eq!(
+            parse_forwarded_client_ip(r#"for="[2001:db8::1]:4711""#),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        // Multiple forwarded-elements — take the leftmost (closest hop).
+        assert_eq!(
+            parse_forwarded_client_ip("for=192.0.2.60, for=10.0.0.1"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // Case-insensitive key.
+        assert_eq!(
+            parse_forwarded_client_ip("For=192.0.2.60"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        // No `for=` → None.
+        assert_eq!(parse_forwarded_client_ip("proto=http;by=10.0.0.1"), None);
+        // Malformed → None.
+        assert_eq!(parse_forwarded_client_ip("garbage"), None);
     }
 
     #[test]
