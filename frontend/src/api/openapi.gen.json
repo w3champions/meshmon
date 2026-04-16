@@ -13,6 +13,217 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "`GET /api/agents` — return every agent known to the registry.",
+        "description": "The response is a flat JSON array sorted by `id` for determinism.\nEmpty when no agents have registered yet.",
+        "operationId": "list_agents",
+        "responses": {
+          "200": {
+            "description": "List of all registered agents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "`GET /api/agents/{id}` — return a single agent by id.",
+        "description": "Returns 404 with a JSON error body when the id is not found in the\ncurrent registry snapshot.",
+        "operationId": "get_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
+    "/api/alerts": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "`GET /api/alerts` — proxy active alerts from Alertmanager.",
+        "description": "Returns a normalized `Vec<AlertSummary>`. Upstream query parameters\n(`active`, `silenced`, `inhibited`, `unprocessed`, `filter`) are\nforwarded verbatim.\n\n- **503** when `upstream.alertmanager_url` is not configured.\n- **502** when the upstream is unreachable or returns a non-2xx status.",
+        "operationId": "list_alerts",
+        "parameters": [
+          {
+            "name": "active",
+            "in": "query",
+            "description": "Include active alerts.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "silenced",
+            "in": "query",
+            "description": "Include silenced alerts.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "inhibited",
+            "in": "query",
+            "description": "Include inhibited alerts.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "unprocessed",
+            "in": "query",
+            "description": "Include unprocessed alerts.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "description": "PromQL-style label matchers, e.g. `alertname=\"HighLatency\"`.\nMay be repeated.",
+            "required": false,
+            "schema": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active alerts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AlertSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "502": {
+            "description": "Upstream error"
+          },
+          "503": {
+            "description": "Alertmanager not configured"
+          }
+        }
+      }
+    },
+    "/api/alerts/{fingerprint}": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "`GET /api/alerts/{fingerprint}` — single alert by fingerprint.",
+        "description": "Fetches the full alert list from Alertmanager and filters client-side\nby fingerprint (the v2 API has no single-alert endpoint).\n\n- **404** when no alert matches the fingerprint.\n- **502** when the upstream is unreachable or returns a non-2xx status.\n- **503** when `upstream.alertmanager_url` is not configured.",
+        "operationId": "get_alert",
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "description": "Alert fingerprint (hex)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Alert detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Alert not found"
+          },
+          "502": {
+            "description": "Upstream error"
+          },
+          "503": {
+            "description": "Alertmanager not configured"
+          }
+        }
+      }
+    },
     "/api/auth/login": {
       "post": {
         "tags": [
@@ -66,6 +277,343 @@
         }
       }
     },
+    "/api/metrics/query": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "`GET /api/metrics/query` -- proxy an instant query to VictoriaMetrics.",
+        "description": "The query expression must start with `meshmon_` followed by a valid\nidentifier character (ASCII lowercase or underscore). Queries that do\nnot match are rejected with 400.\n\n- **400** when the query doesn't start with `meshmon_<ident>`.\n- **502** when the upstream is unreachable or returns an error.\n- **503** when `upstream.vm_url` is not configured.",
+        "operationId": "query_instant",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "description": "PromQL expression (must start with meshmon_)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "time",
+            "in": "query",
+            "description": "Evaluation timestamp",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Instant query result (VM JSON pass-through)"
+          },
+          "400": {
+            "description": "Query rejected by whitelist"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "502": {
+            "description": "Upstream error"
+          },
+          "503": {
+            "description": "VictoriaMetrics not configured"
+          }
+        }
+      }
+    },
+    "/api/metrics/query_range": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "`GET /api/metrics/query_range` -- proxy a range query to VictoriaMetrics.",
+        "description": "The query expression must start with `meshmon_` followed by a valid\nidentifier character (ASCII lowercase or underscore). Queries that do\nnot match are rejected with 400.\n\n- **400** when the query doesn't start with `meshmon_<ident>`.\n- **502** when the upstream is unreachable or returns an error.\n- **503** when `upstream.vm_url` is not configured.",
+        "operationId": "query_range",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "description": "PromQL expression (must start with meshmon_)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "description": "Start timestamp",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "description": "End timestamp",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "step",
+            "in": "query",
+            "description": "Query resolution step",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Range query result (VM JSON pass-through)"
+          },
+          "400": {
+            "description": "Query rejected by whitelist"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "502": {
+            "description": "Upstream error"
+          },
+          "503": {
+            "description": "VictoriaMetrics not configured"
+          }
+        }
+      }
+    },
+    "/api/paths/{src}/{tgt}/routes": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "`GET /api/paths/{src}/{tgt}/routes` — return a paginated, time-filtered\nlist of route snapshot summaries (without hop detail).",
+        "operationId": "list_routes",
+        "parameters": [
+          {
+            "name": "src",
+            "in": "path",
+            "description": "Source agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tgt",
+            "in": "path",
+            "description": "Target agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the time window (inclusive). Defaults to 24 h ago.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the time window (inclusive). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows to return (1..=500, default 100).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Offset for pagination (>= 0, default 0).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "description": "Protocol filter: icmp, tcp, or udp.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated route snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutesPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameters"
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
+    "/api/paths/{src}/{tgt}/routes/latest": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "`GET /api/paths/{src}/{tgt}/routes/latest` — return the most recent\nroute snapshot for the given source, target, and protocol.",
+        "operationId": "get_route_latest",
+        "parameters": [
+          {
+            "name": "src",
+            "in": "path",
+            "description": "Source agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tgt",
+            "in": "path",
+            "description": "Target agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "description": "Protocol filter: icmp, tcp, or udp.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "icmp"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest route snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteSnapshotDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid protocol"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "No snapshot found"
+          }
+        }
+      }
+    },
+    "/api/paths/{src}/{tgt}/routes/{snapshot_id}": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "`GET /api/paths/{src}/{tgt}/routes/{snapshot_id}` — return a single\nroute snapshot by database id.",
+        "operationId": "get_route_by_id",
+        "parameters": [
+          {
+            "name": "src",
+            "in": "path",
+            "description": "Source agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tgt",
+            "in": "path",
+            "description": "Target agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Snapshot database id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Route snapshot detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteSnapshotDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Snapshot not found"
+          }
+        }
+      }
+    },
     "/api/web-config": {
       "get": {
         "tags": [
@@ -94,6 +642,206 @@
   },
   "components": {
     "schemas": {
+      "AgentSummary": {
+        "type": "object",
+        "description": "Summary of a single agent, returned by the list and detail endpoints.\n\nWrite-only on the server (constructed and serialized, never parsed) so\nonly `Serialize` is derived.",
+        "required": [
+          "id",
+          "display_name",
+          "ip",
+          "registered_at",
+          "last_seen_at"
+        ],
+        "properties": {
+          "agent_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional agent version string."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable display label."
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique agent identifier (matches the agent's `AGENT_ID` env var)."
+          },
+          "ip": {
+            "type": "string",
+            "description": "Agent source IP (host address only, CIDR prefix stripped)."
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last successful push (register/metrics/snapshot)."
+          },
+          "lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional latitude."
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional free-form location string."
+          },
+          "lon": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional longitude."
+          },
+          "registered_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this agent first registered."
+          }
+        }
+      },
+      "AlertSummary": {
+        "type": "object",
+        "description": "Normalized alert summary exposed by the meshmon API.\n\nDerived from the Alertmanager v2 alert model, keeping only the fields\nthe frontend needs. `generatorURL` and other upstream-only fields are\nintentionally dropped.",
+        "required": [
+          "fingerprint",
+          "labels",
+          "state",
+          "starts_at",
+          "ends_at"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Longer description from the `description` annotation."
+          },
+          "ends_at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp when the alert resolved (may be empty/zero for\nactive alerts)."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "Alertmanager fingerprint (hex string), unique per alert group."
+          },
+          "labels": {
+            "type": "object",
+            "description": "Label set attached to the alert (alertname, severity, etc.).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "starts_at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp when the alert started firing."
+          },
+          "state": {
+            "type": "string",
+            "description": "Alert state: `active`, `suppressed`, or `unprocessed`."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short human-readable summary from the `summary` annotation."
+          }
+        }
+      },
+      "HopIpJson": {
+        "type": "object",
+        "description": "JSON representation of an observed IP at a hop.",
+        "required": [
+          "ip",
+          "freq"
+        ],
+        "properties": {
+          "freq": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction of probes that observed this IP at this hop."
+          },
+          "ip": {
+            "type": "string",
+            "description": "Human-readable IP string (IPv4 or IPv6 `to_string()` form)."
+          }
+        }
+      },
+      "HopJson": {
+        "type": "object",
+        "description": "JSON representation of a single traceroute hop as stored in\n`route_snapshots.hops`.",
+        "required": [
+          "position",
+          "observed_ips",
+          "avg_rtt_micros",
+          "stddev_rtt_micros",
+          "loss_pct"
+        ],
+        "properties": {
+          "avg_rtt_micros": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Mean RTT to this hop, in microseconds.",
+            "minimum": 0
+          },
+          "loss_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "Fraction of probes with no response at this hop."
+          },
+          "observed_ips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HopIpJson"
+            },
+            "description": "IP addresses observed at this hop and their frequencies."
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1-indexed TTL / hop position (matches the protocol contract).",
+            "minimum": 0
+          },
+          "stddev_rtt_micros": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Standard deviation of RTT to this hop, in microseconds.",
+            "minimum": 0
+          }
+        }
+      },
+      "InstantQuery": {
+        "type": "object",
+        "description": "Query parameters for `GET /api/metrics/query` (instant query).",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "PromQL expression. Must start with `meshmon_`."
+          },
+          "time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional evaluation timestamp (RFC 3339 or Unix epoch)."
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "POST body for `/api/auth/login`.",
@@ -122,6 +870,190 @@
           "username": {
             "type": "string",
             "description": "Echoed username on success."
+          }
+        }
+      },
+      "PathSummaryJson": {
+        "type": "object",
+        "description": "JSON representation of the aggregated path summary stored in\n`route_snapshots.path_summary`.",
+        "required": [
+          "avg_rtt_micros",
+          "loss_pct",
+          "hop_count"
+        ],
+        "properties": {
+          "avg_rtt_micros": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Mean RTT across all hops, in microseconds.",
+            "minimum": 0
+          },
+          "hop_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total number of hops in the route.",
+            "minimum": 0
+          },
+          "loss_pct": {
+            "type": "number",
+            "format": "double",
+            "description": "Overall path loss fraction."
+          }
+        }
+      },
+      "RangeQuery": {
+        "type": "object",
+        "description": "Query parameters for `GET /api/metrics/query_range` (range query).",
+        "required": [
+          "query",
+          "start",
+          "end",
+          "step"
+        ],
+        "properties": {
+          "end": {
+            "type": "string",
+            "description": "End timestamp (RFC 3339 or Unix epoch)."
+          },
+          "query": {
+            "type": "string",
+            "description": "PromQL expression. Must start with `meshmon_`."
+          },
+          "start": {
+            "type": "string",
+            "description": "Start timestamp (RFC 3339 or Unix epoch)."
+          },
+          "step": {
+            "type": "string",
+            "description": "Query resolution step (e.g. `15s`, `1m`)."
+          }
+        }
+      },
+      "RouteSnapshotDetail": {
+        "type": "object",
+        "description": "Full detail of a single route snapshot (includes hops).",
+        "required": [
+          "id",
+          "source_id",
+          "target_id",
+          "protocol",
+          "observed_at",
+          "hops"
+        ],
+        "properties": {
+          "hops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HopJson"
+            },
+            "description": "Hop-by-hop detail."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Database row id."
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the snapshot was observed."
+          },
+          "path_summary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PathSummaryJson",
+                "description": "Aggregated path summary (optional)."
+              }
+            ]
+          },
+          "protocol": {
+            "type": "string",
+            "description": "Protocol used for the traceroute (icmp, tcp, udp)."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Source agent identifier."
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Target agent identifier."
+          }
+        }
+      },
+      "RouteSnapshotSummary": {
+        "type": "object",
+        "description": "Summary of a route snapshot (no hops — used in list responses).",
+        "required": [
+          "id",
+          "source_id",
+          "target_id",
+          "protocol",
+          "observed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Database row id."
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the snapshot was observed."
+          },
+          "path_summary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PathSummaryJson",
+                "description": "Aggregated path summary (optional)."
+              }
+            ]
+          },
+          "protocol": {
+            "type": "string",
+            "description": "Protocol used for the traceroute (icmp, tcp, udp)."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Source agent identifier."
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Target agent identifier."
+          }
+        }
+      },
+      "RoutesPage": {
+        "type": "object",
+        "description": "Paginated response of route snapshot summaries.",
+        "required": [
+          "items",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteSnapshotSummary"
+            },
+            "description": "Snapshot summaries in descending `observed_at` order."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Applied limit."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current offset."
           }
         }
       },
