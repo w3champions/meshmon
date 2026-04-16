@@ -84,10 +84,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
         )
         .await?;
 
-        // -- Spawn supervisors (skip self) --
+        // -- Spawn supervisors (skip self and duplicates) --
         let mut supervisors = HashMap::new();
         for target in targets_resp.targets {
-            if target.id == env.identity.id {
+            if target.id == env.identity.id || supervisors.contains_key(&target.id) {
                 continue;
             }
             let id = target.id.clone();
