@@ -151,17 +151,16 @@ impl<A: ServiceApi> AgentRuntime<A> {
         let probe_config = ProbeConfig::from_proto(config_resp)
             .context("invalid ConfigResponse from service (bootstrap)")?;
 
-        // Publish the UDP probe secret so the listener and prober pool can
-        // accept/send traffic. send() only fails when all receivers are
-        // dropped — can't happen here since we still hold secret_tx.
-        let _ = secret_tx.send(SecretSnapshot {
-            current: Some(probe_config.udp_probe_secret),
-            previous: probe_config.udp_probe_previous_secret,
-        });
-
-        let (config_tx, config_rx) = watch::channel(probe_config);
-
         // -- Fetch targets --
+        //
+        // Important: we fetch targets BEFORE publishing the secret. Between
+        // "secret set" and "allowlist set" the listener would authenticate
+        // peer probes but see an empty allowlist — it'd then send rejection
+        // packets, which put each peer into 60s `REJECTION_PAUSE`. Publishing
+        // the allowlist first keeps the listener in silent-drop mode during
+        // the `get_targets` RPC; once the secret lands the allowlist is
+        // already populated, so the first valid probe is echoed without a
+        // spurious rejection.
         let source_id = env.identity.id.clone();
         let targets_resp = retry_with_backoff(
             || {
@@ -174,9 +173,21 @@ impl<A: ServiceApi> AgentRuntime<A> {
         )
         .await?;
 
-        // Publish the peer IP allowlist so the UDP listener echoes probes
-        // from these peers instead of rejecting them.
+        // Publish the peer IP allowlist first — listener still drops
+        // everything because the secret hasn't been published yet.
         publish_allowlist(&allowlist_tx, &targets_resp.targets);
+
+        // Now publish the UDP probe secret. Listener + prober pool see
+        // both a populated allowlist and a valid secret on the same update
+        // batch (no inter-step refusal window). `send()` only fails when
+        // all receivers are dropped — can't happen here since we still
+        // hold `secret_tx`.
+        let _ = secret_tx.send(SecretSnapshot {
+            current: Some(probe_config.udp_probe_secret),
+            previous: probe_config.udp_probe_previous_secret,
+        });
+
+        let (config_tx, config_rx) = watch::channel(probe_config);
 
         // -- Spawn supervisors (skip self and duplicates) --
         let mut supervisors = HashMap::new();
