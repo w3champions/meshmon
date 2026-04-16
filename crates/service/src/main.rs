@@ -137,28 +137,33 @@ async fn run() -> anyhow::Result<()> {
         let reload_tls_swap = reload_tls_swap.clone();
         async move {
             let _guard = reload_lock.lock().await;
-            match Config::from_file(&reload_path) {
-                Ok(new_cfg) => {
-                    let new_cfg = Arc::new(new_cfg);
-                    match build_tls_acceptor(&new_cfg) {
-                        Ok(new_acceptor) => {
-                            reload_tls_swap.store(Arc::new(new_acceptor));
-                        }
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "tls reload failed; keeping previous TLS acceptor",
-                            );
-                        }
-                    }
-                    reload_handle.store(new_cfg.clone());
-                    let _ = reload_tx.send(new_cfg);
-                    info!("config reloaded");
-                }
+            let new_cfg = match Config::from_file(&reload_path) {
+                Ok(cfg) => Arc::new(cfg),
                 Err(e) => {
                     warn!(error = %e, "config reload failed; keeping previous config");
+                    return;
                 }
-            }
+            };
+            // Validate and rebuild the TLS acceptor before touching any
+            // observable state. Otherwise subscribers on `config_rx` would
+            // see a `[agent_api.tls]` value that doesn't match the listener
+            // (acceptor kept on the old cert while config advertises the
+            // new one). Roll the entire reload back on TLS failure —
+            // consistent with the "keep previous" policy for parse errors.
+            let new_acceptor = match build_tls_acceptor(&new_cfg) {
+                Ok(acceptor) => acceptor,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "tls rebuild failed during config reload; keeping previous config and acceptor",
+                    );
+                    return;
+                }
+            };
+            reload_tls_swap.store(Arc::new(new_acceptor));
+            reload_handle.store(new_cfg.clone());
+            let _ = reload_tx.send(new_cfg);
+            info!("config reloaded");
         }
     });
 
@@ -241,6 +246,7 @@ async fn run() -> anyhow::Result<()> {
                     // concurrent SIGHUP reload will be visible on the next
                     // accept without interrupting this handshake.
                     let maybe_acceptor = tls_swap.load_full();
+                    let conn_token = graceful_token.clone();
                     if let Some(acceptor) = maybe_acceptor.as_ref().clone() {
                         let app = app.clone();
                         let builder = builder.clone();
@@ -248,7 +254,8 @@ async fn run() -> anyhow::Result<()> {
                             match acceptor.accept(tcp_stream).await {
                                 Ok(tls_stream) => {
                                     let io = TokioIo::new(tls_stream);
-                                    serve_connection(io, peer_addr, app, builder).await;
+                                    serve_connection(io, peer_addr, app, builder, conn_token)
+                                        .await;
                                 }
                                 Err(e) => {
                                     warn!(peer = %peer_addr, error = %e, "TLS handshake failed");
@@ -260,7 +267,7 @@ async fn run() -> anyhow::Result<()> {
                         let app = app.clone();
                         let builder = builder.clone();
                         conn_set.spawn(async move {
-                            serve_connection(io, peer_addr, app, builder).await;
+                            serve_connection(io, peer_addr, app, builder, conn_token).await;
                         });
                     }
                 }
@@ -374,11 +381,19 @@ fn build_tls_acceptor(
 ///
 /// `I` must satisfy hyper's `Read + Write + Unpin + Send + 'static` bounds,
 /// which both `TokioIo<TcpStream>` and `TokioIo<TlsStream<TcpStream>>` do.
+///
+/// `graceful_token` lets the drain phase nudge each connection into
+/// `graceful_shutdown` — HTTP/2 connections get a GOAWAY frame so clients
+/// stop opening new streams, and HTTP/1.1 keep-alive connections close
+/// after the current response. Without this, `conn_set` would only bound
+/// the accept queue: already-established connections could keep firing
+/// fresh RPCs up until the deadline abort.
 async fn serve_connection<I>(
     io: I,
     peer_addr: SocketAddr,
     app: axum::Router,
     builder: auto::Builder<TokioExecutor>,
+    graceful_token: CancellationToken,
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -398,10 +413,22 @@ async fn serve_connection<I>(
         }
     });
 
-    if let Err(e) = builder
-        .serve_connection_with_upgrades(io, TowerToHyperService::new(svc))
-        .await
-    {
+    let conn = builder.serve_connection_with_upgrades(io, TowerToHyperService::new(svc));
+    tokio::pin!(conn);
+
+    let result = tokio::select! {
+        biased;
+        res = conn.as_mut() => res,
+        _ = graceful_token.cancelled() => {
+            // Signal the remote peer and drain in-flight work. Per hyper-util
+            // docs, the connection must continue to be polled until
+            // graceful_shutdown can finish.
+            conn.as_mut().graceful_shutdown();
+            conn.as_mut().await
+        }
+    };
+
+    if let Err(e) = result {
         // Connection errors (client disconnect, protocol mismatch) are
         // common in production; log at debug to avoid noise.
         tracing::debug!(peer = %peer_addr, error = %e, "connection error");
