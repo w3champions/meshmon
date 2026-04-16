@@ -12,10 +12,10 @@
 //! (no dedup of common labels across the batch). For our cardinality
 //! (~40k series, ~670 samples/sec) the cost is well under network I/O.
 
-use crate::ingestion::metrics::{
-    ingest_batch, ingest_dropped, ingest_samples, vm_write_duration, BatchOutcome, DropSource,
-};
 use crate::ingestion::queue::DropOldest;
+use crate::metrics::{
+    ingest_batches, ingest_dropped, ingest_samples, vm_write_duration, BatchOutcome, DropSource,
+};
 use prometheus_reqwest_remote_write::{
     Label, Sample, TimeSeries, WriteRequest, CONTENT_TYPE, HEADER_NAME_REMOTE_WRITE_VERSION,
     LABEL_NAME, REMOTE_WRITE_VERSION_01,
@@ -155,7 +155,7 @@ async fn flush(
 ) {
     match post_batch(client, cfg, buf, token).await {
         Ok(()) => {
-            ingest_batch(BatchOutcome::Ok).increment(1);
+            ingest_batches(BatchOutcome::Ok).increment(1);
             ingest_samples().increment(drained as u64);
             debug!(samples = drained, "vm batch flushed");
         }
@@ -166,7 +166,7 @@ async fn flush(
             debug!(samples = drained, "vm batch abandoned on shutdown");
         }
         Err(e) => {
-            ingest_batch(BatchOutcome::WriteError).increment(1);
+            ingest_batches(BatchOutcome::WriteError).increment(1);
             // Samples discarded after retry exhaustion are a data-loss path
             // equivalent to buffer overflow — mirror that in the counter.
             ingest_dropped(DropSource::Metrics).increment(drained as u64);

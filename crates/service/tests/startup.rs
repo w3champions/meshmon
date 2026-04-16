@@ -41,7 +41,14 @@ url = "postgres://ignored"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(testdb.pool.clone());
     let registry = common::dummy_registry(testdb.pool.clone());
-    let state = AppState::new(swap, rx, testdb.pool.clone(), ingestion, registry);
+    let state = AppState::new(
+        swap,
+        rx,
+        testdb.pool.clone(),
+        ingestion,
+        registry,
+        common::test_prometheus_handle().await,
+    );
 
     let listener = TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
         .await
@@ -228,7 +235,14 @@ url = "postgres://ignored"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(testdb.pool.clone());
     let registry = common::dummy_registry(testdb.pool.clone());
-    let state = AppState::new(swap, rx, testdb.pool.clone(), ingestion, registry);
+    let state = AppState::new(
+        swap,
+        rx,
+        testdb.pool.clone(),
+        ingestion,
+        registry,
+        common::test_prometheus_handle().await,
+    );
     state.mark_ready();
     assert!(state.is_ready());
 

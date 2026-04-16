@@ -22,7 +22,7 @@ use common::login_req;
 #[tokio::test]
 async fn login_with_correct_credentials_returns_200_and_sets_cookie() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -50,7 +50,7 @@ async fn login_with_correct_credentials_returns_200_and_sets_cookie() {
 #[tokio::test]
 async fn login_response_body_echoes_username() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -70,7 +70,7 @@ async fn login_response_body_echoes_username() {
 #[tokio::test]
 async fn login_with_wrong_password_returns_401() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -87,7 +87,7 @@ async fn login_with_wrong_password_returns_401() {
 #[tokio::test]
 async fn login_with_unknown_user_returns_401() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -100,7 +100,7 @@ async fn login_with_unknown_user_returns_401() {
 #[tokio::test]
 async fn logout_returns_200() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -119,7 +119,7 @@ async fn logout_returns_200() {
 #[tokio::test]
 async fn rate_limit_kicks_in_after_burst() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     // Spec: 5 attempts per 15 min, burst of 3. After `burst` attempts in
@@ -152,7 +152,7 @@ async fn rate_limit_kicks_in_after_burst() {
 #[tokio::test]
 async fn rate_limit_does_not_leak_between_ips() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin(pool);
+    let state = common::state_with_admin(pool).await;
     let app = meshmon_service::http::router(state);
 
     // Burn the bucket for IP A.
@@ -177,7 +177,7 @@ async fn peer_addr_extractor_reads_connect_info_when_trust_disabled() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_admin_peer_only(pool);
+    let state = common::state_with_admin_peer_only(pool).await;
     let app = meshmon_service::http::router(state);
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)), 12345);

@@ -1,14 +1,17 @@
 //! Shared application state injected into axum handlers.
 //!
-//! Cheap to `Clone` — every field is already `Arc`-backed.
+//! Cheap to `Clone` — heavyweight fields are `Arc`-backed; `Instant` and
+//! `BuildInfo` are small `Copy` types (a few words each).
 
 use crate::config::Config;
 use crate::ingestion::IngestionPipeline;
+use crate::metrics::Handle as PrometheusHandle;
 use crate::registry::AgentRegistry;
 use arc_swap::ArcSwap;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::watch;
 
 /// Build info populated at compile time. Used by `/metrics` and
@@ -60,6 +63,12 @@ pub struct AppState {
     /// known agent and their last-seen timestamps. Used by handler endpoints
     /// that need to validate source agents or list active targets.
     pub registry: Arc<AgentRegistry>,
+    /// Moment state was constructed. Baseline for
+    /// `meshmon_service_uptime_seconds`.
+    pub started_at: Instant,
+    /// Prometheus render handle. Cheap clone; handlers call
+    /// `prom.render()` at scrape time.
+    pub prom: PrometheusHandle,
 }
 
 impl AppState {
@@ -70,6 +79,7 @@ impl AppState {
         pool: PgPool,
         ingestion: IngestionPipeline,
         registry: Arc<AgentRegistry>,
+        prom: PrometheusHandle,
     ) -> Self {
         Self {
             config,
@@ -79,6 +89,8 @@ impl AppState {
             build: BuildInfo::compile_time(),
             ingestion,
             registry,
+            started_at: Instant::now(),
+            prom,
         }
     }
 
@@ -133,5 +145,21 @@ url = "postgres://a@b/c"
         flag.store(true, Ordering::SeqCst);
         assert!(flag.load(Ordering::SeqCst));
         let _ = rx;
+    }
+
+    #[test]
+    fn build_info_reports_version_and_commit() {
+        let b = BuildInfo::compile_time();
+        // Sanity check that compile_time() wires CARGO_PKG_VERSION; guards
+        // against a future refactor that hardcodes a literal.
+        assert_eq!(b.version, env!("CARGO_PKG_VERSION"));
+        // Either a real short sha (hex, >= 7 chars) or the literal
+        // fallback `"unknown"` — build.rs never leaves the env unset.
+        assert!(b.commit == "unknown" || b.commit.len() >= 7);
+        assert!(
+            b.commit == "unknown" || b.commit.chars().all(|c| c.is_ascii_hexdigit()),
+            "commit {} is neither 'unknown' nor hex",
+            b.commit
+        );
     }
 }

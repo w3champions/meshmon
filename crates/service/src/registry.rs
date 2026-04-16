@@ -7,6 +7,9 @@
 //!
 //! See the service README's "Agent registry" section for design context.
 
+use crate::metrics::{
+    registry_agents, registry_last_refresh_age_seconds, registry_refresh_errors, AgentState,
+};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use sqlx::types::ipnetwork::IpNetwork;
@@ -212,6 +215,12 @@ impl AgentRegistry {
         let snap = refresh_once(&self.pool).await?;
         self.publish(&snap);
         self.snapshot.store(Arc::new(snap));
+        // Seed the refresh-age gauge so operators get an honest reading
+        // even before the periodic loop ticks. Without this, the gauge
+        // is absent (or stuck at 0) for up to `refresh_interval` after
+        // startup, which reads as "snapshot is fresh" when it's really
+        // "we haven't measured yet".
+        registry_last_refresh_age_seconds().set(0.0);
         Ok(())
     }
 
@@ -237,6 +246,10 @@ impl AgentRegistry {
         let snap = refresh_once(&self.pool).await?;
         self.publish(&snap);
         self.snapshot.store(Arc::new(snap));
+        // Keep the refresh-age gauge aligned with the snapshot just
+        // published — the periodic loop also resets it, but a force
+        // refresh between ticks should not leave the gauge stale.
+        registry_last_refresh_age_seconds().set(0.0);
         Ok(())
     }
 
@@ -255,16 +268,8 @@ impl AgentRegistry {
                 stale += 1;
             }
         }
-        metrics::gauge!(
-            "meshmon_service_registry_agents",
-            "state" => "active",
-        )
-        .set(active as f64);
-        metrics::gauge!(
-            "meshmon_service_registry_agents",
-            "state" => "stale",
-        )
-        .set(stale as f64);
+        registry_agents(AgentState::Active).set(active as f64);
+        registry_agents(AgentState::Stale).set(stale as f64);
     }
 
     /// Spawn the periodic refresh task.
@@ -299,8 +304,7 @@ impl AgentRegistry {
                             error = %e,
                             "agent registry refresh failed; keeping stale snapshot",
                         );
-                        metrics::counter!("meshmon_service_registry_refresh_errors_total")
-                            .increment(1);
+                        registry_refresh_errors().increment(1);
                     }
                 }
 
@@ -309,7 +313,7 @@ impl AgentRegistry {
                 let age_secs = (Utc::now() - self.snapshot().refreshed_at())
                     .num_seconds()
                     .max(0) as f64;
-                metrics::gauge!("meshmon_service_registry_last_refresh_age_seconds").set(age_secs);
+                registry_last_refresh_age_seconds().set(age_secs);
 
                 tokio::select! {
                     biased;

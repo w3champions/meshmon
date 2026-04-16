@@ -28,6 +28,16 @@ shutdown_deadline_seconds = 5
 # the per-IP login rate limit by forging the header.
 # trust_forwarded_headers = false
 
+# Optional: HTTP Basic auth for /metrics (defense-in-depth for the
+# Prometheus scrape). Unset → /metrics is unauthenticated (spec
+# default). When set, both username and one of {password_hash,
+# password_hash_env} are required.
+#
+# [service.metrics_auth]
+# username = "prometheus"
+# password_hash_env = "MESHMON_METRICS_PASSWORD_HASH"
+# # Generate with:  argon2 salt < <(printf '%s' "$PASSWORD") -id -t 2 -m 19 -p 1 -e
+
 [database]
 # Either `url` or `url_env` must be set.
 # url = "postgres://meshmon:SECRET@meshmon-db:5432/meshmon?sslmode=disable"

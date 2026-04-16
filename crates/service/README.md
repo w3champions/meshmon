@@ -168,3 +168,73 @@ grpcurl -plaintext \
 ## Configuration
 
 See `meshmon.toml` (canonical form lives in the deploy/ example). Secrets go through `*_env` indirection.
+
+## Observability
+
+- `GET /healthz` — liveness. 200 while the process is up. No auth.
+- `GET /readyz` — readiness. 200 when startup completes; 503 during
+  shutdown drain. No auth.
+- `GET /metrics` — Prometheus text-format self-metrics. Optional
+  Basic auth (see below).
+
+### Basic auth for `/metrics`
+
+Opt-in via `[service.metrics_auth]`:
+
+```toml
+[service.metrics_auth]
+username = "prometheus"
+password_hash_env = "MESHMON_METRICS_PASSWORD_HASH"   # or password_hash = "..."
+```
+
+Omit the section → `/metrics` is ungated. When configured:
+- Request without credentials → `401 Unauthorized` with
+  `WWW-Authenticate: Basic realm="meshmon metrics"`.
+- Wrong creds → `401`.
+- Password comparison is argon2 PHC — constant-time username compare
+  plus argon2 verify.
+
+The scraping Prometheus needs matching credentials:
+
+```yaml
+scrape_configs:
+  - job_name: meshmon-service
+    basic_auth:
+      username: prometheus
+      password: <plaintext>
+    static_configs:
+      - targets: [ '<host>:8080' ]
+```
+
+### Metric catalog
+
+- `meshmon_service_uptime_seconds` — seconds since process start.
+- `meshmon_service_build_info{version,commit}` — singleton gauge = 1.
+- `meshmon_service_http_requests_total{method,endpoint,status}` —
+  request counts keyed on axum matched-route templates. Via
+  `axum-prometheus`.
+- `meshmon_service_http_requests_duration_seconds{method,endpoint,status}`
+  — latency histogram. Via `axum-prometheus`.
+- `meshmon_service_http_requests_pending{method,endpoint}` — in-flight
+  gauge. Via `axum-prometheus`.
+- `meshmon_service_ingest_batches_total{outcome}` — `ok` or `write_error`.
+- `meshmon_service_ingest_samples_total` — samples shipped to VM.
+- `meshmon_service_ingest_dropped_total{source}` — source ∈
+  `{metrics, snapshot, touch}`.
+- `meshmon_service_vm_write_duration_seconds` — VM remote-write latency.
+- `meshmon_service_pg_snapshot_duration_seconds` — route-snapshot INSERT
+  latency.
+- `meshmon_service_last_seen_writes_total` — successful
+  `agents.last_seen_at` updates.
+- `meshmon_service_registry_agents{state}` — `active` or `stale`.
+- `meshmon_service_registry_last_refresh_age_seconds` — age of the
+  registry snapshot.
+- `meshmon_service_registry_refresh_errors_total` — failed refreshes.
+
+### Registry-derived gauges
+
+Appended at scrape time from the live registry snapshot (deregistered
+agents disappear on the next scrape):
+
+- `meshmon_agent_info{source,agent_version}` — gauge = 1 per known agent.
+- `meshmon_agent_last_seen_seconds{source}` — Unix timestamp of last push.

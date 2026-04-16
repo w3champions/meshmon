@@ -108,9 +108,12 @@ pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net
         .map(|ci| ci.0.ip())
 }
 
-/// Constant-time equality with explicit length gate (`ct_eq` panics on
-/// unequal lengths). Leaks "token-not-empty-but-wrong-length" by design —
-/// cheap to discover by trial-and-error anyway.
+/// Constant-time equality over byte slices of *equal* length. `ct_eq` on
+/// `[u8]` already returns `Choice(0)` for unequal lengths (subtle 2.x
+/// short-circuits — no panic), but we reject unequal lengths up front to
+/// keep the fast path simple and make the length-leak explicit. Leaks
+/// "token-not-empty-but-wrong-length" by design — cheap to discover by
+/// trial-and-error anyway.
 pub(crate) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -800,6 +803,13 @@ url = "postgres://ignored@h/d"
     /// `[agent_api].shared_token`. The pool is lazy (no real DB connection),
     /// the ingestion pipeline is spawned against a token that's immediately
     /// cancelled so no background threads linger between tests.
+    ///
+    /// Sync on purpose: unit tests in this module use the plain `#[test]`
+    /// harness, and `crate::metrics::test_install()` mirrors that with a
+    /// sync `OnceLock`. Integration tests have their own async
+    /// `test_prometheus_handle()` helper in `tests/common/mod.rs` —
+    /// don't "normalize" this one to async or you'll force every
+    /// surrounding `#[test]` to become `#[tokio::test]`.
     fn agent_state_with(token: Option<&str>) -> AppState {
         let token_line = match token {
             Some(t) => format!(r#"shared_token = "{t}""#),
@@ -832,7 +842,14 @@ url = "postgres://ignored@localhost/db"
             Duration::from_secs(10),
             Duration::from_secs(300),
         ));
-        AppState::new(swap, rx, pool, ingestion, registry)
+        AppState::new(
+            swap,
+            rx,
+            pool,
+            ingestion,
+            registry,
+            crate::metrics::test_install(),
+        )
     }
 
     /// Call the interceptor with the given `Authorization` header value

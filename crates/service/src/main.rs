@@ -3,6 +3,9 @@
 //! Startup order (spec 03 §Startup):
 //! 1. Load config (`$MESHMON_CONFIG`, default `/etc/meshmon/meshmon.toml`).
 //! 2. Initialize tracing subscriber.
+//!    2b. Install Prometheus recorder, describe self-metrics, and emit
+//!    `meshmon_service_build_info` so every subsystem's `metrics::*`
+//!    calls feed the installed handle from the first moment they can fire.
 //! 3. Connect Postgres + run migrations.
 //! 4. Best-effort reachability checks for VictoriaMetrics and Alertmanager
 //!    (warn on failure — those upstreams may not exist yet during rollout).
@@ -58,6 +61,17 @@ async fn run() -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "meshmon-service starting"
     );
+
+    // --- Step 2b: Metrics recorder ---
+    // Install BEFORE ingestion/registry subsystems emit anything —
+    // once installed, every `metrics::*` call in those modules feeds
+    // this handle. `install_recorder` sets the process-global recorder
+    // and panics on a second call; this binary calls it exactly once
+    // here. Integration tests go through `crate::metrics::test_install`
+    // which shares the handle via `OnceLock`.
+    let prom = meshmon_service::metrics::install_recorder();
+    meshmon_service::metrics::describe_service_metrics();
+    meshmon_service::metrics::emit_build_info(&meshmon_service::state::BuildInfo::compile_time());
 
     // --- Step 3: Postgres + migrations ---
     let pool = db::connect(initial_config.database.url())
@@ -198,9 +212,12 @@ async fn run() -> anyhow::Result<()> {
         pool,
         ingestion.clone(),
         registry.clone(),
+        prom.clone(),
     );
     state.mark_ready();
     let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());
+    let upkeep_handle =
+        meshmon_service::metrics::spawn_upkeep(prom.clone(), shutdown_token.clone());
     let app = http::router(state.clone());
 
     // --- Step 8: Serve with a bounded drain ---
@@ -351,6 +368,16 @@ async fn run() -> anyhow::Result<()> {
         }
     }
     info!("agent registry refresh loop drained");
+
+    match tokio::time::timeout(deadline, upkeep_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "metrics upkeep task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "metrics upkeep did not drain within shutdown_deadline; aborting",
+        ),
+    }
+    info!("metrics upkeep loop drained");
 
     serve_result.context("HTTP server")?;
 

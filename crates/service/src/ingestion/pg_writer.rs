@@ -9,9 +9,9 @@
 //! keeps the JSONB write atomic.
 
 use crate::ingestion::json_shapes::{HopJson, PathSummaryJson};
-use crate::ingestion::metrics::pg_snapshot_duration;
 use crate::ingestion::protocol_label;
 use crate::ingestion::validator::ValidatedSnapshot;
+use crate::metrics::pg_snapshot_duration;
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::types::Json;
 use sqlx::PgPool;

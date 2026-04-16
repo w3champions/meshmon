@@ -101,6 +101,7 @@ pub mod grpc_harness;
 
 use ctor::dtor;
 use meshmon_service::config::Config;
+use meshmon_service::metrics::Handle as PrometheusHandle;
 use meshmon_service::state::AppState;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::Executor;
@@ -111,6 +112,22 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::{watch, OnceCell};
 use uuid::Uuid;
+
+static TEST_PROM: OnceCell<PrometheusHandle> = OnceCell::const_new();
+
+/// Process-wide recorder install. `metrics::set_global_recorder`
+/// rejects a second call, so every test in the same binary must share
+/// one handle.
+pub async fn test_prometheus_handle() -> PrometheusHandle {
+    TEST_PROM
+        .get_or_init(|| async {
+            let h = meshmon_service::metrics::install_recorder();
+            meshmon_service::metrics::describe_service_metrics();
+            h
+        })
+        .await
+        .clone()
+}
 
 /// Pinned TimescaleDB image. Rolling tags (`latest`, `latest-pg16`) drift
 /// silently and break historical reproducibility, so this is a deliberate
@@ -367,7 +384,7 @@ pub fn dummy_registry(
 /// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
 /// set a stable client IP via `X-Forwarded-For` without needing to inject a
 /// `ConnectInfo` extension per request.
-pub fn state_with_admin(pool: PgPool) -> AppState {
+pub async fn state_with_admin(pool: PgPool) -> AppState {
     let toml = format!(
         r#"
 [database]
@@ -386,12 +403,57 @@ password_hash = "{AUTH_TEST_HASH}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
+}
+
+/// Same as [`state_with_admin`] but with `[service.metrics_auth]`
+/// populated so the `/metrics` Basic-auth middleware is active. The
+/// scraper credential is `prom` / [`AUTH_TEST_PASSWORD`]; the admin user
+/// stays available under the usual `admin` credential — the two auth
+/// surfaces do not share identities.
+pub async fn state_with_admin_and_metrics_auth(pool: PgPool) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[service]
+trust_forwarded_headers = true
+
+[service.metrics_auth]
+username = "prom"
+password_hash = "{AUTH_TEST_HASH}"
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let ingestion = dummy_ingestion(pool.clone());
+    let registry = dummy_registry(pool.clone());
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
 }
 
 /// Same as [`state_with_admin`] but with `upstream.alertmanager_url` set.
 /// Use this for alert-proxy tests that need the upstream URL configured.
-pub fn state_with_admin_and_alertmanager(pool: PgPool, alertmanager_url: &str) -> AppState {
+pub async fn state_with_admin_and_alertmanager(pool: PgPool, alertmanager_url: &str) -> AppState {
     let toml = format!(
         r#"
 [database]
@@ -413,12 +475,19 @@ alertmanager_url = "{alertmanager_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
 }
 
 /// Same as [`state_with_admin`] but with `upstream.vm_url` set.
 /// Use this for metrics-proxy tests that need the VM URL configured.
-pub fn state_with_admin_and_vm(pool: PgPool, vm_url: &str) -> AppState {
+pub async fn state_with_admin_and_vm(pool: PgPool, vm_url: &str) -> AppState {
     let toml = format!(
         r#"
 [database]
@@ -440,12 +509,19 @@ vm_url = "{vm_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
 }
 
 /// `AppState` with the standard test operator plus `[web]` config for
 /// Grafana fields.
-pub fn state_with_admin_and_web(
+pub async fn state_with_admin_and_web(
     pool: PgPool,
     grafana_base_url: Option<&str>,
     dashboards: &[(&str, &str)],
@@ -486,14 +562,21 @@ password_hash = "{AUTH_TEST_HASH}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
 }
 
 /// Same as [`state_with_admin`] but with `trust_forwarded_headers = false`.
 /// Use this when you need to exercise the `PeerAddrKeyExtractor` branch —
 /// tests driven via `oneshot` must inject `ConnectInfo<SocketAddr>` into
 /// the request extensions manually.
-pub fn state_with_admin_peer_only(pool: PgPool) -> AppState {
+pub async fn state_with_admin_peer_only(pool: PgPool) -> AppState {
     let toml = format!(
         r#"
 [database]
@@ -509,7 +592,14 @@ password_hash = "{AUTH_TEST_HASH}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
 }
 
 /// Bearer token used by the in-process gRPC harness.
@@ -519,7 +609,7 @@ pub const TEST_AGENT_TOKEN: &str = "test-agent-token-0123456789abcdef";
 /// `trust_forwarded_headers = true` so tests can drive per-request IPs via
 /// `x-forwarded-for` without injecting a real `ConnectInfo`. Generous rate
 /// limit so the concurrency test doesn't trip the limiter.
-pub fn state_with_agent_token(pool: PgPool) -> AppState {
+pub async fn state_with_agent_token(pool: PgPool) -> AppState {
     let toml = format!(
         r#"
 [database]
@@ -543,7 +633,14 @@ rate_limit_burst = 300
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
-    AppState::new(swap, rx, pool, ingestion, registry)
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
 }
 
 // ---------------------------------------------------------------------------

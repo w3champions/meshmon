@@ -14,7 +14,7 @@ use tonic::Code;
 #[tokio::test]
 async fn config_returns_defaults() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 0, 99, 1])).await;
 
@@ -42,7 +42,7 @@ async fn config_returns_defaults() {
 #[tokio::test]
 async fn config_requires_auth() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = common::state_with_agent_token(pool);
+    let state = common::state_with_agent_token(pool).await;
     let mut client = common::grpc_harness::in_process_agent_client_with_token(
         state,
         IpAddr::from([10, 0, 99, 2]),
@@ -81,7 +81,14 @@ primary_sec = 120
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(pool.clone());
     let registry = common::dummy_registry(pool.clone());
-    let state = AppState::new(swap, rx, pool, ingestion, registry);
+    let state = AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        common::test_prometheus_handle().await,
+    );
 
     let mut client =
         common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 0, 99, 3])).await;
