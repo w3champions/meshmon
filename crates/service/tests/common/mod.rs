@@ -413,6 +413,44 @@ password_hash = "{AUTH_TEST_HASH}"
     )
 }
 
+/// Same as [`state_with_admin`] but with `[service.metrics_auth]`
+/// populated so the `/metrics` Basic-auth middleware is active. The
+/// scraper credential is `prom` / [`AUTH_TEST_PASSWORD`]; the admin user
+/// stays available under the usual `admin` credential — the two auth
+/// surfaces do not share identities.
+pub async fn state_with_admin_and_metrics_auth(pool: PgPool) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[service]
+trust_forwarded_headers = true
+
+[service.metrics_auth]
+username = "prom"
+password_hash = "{AUTH_TEST_HASH}"
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let ingestion = dummy_ingestion(pool.clone());
+    let registry = dummy_registry(pool.clone());
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
+}
+
 /// Same as [`state_with_admin`] but with `upstream.alertmanager_url` set.
 /// Use this for alert-proxy tests that need the upstream URL configured.
 pub async fn state_with_admin_and_alertmanager(pool: PgPool, alertmanager_url: &str) -> AppState {
