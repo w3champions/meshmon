@@ -132,3 +132,25 @@ async fn metrics_bad_range_returns_invalid_argument() {
     let err = client.push_metrics(batch).await.unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+// ---------------------------------------------------------------------------
+// Test 4: empty source_id → InvalidArgument (not PermissionDenied).
+// The validator runs before the registry check so that malformed payloads
+// surface as INVALID_ARGUMENT. A missing source_id is a client-side data
+// bug, not an authorization question.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn metrics_empty_source_id_returns_invalid_argument() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool);
+
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 4, 0, 1])).await;
+
+    let mut batch = good_batch("ignored-because-empty", "metrics-tgt-empty");
+    batch.source_id = String::new();
+
+    let err = client.push_metrics(batch).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}

@@ -105,3 +105,19 @@ async fn snapshot_bad_hop_returns_invalid_argument() {
     let err = client.push_route_snapshot(bad).await.unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+#[tokio::test]
+async fn snapshot_empty_source_id_returns_invalid_argument() {
+    // Validator runs before the registry check; empty source_id is a
+    // client-side data bug and must surface as InvalidArgument.
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool);
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 2, 0, 5])).await;
+
+    let mut req = good_snapshot("ignored-because-empty", "s-t3");
+    req.source_id = String::new();
+
+    let err = client.push_route_snapshot(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}

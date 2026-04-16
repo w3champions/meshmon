@@ -207,19 +207,23 @@ impl AgentApi for AgentApiImpl {
         let batch = request.into_inner();
         tracing::Span::current().record("source_id", tracing::field::display(&batch.source_id));
 
-        if self
-            .state
-            .registry
-            .snapshot()
-            .get(&batch.source_id)
-            .is_none()
-        {
-            return Err(Status::permission_denied("unknown source agent"));
-        }
+        // Validate payload before authorization lookup so malformed
+        // batches surface as INVALID_ARGUMENT rather than leaking through
+        // the registry check as PERMISSION_DENIED (e.g. empty source_id,
+        // missing target_id, bad failure_rate).
         let validated = validate_metrics(batch).map_err(|e| {
             tracing::debug!(error = %e, "metrics batch rejected by validator");
             Status::invalid_argument(e.to_string())
         })?;
+        if self
+            .state
+            .registry
+            .snapshot()
+            .get(&validated.source_id)
+            .is_none()
+        {
+            return Err(Status::permission_denied("unknown source agent"));
+        }
         self.state.ingestion.push_metrics(validated);
         Ok(Response::new(PushMetricsResponse::default()))
     }
@@ -236,13 +240,21 @@ impl AgentApi for AgentApiImpl {
         tracing::Span::current().record("source_id", tracing::field::display(&req.source_id));
         tracing::Span::current().record("target_id", tracing::field::display(&req.target_id));
 
-        if self.state.registry.snapshot().get(&req.source_id).is_none() {
-            return Err(Status::permission_denied("unknown source agent"));
-        }
+        // Validate payload before authorization lookup; see push_metrics
+        // for rationale.
         let validated = validate_snapshot(req).map_err(|e| {
             tracing::debug!(error = %e, "route snapshot rejected by validator");
             Status::invalid_argument(e.to_string())
         })?;
+        if self
+            .state
+            .registry
+            .snapshot()
+            .get(&validated.source_id)
+            .is_none()
+        {
+            return Err(Status::permission_denied("unknown source agent"));
+        }
         self.state.ingestion.push_snapshot(validated);
         Ok(Response::new(PushRouteSnapshotResponse::default()))
     }
