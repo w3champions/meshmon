@@ -264,17 +264,14 @@ impl ProbeConfig {
             Protocol::Icmp => self
                 .raw
                 .icmp_thresholds
-                .clone()
                 .unwrap_or_else(default_icmp_thresholds),
             Protocol::Tcp => self
                 .raw
                 .tcp_thresholds
-                .clone()
                 .unwrap_or_else(default_tcp_thresholds),
             Protocol::Udp => self
                 .raw
                 .udp_thresholds
-                .clone()
                 .unwrap_or_else(default_udp_thresholds),
             Protocol::Unspecified => default_icmp_thresholds(),
         }
@@ -283,7 +280,6 @@ impl ProbeConfig {
     pub fn path_thresholds(&self) -> PathHealthThresholds {
         self.raw
             .path_health_thresholds
-            .clone()
             .unwrap_or_else(default_path_thresholds)
     }
 
