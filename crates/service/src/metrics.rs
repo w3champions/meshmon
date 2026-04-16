@@ -55,8 +55,15 @@ pub const REGISTRY_REFRESH_ERRORS_TOTAL: &str = "meshmon_service_registry_refres
 // fire once per process (incompatible with integration tests that
 // instantiate the router from multiple `#[tokio::test]`s).
 
+/// Every self-metric that carries a stable HELP/TYPE pair. Drives the
+/// in-module test that fails if a new metric is added without a
+/// corresponding `describe_*!` entry.
+///
+/// Intentionally excludes [`BUILD_INFO`]: it is emitted once at startup
+/// as a labeled gauge = 1, so its describe coverage is checked by a
+/// separate assertion rather than through this slice.
 #[cfg(test)]
-pub(crate) const ALL_METRIC_NAMES: &[&str] = &[
+const ALL_METRIC_NAMES: &[&str] = &[
     UPTIME_SECONDS,
     INGEST_BATCHES_TOTAL,
     INGEST_SAMPLES_TOTAL,
@@ -191,7 +198,7 @@ pub fn registry_refresh_errors() -> Counter {
 /// Emit the one-shot `meshmon_service_build_info` gauge with `version`
 /// and `commit` labels set to the current build's values. Callers hit
 /// this once at startup; the gauge stays at `1` for the process lifetime.
-pub fn emit_build_info(info: &BuildInfo) {
+pub fn emit_build_info(info: BuildInfo) {
     gauge!(
         BUILD_INFO,
         "version" => info.version,
@@ -364,7 +371,7 @@ mod tests {
         // BUILD_INFO is intentionally not in ALL_METRIC_NAMES (it's a
         // one-shot with non-enumerable labels). Exercise it separately so
         // this test's name ("every metric") doesn't lie.
-        emit_build_info(&BuildInfo::compile_time());
+        emit_build_info(BuildInfo::compile_time());
 
         let body = h.render();
         for name in ALL_METRIC_NAMES {

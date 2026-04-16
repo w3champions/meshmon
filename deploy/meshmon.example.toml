@@ -36,7 +36,12 @@ shutdown_deadline_seconds = 5
 # [service.metrics_auth]
 # username = "prometheus"
 # password_hash_env = "MESHMON_METRICS_PASSWORD_HASH"
-# # Generate with:  argon2 salt < <(printf '%s' "$PASSWORD") -id -t 2 -m 19 -p 1 -e
+# # Generate a production-strength PHC hash with the argon2 CLI. `-id`
+# # selects argon2id; `-t 2 -p 1` are the OWASP-recommended iteration
+# # and parallelism; `-m 19` is a base-2 log — 2^19 KiB = 512 MiB memory
+# # per verify. Lower to `-m 17` (128 MiB) on memory-constrained hosts.
+# #
+# #   echo -n "$PASSWORD" | argon2 "$(openssl rand -base64 16)" -id -t 2 -m 19 -p 1 -e
 
 [database]
 # Either `url` or `url_env` must be set.

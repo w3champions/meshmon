@@ -108,14 +108,6 @@ async fn metrics_exposes_registered_agent_info_and_last_seen() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_agent_token(pool.clone()).await;
 
-    // NOTE: this test mutates the shared migrated pool. The `register`
-    // call below commits the `obs-test-agent` row and it persists for
-    // the lifetime of the test binary. None of the current tests in
-    // this binary assert on agent counts, so the contamination is
-    // latent. If a future test here needs clean isolation, switch its
-    // pool to `common::acquire(true)` (fresh DB per test) or add an
-    // explicit `DELETE FROM agents WHERE id = 'obs-test-agent'` cleanup
-    // step.
     let mut client =
         common::grpc_harness::in_process_agent_client(state.clone(), IpAddr::from([10, 99, 0, 1]))
             .await;
@@ -136,8 +128,23 @@ async fn metrics_exposes_registered_agent_info_and_last_seen() {
     // scrape surface.
     state.registry.force_refresh().await.expect("force refresh");
 
-    let app = meshmon_service::http::router(state);
+    let app = meshmon_service::http::router(state.clone());
     let body = scrape(&app).await;
+
+    // Clean up before asserting so the `obs-test-agent` row does not
+    // linger in the shared pool when a later test is added that asserts
+    // on agent counts. Refresh again so the in-memory snapshot loses the
+    // row alongside the database.
+    sqlx::query("DELETE FROM agents WHERE id = $1")
+        .bind("obs-test-agent")
+        .execute(&pool)
+        .await
+        .expect("cleanup obs-test-agent");
+    state
+        .registry
+        .force_refresh()
+        .await
+        .expect("force refresh after cleanup");
 
     assert!(
         body.contains(r#"meshmon_agent_info{source="obs-test-agent",agent_version="0.42.0"} 1"#),
