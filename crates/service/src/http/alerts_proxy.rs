@@ -112,10 +112,11 @@ pub struct AlertsQuery {
     /// Single PromQL-style label matcher expression, e.g.
     /// `alertname="HighLatency"`. Multiple matchers must be combined into
     /// one expression by the caller (Alertmanager accepts comma-separated
-    /// matchers inside a single `filter` value). `serde_urlencoded` --
-    /// the backing deserializer for axum's `Query` extractor -- does not
-    /// reliably decode a repeated `filter=` key into a `Vec`, so we
-    /// expose a single value to avoid silently dropping matchers.
+    /// matchers inside a single `filter` value).
+    // Single value rather than `Vec<String>` because `serde_urlencoded` --
+    // the backing deserializer for axum's `Query` extractor -- does not
+    // reliably decode a repeated `filter=` key into a `Vec`. Exposing a
+    // single value avoids silently dropping matchers.
     pub filter: Option<String>,
 }
 

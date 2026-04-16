@@ -140,7 +140,7 @@
           {
             "name": "filter",
             "in": "query",
-            "description": "Single PromQL-style label matcher expression, e.g.\n`alertname=\"HighLatency\"`. Multiple matchers must be combined into\none expression by the caller (Alertmanager accepts comma-separated\nmatchers inside a single `filter` value). `serde_urlencoded` --\nthe backing deserializer for axum's `Query` extractor -- does not\nreliably decode a repeated `filter=` key into a `Vec`, so we\nexpose a single value to avoid silently dropping matchers.",
+            "description": "Single PromQL-style label matcher expression, e.g.\n`alertname=\"HighLatency\"`. Multiple matchers must be combined into\none expression by the caller (Alertmanager accepts comma-separated\nmatchers inside a single `filter` value).",
             "required": false,
             "schema": {
               "type": [
