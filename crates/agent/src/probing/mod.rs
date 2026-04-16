@@ -5,6 +5,8 @@
 //! the per-target supervisor's mpsc channel. This module owns the shared
 //! data types; prober implementations live in sibling files.
 
+pub mod wire;
+
 use std::net::IpAddr;
 
 /// One probe outcome reported by a prober. The supervisor maps these onto
