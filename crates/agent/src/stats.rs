@@ -39,7 +39,11 @@ use crate::probing::ProbeObservation;
 /// independent of protocol-specific payload size.
 #[derive(Debug, Clone, Copy)]
 struct Sample {
-    /// Monotonic instant the probe was observed (== `ProbeObservation.observed_at`).
+    /// Monotonic instant the sample was inserted into RollingStats — used
+    /// for sliding-window math. NOT the probe's `observed_at` (which is
+    /// the send time and can arrive non-monotonically: UDP timeout
+    /// observations are emitted ≥2s after their send time, breaking the
+    /// monotonicity the prefix-pop `purge_old` requires).
     t: Instant,
     /// `Some(rtt)` on success, `None` on failure (`Timeout` / `Error`).
     /// `Refused` is filtered upstream and never reaches `insert`.
@@ -159,14 +163,22 @@ impl RollingStats {
 
     /// Insert a single observation. O(1).
     ///
+    /// `now` is the monotonic instant the supervisor received the
+    /// observation; it becomes the sample's window-math timestamp. Using
+    /// the receive time (rather than `obs.observed_at`, the send time)
+    /// guarantees the deque is monotonic in `t`, which `purge_old` relies on.
+    /// The send-time/receive-time distinction is bounded by the per-protocol
+    /// probe deadline (~2s for UDP/TCP timeouts) and produces ≤2s of window
+    /// drift — acceptable for 300s/900s windows.
+    ///
     /// The caller (supervisor) is responsible for filtering protocol
     /// outcomes that should not contribute to rolling stats — currently
     /// only UDP `Refused` (spec 02 § Probe outcomes). Other failures
     /// (`Timeout`, TCP `Refused`, `Error`) are valid samples and arrive
     /// here with `outcome.is_success() == false`.
-    pub fn insert(&mut self, obs: &ProbeObservation) {
+    pub fn insert(&mut self, obs: &ProbeObservation, now: Instant) {
         let sample = Sample {
-            t: obs.observed_at,
+            t: now,
             rtt_micros: obs.outcome.rtt_micros(),
         };
         self.sent += 1;
@@ -418,7 +430,8 @@ mod tests {
     #[test]
     fn single_success_yields_mean_equal_to_rtt() {
         let mut stats = RollingStats::new(five_min());
-        stats.insert(&ok(Instant::now(), 1_500));
+        let now = Instant::now();
+        stats.insert(&ok(now, 1_500), now);
         let s = stats.summary_fast();
         assert_eq!(s.sample_count, 1);
         assert_eq!(s.successful, 1);
@@ -434,7 +447,8 @@ mod tests {
     #[test]
     fn single_failure_yields_failure_rate_one() {
         let mut stats = RollingStats::new(five_min());
-        stats.insert(&timeout(Instant::now()));
+        let now = Instant::now();
+        stats.insert(&timeout(now), now);
         let s = stats.summary_fast();
         assert_eq!(s.sample_count, 1);
         assert_eq!(s.successful, 0);
@@ -449,9 +463,9 @@ mod tests {
         let mut stats = RollingStats::new(five_min());
         let now = Instant::now();
         for rtt in [1_000_u32, 2_000, 3_000, 4_000] {
-            stats.insert(&ok(now, rtt));
+            stats.insert(&ok(now, rtt), now);
         }
-        stats.insert(&timeout(now));
+        stats.insert(&timeout(now), now);
         let s = stats.summary_fast();
         assert_eq!(s.sample_count, 5);
         assert_eq!(s.successful, 4);
@@ -477,7 +491,7 @@ mod tests {
         let mut stats = RollingStats::new(five_min());
         let now = Instant::now();
         for _ in 0..10 {
-            stats.insert(&ok(now, 5_000));
+            stats.insert(&ok(now, 5_000), now);
         }
         let s = stats.summary_fast();
         assert_eq!(s.successful, 10);
@@ -489,7 +503,8 @@ mod tests {
     #[test]
     fn error_outcome_counts_as_failure() {
         let mut stats = RollingStats::new(five_min());
-        stats.insert(&obs_at(Instant::now(), ProbeOutcome::Error("bind".into())));
+        let now = Instant::now();
+        stats.insert(&obs_at(now, ProbeOutcome::Error("bind".into())), now);
         let s = stats.summary_fast();
         assert_eq!(s.sample_count, 1);
         assert_eq!(s.successful, 0);
@@ -503,11 +518,43 @@ mod tests {
         // means RST, which is genuine connect failure). The supervisor
         // is responsible for dropping UDP Refused upstream.
         let mut stats = RollingStats::new(five_min());
-        stats.insert(&obs_at(Instant::now(), ProbeOutcome::Refused));
+        let now = Instant::now();
+        stats.insert(&obs_at(now, ProbeOutcome::Refused), now);
         let s = stats.summary_fast();
         assert_eq!(s.sample_count, 1);
         assert_eq!(s.successful, 0);
         assert_eq!(s.failure_rate, 1.0);
+    }
+
+    #[test]
+    fn purge_works_when_observed_at_is_out_of_order_relative_to_insert() {
+        // Simulates the UDP-timeout scenario: a late sample with
+        // observed_at < front.observed_at. Receive-time `t` is monotonic
+        // because we set it in insert order.
+        //
+        // BUG (pre-fix): with `t = obs.observed_at`, the late sample sits
+        // behind a newer-`t` front and `purge_old` (prefix-pop on `t`) cannot
+        // evict it until that front itself ages out — under-purging by the
+        // inter-arrival lag. Setting `t = now` (receive time) at insert
+        // restores monotonicity and lets `purge_old` evict correctly.
+        let base = Instant::now();
+        let win = Duration::from_secs(60);
+        let mut stats = RollingStats::new(win);
+
+        // Insert a "fast success" first, observed at base+1s, received at base+1s.
+        let fast = ok(base + Duration::from_secs(1), 1_000);
+        stats.insert(&fast, base + Duration::from_secs(1));
+
+        // Now insert a "late timeout" — observed_at is base+0s (it was sent
+        // first but timed out, arriving 2s after its send), received at base+2s.
+        let late = timeout(base + Duration::from_secs(0));
+        stats.insert(&late, base + Duration::from_secs(2));
+
+        // 90s later, both should have aged out. (Cutoff = base+30s; both
+        // samples have receive-time t < cutoff.)
+        stats.purge_old(base + Duration::from_secs(90));
+        let s = stats.summary_fast();
+        assert_eq!(s.sample_count, 0, "both samples should have been purged");
     }
 
     // `Duration` is already imported at the top of `mod tests` for the
@@ -525,7 +572,8 @@ mod tests {
     ) -> RollingStats {
         let mut stats = RollingStats::new(window);
         for (offset_secs, rtt) in rtts_with_offsets {
-            stats.insert(&ok(base + Duration::from_secs(*offset_secs), *rtt));
+            let t = base + Duration::from_secs(*offset_secs);
+            stats.insert(&ok(t, *rtt), t);
         }
         stats
     }
@@ -649,10 +697,14 @@ mod tests {
         let base = Instant::now();
         let win = Duration::from_secs(60);
         let mut stats = RollingStats::new(win);
-        stats.insert(&ok(base + Duration::from_secs(0), 1_000));
-        stats.insert(&timeout(base + Duration::from_secs(10)));
-        stats.insert(&ok(base + Duration::from_secs(20), 3_000));
-        stats.insert(&ok(base + Duration::from_secs(50), 5_000));
+        let t0 = base + Duration::from_secs(0);
+        let t10 = base + Duration::from_secs(10);
+        let t20 = base + Duration::from_secs(20);
+        let t50 = base + Duration::from_secs(50);
+        stats.insert(&ok(t0, 1_000), t0);
+        stats.insert(&timeout(t10), t10);
+        stats.insert(&ok(t20, 3_000), t20);
+        stats.insert(&ok(t50, 5_000), t50);
 
         // Purge at t+90 → cutoff = t+30; samples at t+0/t+10/t+20 fall out.
         stats.purge_old(base + Duration::from_secs(90));
@@ -669,8 +721,10 @@ mod tests {
     fn set_window_changes_purge_threshold() {
         let base = Instant::now();
         let mut stats = RollingStats::new(Duration::from_secs(60));
-        stats.insert(&ok(base + Duration::from_secs(0), 1_000));
-        stats.insert(&ok(base + Duration::from_secs(30), 2_000));
+        let t0 = base + Duration::from_secs(0);
+        let t30 = base + Duration::from_secs(30);
+        stats.insert(&ok(t0, 1_000), t0);
+        stats.insert(&ok(t30, 2_000), t30);
 
         // 60s window, now=t+50: both samples in window.
         stats.purge_old(base + Duration::from_secs(50));
@@ -691,7 +745,7 @@ mod tests {
         let now = Instant::now();
         // 100 samples with distinct RTTs so p50/p95/p99 land on different values.
         for i in 1..=100u32 {
-            stats.insert(&ok(now, i * 100));
+            stats.insert(&ok(now, i * 100), now);
         }
         let s = stats.summary_with_percentiles();
         let p50 = s.p50_rtt_micros.expect("p50");
@@ -711,7 +765,7 @@ mod tests {
         // p95 → ceil(0.95 * 100) = 95 → index 94 → value 95.
         // p99 → ceil(0.99 * 100) = 99 → index 98 → value 99.
         for i in 1..=100u32 {
-            stats.insert(&ok(now, i));
+            stats.insert(&ok(now, i), now);
         }
         let s = stats.summary_with_percentiles();
         assert_eq!(s.p50_rtt_micros, Some(50));
@@ -724,7 +778,7 @@ mod tests {
         let mut stats = RollingStats::new(five_min());
         let now = Instant::now();
         for _ in 0..10 {
-            stats.insert(&timeout(now));
+            stats.insert(&timeout(now), now);
         }
         let s = stats.summary_with_percentiles();
         assert_eq!(s.sample_count, 10);
@@ -739,7 +793,8 @@ mod tests {
     #[test]
     fn percentiles_single_sample_collapses_to_value() {
         let mut stats = RollingStats::new(five_min());
-        stats.insert(&ok(Instant::now(), 1_234));
+        let now = Instant::now();
+        stats.insert(&ok(now, 1_234), now);
         let s = stats.summary_with_percentiles();
         assert_eq!(s.p50_rtt_micros, Some(1_234));
         assert_eq!(s.p95_rtt_micros, Some(1_234));
@@ -830,11 +885,12 @@ mod tests {
             let base = Instant::now();
             let mut stats = RollingStats::new(Duration::from_secs(window_secs));
             for (offset, rtt) in &ops {
+                let t = base + Duration::from_secs(*offset);
                 let obs = match rtt {
-                    Some(r) => ok(base + Duration::from_secs(*offset), *r),
-                    None => timeout(base + Duration::from_secs(*offset)),
+                    Some(r) => ok(t, *r),
+                    None => timeout(t),
                 };
-                stats.insert(&obs);
+                stats.insert(&obs, t);
             }
             stats.purge_old(base + Duration::from_secs(purge_at_secs));
 
@@ -900,23 +956,27 @@ mod tests {
 
         // Pre-load the "large" stats with 100k samples.
         for i in 0..100_000u32 {
-            large.insert(&ok(base + Duration::from_micros(i as u64), i));
+            let t = base + Duration::from_micros(i as u64);
+            large.insert(&ok(t, i), t);
         }
 
         // Measure insert latency on small (~1k samples).
         for i in 0..1_000u32 {
-            small.insert(&ok(base + Duration::from_micros(i as u64), i));
+            let t = base + Duration::from_micros(i as u64);
+            small.insert(&ok(t, i), t);
         }
         let t0 = StdInstant::now();
         for i in 0..10_000u32 {
-            small.insert(&ok(base + Duration::from_micros(i as u64 + 1_000), i));
+            let t = base + Duration::from_micros(i as u64 + 1_000);
+            small.insert(&ok(t, i), t);
         }
         let small_per_call = t0.elapsed().as_nanos() / 10_000;
 
         // Measure insert latency on large (~100k samples).
         let t0 = StdInstant::now();
         for i in 0..10_000u32 {
-            large.insert(&ok(base + Duration::from_micros(i as u64 + 100_000), i));
+            let t = base + Duration::from_micros(i as u64 + 100_000);
+            large.insert(&ok(t, i), t);
         }
         let large_per_call = t0.elapsed().as_nanos() / 10_000;
 

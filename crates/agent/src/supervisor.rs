@@ -212,7 +212,12 @@ async fn route_observation(stats: &StatsArray, obs: &ProbeObservation) {
         );
         return;
     };
-    stats[idx].lock().await.insert(obs);
+    // Use the receive instant as the sample's window-math timestamp.
+    // `obs.observed_at` is the probe's send time and can arrive
+    // non-monotonically (e.g. UDP timeout observations are emitted ≥2s
+    // after their send), which `RollingStats::purge_old` cannot handle
+    // because it relies on a monotonic prefix-pop. See `RollingStats::insert` doc.
+    stats[idx].lock().await.insert(obs, Instant::now());
 }
 
 // ---------------------------------------------------------------------------
