@@ -4,7 +4,7 @@
 //! per-batch touches into one DB write per debounce window via skip-if-
 //! recent state in an in-memory `HashMap<String, Instant>`.
 
-use crate::ingestion::metrics::{ingest_dropped, last_seen_writes, DropSource};
+use crate::metrics::{ingest_dropped, last_seen_writes, DropSource};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -255,16 +255,8 @@ impl AgentRegistry {
                 stale += 1;
             }
         }
-        metrics::gauge!(
-            "meshmon_service_registry_agents",
-            "state" => "active",
-        )
-        .set(active as f64);
-        metrics::gauge!(
-            "meshmon_service_registry_agents",
-            "state" => "stale",
-        )
-        .set(stale as f64);
+        crate::metrics::registry_agents(crate::metrics::AgentState::Active).set(active as f64);
+        crate::metrics::registry_agents(crate::metrics::AgentState::Stale).set(stale as f64);
     }
 
     /// Spawn the periodic refresh task.
@@ -299,8 +291,7 @@ impl AgentRegistry {
                             error = %e,
                             "agent registry refresh failed; keeping stale snapshot",
                         );
-                        metrics::counter!("meshmon_service_registry_refresh_errors_total")
-                            .increment(1);
+                        crate::metrics::registry_refresh_errors().increment(1);
                     }
                 }
 
@@ -309,7 +300,7 @@ impl AgentRegistry {
                 let age_secs = (Utc::now() - self.snapshot().refreshed_at())
                     .num_seconds()
                     .max(0) as f64;
-                metrics::gauge!("meshmon_service_registry_last_refresh_age_seconds").set(age_secs);
+                crate::metrics::registry_last_refresh_age_seconds().set(age_secs);
 
                 tokio::select! {
                     biased;
