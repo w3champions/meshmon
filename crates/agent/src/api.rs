@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tonic::service::interceptor::InterceptedService;
 use tonic::service::Interceptor;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig};
 
 use meshmon_protocol::{
     AgentApiClient, ConfigResponse, GetConfigRequest, GetTargetsRequest, MetricsBatch,
@@ -92,14 +92,30 @@ impl GrpcServiceApi {
     /// Create a new client connected (lazily) to `service_url`.
     ///
     /// The channel is created with `connect_lazy()` so construction never
-    /// blocks. Keep-alive is configured at 20 seconds with idle pings enabled
-    /// so the connection stays warm across long probe intervals.
+    /// blocks. HTTP/2 keep-alive pings are sent every 60 seconds with a
+    /// 20-second response deadline so the connection stays warm across long
+    /// probe intervals and dead peers are detected promptly.
+    ///
+    /// When `service_url` uses the `https://` scheme, TLS is configured with
+    /// the OS certificate store (`tls-native-roots` feature). Plain `http://`
+    /// URLs use cleartext h2c — the service is expected to be inside a
+    /// trusted network in that case.
     pub async fn connect(service_url: &str, agent_token: &str) -> Result<Arc<Self>> {
-        let channel = Channel::from_shared(service_url.to_owned())
+        let mut endpoint = Channel::from_shared(service_url.to_owned())
             .context("invalid service URL")?
             .keep_alive_timeout(Duration::from_secs(20))
-            .keep_alive_while_idle(true)
-            .connect_lazy();
+            .http2_keep_alive_interval(Duration::from_secs(60))
+            .keep_alive_while_idle(true);
+
+        // Channel::from_shared does not auto-apply TLS for https:// URLs;
+        // configure it explicitly so HTTPS endpoints actually negotiate TLS.
+        if service_url.to_ascii_lowercase().starts_with("https://") {
+            endpoint = endpoint
+                .tls_config(ClientTlsConfig::new().with_enabled_roots())
+                .context("failed to configure TLS")?;
+        }
+
+        let channel = endpoint.connect_lazy();
 
         let interceptor = BearerInterceptor {
             token: Arc::from(agent_token),
