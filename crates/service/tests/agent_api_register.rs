@@ -159,6 +159,40 @@ async fn register_force_refreshes_registry() {
 }
 
 #[tokio::test]
+async fn register_rejects_invalid_coordinates() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool);
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 0, 1])).await;
+
+    // NaN lat.
+    let mut req = sample("agent-reg-coord-nan", [10, 9, 0, 1]);
+    req.lat = f64::NAN;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("lat"), "{:?}", err.message());
+
+    // Infinite lon.
+    let mut req = sample("agent-reg-coord-inf", [10, 9, 0, 1]);
+    req.lon = f64::INFINITY;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("lon"), "{:?}", err.message());
+
+    // lat > 90.
+    let mut req = sample("agent-reg-coord-bigtlat", [10, 9, 0, 1]);
+    req.lat = 91.0;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // lon < -180.
+    let mut req = sample("agent-reg-coord-smalllon", [10, 9, 0, 1]);
+    req.lon = -180.1;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
 async fn register_rejects_bad_ip_length() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_agent_token(pool);

@@ -82,6 +82,22 @@ impl AgentApi for AgentApiImpl {
         if req.id.trim().is_empty() || req.display_name.trim().is_empty() {
             return Err(Status::invalid_argument("id and display_name required"));
         }
+        // Reject non-finite or out-of-range coordinates before they enter
+        // the DB — the `agents.lat`/`lon` columns are `DOUBLE PRECISION`
+        // and happily store NaN/Inf, which would then leak through
+        // `GetTargets` and break clients that assume real-world ranges.
+        if !req.lat.is_finite() || !(-90.0..=90.0).contains(&req.lat) {
+            return Err(Status::invalid_argument(format!(
+                "lat {} out of range [-90, 90]",
+                req.lat
+            )));
+        }
+        if !req.lon.is_finite() || !(-180.0..=180.0).contains(&req.lon) {
+            return Err(Status::invalid_argument(format!(
+                "lon {} out of range [-180, 180]",
+                req.lon
+            )));
+        }
         let claimed_ip = proto_ip::to_ipaddr(&req.ip)
             .map_err(|e| Status::invalid_argument(format!("invalid ip bytes: {e}")))?;
 
