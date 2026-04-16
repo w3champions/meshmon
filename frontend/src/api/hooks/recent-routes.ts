@@ -11,7 +11,7 @@ export function useRecentRouteChanges(limit: number = 10) {
       const { data, error } = await api.GET("/api/routes/recent", {
         params: { query: { limit } },
       });
-      if (error) throw new Error("failed to fetch recent route changes");
+      if (error) throw new Error("failed to fetch recent route changes", { cause: error });
       if (!data) throw new Error("empty response");
       return data;
     },

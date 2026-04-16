@@ -452,6 +452,39 @@ pub struct RecentRoutesParams {
     pub limit: Option<i64>,
 }
 
+/// Fetch the most recent route snapshots across all source/target pairs.
+async fn fetch_recent_routes(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<Vec<RouteSnapshotSummary>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!",
+                  source_id,
+                  target_id,
+                  protocol,
+                  observed_at,
+                  path_summary AS "path_summary: SqlxJson<PathSummaryJson>"
+           FROM route_snapshots
+           ORDER BY observed_at DESC
+           LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| RouteSnapshotSummary {
+            id: r.id,
+            source_id: r.source_id,
+            target_id: r.target_id,
+            protocol: r.protocol,
+            observed_at: r.observed_at,
+            path_summary: r.path_summary.map(|s| s.0),
+        })
+        .collect())
+}
+
 /// `GET /api/routes/recent` — return the most recent route snapshots across
 /// all source/target pairs, ordered by `observed_at DESC`.
 #[utoipa::path(
@@ -480,37 +513,10 @@ pub async fn list_recent_routes(
             .into_response();
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT id AS "id!",
-                  source_id,
-                  target_id,
-                  protocol,
-                  observed_at,
-                  path_summary AS "path_summary: SqlxJson<PathSummaryJson>"
-           FROM route_snapshots
-           ORDER BY observed_at DESC
-           LIMIT $1"#,
-        limit,
-    )
-    .fetch_all(&state.pool)
-    .await;
-
-    match rows {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .map(|r| RouteSnapshotSummary {
-                    id: r.id,
-                    source_id: r.source_id,
-                    target_id: r.target_id,
-                    protocol: r.protocol,
-                    observed_at: r.observed_at,
-                    path_summary: r.path_summary.map(|s| s.0),
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+    match fetch_recent_routes(&state.pool, limit).await {
+        Ok(items) => Json(items).into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "list_recent_routes failed");
+            tracing::error!(error = %e, "fetch_recent_routes failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

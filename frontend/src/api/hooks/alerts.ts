@@ -12,7 +12,7 @@ export function useAlerts() {
         params: { query: { active: true } },
       });
       if (response?.status === 503) return [] as AlertSummary[];
-      if (error) throw new Error("failed to fetch alerts");
+      if (error) throw new Error("failed to fetch alerts", { cause: error });
       return (data ?? []) as AlertSummary[];
     },
     refetchInterval: 30_000,

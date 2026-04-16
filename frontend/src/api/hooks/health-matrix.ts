@@ -32,7 +32,7 @@ export function useHealthMatrix() {
         params: { query: { query: PROMQL } },
       });
       if (response?.status === 503) return new Map();
-      if (error) throw new Error("failed to fetch health matrix");
+      if (error) throw new Error("failed to fetch health matrix", { cause: error });
       const body = data as unknown as VmInstantResponse;
       const out: HealthMatrix = new Map();
       for (const series of body?.data?.result ?? []) {

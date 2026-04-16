@@ -9,7 +9,7 @@ export function useAgents() {
     queryKey: ["agents"],
     queryFn: async () => {
       const { data, error } = await api.GET("/api/agents");
-      if (error) throw new Error("failed to fetch agents");
+      if (error) throw new Error("failed to fetch agents", { cause: error });
       if (!data) throw new Error("empty response");
       return data;
     },
@@ -24,8 +24,9 @@ export function useAgent(id: string) {
       const { data, error, response } = await api.GET("/api/agents/{id}", {
         params: { path: { id } },
       });
+      // Check 404 before error — openapi-fetch fills error for non-2xx.
       if (response?.status === 404) return null;
-      if (error) throw new Error("failed to fetch agent");
+      if (error) throw new Error("failed to fetch agent", { cause: error });
       if (!data) throw new Error("empty response");
       return data;
     },
