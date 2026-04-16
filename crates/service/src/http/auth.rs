@@ -108,9 +108,12 @@ pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net
         .map(|ci| ci.0.ip())
 }
 
-/// Constant-time equality with explicit length gate (`ct_eq` panics on
-/// unequal lengths). Leaks "token-not-empty-but-wrong-length" by design —
-/// cheap to discover by trial-and-error anyway.
+/// Constant-time equality over byte slices of *equal* length. `ct_eq` on
+/// `[u8]` already returns `Choice(0)` for unequal lengths (subtle 2.x
+/// short-circuits — no panic), but we reject unequal lengths up front to
+/// keep the fast path simple and make the length-leak explicit. Leaks
+/// "token-not-empty-but-wrong-length" by design — cheap to discover by
+/// trial-and-error anyway.
 pub(crate) fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

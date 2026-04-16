@@ -51,16 +51,27 @@ pub async fn require_basic_auth(
         return challenge();
     }
 
-    // Hash was PHC-validated at config load, so a parse failure here means
-    // the runtime config has drifted from the validator — treat as non-match
-    // and 401 rather than leaking a 500 status to the scraper.
-    let Ok(parsed) = PasswordHash::new(&expected.password_hash) else {
-        return challenge();
-    };
-    if Argon2::default()
-        .verify_password(pass.as_bytes(), &parsed)
-        .is_err()
-    {
+    // Argon2 verification is ~100ms of CPU work per call; a scrape burst or
+    // a DoS of wrong-password attempts would otherwise starve every task
+    // scheduled on this executor thread. Mirror the `http::auth` pattern:
+    // move the whole parse+verify block onto the blocking pool. Cloning the
+    // hash + password into the closure keeps the config snapshot stable
+    // even if SIGHUP swaps the config mid-verify. `PasswordHash::new`
+    // inside the closure is deliberate — the hash was PHC-validated at
+    // config load, so a parse failure here means the runtime config drifted
+    // from the validator; treat as non-match and 401 rather than leaking a
+    // 500 to the scraper.
+    let hash = expected.password_hash.clone();
+    let pass_bytes = pass.into_bytes();
+    let verified = tokio::task::spawn_blocking(move || match PasswordHash::new(&hash) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(&pass_bytes, &parsed)
+            .is_ok(),
+        Err(_) => false,
+    })
+    .await
+    .unwrap_or(false);
+    if !verified {
         return challenge();
     }
 
@@ -68,8 +79,13 @@ pub async fn require_basic_auth(
 }
 
 /// 401 response with the `WWW-Authenticate` challenge Prometheus and curl
-/// both understand.
+/// both understand. Emits a single uniform `warn!` so operators can spot a
+/// misconfigured scraper server-side. The log line deliberately does NOT
+/// distinguish the failure reason (missing header vs. wrong user vs. wrong
+/// password vs. malformed): a fine-grained log would be a timing-oracle
+/// signal leaked to anyone with access to the server logs.
 fn challenge() -> Response {
+    tracing::warn!(target: "meshmon::metrics_auth", "metrics auth failure");
     let mut resp = (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     resp.headers_mut().insert(
         header::WWW_AUTHENTICATE,
