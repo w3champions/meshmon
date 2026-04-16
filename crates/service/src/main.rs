@@ -3,6 +3,9 @@
 //! Startup order (spec 03 §Startup):
 //! 1. Load config (`$MESHMON_CONFIG`, default `/etc/meshmon/meshmon.toml`).
 //! 2. Initialize tracing subscriber.
+//!    2b. Install Prometheus recorder, describe self-metrics, and emit
+//!    `meshmon_service_build_info` so every subsystem's `metrics::*`
+//!    calls feed the installed handle from the first moment they can fire.
 //! 3. Connect Postgres + run migrations.
 //! 4. Best-effort reachability checks for VictoriaMetrics and Alertmanager
 //!    (warn on failure — those upstreams may not exist yet during rollout).
@@ -62,9 +65,10 @@ async fn run() -> anyhow::Result<()> {
     // --- Step 2b: Metrics recorder ---
     // Install BEFORE ingestion/registry subsystems emit anything —
     // once installed, every `metrics::*` call in those modules feeds
-    // this handle. `install_recorder` sets the process-global
-    // recorder; a second call is an error, which is fine for a
-    // long-lived binary.
+    // this handle. `install_recorder` sets the process-global recorder
+    // and panics on a second call; this binary calls it exactly once
+    // here. Integration tests go through `crate::metrics::test_install`
+    // which shares the handle via `OnceLock`.
     let prom = meshmon_service::metrics::install_recorder();
     meshmon_service::metrics::describe_service_metrics();
     meshmon_service::metrics::emit_build_info(&meshmon_service::state::BuildInfo::compile_time());
