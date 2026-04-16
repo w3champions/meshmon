@@ -18,8 +18,16 @@
 //!    `<admin>/HEAD` (branch pointer for this worktree) plus the shared
 //!    `refs/heads` via `<admin>/commondir` (or `<admin>/refs/heads` as
 //!    a fallback).
-//! 3. No `.git` at all (tarball build) → emit no rerun hints; the
-//!    `git rev-parse` subprocess fails and we record `"unknown"`.
+//! 3. No `.git` at all (tarball build) → emit no rerun hints and skip
+//!    the `git rev-parse` subprocess entirely so we record `"unknown"`
+//!    instead of an unrelated outer-repo hash. Relying on the
+//!    subprocess's failure path would let `git` walk the directory
+//!    tree upward from the build CWD and embed a neighboring
+//!    repository's `HEAD` into `MESHMON_GIT_COMMIT`.
+//!
+//! When we *do* run `git rev-parse`, we pin it to the resolved
+//! workspace via `-C <workspace-root>` so the same upward-walk can't
+//! contaminate the answer even on a plain clone layout.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,25 +36,40 @@ use std::process::Command;
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // Workspace root is two levels above the crate (`crates/service/`).
-    let workspace_git = manifest_dir.join("../../.git");
-    emit_git_rerun_hints(&workspace_git);
+    let workspace_root = manifest_dir.join("../../");
+    let workspace_git = workspace_root.join(".git");
+    let git_resolvable = emit_git_rerun_hints(&workspace_git);
 
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_else(|| "unknown".to_owned());
+    // Only invoke `git` when we've confirmed a `.git` entry belongs to
+    // THIS workspace; otherwise skip to the `"unknown"` fallback. This
+    // keeps tarball/detached-source builds honest (no hash from a
+    // parent repo that happens to enclose the source tree) while still
+    // letting plain clones and worktree layouts emit a real commit.
+    let sha = if git_resolvable {
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace_root)
+            .args(["rev-parse", "--short=12", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned())
+    } else {
+        "unknown".to_owned()
+    };
 
     println!("cargo:rustc-env=MESHMON_GIT_COMMIT={sha}");
 }
 
 /// Emit `cargo:rerun-if-changed` hints covering plain clones and git
-/// worktrees. Silently returns when no `.git` entry exists so tarball
-/// builds don't fail — the `git rev-parse` fallback handles those.
-fn emit_git_rerun_hints(workspace_git: &Path) {
+/// worktrees. Returns `true` when a `.git` entry that belongs to the
+/// workspace was successfully resolved — callers gate the
+/// `git rev-parse` subprocess on this so tarball builds don't accidentally
+/// inherit a parent repository's commit.
+fn emit_git_rerun_hints(workspace_git: &Path) -> bool {
     // Resolve (head_path, refs_heads_path) for the three layouts, or
     // `None` to skip emission entirely (tarball / no `.git`).
     let paths = if workspace_git.is_dir() {
@@ -71,6 +94,9 @@ fn emit_git_rerun_hints(workspace_git: &Path) {
     if let Some((head, refs_heads)) = paths {
         println!("cargo:rerun-if-changed={}", head.display());
         println!("cargo:rerun-if-changed={}", refs_heads.display());
+        true
+    } else {
+        false
     }
 }
 

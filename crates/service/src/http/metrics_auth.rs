@@ -97,10 +97,29 @@ fn challenge() -> Response {
 /// Parse an `Authorization: Basic <b64>` header into `(username, password)`.
 /// Returns `None` on any malformed input: non-UTF-8 header, missing prefix,
 /// invalid base64, non-UTF-8 decoded bytes, or missing colon separator.
+///
+/// The scheme token (`Basic`) is matched case-insensitively per RFC 7617
+/// (section 2) and RFC 9110 (section 11.1): auth-scheme tokens are ABNF
+/// tokens and MUST be treated as case-insensitive. A compliant proxy
+/// that normalises to `basic <b64>` would otherwise get rejected.
 fn parse_basic(h: &HeaderValue) -> Option<(String, String)> {
     let s = h.to_str().ok()?;
-    let b64 = s.strip_prefix("Basic ")?;
-    let decoded = STANDARD.decode(b64.trim()).ok()?;
+    // Split off exactly the five-char "Basic" token and require a
+    // whitespace separator. Byte indexing (rather than `split_whitespace`)
+    // keeps the base64 slice intact — whitespace INSIDE the b64 payload
+    // would be malformed input and must not be silently collapsed.
+    let (scheme, rest) = s.split_at_checked(5)?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return None;
+    }
+    // RFC 7235 §2.1 mandates 1*SP between scheme and credentials; real
+    // proxies occasionally pad with a tab, so accept any leading ASCII
+    // whitespace but reject an empty separator (e.g. `Basicabc...`).
+    let after_ws = rest.trim_start_matches([' ', '\t']);
+    if after_ws.len() == rest.len() {
+        return None;
+    }
+    let decoded = STANDARD.decode(after_ws.trim()).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     let (user, pass) = decoded.split_once(':')?;
     Some((user.to_owned(), pass.to_owned()))
@@ -234,6 +253,46 @@ url = "postgres://ignored@h/d"
                 HttpRequest::builder()
                     .uri("/metrics")
                     .header(header::AUTHORIZATION, format!("Basic {b64}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// RFC 7235 §2.1 / RFC 9110 §11.1: auth-scheme tokens are case-insensitive.
+    /// A compliant proxy that normalises to `basic <b64>` must still
+    /// authenticate successfully.
+    #[tokio::test]
+    async fn parse_basic_accepts_lowercase_scheme() {
+        let app = app(state(true));
+        let b64 = STANDARD.encode(format!("prom:{CORRECT_PASSWORD}"));
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, format!("basic {b64}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `Basicabc...` (no separator between scheme and credentials) must be
+    /// rejected so the case-insensitive rewrite doesn't accidentally
+    /// accept concatenated garbage.
+    #[tokio::test]
+    async fn parse_basic_rejects_scheme_without_separator() {
+        let app = app(state(true));
+        let b64 = STANDARD.encode(format!("prom:{CORRECT_PASSWORD}"));
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, format!("Basic{b64}"))
                     .body(Body::empty())
                     .unwrap(),
             )
