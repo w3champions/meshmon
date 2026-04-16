@@ -1,0 +1,48 @@
+# meshmon
+
+Continuous mesh-network monitoring system. Agents probe every other node;
+a central service ingests, stores, and alerts on regressions and route changes.
+
+## Workspace layout
+
+| Crate | Role |
+|-------|------|
+| `crates/service` | Central axum service: API, ingestion, alerting |
+| `crates/agent` | Per-node probe agent (tokio + tonic gRPC client) |
+| `crates/protocol` | Shared protobuf types (`meshmon.proto`, tonic codegen) |
+| `crates/common` | Shared utilities |
+| `frontend/` | React 19 + Tailwind SPA, embedded into the service binary |
+
+## Build and test
+
+```bash
+cargo build --workspace
+cargo test --workspace --all-targets
+cargo clippy --workspace -- -D warnings
+```
+
+Service integration tests require Docker (TimescaleDB via `testcontainers`).
+
+## Database
+
+Postgres + TimescaleDB. Migrations in `crates/service/migrations/`.
+Compile-time-checked queries via `sqlx::query!` with a committed `.sqlx/`
+offline cache. After changing any query macro, regenerate the cache (see
+README for steps).
+
+## Agent
+
+Env-var-configured, gRPC-based agent. See README "Running the agent" for
+the full variable table and lifecycle description.
+
+Key patterns:
+- `ServiceApi` trait abstracts gRPC for testability (generic, not dyn)
+- `AgentRuntime<A: ServiceApi>` owns supervisors, config broadcast, cancel token
+- Retry with exponential backoff + jitter for all bootstrap RPCs
+- `CancellationToken` tree for graceful shutdown propagation
+
+## Conventions
+
+- Squash-merge only (no merge commits, no rebase)
+- `cargo fmt` + `cargo clippy -- -D warnings` must pass
+- Test coverage: unit tests in `#[cfg(test)]` modules, integration tests in `tests/`

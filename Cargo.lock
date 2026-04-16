@@ -1787,6 +1787,20 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "meshmon-agent"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "meshmon-protocol",
+ "prost",
+ "rand 0.9.4",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "meshmon-common"
@@ -3870,9 +3884,11 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
+ "rustls-native-certs",
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",

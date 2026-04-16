@@ -141,11 +141,64 @@ docker stop meshmon-prep
 
 CI sets `SQLX_OFFLINE=true` and runs `cargo sqlx prepare --check` to guard against stale caches.
 
+## Running the agent
+
+The agent binary is deployed to each monitored node. It registers with the
+central service, fetches probe configuration and the target list, then spawns
+one supervisor task per target.
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MESHMON_SERVICE_URL` | yes | URL of the central service (`http://` or `https://`) |
+| `MESHMON_AGENT_TOKEN` | yes | Shared bearer token for gRPC authentication |
+| `AGENT_ID` | yes | Unique machine-readable name, e.g. `brazil-north` |
+| `AGENT_DISPLAY_NAME` | yes | Human-friendly label |
+| `AGENT_LOCATION` | yes | Free-form location string |
+| `AGENT_IP` | yes | Externally-reachable IP (v4 or v6) |
+| `AGENT_LAT` | yes | Latitude in decimal degrees (-90 to 90) |
+| `AGENT_LON` | yes | Longitude in decimal degrees (-180 to 180) |
+| `RUST_LOG` | no | Tracing filter (default: `meshmon_agent=info,warn`) |
+
+```bash
+export MESHMON_SERVICE_URL=http://localhost:8080
+export MESHMON_AGENT_TOKEN=<token>
+export AGENT_ID=dev-agent
+export AGENT_DISPLAY_NAME="Dev Agent"
+export AGENT_LOCATION="Local"
+export AGENT_IP=127.0.0.1
+export AGENT_LAT=0.0
+export AGENT_LON=0.0
+
+cargo run -p meshmon-agent
+```
+
+### Agent modules
+
+| Module | Responsibility |
+|--------|----------------|
+| `config.rs` | Env var parsing (`AgentEnv`), probe config wrapper |
+| `api.rs` | `ServiceApi` trait + `GrpcServiceApi` (tonic client with bearer auth) |
+| `supervisor.rs` | Per-target supervisor task (placeholder loop until probers land) |
+| `bootstrap.rs` | Register → config → targets → spawn, 5-minute refresh loop |
+| `probing/mod.rs` | `ProbeObservation` / `HopObservation` types (populated by probers) |
+
+### Lifecycle
+
+1. Parse identity from env vars (fail fast on missing/invalid values).
+2. Connect to the service via gRPC with bearer-token interceptor.
+3. Register with exponential-backoff retry (1s → 30s, ±25% jitter).
+4. Fetch initial config and target list.
+5. Spawn one supervisor task per target (skip self).
+6. Run a 5-minute refresh loop: re-fetch config (broadcast via `watch`),
+   re-fetch targets (reconcile: spawn new, shut down removed).
+7. On `SIGTERM`/`SIGINT`: cancel all supervisors, drain observations, exit.
+
 ## Status
 
-This repo is under active initial construction. The scaffolding in this commit
-builds and runs, but the service and agent binaries are placeholders. Feature
-work lands incrementally per the task plan tracked outside this repo.
+This repo is under active initial construction. Feature work lands
+incrementally.
 
 ## License
 
