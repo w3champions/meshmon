@@ -36,8 +36,11 @@ export default function Login() {
           `Too many attempts. Try again in ${Number.isFinite(seconds) ? seconds : 60}s`,
         );
       }
-      if (response.status === 401 || error) {
+      if (response.status === 401) {
         throw new Error("Invalid credentials");
+      }
+      if (error) {
+        throw new Error("Something went wrong. Please try again later.");
       }
       if (!data) {
         throw new Error("unexpected empty response");
