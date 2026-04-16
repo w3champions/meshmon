@@ -187,8 +187,7 @@ mod tests {
         let obs = ProbeObservation {
             protocol: Protocol::Icmp,
             target_id: "test-2".to_string(),
-            success: true,
-            rtt_micros: Some(1000),
+            outcome: crate::probing::ProbeOutcome::Success { rtt_micros: 1000 },
             hops: None,
             observed_at: tokio::time::Instant::now(),
         };
