@@ -176,18 +176,17 @@ impl RollingStats {
         self.sent += 1;
         if let Some(rtt) = sample.rtt_micros {
             self.successful += 1;
-            self.sum_rtt_micros = self.sum_rtt_micros.saturating_add(rtt as u64);
-            // (rtt as u128) * (rtt as u128) cannot overflow u128 because
-            // u32::MAX² ≈ 1.84e19 ≪ u128::MAX. Adding to the u128
-            // accumulator also cannot overflow within any plausible window
-            // — see plan version-check gate.
+            // Both sums are bounded by the worst-case window analysis in
+            // the plan's version-check gate: 900 × u32::MAX ≈ 3.87e12 for
+            // the linear sum (u64 has ~1.84e19 head-room) and 900 ×
+            // u32::MAX² ≈ 1.66e22 for the squared sum (u128 has ~3.4e38).
+            // Neither can overflow within any plausible window.
+            self.sum_rtt_micros += rtt as u64;
             self.sum_rtt_sq_micros += (rtt as u128) * (rtt as u128);
-            // Update min/max optimistically. The dirty bit only signals
-            // that a *purge* may have removed the current extremum, so
-            // it's still safe to fold a new sample into the cached value
-            // — the resolved value (after the next percentile scan) will
-            // be the min/max over the remaining + newly-inserted samples
-            // either way.
+            // Optimistic min/max: safe even when the dirty bit is set
+            // because summary_fast returns None for min/max while dirty,
+            // and the next percentile scan (Task 6) recomputes from the
+            // deque regardless.
             self.min_rtt_micros = Some(match self.min_rtt_micros {
                 Some(cur) => cur.min(rtt),
                 None => rtt,
