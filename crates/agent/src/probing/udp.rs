@@ -2,7 +2,9 @@
 //!
 //! One [`UdpProberPool`] per agent. The pool owns:
 //! * a shared `UdpSocket` bound to an ephemeral port on 0.0.0.0,
-//! * a `DashMap<IpAddr, Arc<Mutex<TargetState>>>` for per-target state,
+//! * a `DashMap<(IpAddr, u16), Arc<Mutex<TargetState>>>` for per-target
+//!   state keyed by `(target_ip, udp_probe_port)` so two agents sharing
+//!   an IP (NAT) but listening on distinct ports don't collide,
 //! * a background receiver task that decodes responses and dispatches,
 //! * a background sweep task that times out pending nonces every 500 ms.
 //!
@@ -46,11 +48,16 @@ struct TargetState {
     obs_tx: mpsc::Sender<ProbeObservation>,
 }
 
+/// Dispatch map keyed by `(target_ip, udp_probe_port)`. The port is the
+/// target's listener port — replies always come from there, so the tuple
+/// uniquely disambiguates two targets that share an IP (NAT).
+type DispatchMap = DashMap<(IpAddr, u16), Arc<Mutex<TargetState>>>;
+
 /// Shared UDP prober. Hold an `Arc<UdpProberPool>` for the lifetime of the
 /// agent and `spawn_target` for each target.
 pub struct UdpProberPool {
     socket: Arc<UdpSocket>,
-    targets: Arc<DashMap<IpAddr, Arc<Mutex<TargetState>>>>,
+    targets: Arc<DispatchMap>,
     secret_rx: watch::Receiver<SecretSnapshot>,
 }
 
@@ -61,7 +68,7 @@ impl UdpProberPool {
         cancel: CancellationToken,
     ) -> std::io::Result<Arc<Self>> {
         let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-        let targets: Arc<DashMap<IpAddr, Arc<Mutex<TargetState>>>> = Arc::new(DashMap::new());
+        let targets: Arc<DispatchMap> = Arc::new(DashMap::new());
 
         tokio::spawn(run_receiver(
             socket.clone(),
@@ -114,8 +121,8 @@ impl UdpProberPool {
             paused_until: None,
             obs_tx,
         }));
-        if let Some(prev) = self.targets.insert(ip, state.clone()) {
-            // Duplicate `spawn_target` for the same IP without an
+        if let Some(prev) = self.targets.insert((ip, port), state.clone()) {
+            // Duplicate `spawn_target` for the same (ip, port) without an
             // intervening `forget_if_owner`. The receiver now dispatches
             // to the new state; the old sender (if still running) will
             // eventually exit on cancel. Without this guard its final
@@ -124,8 +131,9 @@ impl UdpProberPool {
             // log loudly so operators can investigate the caller.
             tracing::warn!(
                 %ip,
-                "udp prober spawn_target called while prior target still active; \
-                 dispatch now points at the new state",
+                port,
+                "udp prober spawn_target called while prior target still active — \
+                 orphan dispatch state corrected",
             );
             drop(prev);
         }
@@ -136,18 +144,12 @@ impl UdpProberPool {
         })
     }
 
-    /// Remove a target from dispatch. Kept for call-sites that own the
-    /// target outright and know no replacement has been spawned.
-    pub fn forget(&self, ip: &IpAddr) {
-        self.targets.remove(ip);
-    }
-
     /// Remove a target from dispatch only if the registered state is still
     /// the one the caller owns. Prevents a lame-duck sender from evicting
     /// its replacement after a late `spawn_target` clobber (see the warn
     /// inside [`UdpProberPool::spawn_target`]).
-    fn forget_if_owner(&self, ip: &IpAddr, owned: &Arc<Mutex<TargetState>>) {
-        self.targets.remove_if(ip, |_k, v| Arc::ptr_eq(v, owned));
+    fn forget_if_owner(&self, key: (IpAddr, u16), owned: &Arc<Mutex<TargetState>>) {
+        self.targets.remove_if(&key, |_k, v| Arc::ptr_eq(v, owned));
     }
 }
 
@@ -155,7 +157,7 @@ impl UdpProberPool {
 
 async fn run_receiver(
     socket: Arc<UdpSocket>,
-    targets: Arc<DashMap<IpAddr, Arc<Mutex<TargetState>>>>,
+    targets: Arc<DispatchMap>,
     secret_rx: watch::Receiver<SecretSnapshot>,
     cancel: CancellationToken,
 ) {
@@ -179,7 +181,12 @@ async fn run_receiver(
                 let Some(current) = secret.current else { continue };
                 let decoded = decode_response(&buf[..PACKET_LEN], &current, secret.previous.as_ref());
                 let Some(decoded) = decoded else { continue };
-                let Some(state_ref) = targets.get(&peer.ip()) else {
+                // The echo/rejection reply always comes from the target's
+                // bound `udp_probe_port` (it uses `send_to` on its own
+                // listener socket). Keying on `(ip, port)` lets two
+                // targets that share an IP (NAT) but listen on different
+                // ports route responses to the correct `TargetState`.
+                let Some(state_ref) = targets.get(&(peer.ip(), peer.port())) else {
                     continue;
                 };
                 let state = state_ref.clone();
@@ -244,10 +251,7 @@ async fn handle_response(
 
 // ---- sweeper ----
 
-async fn run_sweeper(
-    targets: Arc<DashMap<IpAddr, Arc<Mutex<TargetState>>>>,
-    cancel: CancellationToken,
-) {
+async fn run_sweeper(targets: Arc<DispatchMap>, cancel: CancellationToken) {
     let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -380,8 +384,8 @@ async fn run_sender(
     }
     // Only forget if the dispatch map still points at our state. Guards
     // against a newer `spawn_target` having already installed a
-    // replacement for this IP (see the warn in `spawn_target`).
-    pool.forget_if_owner(&target_ip, &state);
+    // replacement for this (ip, port) (see the warn in `spawn_target`).
+    pool.forget_if_owner((target_ip, target_port), &state);
 }
 
 async fn maybe_sleep(interval: Option<Duration>) {
@@ -646,6 +650,8 @@ mod tests {
             .unwrap();
 
         let ip: IpAddr = "127.0.0.50".parse().unwrap();
+        let port: u16 = 49_000;
+        let key = (ip, port);
         let (old_obs, _old_rx) = mpsc::channel(1);
         let old_state = Arc::new(Mutex::new(TargetState {
             target_id: "old".into(),
@@ -663,19 +669,92 @@ mod tests {
             obs_tx: new_obs,
         }));
 
-        pool.targets.insert(ip, new_state.clone());
+        pool.targets.insert(key, new_state.clone());
         // Stale sender's forget must leave `new_state` in place.
-        pool.forget_if_owner(&ip, &old_state);
-        assert!(pool.targets.get(&ip).is_some(), "foreign forget evicted");
+        pool.forget_if_owner(key, &old_state);
+        assert!(pool.targets.get(&key).is_some(), "foreign forget evicted");
 
         // Owner's forget does evict.
-        pool.forget_if_owner(&ip, &new_state);
+        pool.forget_if_owner(key, &new_state);
         assert!(
-            pool.targets.get(&ip).is_none(),
+            pool.targets.get(&key).is_none(),
             "owner forget did not evict"
         );
 
         pool_cancel.cancel();
         drop(sec_tx);
+    }
+
+    /// Two targets sharing an IP but on different `udp_probe_port`s must
+    /// not collide in the dispatch map. Before the `(ip, port)` key
+    /// change, the second `spawn_target` would evict the first and
+    /// responses for the first target would be dropped.
+    #[tokio::test]
+    async fn two_targets_same_ip_different_ports_do_not_collide() {
+        let (port_a, h_a, c_a) = start_echo_server().await;
+        let (port_b, h_b, c_b) = start_echo_server().await;
+        assert_ne!(port_a, port_b);
+
+        let (sec_tx, sec_rx) = watch::channel(SecretSnapshot {
+            current: Some(SECRET),
+            previous: None,
+        });
+        let pool_cancel = CancellationToken::new();
+        let pool = UdpProberPool::new(sec_rx, pool_cancel.clone())
+            .await
+            .unwrap();
+
+        let (rate_tx_a, rate_rx_a) = watch::channel(ProbeRate(10.0));
+        let (rate_tx_b, rate_rx_b) = watch::channel(ProbeRate(10.0));
+        let (obs_tx_a, mut obs_rx_a) = mpsc::channel(16);
+        let (obs_tx_b, mut obs_rx_b) = mpsc::channel(16);
+        let c_target_a = CancellationToken::new();
+        let c_target_b = CancellationToken::new();
+
+        pool.spawn_target(
+            target("peer-a", [127, 0, 0, 1], port_a),
+            rate_rx_a,
+            obs_tx_a,
+            c_target_a.clone(),
+        );
+        pool.spawn_target(
+            target("peer-b", [127, 0, 0, 1], port_b),
+            rate_rx_b,
+            obs_tx_b,
+            c_target_b.clone(),
+        );
+
+        // Both targets must receive Success observations attributed to
+        // their own IDs — proves responses aren't misattributed.
+        let obs_a = tokio::time::timeout(TD::from_secs(2), obs_rx_a.recv())
+            .await
+            .expect("no obs for a")
+            .expect("channel a closed");
+        let obs_b = tokio::time::timeout(TD::from_secs(2), obs_rx_b.recv())
+            .await
+            .expect("no obs for b")
+            .expect("channel b closed");
+
+        assert_eq!(obs_a.target_id, "peer-a");
+        assert_eq!(obs_b.target_id, "peer-b");
+        assert!(
+            matches!(obs_a.outcome, ProbeOutcome::Success { .. }),
+            "{obs_a:?}"
+        );
+        assert!(
+            matches!(obs_b.outcome, ProbeOutcome::Success { .. }),
+            "{obs_b:?}"
+        );
+
+        c_target_a.cancel();
+        c_target_b.cancel();
+        pool_cancel.cancel();
+        c_a.cancel();
+        c_b.cancel();
+        drop(rate_tx_a);
+        drop(rate_tx_b);
+        drop(sec_tx);
+        let _ = h_a.await;
+        let _ = h_b.await;
     }
 }
