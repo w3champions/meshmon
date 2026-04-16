@@ -346,6 +346,19 @@ fn validate_positive_u32(name: &str, v: u32) -> Result<(), String> {
     }
 }
 
+/// Validate a probe rate in packets-per-second. Zero means "never probe
+/// this (primary × health × protocol) combination" — semantically valid
+/// when operators want to disable a probe type without removing its row
+/// from the rate matrix. NaN/Inf/negative values have no meaningful
+/// scheduler interpretation and are rejected at config load.
+fn validate_pps(name: &str, v: f64) -> Result<(), String> {
+    if v.is_finite() && v >= 0.0 {
+        Ok(())
+    } else {
+        Err(format!("`{name}` = {v} must be finite and >= 0"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TryFrom conversion
 // ---------------------------------------------------------------------------
@@ -406,14 +419,30 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             }
             raw.rates
                 .into_iter()
-                .map(|r| ProbingRate {
-                    primary: Protocol::from(r.primary),
-                    health: PathHealth::from(r.health),
-                    icmp_pps: r.icmp_pps,
-                    tcp_pps: r.tcp_pps,
-                    udp_pps: r.udp_pps,
+                .map(|r| {
+                    let primary = Protocol::from(r.primary);
+                    let health = PathHealth::from(r.health);
+                    validate_pps(
+                        &format!("rates[primary={primary:?},health={health:?}].icmp_pps"),
+                        r.icmp_pps,
+                    )?;
+                    validate_pps(
+                        &format!("rates[primary={primary:?},health={health:?}].tcp_pps"),
+                        r.tcp_pps,
+                    )?;
+                    validate_pps(
+                        &format!("rates[primary={primary:?},health={health:?}].udp_pps"),
+                        r.udp_pps,
+                    )?;
+                    Ok::<_, String>(ProbingRate {
+                        primary,
+                        health,
+                        icmp_pps: r.icmp_pps,
+                        tcp_pps: r.tcp_pps,
+                        udp_pps: r.udp_pps,
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         // --- icmp_thresholds ---
@@ -544,6 +573,7 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             validate_fraction("diff_detection.new_ip_min_freq", nim)?;
             validate_fraction("diff_detection.missing_ip_max_freq", mim)?;
             validate_fraction("diff_detection.rtt_shift_frac", rsf)?;
+            validate_positive_u32("diff_detection.hop_count_change", hcc)?;
             ProbingDiffDetection {
                 new_ip_min_freq: nim,
                 missing_ip_max_freq: mim,
@@ -579,6 +609,7 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             validate_fraction("path_health_thresholds.normal_recovery_pct", nrp)?;
             validate_positive_u32("path_health_thresholds.degraded_trigger_sec", dts)?;
             validate_positive_u32("path_health_thresholds.normal_recovery_sec", nrs)?;
+            validate_positive_u32("path_health_thresholds.degraded_min_samples", dms)?;
             PathHealthThresholds {
                 degraded_trigger_pct: dtp,
                 degraded_trigger_sec: dts,
@@ -744,6 +775,116 @@ mod tests {
         assert!(
             err.to_lowercase().contains("window") || err.to_lowercase().contains("primary"),
             "expected 'window' or 'primary' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_degraded_min_samples_rejected() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [path_health_thresholds]
+            degraded_min_samples = 0
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("degraded_min_samples"),
+            "expected 'degraded_min_samples' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_hop_count_change_rejected() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [diff_detection]
+            hop_count_change = 0
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("hop_count_change"),
+            "expected 'hop_count_change' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn negative_pps_rejected() {
+        // NaN / Inf / negative probe rates have no meaningful scheduler
+        // interpretation. Zero is accepted (see validate_pps doc comment).
+        // Priority is narrowed to icmp only so the rate matrix only needs
+        // 3 entries (primary=icmp × 3 health states) instead of 9.
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            enabled_protocols = ["icmp"]
+            priority = ["icmp"]
+
+            [[rates]]
+            primary = "icmp"
+            health = "normal"
+            icmp_pps = -0.1
+            tcp_pps = 0.05
+            udp_pps = 0.05
+
+            [[rates]]
+            primary = "icmp"
+            health = "degraded"
+            icmp_pps = 0.05
+            tcp_pps = 0.05
+            udp_pps = 0.05
+
+            [[rates]]
+            primary = "icmp"
+            health = "unreachable"
+            icmp_pps = 0.05
+            tcp_pps = 0.05
+            udp_pps = 0.05
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("icmp_pps"),
+            "expected 'icmp_pps' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nan_pps_rejected() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            enabled_protocols = ["icmp"]
+            priority = ["icmp"]
+
+            [[rates]]
+            primary = "icmp"
+            health = "normal"
+            icmp_pps = nan
+            tcp_pps = 0.05
+            udp_pps = 0.05
+
+            [[rates]]
+            primary = "icmp"
+            health = "degraded"
+            icmp_pps = 0.05
+            tcp_pps = 0.05
+            udp_pps = 0.05
+
+            [[rates]]
+            primary = "icmp"
+            health = "unreachable"
+            icmp_pps = 0.05
+            tcp_pps = 0.05
+            udp_pps = 0.05
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("icmp_pps"),
+            "expected 'icmp_pps' in error, got: {err}"
         );
     }
 }
