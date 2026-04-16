@@ -134,4 +134,18 @@ url = "postgres://a@b/c"
         assert!(flag.load(Ordering::SeqCst));
         let _ = rx;
     }
+
+    #[test]
+    fn build_info_reports_version_and_commit() {
+        let b = BuildInfo::compile_time();
+        assert_eq!(b.version, env!("CARGO_PKG_VERSION"));
+        // Either a real short sha (hex, >= 7 chars) or the literal
+        // fallback `"unknown"` — build.rs never leaves the env unset.
+        assert!(b.commit == "unknown" || b.commit.len() >= 7);
+        assert!(
+            b.commit == "unknown" || b.commit.chars().all(|c| c.is_ascii_hexdigit()),
+            "commit {} is neither 'unknown' nor hex",
+            b.commit
+        );
+    }
 }
