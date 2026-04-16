@@ -21,6 +21,6 @@ pub fn proxy_client() -> &'static Client {
             .timeout(Duration::from_secs(10))
             .user_agent(concat!("meshmon-service/", env!("CARGO_PKG_VERSION")))
             .build()
-            .expect("reqwest client build")
+            .expect("failed to build reqwest proxy client — check TLS configuration")
     })
 }

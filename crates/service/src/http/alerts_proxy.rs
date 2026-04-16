@@ -99,7 +99,7 @@ impl From<AlertmanagerV2Alert> for AlertSummary {
 // ---------------------------------------------------------------------------
 
 /// Query parameters forwarded to the upstream Alertmanager.
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 pub struct AlertsQuery {
     /// Include active alerts.
     pub active: Option<bool>,
@@ -175,7 +175,7 @@ async fn fetch_alerts(base: &str, q: &AlertsQuery) -> Result<Vec<AlertSummary>, 
     Ok(alerts.into_iter().map(AlertSummary::from).collect())
 }
 
-/// Internal error type — mapped to HTTP status codes by the handlers.
+/// Internal error type — mapped to HTTP status codes via [`IntoResponse`].
 enum ProxyError {
     /// Alertmanager URL not configured.
     NotConfigured,
@@ -183,19 +183,19 @@ enum ProxyError {
     Upstream(String),
 }
 
-impl ProxyError {
+impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
         match self {
             Self::NotConfigured => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "alertmanager_url not configured" })),
+                Json(serde_json::json!({ "error": "alertmanager not configured" })),
             )
                 .into_response(),
             Self::Upstream(msg) => {
                 tracing::warn!(error = %msg, "alertmanager proxy error");
                 (
                     StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({ "error": msg })),
+                    Json(serde_json::json!({ "error": "upstream request failed" })),
                 )
                     .into_response()
             }
@@ -269,13 +269,7 @@ pub async fn get_alert(State(state): State<AppState>, Path(fingerprint): Path<St
     };
 
     // Fetch all alerts (the v2 API doesn't support single-fingerprint lookup).
-    let empty_query = AlertsQuery {
-        active: None,
-        silenced: None,
-        inhibited: None,
-        unprocessed: None,
-        filter: None,
-    };
+    let empty_query = AlertsQuery::default();
 
     match fetch_alerts(&base, &empty_query).await {
         Ok(alerts) => match alerts.into_iter().find(|a| a.fingerprint == fingerprint) {
