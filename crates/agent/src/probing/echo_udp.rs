@@ -1,6 +1,12 @@
 //! UDP echo listener (spec 02 § Agent echo listeners).
 //!
-//! Binds `0.0.0.0:port` and services 12-byte probes from peer agents:
+//! Binds `[::]:port` dual-stack (`IPV6_V6ONLY=false`) and services 12-byte
+//! probes from peer agents over both IPv4 and IPv6. IPv4 peers reach the
+//! listener transparently via IPv4-mapped IPv6 addresses
+//! (`::ffff:a.b.c.d`); the allowlist check normalizes mapped addresses
+//! back to their canonical v4 form before lookup so entries stored as
+//! plain `Ipv4Addr` match v4 peers regardless of how the kernel delivers
+//! them.
 //!
 //! * len != 12                      → drop silent
 //! * secret mismatch (current OR previous) → drop silent
@@ -12,9 +18,10 @@
 //! by the bootstrap refresh loop.
 
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 
+use socket2::{Domain, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -38,9 +45,24 @@ pub async fn spawn(
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-    let socket = UdpSocket::bind(("0.0.0.0", port)).await?;
-    tracing::info!(port, "udp echo listener ready");
+    let socket = bind_dual_stack(port)?;
+    tracing::info!(port, "udp echo listener ready (dual-stack)");
     Ok(tokio::spawn(run(socket, secret_rx, allowlist_rx, cancel)))
+}
+
+/// Build a dual-stack (`IPV6_V6ONLY=false`) UDP socket bound to
+/// `[::]:port`. See `echo_tcp::bind_dual_stack` for the rationale: we
+/// must explicitly clear `IPV6_V6ONLY` because some kernels default it
+/// to `true`, which would prevent IPv4 peers from reaching us on a v6
+/// bind.
+fn bind_dual_stack(port: u16) -> std::io::Result<UdpSocket> {
+    let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, None)?;
+    socket.set_only_v6(false)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::V6(addr).into())?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket)
 }
 
 async fn run(
@@ -98,7 +120,16 @@ async fn run(
                     continue;
                 }
 
-                let allowed = allowlist_rx.borrow().contains(&peer.ip());
+                // Normalize v4-mapped-v6 (::ffff:a.b.c.d) back to Ipv4Addr
+                // before the allowlist lookup. The allowlist is built from
+                // `to_ipaddr(&target.ip)` which preserves the wire's native
+                // form (4 bytes → V4, 16 bytes → V6); when a dual-stack
+                // socket delivers an IPv4 peer as its v4-mapped form, a
+                // naive `contains(&peer.ip())` would miss the v4 entry.
+                // Sends reuse the original `peer` — the kernel accepts
+                // either form, so don't rewrite it unnecessarily.
+                let peer_ip = peer.ip().to_canonical();
+                let allowed = allowlist_rx.borrow().contains(&peer_ip);
                 if !allowed {
                     let reject = encode_rejection(current);
                     if let Err(e) = socket.send_to(&reject, peer).await {
@@ -222,9 +253,11 @@ mod tests {
 
     #[tokio::test]
     async fn bind_fails_when_port_in_use() {
-        // Hold the port on `0.0.0.0` — same address family the listener
+        // Hold the port on `[::]` — same dual-stack address the listener
         // binds on — so the collision is unambiguous across platforms.
-        let held = UdpSocket::bind(("0.0.0.0", 0)).await.unwrap();
+        // See the matching comment in `echo_tcp::tests::bind_fails_when_port_in_use`
+        // for why `[::]` on both sides is the reliable conflict pair.
+        let held = UdpSocket::bind(("::", 0)).await.unwrap();
         let port = held.local_addr().unwrap().port();
 
         let (sec_tx, sec_rx) = watch::channel(SecretSnapshot::default());

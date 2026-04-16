@@ -868,12 +868,11 @@ mod tests {
     /// without a listener. Same principle for UDP (tested separately).
     #[tokio::test]
     async fn bootstrap_fails_when_tcp_port_in_use() {
-        // Hold the port on `0.0.0.0` — same address family the bootstrap
+        // Hold the port on `[::]` — same dual-stack address the bootstrap
         // binds on — for the duration of the test so the collision is
-        // unambiguous.
-        let squatter = TcpListener::bind(("0.0.0.0", 0))
-            .await
-            .expect("squatter bind");
+        // unambiguous across platforms. See the matching comment in
+        // `probing::echo_tcp::tests::bind_fails_when_port_in_use`.
+        let squatter = TcpListener::bind(("::", 0)).await.expect("squatter bind");
         let occupied_port = squatter.local_addr().unwrap().port();
 
         let mut env = test_env().await;
@@ -955,10 +954,14 @@ mod tests {
         // Wait for them to release the ports, polling to avoid a flaky
         // scheduling race. Without the fix, this loop times out because
         // the listener tasks stay alive on the leaked cancel token.
+        //
+        // Rebind-check uses `[::]` since the real listeners bind
+        // dual-stack — a `0.0.0.0` rebind would succeed even if the v6
+        // side of the port is still held.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let tcp_free = TcpListener::bind(("0.0.0.0", tcp_port)).await.is_ok();
-            let udp_free = UdpSocket::bind(("0.0.0.0", udp_port)).await.is_ok();
+            let tcp_free = TcpListener::bind(("::", tcp_port)).await.is_ok();
+            let udp_free = UdpSocket::bind(("::", udp_port)).await.is_ok();
             if tcp_free && udp_free {
                 break;
             }
@@ -975,9 +978,10 @@ mod tests {
     /// Same as above for UDP.
     #[tokio::test]
     async fn bootstrap_fails_when_udp_port_in_use() {
-        let squatter = UdpSocket::bind(("0.0.0.0", 0))
-            .await
-            .expect("squatter bind");
+        // Hold the port on `[::]` — same dual-stack address the bootstrap
+        // binds on — for the duration of the test so the collision is
+        // unambiguous across platforms.
+        let squatter = UdpSocket::bind(("::", 0)).await.expect("squatter bind");
         let occupied_port = squatter.local_addr().unwrap().port();
 
         let mut env = test_env().await;

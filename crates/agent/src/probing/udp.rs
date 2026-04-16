@@ -1,7 +1,9 @@
 //! UDP prober pool (spec 02 § UDP prober architecture).
 //!
 //! One [`UdpProberPool`] per agent. The pool owns:
-//! * a shared `UdpSocket` bound to an ephemeral port on 0.0.0.0,
+//! * a shared `UdpSocket` bound to an ephemeral port on `[::]:0`
+//!   (dual-stack, `IPV6_V6ONLY=false`) so a single socket handles both
+//!   IPv4 and IPv6 peers,
 //! * a `DashMap<(IpAddr, u16), Arc<Mutex<TargetState>>>` for per-target
 //!   state keyed by `(target_ip, udp_probe_port)` so two agents sharing
 //!   an IP (NAT) but listening on distinct ports don't collide,
@@ -12,7 +14,7 @@
 //! spawns a per-target sender task feeding into the same socket.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +22,7 @@ use dashmap::DashMap;
 use meshmon_protocol::{Protocol, Target};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use socket2::{Domain, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -51,6 +54,13 @@ struct TargetState {
 /// Dispatch map keyed by `(target_ip, udp_probe_port)`. The port is the
 /// target's listener port — replies always come from there, so the tuple
 /// uniquely disambiguates two targets that share an IP (NAT).
+///
+/// The `IpAddr` is always the target's *native* form from
+/// `to_ipaddr(&target.ip)` (4-byte wire → V4, 16-byte wire → V6). The
+/// receiver normalizes incoming peer addresses via
+/// [`IpAddr::to_canonical`] before lookup because a dual-stack socket may
+/// deliver an IPv4 peer's reply as the v4-mapped-v6 form
+/// (`::ffff:a.b.c.d`) on some platforms (notably Linux).
 type DispatchMap = DashMap<(IpAddr, u16), Arc<Mutex<TargetState>>>;
 
 /// Shared UDP prober. Hold an `Arc<UdpProberPool>` for the lifetime of the
@@ -67,7 +77,7 @@ impl UdpProberPool {
         secret_rx: watch::Receiver<SecretSnapshot>,
         cancel: CancellationToken,
     ) -> std::io::Result<Arc<Self>> {
-        let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+        let socket = Arc::new(bind_dual_stack_ephemeral()?);
         let targets: Arc<DispatchMap> = Arc::new(DashMap::new());
 
         tokio::spawn(run_receiver(
@@ -153,6 +163,33 @@ impl UdpProberPool {
     }
 }
 
+/// Build the shared prober socket as dual-stack (`IPV6_V6ONLY=false`) on
+/// `[::]:0`. Callers send to IPv4 targets via [`dual_stack_send_addr`]
+/// which maps v4 → v4-mapped-v6 since `sendto(2)` on an `AF_INET6`
+/// socket rejects a plain `sockaddr_in` on macOS / BSD. See the module
+/// docs for the peer-address normalization the receiver applies on the
+/// reply path.
+fn bind_dual_stack_ephemeral() -> std::io::Result<UdpSocket> {
+    let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, None)?;
+    socket.set_only_v6(false)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::V6(addr).into())?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket)
+}
+
+/// Translate a target IP into the `SocketAddr` form the dual-stack
+/// (`AF_INET6`) prober socket accepts. v6 passes through untouched; v4
+/// is wrapped as `::ffff:a.b.c.d` so BSD/macOS kernels stop rejecting
+/// the send with `EINVAL`.
+fn dual_stack_send_addr(ip: IpAddr, port: u16) -> SocketAddr {
+    match ip {
+        IpAddr::V4(v4) => SocketAddr::V6(SocketAddrV6::new(v4.to_ipv6_mapped(), port, 0, 0)),
+        IpAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(v6, port, 0, 0)),
+    }
+}
+
 // ---- receiver ----
 
 async fn run_receiver(
@@ -186,12 +223,22 @@ async fn run_receiver(
                 // listener socket). Keying on `(ip, port)` lets two
                 // targets that share an IP (NAT) but listen on different
                 // ports route responses to the correct `TargetState`.
-                let Some(state_ref) = targets.get(&(peer.ip(), peer.port())) else {
+                //
+                // Normalize v4-mapped-v6 (`::ffff:a.b.c.d`) back to the
+                // native `Ipv4Addr` before lookup: on a dual-stack socket
+                // the kernel may deliver an IPv4 peer's reply as the
+                // mapped form, but the dispatch-map key is the target's
+                // *native* address from `to_ipaddr(&target.ip)` (v4 from
+                // a 4-byte wire, v6 from a 16-byte wire). Without this,
+                // IPv4 targets would silently drop every reply on
+                // platforms that deliver the mapped form.
+                let peer_ip = peer.ip().to_canonical();
+                let Some(state_ref) = targets.get(&(peer_ip, peer.port())) else {
                     continue;
                 };
                 let state = state_ref.clone();
                 drop(state_ref);
-                handle_response(state, peer.ip(), decoded).await;
+                handle_response(state, peer_ip, decoded).await;
             }
         }
     }
@@ -325,7 +372,15 @@ async fn run_sender(
     mut rate_rx: watch::Receiver<ProbeRate>,
     cancel: CancellationToken,
 ) {
-    let target_addr = std::net::SocketAddr::new(target_ip, target_port);
+    // The pool socket is a dual-stack `AF_INET6` socket with
+    // `IPV6_V6ONLY=false`. On Linux this accepts either `SocketAddr::V4`
+    // or `SocketAddr::V6` in `send_to` and auto-maps v4 to
+    // `::ffff:a.b.c.d`, but on macOS / BSD the `sendto(2)` path rejects
+    // a plain `sockaddr_in` on an `AF_INET6` socket with `EINVAL`.
+    // Always map v4 targets to v4-mapped-v6 ourselves so every platform
+    // agrees. The dispatch-map key stays as the native `IpAddr` because
+    // the receiver re-canonicalizes incoming peer addresses.
+    let target_addr = dual_stack_send_addr(target_ip, target_port);
     // `ThreadRng` is !Send; spawned futures must be Send, so use SmallRng.
     let mut rng = SmallRng::from_rng(&mut rand::rng());
     // Independent watch receiver for the UDP secret so the pre-config

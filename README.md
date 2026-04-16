@@ -159,8 +159,8 @@ one supervisor task per target.
 | `AGENT_IP` | yes | Externally-reachable IP (v4 or v6) |
 | `AGENT_LAT` | yes | Latitude in decimal degrees (-90 to 90) |
 | `AGENT_LON` | yes | Longitude in decimal degrees (-180 to 180) |
-| `MESHMON_TCP_PROBE_PORT` | yes | Port the TCP echo listener binds. Must be open on the host and reachable from peers. |
-| `MESHMON_UDP_PROBE_PORT` | yes | Port the UDP echo listener binds. Must be open on the host and reachable from peers. |
+| `MESHMON_TCP_PROBE_PORT` | yes | Port the TCP echo listener binds (dual-stack on `[::]`, serves both IPv4 and IPv6 peers). Must be open on the host and reachable from peers. |
+| `MESHMON_UDP_PROBE_PORT` | yes | Port the UDP echo listener binds (dual-stack on `[::]`, serves both IPv4 and IPv6 peers). Must be open on the host and reachable from peers. |
 | `MESHMON_ICMP_TARGET_CONCURRENCY` | no (default `32`) | Global cap on concurrent per-target ICMP/traceroute rounds. Lower if raw-socket / thread use is too high. |
 | `RUST_LOG` | no | Tracing filter (default: `meshmon_agent=info,warn`) |
 
