@@ -1,6 +1,7 @@
 //! Shared application state injected into axum handlers.
 //!
-//! Cheap to `Clone` — every field is already `Arc`-backed.
+//! Cheap to `Clone` — heavyweight fields are `Arc`-backed; `Instant` and
+//! `BuildInfo` are small `Copy` types (a few words each).
 
 use crate::config::Config;
 use crate::ingestion::IngestionPipeline;
