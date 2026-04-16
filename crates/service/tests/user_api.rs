@@ -34,6 +34,10 @@
 //! | `.142` | `metrics_proxy_range_forwards_all_params`                   |
 //! | `.143` | `metrics_proxy_returns_503_when_vm_not_configured`          |
 //! | `.144` | `alerts_proxy_forwards_query_params_to_upstream`            |
+//! | `.150` | `recent_routes_returns_latest_across_pairs`                 |
+//! | `.151` | `recent_routes_respects_limit_cap`                          |
+//! | `.152` | `recent_routes_rejects_invalid_limit`                       |
+//! | `.153` | (reserved for future)                                       |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -774,7 +778,7 @@ async fn metrics_proxy_rejects_non_meshmon_query() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        body["error"], "query must start with a meshmon_ metric name",
+        body["error"], "query must reference at least one meshmon_ metric",
         "body = {body}"
     );
 }
@@ -901,4 +905,213 @@ async fn metrics_proxy_returns_503_when_vm_not_configured() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---------------------------------------------------------------------------
+// T18: GET /api/routes/recent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn recent_routes_returns_latest_across_pairs() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.150").await;
+
+    // Test-unique IDs so we can filter our rows out of the shared pool's
+    // route_snapshots table (other integration tests also seed this table).
+    let src_a = "t18recent-src-a";
+    let tgt_a = "t18recent-tgt-a";
+    let src_b = "t18recent-src-b";
+    let tgt_b = "t18recent-tgt-b";
+
+    // Two source/target pairs, three snapshots total.
+    // Pair A: one old + one new. Pair B: one mid.
+    let now = chrono::Utc::now();
+    let rows: [(&str, &str, &str, chrono::DateTime<chrono::Utc>); 3] = [
+        (src_a, tgt_a, "icmp", now - chrono::Duration::minutes(60)),
+        (src_a, tgt_a, "icmp", now - chrono::Duration::minutes(1)),
+        (src_b, tgt_b, "icmp", now - chrono::Duration::minutes(30)),
+    ];
+    for (src, tgt, proto, ts) in rows {
+        // Register the agents first so the FK holds.
+        common::insert_agent(&pool, src).await;
+        common::insert_agent(&pool, tgt).await;
+        sqlx::query(
+            "INSERT INTO route_snapshots \
+             (source_id, target_id, protocol, observed_at, hops, path_summary) \
+             VALUES ($1, $2, $3, $4, '[]'::jsonb, NULL)",
+        )
+        .bind(src)
+        .bind(tgt)
+        .bind(proto)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("insert snapshot");
+    }
+
+    // Request enough rows to survive shared-pool pollution — other tests may
+    // insert their own "latest" pairs that rank ahead of ours.
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent?limit=100")
+                .header(axum::http::header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let items = body.as_array().expect("array");
+
+    // DISTINCT ON globally: no (source_id, target_id) pair repeats in the response,
+    // regardless of which test inserted the row.
+    let mut seen_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for item in items {
+        let src = item["source_id"].as_str().unwrap().to_string();
+        let tgt = item["target_id"].as_str().unwrap().to_string();
+        assert!(
+            seen_pairs.insert((src.clone(), tgt.clone())),
+            "duplicate pair ({src}, {tgt}) — DISTINCT ON not working"
+        );
+    }
+
+    // observed_at must globally descend across all items — the ORDER BY contract
+    // must hold regardless of how many foreign rows sit between ours.
+    for w in items.windows(2) {
+        let a = w[0]["observed_at"].as_str().unwrap();
+        let b = w[1]["observed_at"].as_str().unwrap();
+        assert!(a >= b, "expected descending: {a} >= {b}");
+    }
+
+    // Everything below is about OUR seeded rows — filter the response so foreign
+    // rows from other tests in the same binary can't flake the assertions.
+    let mine: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|i| {
+            let s = i["source_id"].as_str().unwrap_or("");
+            s == src_a || s == src_b
+        })
+        .collect();
+
+    // DISTINCT ON must collapse src-a's two snapshots to one row, plus one for src-b.
+    assert_eq!(
+        mine.len(),
+        2,
+        "expected exactly 2 rows for our pairs, got {}: {mine:#?}",
+        mine.len()
+    );
+
+    // Within our rows: src-a (1m ago) is newer than src-b (30m ago).
+    assert_eq!(
+        mine[0]["source_id"], src_a,
+        "src-a (1m ago) must rank first among our rows"
+    );
+    assert_eq!(mine[0]["target_id"], tgt_a);
+    assert_eq!(mine[1]["source_id"], src_b);
+    assert_eq!(mine[1]["target_id"], tgt_b);
+
+    // Cleanup seeded rows.
+    sqlx::query("DELETE FROM route_snapshots WHERE source_id LIKE 't18recent-%'")
+        .execute(&pool)
+        .await
+        .expect("cleanup snapshots");
+    sqlx::query("DELETE FROM agents WHERE id LIKE 't18recent-%'")
+        .execute(&pool)
+        .await
+        .expect("cleanup agents");
+}
+
+#[tokio::test]
+async fn recent_routes_respects_limit_cap() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.151").await;
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent?limit=500")
+                .header(axum::http::header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("limit must be between 1 and 100"),
+        "expected error mentioning 'limit must be between 1 and 100', got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn recent_routes_rejects_invalid_limit() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.152").await;
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent?limit=0")
+                .header(axum::http::header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("limit must be between 1 and 100"),
+        "expected error mentioning 'limit must be between 1 and 100', got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn recent_routes_requires_session() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin(pool).await;
+    let app = meshmon_service::http::router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/routes/recent")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
 }

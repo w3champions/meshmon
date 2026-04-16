@@ -712,6 +712,20 @@ pub fn login_req(
         .expect("build login request")
 }
 
+/// Insert a minimal `agents` row with only the NOT-NULL required columns.
+/// Uses `ON CONFLICT (id) DO NOTHING` so it is safe to call multiple times
+/// with the same id (e.g., from concurrent tests sharing the migrated pool).
+pub async fn insert_agent(pool: &PgPool, id: &str) {
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+         VALUES ($1, $1, '10.0.0.1', 3555, 3552) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("insert_agent({id}) failed: {e}"));
+}
+
 /// Drive a successful login as the default `admin` user on `app` and
 /// return the `Set-Cookie` value so the caller can attach it to follow-up
 /// requests. Panics if the login fails — callers use this as test setup,

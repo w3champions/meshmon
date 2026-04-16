@@ -438,6 +438,105 @@ async fn fetch_list(
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// T18: GET /api/routes/recent — cross-pair recent snapshots
+// ---------------------------------------------------------------------------
+
+const RECENT_ROUTES_MAX_LIMIT: i64 = 100;
+const RECENT_ROUTES_DEFAULT_LIMIT: i64 = 10;
+
+/// Query parameters for the recent-routes endpoint.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct RecentRoutesParams {
+    /// Maximum rows to return (1..=100, default 10).
+    pub limit: Option<i64>,
+}
+
+/// Fetch the most recent route snapshots across all source/target pairs.
+///
+/// Uses a CTE with `DISTINCT ON` to return exactly one (the latest) snapshot
+/// per `(source_id, target_id)` pair, then orders the result set globally by
+/// `observed_at DESC` so the caller sees the most recently active pairs first.
+///
+/// Protocol is collapsed: when a pair has multiple protocols (e.g. icmp + tcp),
+/// only the snapshot with the newest `observed_at` across protocols is kept.
+/// The per-protocol route history remains available via `/api/paths/{src}/{tgt}/routes`.
+async fn fetch_recent_routes(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<Vec<RouteSnapshotSummary>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"WITH latest AS (
+               SELECT DISTINCT ON (source_id, target_id)
+                      id, source_id, target_id, protocol, observed_at, path_summary
+               FROM route_snapshots
+               ORDER BY source_id, target_id, observed_at DESC, id DESC
+           )
+           SELECT id AS "id!",
+                  source_id,
+                  target_id,
+                  protocol,
+                  observed_at,
+                  path_summary AS "path_summary: SqlxJson<PathSummaryJson>"
+           FROM latest
+           ORDER BY observed_at DESC, id DESC
+           LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| RouteSnapshotSummary {
+            id: r.id,
+            source_id: r.source_id,
+            target_id: r.target_id,
+            protocol: r.protocol,
+            observed_at: r.observed_at,
+            path_summary: r.path_summary.map(|s| s.0),
+        })
+        .collect())
+}
+
+/// `GET /api/routes/recent` — returns the latest route snapshot per
+/// `(source_id, target_id)` pair, newest first, up to `limit` rows
+/// (default 10, max 100).
+#[utoipa::path(
+    get,
+    path = "/api/routes/recent",
+    tag = "routes",
+    params(RecentRoutesParams),
+    responses(
+        (status = 200, description = "Recent route snapshots across all pairs", body = Vec<RouteSnapshotSummary>),
+        (status = 400, description = "Invalid limit"),
+        (status = 401, description = "No active session"),
+    ),
+)]
+pub async fn list_recent_routes(
+    State(state): State<AppState>,
+    Query(q): Query<RecentRoutesParams>,
+) -> Response {
+    let limit = q.limit.unwrap_or(RECENT_ROUTES_DEFAULT_LIMIT);
+    if !(1..=RECENT_ROUTES_MAX_LIMIT).contains(&limit) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("limit must be between 1 and {RECENT_ROUTES_MAX_LIMIT}")
+            })),
+        )
+            .into_response();
+    }
+
+    match fetch_recent_routes(&state.pool, limit).await {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "fetch_recent_routes failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 /// `GET /api/paths/{src}/{tgt}/routes` — return a paginated, time-filtered
 /// list of route snapshot summaries (without hop detail).
 #[utoipa::path(
