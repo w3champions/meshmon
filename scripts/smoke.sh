@@ -100,7 +100,7 @@ target_active_window_minutes = 5
 refresh_interval_seconds = 10
 
 [probing]
-udp_probe_secret = "AAAAAAAAAAAAAAAAAAAAAA=="
+udp_probe_secret = "base64:AAAAAAAAAAAAAAAAAAAAAA=="
 EOF
 
 # ---- Migrations + seed data --------------------------------------------
