@@ -29,5 +29,9 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
-tokio-stream = "0.1"
+# `net` feature is required for `TcpListenerStream` used by the integration
+# test's mock gRPC server. Currently pulled in transitively via `tonic`, but
+# declared explicitly so the test does not break if the transitive chain
+# changes.
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true
