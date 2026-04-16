@@ -21,7 +21,9 @@ DB_CONTAINER=meshmon-smoke-db
 VM_CONTAINER=meshmon-smoke-vm
 DB_PORT=${MESHMON_SMOKE_DB_PORT:-5432}
 VM_PORT=${MESHMON_SMOKE_VM_PORT:-8428}
-SERVICE_PORT=${MESHMON_SMOKE_SERVICE_PORT:-8080}
+# Non-standard default port to avoid clashing with Docker Desktop's common
+# *:8080 binding and other typical local dev services.
+SERVICE_PORT=${MESHMON_SMOKE_SERVICE_PORT:-18080}
 FRONTEND_PORT=${MESHMON_SMOKE_FRONTEND_PORT:-5173}
 CONFIG_PATH=${MESHMON_SMOKE_CONFIG:-/tmp/meshmon-smoke.toml}
 ADMIN_USER=${MESHMON_SMOKE_USER:-admin}
@@ -175,4 +177,5 @@ Ctrl-C tears everything down (service + containers).
 
 EOF
 
+export MESHMON_API_PROXY_TARGET="http://127.0.0.1:${SERVICE_PORT}"
 exec npm --prefix frontend run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT"
