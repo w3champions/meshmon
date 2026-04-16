@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH latest AS (\n               SELECT DISTINCT ON (source_id, target_id)\n                      id, source_id, target_id, protocol, observed_at, path_summary\n               FROM route_snapshots\n               ORDER BY source_id, target_id, observed_at DESC\n           )\n           SELECT id AS \"id!\",\n                  source_id,\n                  target_id,\n                  protocol,\n                  observed_at,\n                  path_summary AS \"path_summary: SqlxJson<PathSummaryJson>\"\n           FROM latest\n           ORDER BY observed_at DESC\n           LIMIT $1",
+  "query": "WITH latest AS (\n               SELECT DISTINCT ON (source_id, target_id)\n                      id, source_id, target_id, protocol, observed_at, path_summary\n               FROM route_snapshots\n               ORDER BY source_id, target_id, observed_at DESC, id DESC\n           )\n           SELECT id AS \"id!\",\n                  source_id,\n                  target_id,\n                  protocol,\n                  observed_at,\n                  path_summary AS \"path_summary: SqlxJson<PathSummaryJson>\"\n           FROM latest\n           ORDER BY observed_at DESC, id DESC\n           LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -48,5 +48,5 @@
       true
     ]
   },
-  "hash": "45ee6ad4689f2ed39e7e06d015c3d89d7cc85e2911b79b3531b2da12250e1cf9"
+  "hash": "e6d6b4a7c1c6a8bf694d4f7f149cca98f3c575bb647a32097871995232a6bd47"
 }

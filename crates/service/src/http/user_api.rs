@@ -457,6 +457,10 @@ pub struct RecentRoutesParams {
 /// Uses a CTE with `DISTINCT ON` to return exactly one (the latest) snapshot
 /// per `(source_id, target_id)` pair, then orders the result set globally by
 /// `observed_at DESC` so the caller sees the most recently active pairs first.
+///
+/// Protocol is collapsed: when a pair has multiple protocols (e.g. icmp + tcp),
+/// only the snapshot with the newest `observed_at` across protocols is kept.
+/// The per-protocol route history remains available via `/api/paths/{src}/{tgt}/routes`.
 async fn fetch_recent_routes(
     pool: &sqlx::PgPool,
     limit: i64,
@@ -466,7 +470,7 @@ async fn fetch_recent_routes(
                SELECT DISTINCT ON (source_id, target_id)
                       id, source_id, target_id, protocol, observed_at, path_summary
                FROM route_snapshots
-               ORDER BY source_id, target_id, observed_at DESC
+               ORDER BY source_id, target_id, observed_at DESC, id DESC
            )
            SELECT id AS "id!",
                   source_id,
@@ -475,7 +479,7 @@ async fn fetch_recent_routes(
                   observed_at,
                   path_summary AS "path_summary: SqlxJson<PathSummaryJson>"
            FROM latest
-           ORDER BY observed_at DESC
+           ORDER BY observed_at DESC, id DESC
            LIMIT $1"#,
         limit,
     )

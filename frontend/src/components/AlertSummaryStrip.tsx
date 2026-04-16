@@ -23,7 +23,7 @@ export function AlertSummaryStrip({ className }: AlertSummaryStripProps) {
     );
   }
 
-  if (data.total === 0) {
+  if (!data || data.total === 0) {
     return <p className={cn("text-sm text-muted-foreground", className)}>No active alerts</p>;
   }
 
