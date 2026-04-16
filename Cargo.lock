@@ -1789,6 +1789,7 @@ name = "meshmon-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dashmap",
  "meshmon-protocol",
  "prost",
  "rand 0.9.4",
