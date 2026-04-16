@@ -18,7 +18,10 @@ export default defineConfig({
     port: 5173,
     host: "0.0.0.0",
     proxy: {
-      "/api": "http://localhost:8080",
+      // Explicit 127.0.0.1 (not `localhost`) so Node's IPv6-first resolution
+      // doesn't route to an unrelated `::8080` listener (e.g. Docker Desktop
+      // commonly binds `*:8080` on IPv6 while the service binds IPv4 only).
+      "/api": "http://127.0.0.1:8080",
     },
   },
 });
