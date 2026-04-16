@@ -26,8 +26,12 @@ trust_forwarded_headers = true
 shared_token = "{token}"
 rate_limit_per_minute = 60
 rate_limit_burst = 3
+
+[probing]
+udp_probe_secret = "{secret}"
 "#,
-        token = common::TEST_AGENT_TOKEN
+        token = common::TEST_AGENT_TOKEN,
+        secret = common::TEST_UDP_PROBE_SECRET_TOML,
     );
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
     let swap = Arc::new(ArcSwap::from(cfg.clone()));

@@ -9,6 +9,9 @@ listen_addr = "127.0.0.1:8080"
 
 [database]
 url = "postgres://meshmon:secret@localhost:5432/meshmon"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#;
 
 #[test]
@@ -72,6 +75,9 @@ fn url_env_resolves() {
         r#"
 [database]
 url_env = "MESHMON_T04_TEST_URL"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "t.toml",
     )
@@ -144,6 +150,9 @@ url = "postgres://a@b/c"
 [[auth.users]]
 username = "admin"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$BztdyfEefG5V18Uudy4vk6vVrWxD1w9dDLV5GhJNDAs"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "t.toml",
     );
@@ -161,6 +170,8 @@ fn log_format_compact_accepted() {
 url = "postgres://a@b/c"
 [logging]
 format = "compact"
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "t.toml",
     )
@@ -287,6 +298,8 @@ fn trust_forwarded_headers_defaults_to_false() {
         r#"
 [database]
 url = "postgres://u@h/d"
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -302,6 +315,8 @@ fn trust_forwarded_headers_honored() {
 url = "postgres://u@h/d"
 [service]
 trust_forwarded_headers = true
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -315,6 +330,9 @@ fn agents_section_defaults_when_missing() {
         r#"
 [database]
 url = "postgres://a@b/c"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )
@@ -333,6 +351,9 @@ url = "postgres://a@b/c"
 [agents]
 target_active_window_minutes = 15
 refresh_interval_seconds = 30
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
         "test.toml",
     )

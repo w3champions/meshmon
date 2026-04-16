@@ -35,6 +35,9 @@ listen_addr = "127.0.0.1:0"
 
 [database]
 url = "postgres://ignored"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#;
     let cfg = Arc::new(Config::from_str(cfg_text, "startup_test.toml").expect("parse"));
     let swap = Arc::new(ArcSwap::from(cfg.clone()));
@@ -132,6 +135,9 @@ url = "postgres://ignored@localhost/nope"
 
 [logging]
 filter = "{filter}"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#
         );
         let mut f = std::fs::File::create(&cfg_path).unwrap();
@@ -219,6 +225,9 @@ async fn shutdown_flips_not_ready() {
             r#"
 [database]
 url = "postgres://ignored"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
 "#,
             "t.toml",
         )

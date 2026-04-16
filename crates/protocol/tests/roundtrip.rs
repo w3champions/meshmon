@@ -41,6 +41,8 @@ fn register_request_roundtrip() {
         lat: -3.7,
         lon: -38.5,
         agent_version: "0.1.0".into(),
+        tcp_probe_port: 3555,
+        udp_probe_port: 3552,
     };
     assert_roundtrip(&msg);
 }
@@ -185,6 +187,8 @@ fn config_response_roundtrip() {
             normal_recovery_pct: 0.01,
             normal_recovery_sec: 300,
         }),
+        udp_probe_secret: vec![0u8; 8].into(),
+        udp_probe_previous_secret: Vec::<u8>::new().into(),
     };
     assert_roundtrip(&msg);
 }
@@ -200,6 +204,8 @@ fn targets_response_roundtrip() {
                 location: "Fortaleza, Brazil".into(),
                 lat: -3.7,
                 lon: -38.5,
+                tcp_probe_port: 3555,
+                udp_probe_port: 3552,
             },
             Target {
                 id: "eu-west".into(),
@@ -208,6 +214,8 @@ fn targets_response_roundtrip() {
                 location: "Frankfurt".into(),
                 lat: 50.1,
                 lon: 8.7,
+                tcp_probe_port: 3555,
+                udp_probe_port: 3552,
             },
         ],
     };
