@@ -99,9 +99,17 @@ impl SupervisorHandle {
     /// Await all prober tasks to completion. Useful for clean shutdown in
     /// tests and integration scenarios where callers need to know all probers
     /// have exited before proceeding.
+    ///
+    /// Panics in prober tasks are logged at `warn` rather than silently
+    /// swallowed; cancellation-induced `JoinError`s are ignored because they
+    /// are an expected part of graceful shutdown.
     pub async fn await_probers(&mut self) {
-        for handle in self.prober_joins.drain(..) {
-            let _ = handle.await;
+        for join in std::mem::take(&mut self.prober_joins) {
+            if let Err(e) = join.await {
+                if !e.is_cancelled() {
+                    tracing::warn!(error = %e, "prober task panicked");
+                }
+            }
         }
     }
 }
@@ -273,23 +281,38 @@ async fn run(
                     now,
                 );
 
-                // Log protocol transitions.
+                // Log protocol transitions. Include the triggering FastSummary's
+                // failure_rate + sample_count per spec 02: "Every state change
+                // is logged at INFO with target_id, the before/after state, and
+                // the triggering FastSummary (sample_count, successful,
+                // failure_rate)."
                 for pt in &change.protocol_transitions {
+                    let summary = match pt.protocol {
+                        Protocol::Icmp => &icmp_summary,
+                        Protocol::Tcp => &tcp_summary,
+                        Protocol::Udp => &udp_summary,
+                        Protocol::Unspecified => continue,
+                    };
                     tracing::info!(
                         target_id = %target.id,
                         protocol = ?pt.protocol,
                         from = ?pt.from,
                         to = ?pt.to,
-                        "protocol health transition",
+                        failure_rate = summary.failure_rate,
+                        sample_count = summary.sample_count,
+                        "per-protocol health changed",
                     );
                 }
-                // Log path transition.
+                // Log path transition, including the current primary so an
+                // operator can correlate degraded/unreachable with which
+                // protocol drove the decision.
                 if let Some((from, to)) = change.path_transition {
                     tracing::info!(
                         target_id = %target.id,
                         from = ?from,
                         to = ?to,
-                        "path health transition",
+                        primary = ?change.primary,
+                        "path health changed",
                     );
                 }
                 // Log primary transition.
@@ -298,7 +321,7 @@ async fn run(
                         target_id = %target.id,
                         from = ?from,
                         to = ?to,
-                        "primary protocol transition",
+                        "primary protocol changed",
                     );
                 }
 
@@ -866,6 +889,22 @@ mod tests {
                 })
                 .await
                 .expect("send tcp success");
+        }
+        // Inject UDP successes too so the path-level state machine doesn't
+        // accidentally flip to Unreachable because every non-primary protocol
+        // has zero samples. Plan lines 2150-2163 call this out explicitly.
+        for _ in 0..10 {
+            handle
+                .observation_tx
+                .send(ProbeObservation {
+                    protocol: Protocol::Udp,
+                    target_id: "swing-test".to_string(),
+                    outcome: ProbeOutcome::Success { rtt_micros: 1_500 },
+                    hops: None,
+                    observed_at: tokio::time::Instant::now(),
+                })
+                .await
+                .expect("send udp success");
         }
 
         // Yield so the supervisor processes all queued observations.
