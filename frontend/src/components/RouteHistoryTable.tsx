@@ -27,6 +27,12 @@ interface RouteHistoryTableProps {
   className?: string;
 }
 
+/**
+ * Path detail "Route change history" table. Rows come from the overview
+ * endpoint's `recent_snapshots`, which is protocol-scoped server-side, so
+ * all snapshots in one render share a protocol — no cross-protocol pair
+ * is ever representable.
+ */
 export function RouteHistoryTable({
   snapshots,
   truncated,
@@ -40,22 +46,12 @@ export function RouteHistoryTable({
     return <p className="text-sm text-muted-foreground">No route snapshots in this window.</p>;
   }
 
-  // Cross-protocol diffs are nonsense (ICMP vs TCP hop semantics differ), so
-  // lock B to the same protocol as A (and vice versa). Native radios can't
-  // be unchecked by clicking again, so the "Clear" button below is the
-  // recovery path when a user wants to switch protocols.
-  const pickedProtocol = (id: number | null): string | null =>
-    id === null ? null : (snapshots.find((s) => s.id === id)?.protocol ?? null);
-  const aProtocol = pickedProtocol(a);
-  const bProtocol = pickedProtocol(b);
-
   return (
     <div className={cn("flex flex-col gap-3", className)}>
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Observed</TableHead>
-            <TableHead>Protocol</TableHead>
             <TableHead>Hops</TableHead>
             <TableHead>Avg RTT</TableHead>
             <TableHead>Loss</TableHead>
@@ -64,48 +60,38 @@ export function RouteHistoryTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {snapshots.map((s) => {
-            // Disable the opposite-side radio when its row's protocol
-            // doesn't match the already-picked side. Keeps comparisons
-            // within a single protocol without surfacing a banner.
-            const aDisabled = bProtocol !== null && s.protocol !== bProtocol;
-            const bDisabled = aProtocol !== null && s.protocol !== aProtocol;
-            return (
-              <TableRow key={s.id}>
-                <TableCell title={s.observed_at}>
-                  {formatDistanceToNowStrict(new Date(s.observed_at), { addSuffix: true })}
-                </TableCell>
-                <TableCell className="uppercase text-xs">{s.protocol}</TableCell>
-                <TableCell>{s.path_summary?.hop_count ?? "—"} hops</TableCell>
-                <TableCell>
-                  {s.path_summary ? `${(s.path_summary.avg_rtt_micros / 1000).toFixed(0)} ms` : "—"}
-                </TableCell>
-                <TableCell>
-                  {s.path_summary ? `${(s.path_summary.loss_pct * 100).toFixed(1)}%` : "—"}
-                </TableCell>
-                <TableCell>
-                  <input
-                    type="radio"
-                    name="compare-a"
-                    aria-label={`Pick as A (id ${s.id})`}
-                    checked={a === s.id}
-                    disabled={aDisabled}
-                    onChange={() => setA(s.id)}
-                  />
-                </TableCell>
-                <TableCell>
-                  <input
-                    type="radio"
-                    name="compare-b"
-                    aria-label={`Pick as B (id ${s.id})`}
-                    checked={b === s.id}
-                    disabled={bDisabled}
-                    onChange={() => setB(s.id)}
-                  />
-                </TableCell>
-              </TableRow>
-            );
-          })}
+          {snapshots.map((s) => (
+            <TableRow key={s.id}>
+              <TableCell title={s.observed_at}>
+                {formatDistanceToNowStrict(new Date(s.observed_at), { addSuffix: true })}
+              </TableCell>
+              <TableCell>{s.path_summary?.hop_count ?? "—"} hops</TableCell>
+              <TableCell>
+                {s.path_summary ? `${(s.path_summary.avg_rtt_micros / 1000).toFixed(0)} ms` : "—"}
+              </TableCell>
+              <TableCell>
+                {s.path_summary ? `${(s.path_summary.loss_pct * 100).toFixed(1)}%` : "—"}
+              </TableCell>
+              <TableCell>
+                <input
+                  type="radio"
+                  name="compare-a"
+                  aria-label={`Pick as A (id ${s.id})`}
+                  checked={a === s.id}
+                  onChange={() => setA(s.id)}
+                />
+              </TableCell>
+              <TableCell>
+                <input
+                  type="radio"
+                  name="compare-b"
+                  aria-label={`Pick as B (id ${s.id})`}
+                  checked={b === s.id}
+                  onChange={() => setB(s.id)}
+                />
+              </TableCell>
+            </TableRow>
+          ))}
         </TableBody>
       </Table>
       {truncated && (
