@@ -11,10 +11,24 @@
 //! * Four `watch` senders (ICMP rate, TCP rate, UDP rate, Trippy rate) that
 //!   drive the four probers, which are spawned once per target and reconfigured
 //!   via the watch channels — never respawned.
+//! * A per-target [`RouteTracker`] that accumulates trippy per-hop
+//!   observations (for whichever protocol is currently primary) over a
+//!   rolling window sized from `ProbeConfig.primary_window_sec`.
 //!
 //! Every 10 s the eval tick snapshots per-protocol stats, runs
 //! [`TargetStateMachine::evaluate`], publishes new rates via the watch senders,
-//! and resizes the primary protocol's rolling window on primary swings.
+//! resizes the primary protocol's rolling window on primary swings, and calls
+//! [`RouteTracker::reset_for_protocol`] so the next snapshot re-baselines
+//! under the new primary.
+//!
+//! An independent 60 s snapshot tick calls [`RouteTracker::build_snapshot`]
+//! followed by [`RouteTracker::diff_against`]; the first snapshot after a
+//! reset is emitted unconditionally, and subsequent snapshots only emit
+//! when the diff rules from `ProbeConfig.diff_detection` fire. Meaningful
+//! snapshots are pushed into a shared `mpsc::Sender<RouteSnapshot>` owned
+//! by the [`AgentRuntime`](crate::bootstrap::AgentRuntime) via `try_send`
+//! (lossy — a full or closed channel logs and drops). The bootstrap
+//! placeholder consumer logs received snapshots at `info`.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

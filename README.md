@@ -221,8 +221,9 @@ cargo run -p meshmon-agent
 |--------|----------------|
 | `config.rs` | Env var parsing (`AgentEnv`), probe config wrapper |
 | `api.rs` | `ServiceApi` trait + `GrpcServiceApi` (tonic client with bearer auth) |
-| `supervisor.rs` | Per-target supervisor: spawns 4 probers, runs state machine every 10 s, publishes rates |
+| `supervisor.rs` | Per-target supervisor: spawns 4 probers, runs state machine every 10 s, publishes rates, owns the per-target route tracker and emits diff-gated route snapshots on a 60 s tick |
 | `state.rs` | Pure state-machine types: per-protocol + path health, rate/window lookup |
+| `route.rs` | Per-target route-state tracker: accumulates trippy per-hop observations over a rolling window, builds canonical snapshots, detects meaningful diffs |
 | `bootstrap.rs` | Register → config → targets → spawn, 5-minute refresh loop |
 | `probing/mod.rs` | `ProbeObservation` / `HopObservation` types (populated by probers) |
 | `probing/icmp.rs` | ICMP Echo pinger (`surge-ping`), always-on per target for per-protocol health |

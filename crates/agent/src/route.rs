@@ -1,17 +1,25 @@
 //! Per-target route state tracker.
 //!
 //! See spec 02 § "Route state tracker". Pure, clock-injected logic: no
-//! tokio, no async, no mpsc. Owned by the per-target supervisor, which
-//! feeds per-hop observations via [`RouteTracker::observe`] on every
-//! trippy probe and polls [`RouteTracker::build_snapshot`] +
+//! tokio runtime, no async, no mpsc — just a regular struct the
+//! per-target supervisor owns, mutates on every trippy probe via
+//! [`RouteTracker::observe`], and polls via [`RouteTracker::build_snapshot`] +
 //! [`RouteTracker::diff_against`] on its 60 s snapshot tick.
 //!
-//! The tracker records the [`Protocol`] it's currently accumulating for.
-//! On a primary swing the supervisor calls
-//! [`RouteTracker::reset_for_protocol`], which drops the accumulator and
-//! the cached `last_reported` snapshot; the first non-empty snapshot
-//! after the reset is emitted as the new baseline (same path as the
-//! first-after-startup emission).
+//! The tracker records the [`Protocol`] it's currently accumulating for
+//! and a rolling window sized from `ProbeConfig.primary_window_sec` (via
+//! [`RouteTracker::set_window`] on config updates). On a primary swing
+//! the supervisor calls [`RouteTracker::reset_for_protocol`], which
+//! drops the accumulator and the cached `last_reported` snapshot; the
+//! first non-empty snapshot after the reset is emitted as the new
+//! baseline (same path as the first-after-startup emission).
+//!
+//! [`RouteTracker::set_last_reported`] is a deliberate mutation API
+//! separate from [`RouteTracker::diff_against`]: the diff is a
+//! read-only comparison, and the supervisor only advances `last_reported`
+//! after a successful emit on the snapshot channel. A send failure
+//! leaves the cached baseline untouched so the next tick retries the
+//! diff unchanged.
 //!
 //! ## Complexity targets
 //! - `observe(hops, now)`: O(H) per call where H = hops.len() (typically ≤ 30).
@@ -19,13 +27,15 @@
 //!   distinct IPs per position (typically 1–4). The sort is per-position.
 //! - `diff_against(last)`: O(H · K) — two hashmap walks over current vs. last.
 //!
-//! ## What lands here vs. what doesn't
-//! - T15 owns all accumulator logic, snapshot construction, diff detection.
+//! ## Ownership boundary
+//! - This module owns all accumulator logic, snapshot construction, and
+//!   diff detection.
 //! - The supervisor (see [`supervisor`](crate::supervisor)) owns the mpsc
 //!   channel, the 60 s timer, the primary-swing reset call, and the
 //!   protocol-filter rule that skips hops from non-tracked protocols.
-//! - The emitter (T16) owns the `Receiver` side of the snapshot channel
-//!   and the wall-clock → i64 conversion at wire-encoding time.
+//! - The emitter owns the `Receiver` side of the snapshot channel and
+//!   the wall-clock → `i64` conversion at wire-encoding time; see
+//!   [`RouteSnapshot::observed_at_micros_i64`].
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
