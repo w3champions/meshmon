@@ -111,3 +111,26 @@ groups:
     annotations:
       summary: 'Elevated jitter: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
       description: 'RTT stddev over 5 min: {{ $value | printf "%.0f" }} µs'
+
+- name: meshmon.path_availability
+  interval: 30s
+  rules:
+
+  # Path is unreachable across every protocol. `min without(protocol)` gives
+  # us one alert per (source, target) pair without a leaked protocol label;
+  # firing semantics are identical to "all three protocols' loss ≥ 0.99".
+  # Retains only source/target/alertname labels — matches the label contract
+  # (protocol omitted when the concept doesn't apply) and the inhibit rule's
+  # `equal: [source, target]` match.
+  - alert: PathUnreachable
+    expr: |
+      min without(protocol) (
+        avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp|tcp"}[5m])
+      ) >= 0.99
+    for: 2m
+    labels:
+      severity: critical
+      category: unreachable
+    annotations:
+      summary: 'Path unreachable: {{ $labels.source }} → {{ $labels.target }}'
+      description: 'Every probe protocol has sustained ≥ 99% loss over 5 min'
