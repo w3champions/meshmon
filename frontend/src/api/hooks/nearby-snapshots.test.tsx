@@ -53,15 +53,13 @@ describe("useNearbySnapshots", () => {
       { wrapper: wrap() },
     );
 
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await waitFor(() => expect(result.current.snapshots.map((s) => s.id)).toEqual([1, 2, 3, 4, 5]));
 
     const first = captured[0];
     expect(first).toContain("/api/paths/a/b/routes");
     expect(first).toContain("protocol=icmp");
     expect(first).toMatch(/from=/);
     expect(first).toMatch(/to=/);
-
-    expect(result.current.snapshots.map((s) => s.id)).toEqual([1, 2, 3, 4, 5]);
   });
 
   test("findClosest picks the snapshot with minimum |observed_at - target|", async () => {
@@ -82,7 +80,7 @@ describe("useNearbySnapshots", () => {
       () => useNearbySnapshots({ source: "a", target: "b", protocol: "icmp", aroundTimeMs }),
       { wrapper: wrap() },
     );
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await waitFor(() => expect(result.current.snapshots.map((s) => s.id)).toEqual([1, 2, 3]));
 
     const target = Date.UTC(2026, 3, 17, 9, 13, 29);
     expect(result.current.findClosest(target)?.id).toBe(3);
@@ -107,7 +105,7 @@ describe("useNearbySnapshots", () => {
       () => useNearbySnapshots({ source: "a", target: "b", protocol: "icmp", aroundTimeMs }),
       { wrapper: wrap() },
     );
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await waitFor(() => expect(result.current.snapshots.map((s) => s.id)).toEqual([1, 2, 3]));
 
     const neighbors = result.current.getNeighbors(2);
     expect(neighbors.prev?.id).toBe(1);
