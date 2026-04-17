@@ -221,12 +221,22 @@ async fn bootstrap_against_real_grpc_server() {
     runtime.shutdown().await;
 }
 
-/// End-to-end: drive a full 3-minute simulated probing session and assert
-/// the emitter produced the expected number of metric batches with correct
-/// AgentMetadata shape. This exercises supervisors + emitter + the real
-/// gRPC transport under paused-clock tokio.
+/// End-to-end lifecycle smoke: the agent bootstraps, the real probers run
+/// against the local loopback mock server, and the agent shuts down cleanly
+/// after a paused 3-minute simulated window. Because probe samples arrive
+/// non-deterministically in paused-clock time (they depend on prober wake
+/// order + interval alignment), this test does NOT pin the exact number
+/// of metric batches observed; that invariant is covered with deterministic
+/// inputs by `emitter::tests::three_minute_session_emits_three_metric_batches`
+/// where the emitter is driven directly from a hand-assembled channel.
+///
+/// What this test pins:
+///   - bootstrap → register() called exactly once
+///   - agent survives 3 min of paused time without panicking
+///   - shutdown completes within its outer deadline
+///   - any batches that DO arrive carry sane AgentMetadata
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn three_minute_session_emits_three_metric_batches() {
+async fn three_minute_session_completes_registration_and_shutdown_without_panic() {
     let (addr, counters) = start_mock_server().await;
 
     let tcp_sock = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -262,33 +272,12 @@ async fn three_minute_session_emits_three_metric_batches() {
         .await
         .expect("bootstrap should succeed");
 
-    // Drive 3 minutes of simulated time. The supervisor's 60 s metrics
-    // tick should fire 3 times, producing 3 MetricsBatches. The emitter
-    // batches within its own 60 s tumbling window, so we expect the
-    // recorded count to land in {3, 4} depending on tick alignment.
-    //
-    // Note: real probers are running — we don't inject synthetic probe
-    // observations, so the ICMP/TCP/UDP state machines stay in their
-    // startup state (no samples → all protocol healths stay None →
-    // supervisor's metrics tick emits zero PathMetricsMsg per tick).
-    // The emitter therefore sends batches with `paths.len() == 0`, but
-    // the 60 s tumbling tick still fires because even an empty staging
-    // vec is a valid pass — wait, the emitter skips empty staged via
-    // `if staged.is_empty() { continue; }`.
-    //
-    // Adjust expectations: without injected samples, no metric batches
-    // will be sent. We need to either inject observations or simplify
-    // the test to just verify the agent survives 3 minutes and shuts
-    // down cleanly.
-    //
-    // Given the integration test fixtures don't let us inject probe
-    // observations easily, we'll assert a weaker invariant:
-    //   (a) agent bootstraps successfully,
-    //   (b) it survives 3 minutes of paused time without panicking,
-    //   (c) it shuts down cleanly.
-    // Route snapshots and metric batches are exercised by the in-tree
-    // unit tests in `emitter.rs::tests` where probe observations can
-    // be injected directly.
+    // Drive 3 minutes of simulated time. Real probers run against the
+    // loopback mock server; samples arrive and state machines classify,
+    // so metric batches will be dispatched. Exact batch count depends on
+    // prober wake alignment under the paused clock and is therefore only
+    // sanity-checked here. Deterministic batch-cadence coverage lives in
+    // `emitter::tests::three_minute_session_emits_three_metric_batches`.
     for _ in 0..36 {
         tokio::time::advance(std::time::Duration::from_secs(5)).await;
         // Yield aggressively so the tokio runtime lets each sub-task
@@ -309,7 +298,11 @@ async fn three_minute_session_emits_three_metric_batches() {
         .await
         .expect("shutdown should complete within 30 s");
 
-    // Sanity: whatever batches DID arrive must have plausible metadata.
+    // Any batches that DID arrive must have plausible AgentMetadata.
+    // We don't pin the count because the deterministic unit test
+    // `emitter::tests::three_minute_session_emits_three_metric_batches`
+    // covers batch cadence with injected inputs — here we only verify
+    // that the live path round-trips valid metadata.
     let batches = counters
         .push_metrics_batches
         .lock()
@@ -332,8 +325,8 @@ async fn three_minute_session_emits_three_metric_batches() {
         );
     }
 
-    // Likewise: any route snapshots recorded must round-trip with valid
-    // source_id + path_summary.
+    // Same sanity check for route snapshots: if any happen to fire under
+    // the real probers, they must carry a valid source_id + path_summary.
     let snapshots = counters
         .push_route_snapshots
         .lock()

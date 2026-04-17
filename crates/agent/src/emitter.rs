@@ -1035,6 +1035,84 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn three_minute_session_emits_three_metric_batches() {
+        // Focused E2E: spawn the emitter directly with a hand-assembled
+        // identity + mpsc<PathMetricsMsg>, push one message per minute
+        // across a paused 3-minute clock, and verify the emitter produces
+        // exactly three MetricsBatch calls — one per 60 s tumbling window.
+        //
+        // This replaces the weaker integration-test equivalent that never
+        // injected observations and therefore never exercised batch flow.
+        let api = Arc::new(RecordingApi::default());
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "test".into(),
+            start_time: SystemTime::now(),
+        };
+        let (mtx, mrx) = mpsc::channel::<PathMetricsMsg>(16);
+        let (_stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        let now = SystemTime::now();
+        for minute in 0..3 {
+            mtx.send(PathMetricsMsg {
+                target_id: format!("t{minute}"),
+                protocol: Protocol::Icmp,
+                window_start: now - Duration::from_secs(60),
+                window_end: now,
+                stats: test_stats(),
+                health: ProtoHealth::Healthy,
+            })
+            .await
+            .expect("send");
+
+            // Park the emitter in select! so the message lands in `staged`
+            // before we advance the clock past the 60 s tick boundary.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(Duration::from_secs(61)).await;
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+        let calls = api.push_metrics_calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected exactly 3 MetricsBatch calls across a 3 min paused-clock window",
+        );
+
+        // Every batch must carry the identity + exactly one path (we pushed
+        // one message per window), and uptime_secs must be monotonic across
+        // successive batches — a regression in the uptime calculation or
+        // start_time plumbing would break this cheaply.
+        let mut prev_uptime = 0u64;
+        for (i, batch) in calls.iter().enumerate() {
+            assert_eq!(batch.source_id, "src", "batch {i} source_id");
+            assert_eq!(batch.paths.len(), 1, "batch {i} path count");
+            let md = batch
+                .agent_metadata
+                .as_ref()
+                .expect("AgentMetadata stamped");
+            assert_eq!(md.version, "test", "batch {i} version");
+            assert_eq!(md.dropped_count, 0, "batch {i} dropped_count");
+            assert_eq!(md.local_error_count, 0, "batch {i} local_error_count");
+            assert!(
+                md.uptime_secs >= prev_uptime,
+                "batch {i} uptime_secs {} must be monotonic (prev {prev_uptime})",
+                md.uptime_secs,
+            );
+            prev_uptime = md.uptime_secs;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn primary_loop_enqueues_on_unavailable_and_bumps_error_counter() {
         let api = Arc::new(RecordingApi::default());
         *api.metrics_result.lock().await = Some(tonic::Status::unavailable("down"));
