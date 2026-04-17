@@ -28,11 +28,12 @@ export interface GrafanaRange {
  * Grafana's `d-solo` endpoint accepts.
  *
  * Presets map to the `now-<key>` / `now` shorthand that Grafana resolves
- * server-side. Custom ranges return millisecond-epoch strings.
+ * server-side. Custom ranges return millisecond-epoch strings. Throws when
+ * `custom` is passed without bounds — callers must validate upstream.
  */
 export function grafanaTimes(key: TimeRangeKey, custom?: CustomRange): GrafanaRange {
   if (key === "custom") {
-    if (!custom) return { from: "now-1h", to: "now" };
+    if (!custom) throw new Error("custom range requires from/to");
     return { from: String(custom.from.getTime()), to: String(custom.to.getTime()) };
   }
   return { from: `now-${key}`, to: "now" };
@@ -40,7 +41,8 @@ export function grafanaTimes(key: TimeRangeKey, custom?: CustomRange): GrafanaRa
 
 /**
  * Resolve a preset key (or custom bounds) into absolute `Date` bounds. Used
- * for Prometheus-style API queries that require concrete timestamps.
+ * for Prometheus-style API queries that require concrete timestamps. Throws
+ * when `custom` is passed without bounds.
  */
 export function rangeBounds(
   key: TimeRangeKey,
@@ -48,9 +50,7 @@ export function rangeBounds(
   now: Date = new Date(),
 ): { from: Date; to: Date } {
   if (key === "custom") {
-    if (!custom) {
-      return { from: new Date(now.getTime() - PRESET_MILLIS["1h"]), to: now };
-    }
+    if (!custom) throw new Error("custom range requires from/to");
     return { from: custom.from, to: custom.to };
   }
   return { from: new Date(now.getTime() - PRESET_MILLIS[key]), to: now };
@@ -68,8 +68,8 @@ function isPresetKey(value: unknown): value is Exclude<TimeRangeKey, "custom"> {
 /**
  * Parse a `{ range, from, to }` search-param bag into a `TimeRangeSearch`.
  *
- * Invalid / missing values fall back to the `24h` default so callers never
- * have to branch on malformed URLs.
+ * Missing `range` defaults to `"24h"`. Unknown range values throw.
+ * `"custom"` requires parseable `from`/`to`; otherwise throws.
  */
 export function parseTimeRangeSearch(input: {
   range?: unknown;
@@ -78,18 +78,24 @@ export function parseTimeRangeSearch(input: {
 }): TimeRangeSearch {
   const raw = input.range;
 
+  if (raw === undefined || raw === null) {
+    return { range: "24h" };
+  }
+
   if (raw === "custom") {
     const fromStr = typeof input.from === "string" ? input.from : undefined;
     const toStr = typeof input.to === "string" ? input.to : undefined;
-    if (!fromStr || !toStr) return { range: "24h" };
+    if (!fromStr || !toStr) {
+      throw new Error("custom range requires from and to");
+    }
     const from = new Date(fromStr);
     const to = new Date(toStr);
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-      return { range: "24h" };
+      throw new Error("custom range requires parseable from/to");
     }
     return { range: "custom", custom: { from, to } };
   }
 
   if (isPresetKey(raw)) return { range: raw };
-  return { range: "24h" };
+  throw new Error(`unknown range ${String(raw)}`);
 }

@@ -32,8 +32,8 @@ describe("grafanaTimes", () => {
     });
   });
 
-  test("custom without bounds falls back to 1h preset", () => {
-    expect(grafanaTimes("custom")).toEqual({ from: "now-1h", to: "now" });
+  test("custom without bounds throws", () => {
+    expect(() => grafanaTimes("custom")).toThrowError(/custom range/);
   });
 });
 
@@ -72,20 +72,21 @@ describe("rangeBounds", () => {
     expect(to).toEqual(customTo);
   });
 
-  test("custom without bounds falls back to 1h window", () => {
-    const { from, to } = rangeBounds("custom", undefined, now);
-    expect(to).toEqual(now);
-    expect(from).toEqual(new Date(now.getTime() - 60 * 60 * 1000));
+  test("custom without bounds throws", () => {
+    expect(() => rangeBounds("custom", undefined, now)).toThrowError(/custom range/);
   });
 });
 
 describe("parseTimeRangeSearch", () => {
-  test("returns '24h' default when range is missing or invalid", () => {
+  test("defaults to 24h when nothing is provided", () => {
     expect(parseTimeRangeSearch({}).range).toBe("24h");
-    expect(parseTimeRangeSearch({ range: "invalid" }).range).toBe("24h");
   });
 
-  test("returns recognised preset keys", () => {
+  test("accepts a preset", () => {
+    expect(parseTimeRangeSearch({ range: "7d" }).range).toBe("7d");
+  });
+
+  test("returns all recognised preset keys", () => {
     for (const key of ["1h", "6h", "24h", "7d", "30d", "2y"] satisfies TimeRangeKey[]) {
       expect(parseTimeRangeSearch({ range: key }).range).toBe(key);
     }
@@ -102,17 +103,21 @@ describe("parseTimeRangeSearch", () => {
     });
   });
 
-  test("custom without from/to falls back to '24h'", () => {
-    expect(parseTimeRangeSearch({ range: "custom" }).range).toBe("24h");
+  test("requires from/to when custom", () => {
+    expect(() => parseTimeRangeSearch({ range: "custom" })).toThrowError(/custom range/);
   });
 
-  test("custom with unparseable bounds falls back to '24h'", () => {
-    const result = parseTimeRangeSearch({
-      range: "custom",
-      from: "garbage",
-      to: "more-garbage",
-    });
-    expect(result.range).toBe("24h");
-    expect(result.custom).toBeUndefined();
+  test("custom with unparseable bounds throws", () => {
+    expect(() =>
+      parseTimeRangeSearch({
+        range: "custom",
+        from: "garbage",
+        to: "more-garbage",
+      }),
+    ).toThrowError(/custom range/);
+  });
+
+  test("rejects unknown range", () => {
+    expect(() => parseTimeRangeSearch({ range: "1y" as unknown as TimeRangeKey })).toThrowError();
   });
 });
