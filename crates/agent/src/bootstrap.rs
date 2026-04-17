@@ -159,6 +159,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
             },
             &child,
             "register",
+            Duration::from_secs(1),
+            Duration::from_secs(30),
         )
         .await?;
 
@@ -170,6 +172,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
             },
             &child,
             "get_config",
+            Duration::from_secs(1),
+            Duration::from_secs(30),
         )
         .await?;
 
@@ -195,6 +199,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
             },
             &child,
             "get_targets",
+            Duration::from_secs(1),
+            Duration::from_secs(30),
         )
         .await?;
 
@@ -577,20 +583,21 @@ fn publish_allowlist(allowlist_tx: &watch::Sender<Arc<HashSet<IpAddr>>>, targets
 /// a retryable error so the backoff/retry logic can actually run.
 const RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Retry an async operation with exponential backoff (1s base, 30s max, ±25%
-/// jitter). Each attempt is bounded by [`RPC_ATTEMPT_TIMEOUT`]. Returns the
-/// first successful result or an error if cancelled.
+/// Retry an async operation with exponential backoff, ±25% jitter. Each
+/// attempt is bounded by [`RPC_ATTEMPT_TIMEOUT`]. Returns the first
+/// successful result, or an error if cancelled.
 async fn retry_with_backoff<F, Fut, T>(
     mut op: F,
     cancel: &CancellationToken,
     label: &str,
+    base_delay: Duration,
+    max_delay: Duration,
 ) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let mut delay = Duration::from_secs(1);
-    let max_delay = Duration::from_secs(30);
+    let mut delay = base_delay;
 
     loop {
         // Race the in-flight RPC against:
@@ -632,7 +639,7 @@ where
                 }
 
                 // Exponential growth, capped.
-                delay = (delay * 2).min(max_delay);
+                delay = (delay.saturating_mul(2)).min(max_delay);
             }
         }
     }
@@ -1143,5 +1150,34 @@ mod tests {
             allowlist.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             "canonical v4 form must be in the allowlist; got {allowlist:?}",
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_with_backoff_respects_custom_caps() {
+        let cancel = CancellationToken::new();
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result: Result<()> = retry_with_backoff(
+            || {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        Err(anyhow::anyhow!("boom"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            &cancel,
+            "custom_caps_test",
+            Duration::from_millis(100),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(result.is_ok());
+        // After 2 retryable failures: first sleep ~100ms*jitter, second ~200ms*jitter.
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(180)); // lower jitter bound
+        assert!(elapsed < Duration::from_millis(500));
     }
 }
