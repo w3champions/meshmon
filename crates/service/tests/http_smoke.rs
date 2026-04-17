@@ -4,47 +4,14 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use meshmon_service::config::Config;
-use meshmon_service::state::AppState;
-use sqlx::postgres::PgPool;
-use std::sync::Arc;
-use tokio::sync::watch;
 use tower::util::ServiceExt;
 
 mod common;
 
-async fn make_state(pool: PgPool) -> AppState {
-    let cfg = Arc::new(
-        Config::from_str(
-            r#"
-[database]
-url = "postgres://ignored@localhost/nope"
-
-[probing]
-udp_probe_secret = "hex:0011223344556677"
-"#,
-            "synthetic.toml",
-        )
-        .expect("synthetic config"),
-    );
-    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
-    let (_tx, rx) = watch::channel(cfg);
-    let ingestion = common::dummy_ingestion(pool.clone());
-    let registry = common::dummy_registry(pool.clone());
-    AppState::new(
-        swap,
-        rx,
-        pool,
-        ingestion,
-        registry,
-        common::test_prometheus_handle().await,
-    )
-}
-
 #[tokio::test]
 async fn healthz_always_returns_200() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool).await;
+    let state = common::state_minimal(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -62,7 +29,7 @@ async fn healthz_always_returns_200() {
 #[tokio::test]
 async fn readyz_reflects_ready_flag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool).await;
+    let state = common::state_minimal(pool).await;
     let app = meshmon_service::http::router(state.clone());
 
     let resp = app
@@ -93,7 +60,7 @@ async fn readyz_reflects_ready_flag() {
 #[tokio::test]
 async fn metrics_returns_prometheus_format_with_uptime() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool).await;
+    let state = common::state_minimal(pool).await;
     state.mark_ready();
     let app = meshmon_service::http::router(state);
 
@@ -128,7 +95,7 @@ async fn metrics_returns_prometheus_format_with_uptime() {
 #[tokio::test]
 async fn openapi_json_is_valid() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool).await;
+    let state = common::state_minimal(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
@@ -159,7 +126,7 @@ async fn openapi_json_is_valid() {
 #[tokio::test]
 async fn openapi_json_contains_user_api_paths() {
     let pool = common::shared_migrated_pool().await.clone();
-    let state = make_state(pool).await;
+    let state = common::state_minimal(pool).await;
     let app = meshmon_service::http::router(state);
 
     let resp = app
