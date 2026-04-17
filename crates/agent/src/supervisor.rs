@@ -331,7 +331,11 @@ async fn run(
                         route_tracker.reset_for_protocol(Some(p));
                     }
                 } else if change.primary_transition.is_some() {
-                    tracer_reset_primary(&mut route_tracker, change.primary);
+                    reset_tracker_on_swing(
+                        &target.id,
+                        &mut route_tracker,
+                        change.primary,
+                    );
                 }
 
                 // T15: keep the tracker window in sync with the primary
@@ -609,8 +613,9 @@ fn feed_tracker(tracker: &mut RouteTracker, obs: &ProbeObservation, now: Instant
 
 /// Apply a primary-swing to the route tracker. Separated from the eval
 /// arm so the tracing call is reviewable in isolation.
-fn tracer_reset_primary(tracker: &mut RouteTracker, primary: Option<Protocol>) {
+fn reset_tracker_on_swing(target_id: &str, tracker: &mut RouteTracker, primary: Option<Protocol>) {
     tracing::info!(
+        target_id = %target_id,
         tracker_protocol_before = ?tracker.protocol(),
         tracker_protocol_after = ?primary,
         "route tracker reset on primary swing",
