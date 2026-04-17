@@ -72,9 +72,15 @@ pub struct SupervisorHandle {
     /// `pub(crate)` so T14's state machine can reach into the same array
     /// from inside the agent crate; tests use [`SupervisorHandle::snapshot`].
     pub(crate) stats: Arc<StatsArray>,
-    /// Join handles for the 4 per-target prober tasks.
-    pub(crate) prober_joins: Vec<tokio::task::JoinHandle<()>>,
-    /// Most-recently evaluated state snapshot. Read by tests and future T16 emitter.
+    /// Join handles for the 4 per-target prober tasks. Private because the
+    /// only legitimate consumer is [`SupervisorHandle::await_probers`]; no
+    /// outside caller should iterate or mutate the vec directly.
+    prober_joins: Vec<tokio::task::JoinHandle<()>>,
+    /// Most-recently evaluated state snapshot. Written every eval tick by the
+    /// supervisor task; read by tests directly. The future T16 emitter will
+    /// add a public accessor when it consumes this — until then rustc's
+    /// dead-code lint can't see the test-module read because it fires on
+    /// the lib-only pass that gates out `#[cfg(test)]` code.
     #[allow(dead_code)]
     pub(crate) last_state: Arc<Mutex<TargetSnapshot>>,
 }
@@ -96,13 +102,16 @@ impl SupervisorHandle {
         Some(guard.summary_fast())
     }
 
-    /// Await all prober tasks to completion. Useful for clean shutdown in
-    /// tests and integration scenarios where callers need to know all probers
-    /// have exited before proceeding.
+    /// Await all 4 prober JoinHandles and log panics.
     ///
-    /// Panics in prober tasks are logged at `warn` rather than silently
-    /// swallowed; cancellation-induced `JoinError`s are ignored because they
-    /// are an expected part of graceful shutdown.
+    /// Not called in production shutdown — `bootstrap` relies on the
+    /// cancel token propagating down each prober's task; dropped
+    /// `JoinHandle`s detach but the cancel causes clean exit. This method
+    /// exists for tests / integration scenarios that need to observe
+    /// prober panics explicitly.
+    ///
+    /// Cancellation-induced `JoinError`s are ignored (expected at shutdown);
+    /// genuine panics surface at `warn`.
     pub async fn await_probers(&mut self) {
         for join in std::mem::take(&mut self.prober_joins) {
             if let Err(e) = join.await {
@@ -325,7 +334,9 @@ async fn run(
                     );
                 }
 
-                // Publish new rates to all 4 probers.
+                // Per-tick publish. watch dedupes on PartialEq so no-change sends
+                // are cheap. Err only when every prober receiver is dropped
+                // (shutdown / prober task exit) — benign, no log needed.
                 let _ = icmp_rate_tx.send(ProbeRate(change.rates.icmp_pps));
                 let _ = tcp_rate_tx.send(ProbeRate(change.rates.tcp_pps));
                 let _ = udp_rate_tx.send(ProbeRate(change.rates.udp_pps));
