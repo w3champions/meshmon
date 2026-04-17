@@ -41,8 +41,9 @@ export function RouteHistoryTable({
   }
 
   // Cross-protocol diffs are nonsense (ICMP vs TCP hop semantics differ), so
-  // lock B to the same protocol as A (and vice versa). Users can switch
-  // protocols by clearing the other side's radio.
+  // lock B to the same protocol as A (and vice versa). Native radios can't
+  // be unchecked by clicking again, so the "Clear" button below is the
+  // recovery path when a user wants to switch protocols.
   const pickedProtocol = (id: number | null): string | null =>
     id === null ? null : (snapshots.find((s) => s.id === id)?.protocol ?? null);
   const aProtocol = pickedProtocol(a);
@@ -112,14 +113,26 @@ export function RouteHistoryTable({
           Showing latest 100 snapshots — narrow the time window to see older entries.
         </p>
       )}
-      <Button
-        type="button"
-        className="self-start"
-        disabled={!a || !b || a === b}
-        onClick={() => a && b && onCompare({ a, b })}
-      >
-        Compare
-      </Button>
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          disabled={!a || !b || a === b}
+          onClick={() => a && b && onCompare({ a, b })}
+        >
+          Compare
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={a === null && b === null}
+          onClick={() => {
+            setA(null);
+            setB(null);
+          }}
+        >
+          Clear
+        </Button>
+      </div>
     </div>
   );
 }

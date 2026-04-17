@@ -55,10 +55,9 @@ pub struct PathOverviewResponse {
     pub source: AgentSummary,
     /// Target agent metadata.
     pub target: AgentSummary,
-    /// Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing
+    /// Server-picked primary protocol (`icmp`, `udp`, or `tcp`). `null`
     /// only when no protocol has any snapshot in the window; callers should
     /// treat that as "show a neutral empty state".
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_protocol: Option<String>,
     /// Latest snapshot per protocol within the window (each field optional).
     pub latest_by_protocol: LatestByProtocol,

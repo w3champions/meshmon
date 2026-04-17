@@ -1123,7 +1123,7 @@
               "string",
               "null"
             ],
-            "description": "Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing\nonly when no protocol has any snapshot in the window; callers should\ntreat that as \"show a neutral empty state\"."
+            "description": "Server-picked primary protocol (`icmp`, `udp`, or `tcp`). `null`\nonly when no protocol has any snapshot in the window; callers should\ntreat that as \"show a neutral empty state\"."
           },
           "recent_snapshots": {
             "type": "array",

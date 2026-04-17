@@ -474,7 +474,7 @@ export interface components {
             latest_by_protocol: components["schemas"]["LatestByProtocol"];
             metrics?: null | components["schemas"]["PathMetrics"];
             /**
-             * @description Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing
+             * @description Server-picked primary protocol (`icmp`, `udp`, or `tcp`). `null`
              *     only when no protocol has any snapshot in the window; callers should
              *     treat that as "show a neutral empty state".
              */
