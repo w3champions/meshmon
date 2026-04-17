@@ -314,7 +314,7 @@ impl TargetStateMachine {
         now: Instant,
     ) -> StateChange {
         let priority = config.priority_list();
-        let old_primary = select_primary(&priority, &self.health_snapshot());
+        let old_primary = select_primary(&priority, &self.health_snapshot(), stats_by_protocol);
 
         let mut protocol_transitions = Vec::with_capacity(3);
         if let Some(t) = self.icmp.evaluate(
@@ -339,7 +339,7 @@ impl TargetStateMachine {
             protocol_transitions.push(t);
         }
 
-        let new_primary = select_primary(&priority, &self.health_snapshot());
+        let new_primary = select_primary(&priority, &self.health_snapshot(), stats_by_protocol);
         let primary_transition = if new_primary == old_primary {
             None
         } else {
@@ -417,15 +417,37 @@ pub(crate) fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
     }
 }
 
+/// Returns the first priority-ordered protocol whose state machine is
+/// `Healthy` **and** whose rolling window carries at least
+/// [`MIN_TRANSITION_SAMPLES`] samples.
+///
+/// A bare `Healthy` check is insufficient because every
+/// `ProtocolStateMachine` starts in `Healthy` and `evaluate` early-returns
+/// below the sample floor, leaving never-probed protocols in their initial
+/// state. Selecting such a protocol would have the supervisor report
+/// `Normal` with zero evidence. Gating on `sample_count` here keeps
+/// `select_primary` symmetric with [`ProtocolStateMachine::evaluate`]'s
+/// own floor — until evidence exists we have no healthy path.
 pub(crate) fn select_primary(
     priority: &[Protocol],
     healths: &[(Protocol, ProtoHealth)],
+    stats_by_protocol: [&FastSummary; 3],
 ) -> Option<Protocol> {
     for p in priority {
-        if let Some((_, h)) = healths.iter().find(|(proto, _)| proto == p) {
-            if *h == ProtoHealth::Healthy {
-                return Some(*p);
-            }
+        let Some(&(_, h)) = healths.iter().find(|(proto, _)| proto == p) else {
+            continue;
+        };
+        if h != ProtoHealth::Healthy {
+            continue;
+        }
+        let sample_count = match p {
+            Protocol::Icmp => stats_by_protocol[0].sample_count,
+            Protocol::Tcp => stats_by_protocol[1].sample_count,
+            Protocol::Udp => stats_by_protocol[2].sample_count,
+            Protocol::Unspecified => continue,
+        };
+        if sample_count >= MIN_TRANSITION_SAMPLES {
+            return Some(*p);
         }
     }
     None
@@ -668,7 +690,14 @@ mod tests {
             (Protocol::Tcp, ProtoHealth::Healthy),
             (Protocol::Udp, ProtoHealth::Healthy),
         ];
-        assert_eq!(select_primary(&prio, &healths), Some(Protocol::Tcp));
+        // All three protocols have >= MIN_TRANSITION_SAMPLES so the
+        // select_primary evidence floor is satisfied; priority order
+        // then elects TCP.
+        let healthy = summary(10, 10);
+        assert_eq!(
+            select_primary(&prio, &healths, [&healthy, &healthy, &healthy]),
+            Some(Protocol::Tcp),
+        );
     }
 
     #[test]
@@ -679,7 +708,50 @@ mod tests {
             (Protocol::Tcp, ProtoHealth::Unhealthy),
             (Protocol::Udp, ProtoHealth::Unhealthy),
         ];
-        assert_eq!(select_primary(&prio, &healths), None);
+        let healthy = summary(10, 10);
+        assert_eq!(
+            select_primary(&prio, &healths, [&healthy, &healthy, &healthy]),
+            None,
+        );
+    }
+
+    #[test]
+    fn select_primary_rejects_protocols_with_insufficient_samples() {
+        let prio = [Protocol::Icmp, Protocol::Tcp, Protocol::Udp];
+        let healths = [
+            (Protocol::Icmp, ProtoHealth::Healthy),
+            (Protocol::Tcp, ProtoHealth::Healthy),
+            (Protocol::Udp, ProtoHealth::Healthy),
+        ];
+
+        // All three protocols below the evidence floor → None, even though
+        // every state machine reports Healthy. This pins the P2 contract:
+        // never-probed protocols must not be elected primary on the basis
+        // of their initial-state Healthy.
+        let empty = summary(0, 0);
+        let just_below = summary(MIN_TRANSITION_SAMPLES - 1, MIN_TRANSITION_SAMPLES - 1);
+        assert_eq!(
+            select_primary(&prio, &healths, [&empty, &empty, &empty]),
+            None,
+        );
+        assert_eq!(
+            select_primary(&prio, &healths, [&just_below, &just_below, &just_below]),
+            None,
+        );
+
+        // ICMP starved, TCP has evidence → skip ICMP, elect TCP.
+        let enough = summary(MIN_TRANSITION_SAMPLES, MIN_TRANSITION_SAMPLES);
+        assert_eq!(
+            select_primary(&prio, &healths, [&empty, &enough, &enough]),
+            Some(Protocol::Tcp),
+        );
+
+        // Only ICMP has evidence — elected even though TCP/UDP are
+        // unprobed: the evidence floor is per-protocol, not global.
+        assert_eq!(
+            select_primary(&prio, &healths, [&enough, &empty, &empty]),
+            Some(Protocol::Icmp),
+        );
     }
 
     fn path_thresholds() -> PathHealthThresholds {
