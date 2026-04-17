@@ -157,6 +157,7 @@ pub fn router(state: AppState) -> Router {
         .html_cache_control(CacheControl::Custom("no-cache, no-store, must-revalidate"))
         .cache_control(CacheControl::Long)
         .fallback(Some("/index.html"))
+        .fallback_status(axum::http::StatusCode::OK)
         .into_router();
 
     // Unknown `/api/*` paths must return a clean 404 rather than falling
