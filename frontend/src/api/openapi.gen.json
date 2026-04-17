@@ -1347,6 +1347,13 @@
           "grafana_dashboards"
         ],
         "properties": {
+          "alertmanager_base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Alertmanager base URL for constructing \"view in Alertmanager\"\ndeep links (e.g., `https://alertmanager.example/`). `None` when\nAlertmanager is not configured — omitted from the JSON body."
+          },
           "grafana_base_url": {
             "type": [
               "string",
