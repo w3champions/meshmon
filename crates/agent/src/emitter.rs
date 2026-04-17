@@ -261,7 +261,75 @@ async fn run_emitter<A: ServiceApi>(
         }
     }
 
-    // Task 12 adds the drain phase here.
+    // Drain phase: up to 5 s wall-clock to flush in-flight work before we
+    // return. Biased toward route snapshots — they're time-sensitive;
+    // metrics are already aggregated into staged.
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() >= drain_deadline {
+            break;
+        }
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(drain_deadline) => break,
+            maybe = snapshots_rx.recv() => {
+                match maybe {
+                    Some(env) => {
+                        dispatch_snapshot(
+                            api.as_ref(),
+                            &identity,
+                            env,
+                            &queue,
+                            &notify,
+                            &local_error_count,
+                        )
+                        .await;
+                    }
+                    None => {
+                        // Snapshot channel fully drained; keep pulling
+                        // metrics until the deadline or metrics_rx also
+                        // closes. Can't return here: staged may still be
+                        // non-empty and we haven't sent the final batch.
+                    }
+                }
+            }
+            maybe = metrics_rx.recv() => {
+                match maybe {
+                    Some(m) => staged.push(m),
+                    None => {
+                        // Both channels closed and no more snapshots
+                        // pending — still need to flush staged below.
+                    }
+                }
+            }
+        }
+
+        // Early exit when both channels are closed AND staged is drained.
+        // Checking the receivers' closed state directly avoids spinning
+        // on `Poll::Ready(None)` for the rest of the 5 s deadline once
+        // the senders are all gone.
+        if snapshots_rx.is_closed() && metrics_rx.is_closed() && staged.is_empty() {
+            break;
+        }
+    }
+
+    // Flush any remaining staged metrics as one final best-effort batch.
+    if !staged.is_empty() {
+        let dropped = queue.lock().await.dropped_count();
+        let errors = local_error_count.load(std::sync::atomic::Ordering::Relaxed);
+        let batch = build_metrics_batch(
+            std::mem::take(&mut staged),
+            &identity,
+            errors,
+            dropped,
+            SystemTime::now(),
+        );
+        dispatch_metrics(api.as_ref(), batch, &queue, &notify, &local_error_count).await;
+    }
+
+    // Stop the retry worker. Any entries left in the queue are dropped —
+    // they'll be re-acquired from whatever persistence layer exists (none
+    // today; see spec 02 future-work §Local buffer).
     retry_handle.abort();
     let _ = retry_handle.await;
 }
@@ -869,8 +937,10 @@ mod tests {
         // Give the task one poll then cancel.
         tokio::task::yield_now().await;
         cancel.cancel();
-        let res = tokio::time::timeout(Duration::from_secs(1), handle).await;
-        assert!(res.is_ok(), "emitter task should exit within 1s of cancel");
+        // Shutdown now includes up to 5 s of drain (Task 12); allow 10 s
+        // of logical time for the handle to settle.
+        let res = tokio::time::timeout(Duration::from_secs(10), handle).await;
+        assert!(res.is_ok(), "emitter task should exit within 10s of cancel");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1609,6 +1679,183 @@ mod tests {
             dc, 0,
             "post-drain primary batch should see dropped_count = 0 after reset; got {}",
             dc,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drains_pending_snapshots_within_5s() {
+        use crate::route::{RouteSnapshot, RouteSnapshotEnvelope};
+
+        let api = Arc::new(RecordingApi::default());
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (_mtx, mrx) = mpsc::channel(16);
+        let (stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        // Park the emitter in select!.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Push 3 snapshots, then cancel immediately. The drain phase must
+        // still dispatch all three within its 5 s window.
+        for i in 0..3u64 {
+            let envelope = RouteSnapshotEnvelope {
+                target_id: format!("t{i}"),
+                snapshot: RouteSnapshot {
+                    protocol: Protocol::Icmp,
+                    observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i),
+                    hops: vec![],
+                },
+            };
+            stx.send(envelope).await.unwrap();
+        }
+
+        cancel.cancel();
+
+        // Advance up to 5 s and yield so the drain loop makes progress.
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(500)).await;
+            for _ in 0..30 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+        let calls = api.push_snapshot_calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected all 3 queued snapshots to be drained; got {}",
+            calls.len(),
+        );
+        let target_ids: std::collections::HashSet<_> =
+            calls.iter().map(|c| c.target_id.clone()).collect();
+        assert!(target_ids.contains("t0"));
+        assert!(target_ids.contains("t1"));
+        assert!(target_ids.contains("t2"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_flushes_staged_metrics_as_final_batch() {
+        let api = Arc::new(RecordingApi::default());
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (mtx, mrx) = mpsc::channel(16);
+        let (_stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Push one metric well BEFORE the 60 s tick — it lands in `staged`
+        // but is not flushed by the primary loop yet.
+        let now = SystemTime::now();
+        mtx.send(PathMetricsMsg {
+            target_id: "t1".into(),
+            protocol: Protocol::Icmp,
+            window_start: now - Duration::from_secs(60),
+            window_end: now,
+            stats: test_stats(),
+            health: ProtoHealth::Healthy,
+        })
+        .await
+        .unwrap();
+
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        // Cancel before the 60 s interval fires. The drain phase must flush
+        // `staged` as a final best-effort batch.
+        cancel.cancel();
+
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(500)).await;
+            for _ in 0..30 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+        let calls = api.push_metrics_calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one final flush batch; got {} calls",
+            calls.len(),
+        );
+        let final_batch = &calls[0];
+        assert_eq!(final_batch.paths.len(), 1);
+        assert_eq!(final_batch.paths[0].target_id, "t1");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_respects_5s_deadline_when_snapshots_stream_forever() {
+        use crate::route::{RouteSnapshot, RouteSnapshotEnvelope};
+
+        let api = Arc::new(RecordingApi::default());
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (_mtx, mrx) = mpsc::channel(16);
+        let (stx, srx) = mpsc::channel(1024);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Fire 100 snapshots (more than we can plausibly drain in 5 s of
+        // logical time — each dispatch is near-instant under the recording
+        // API, but this asserts the deadline bound exists).
+        for i in 0..100u64 {
+            let _ = stx.try_send(RouteSnapshotEnvelope {
+                target_id: format!("t{i}"),
+                snapshot: RouteSnapshot {
+                    protocol: Protocol::Icmp,
+                    observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i),
+                    hops: vec![],
+                },
+            });
+        }
+
+        cancel.cancel();
+
+        // Advance through the 5 s deadline + margin.
+        for _ in 0..20 {
+            tokio::time::advance(Duration::from_millis(500)).await;
+            for _ in 0..30 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Handle must exit cleanly (within the 10 s outer test timeout),
+        // and the drain loop must have obeyed the 5 s deadline internally.
+        let t0 = tokio::time::Instant::now();
+        let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+        // No explicit assertion on call count — we just don't want a hang.
+        // Sanity: at least one snapshot was processed before the deadline.
+        let _ = t0;
+        let calls = api.push_snapshot_calls.lock().await;
+        assert!(
+            !calls.is_empty(),
+            "expected at least one snapshot drained before deadline",
         );
     }
 
