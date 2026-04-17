@@ -545,15 +545,9 @@ fn hop_to_proto(h: &crate::route::HopSummary) -> HopSummaryProto {
     let observed_ips = h
         .observed_ips
         .iter()
-        .map(|obs| {
-            let ip_bytes = match obs.ip {
-                std::net::IpAddr::V4(v4) => v4.octets().to_vec(),
-                std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
-            };
-            HopIpProto {
-                ip: ip_bytes.into(),
-                frequency: obs.frequency,
-            }
+        .map(|obs| HopIpProto {
+            ip: meshmon_protocol::ip::from_ipaddr(obs.ip),
+            frequency: obs.frequency,
         })
         .collect();
     HopSummaryProto {
@@ -871,8 +865,8 @@ mod tests {
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
 
-        // The retry worker is still a stub in Task 7, so only the primary
-        // dispatch's one call is observable. Queue should contain one entry.
+        // The retry worker is still a stub (Task 9 implements it), so only the
+        // primary dispatch's one call is observable.
         let calls = api.push_metrics_calls.lock().await;
         assert_eq!(calls.len(), 1, "primary loop attempted once before enqueue");
         // (Queue state is module-private and the retry worker stub never runs;
