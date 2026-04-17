@@ -110,6 +110,10 @@ shared_token = "smoke-token-unused"
 
 [upstream]
 vm_url = "http://127.0.0.1:${VM_PORT}"
+# Placeholder so the "View in Alertmanager" link renders on the Alerts
+# page. Smoke doesn't run an actual Alertmanager — clicks will 404 until
+# the full stack lands (see deploy/docker-compose.yml).
+alertmanager_url = "http://127.0.0.1:9093"
 
 [agents]
 target_active_window_minutes = 5
@@ -125,6 +129,12 @@ DATABASE_URL="postgres://meshmon:meshmon@127.0.0.1:${DB_PORT}/meshmon" \
   sqlx migrate run --source crates/service/migrations >/dev/null
 
 echo "[smoke] seeding agents + route snapshots"
+# Staleness variety mirrors the three health states the agent state machine
+# classifies: recent (fra-01), slightly stale (lon-01), offline (nrt-01).
+# Snapshots are authored to demonstrate the T19 diff detection + T20 Report
+# page: fra-01 → lon-01 has four ICMP snapshots over ~40 min where hop 2
+# swaps IPs halfway through (10.1.1.2 → 10.1.1.9), so BEFORE/AFTER on the
+# Report page highlights the change and the history table has rows to sort.
 PGPASSWORD=meshmon psql -h 127.0.0.1 -p "$DB_PORT" -U meshmon -d meshmon -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 INSERT INTO agents (id, display_name, location, ip, lat, lon, agent_version, registered_at, last_seen_at, tcp_probe_port, udp_probe_port)
 VALUES
@@ -133,11 +143,63 @@ VALUES
   ('nrt-01', 'Tokyo 01',     'Tokyo, JP',     '10.10.0.3', 35.68, 139.69, '0.1.0', now() - interval '1 day', now() - interval '30 minutes', 7676, 7677)
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO route_snapshots (source_id, target_id, protocol, observed_at, hops, path_summary)
-VALUES
-  ('fra-01', 'lon-01', 'icmp', now() - interval '2 minutes',  '[]'::jsonb, NULL),
-  ('lon-01', 'nrt-01', 'udp',  now() - interval '5 minutes',  '[]'::jsonb, NULL),
-  ('fra-01', 'nrt-01', 'tcp',  now() - interval '10 minutes', '[]'::jsonb, NULL);
+INSERT INTO route_snapshots (source_id, target_id, protocol, observed_at, hops, path_summary) VALUES
+  -- fra-01 -> lon-01 icmp: 4 snapshots showing a hop-2 IP swap around T-10min.
+  ('fra-01', 'lon-01', 'icmp', now() - interval '40 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":  1200, "stddev_rtt_micros":  50, "loss_pct": 0.0, "observed_ips": [{"ip": "10.1.1.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros":  8500, "stddev_rtt_micros": 400, "loss_pct": 0.0, "observed_ips": [{"ip": "10.1.1.2", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 14200, "stddev_rtt_micros": 600, "loss_pct": 0.0, "observed_ips": [{"ip": "10.1.1.3", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 14200, "hop_count": 3, "loss_pct": 0.0}'::jsonb),
+  ('fra-01', 'lon-01', 'icmp', now() - interval '20 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":  1100, "stddev_rtt_micros":  40, "loss_pct": 0.0,  "observed_ips": [{"ip": "10.1.1.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros":  8700, "stddev_rtt_micros": 350, "loss_pct": 0.0,  "observed_ips": [{"ip": "10.1.1.2", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 13900, "stddev_rtt_micros": 500, "loss_pct": 0.0,  "observed_ips": [{"ip": "10.1.1.3", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 13900, "hop_count": 3, "loss_pct": 0.0}'::jsonb),
+  ('fra-01', 'lon-01', 'icmp', now() - interval '10 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":  1300, "stddev_rtt_micros":  80, "loss_pct": 0.0,  "observed_ips": [{"ip": "10.1.1.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros": 11200, "stddev_rtt_micros": 900, "loss_pct": 0.03, "observed_ips": [{"ip": "10.1.1.9", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 17800, "stddev_rtt_micros": 700, "loss_pct": 0.0,  "observed_ips": [{"ip": "10.1.1.3", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 17800, "hop_count": 3, "loss_pct": 0.01}'::jsonb),
+  ('fra-01', 'lon-01', 'icmp', now() - interval '2 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":  1250, "stddev_rtt_micros":  60, "loss_pct": 0.0, "observed_ips": [{"ip": "10.1.1.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros": 10800, "stddev_rtt_micros": 750, "loss_pct": 0.0, "observed_ips": [{"ip": "10.1.1.9", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 17200, "stddev_rtt_micros": 650, "loss_pct": 0.0, "observed_ips": [{"ip": "10.1.1.3", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 17200, "hop_count": 3, "loss_pct": 0.0}'::jsonb),
+
+  -- lon-01 -> nrt-01 udp: 2 snapshots, stable route, ~250 ms intercontinental.
+  ('lon-01', 'nrt-01', 'udp', now() - interval '15 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":   1800, "stddev_rtt_micros":  100, "loss_pct": 0.0, "observed_ips": [{"ip": "10.2.2.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros": 120000, "stddev_rtt_micros": 4500, "loss_pct": 0.0, "observed_ips": [{"ip": "10.2.2.2", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 248000, "stddev_rtt_micros": 6200, "loss_pct": 0.0, "observed_ips": [{"ip": "10.2.2.3", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 248000, "hop_count": 3, "loss_pct": 0.0}'::jsonb),
+  ('lon-01', 'nrt-01', 'udp', now() - interval '3 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":   1900, "stddev_rtt_micros":  110, "loss_pct": 0.0, "observed_ips": [{"ip": "10.2.2.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros": 119500, "stddev_rtt_micros": 4200, "loss_pct": 0.0, "observed_ips": [{"ip": "10.2.2.2", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 251000, "stddev_rtt_micros": 6400, "loss_pct": 0.0, "observed_ips": [{"ip": "10.2.2.3", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 251000, "hop_count": 3, "loss_pct": 0.0}'::jsonb),
+
+  -- fra-01 -> nrt-01 tcp: one 5-hop snapshot, ~280 ms.
+  ('fra-01', 'nrt-01', 'tcp', now() - interval '8 minutes',
+    '[
+      {"position": 1, "avg_rtt_micros":   1400, "stddev_rtt_micros":   70, "loss_pct": 0.0, "observed_ips": [{"ip": "10.3.3.1", "freq": 1.0}]},
+      {"position": 2, "avg_rtt_micros":  14500, "stddev_rtt_micros":  600, "loss_pct": 0.0, "observed_ips": [{"ip": "10.3.3.2", "freq": 1.0}]},
+      {"position": 3, "avg_rtt_micros": 142000, "stddev_rtt_micros": 5000, "loss_pct": 0.0, "observed_ips": [{"ip": "10.3.3.3", "freq": 1.0}]},
+      {"position": 4, "avg_rtt_micros": 210000, "stddev_rtt_micros": 5800, "loss_pct": 0.0, "observed_ips": [{"ip": "10.3.3.4", "freq": 1.0}]},
+      {"position": 5, "avg_rtt_micros": 278000, "stddev_rtt_micros": 6500, "loss_pct": 0.0, "observed_ips": [{"ip": "10.3.3.5", "freq": 1.0}]}
+    ]'::jsonb,
+    '{"avg_rtt_micros": 278000, "hop_count": 5, "loss_pct": 0.0}'::jsonb);
 SQL
 
 # ---- Service (background) ----------------------------------------------
