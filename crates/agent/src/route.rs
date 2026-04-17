@@ -207,14 +207,11 @@ pub struct RouteTracker {
     /// Rolling window; primary_window_sec from `ProbeConfig` (default 300 s).
     window: Duration,
     /// `(position, ip)` → per-hop accumulator. Flat for cache locality.
-    /// Consumed by `observe` / `build_snapshot` in Tasks 3–4.
-    #[allow(dead_code)]
+    /// Maintained by `observe`; consumed by `build_snapshot` (Task 4).
     hops: HashMap<(u8, IpAddr), HopObservationsAcc>,
     /// Sum of `HopObservationsAcc.seen` across all IPs at each position.
     /// Maintained O(1) on insert + O(1) on purge so hop-frequency
     /// computation in `build_snapshot` is O(1) per `(position, ip)`.
-    /// Consumed by `observe` / `build_snapshot` in Tasks 3–4.
-    #[allow(dead_code)]
     position_totals: HashMap<u8, u32>,
     /// Most-recently emitted snapshot, for the next `diff_against` call.
     last_reported: Option<RouteSnapshot>,
@@ -266,8 +263,73 @@ impl RouteTracker {
 
     /// Ingest the hop observations from one trippy round. Purges samples
     /// older than `now - window` before inserting the new ones.
-    pub fn observe(&mut self, _hops: &[HopObservation], _now: Instant) {
-        unimplemented!("Task 3")
+    pub fn observe(&mut self, hops: &[HopObservation], now: Instant) {
+        if self.protocol.is_none() {
+            return;
+        }
+
+        // Purge everything strictly older than `now - window`. We walk the
+        // entire accumulator because hop entries age independently (one IP
+        // at position 3 might purge while another IP at position 3 stays
+        // fresh). The walk is O(K) in total entries (typically ≤ ~30
+        // hops × a few IPs each = < 100), cheap.
+        //
+        // `HopObservationsAcc::purge` has boundary-inclusive semantics
+        // (purges `t <= cutoff`), so we subtract one nanosecond from the
+        // window boundary to get strict semantics: a sample with
+        // `t == now - window` is exactly window-old and stays in the
+        // window; only samples strictly older fall out.
+        let cutoff_strict = now
+            .checked_sub(self.window)
+            .and_then(|c| c.checked_sub(Duration::from_nanos(1)));
+        let Some(cutoff) = cutoff_strict else {
+            // Runtime clock is before the window — nothing is old enough yet.
+            // Still insert new observations below.
+            for obs in hops {
+                let Some(ip) = obs.ip else { continue };
+                let key = (obs.position, ip);
+                let acc = self.hops.entry(key).or_default();
+                acc.insert(now, obs.rtt_micros);
+                *self.position_totals.entry(obs.position).or_insert(0) += 1;
+            }
+            return;
+        };
+
+        // Purge step — walk all entries, prune old samples, decrement
+        // per-position totals, drop entries that became empty.
+        let mut empty_keys: Vec<(u8, IpAddr)> = Vec::new();
+        for (key, acc) in self.hops.iter_mut() {
+            let purged = acc.purge(cutoff);
+            if purged > 0 {
+                if let Some(total) = self.position_totals.get_mut(&key.0) {
+                    *total = total.saturating_sub(purged);
+                }
+            }
+            if acc.is_empty() {
+                empty_keys.push(*key);
+            }
+        }
+        for key in &empty_keys {
+            self.hops.remove(key);
+            // If this was the last IP at that position, drop the total too.
+            if let Some(total) = self.position_totals.get(&key.0) {
+                if *total == 0 {
+                    self.position_totals.remove(&key.0);
+                }
+            }
+        }
+
+        // Insert step — record each hop with an IP. Star hops (ip = None)
+        // are ignored because they can't be attributed to a (position, ip)
+        // key. This matches the spec: the histogram tracks OBSERVED IPs,
+        // and star hops are the absence of observation.
+        for obs in hops {
+            let Some(ip) = obs.ip else { continue };
+            let key = (obs.position, ip);
+            let acc = self.hops.entry(key).or_default();
+            acc.insert(now, obs.rtt_micros);
+            *self.position_totals.entry(obs.position).or_insert(0) += 1;
+        }
     }
 
     /// Build a canonical snapshot from the current window. Returns `None`
@@ -365,5 +427,147 @@ mod tests {
             t.last_reported().is_none(),
             "primary swing must clear last_reported so the first post-swing snapshot emits unconditionally",
         );
+    }
+
+    fn hop(position: u8, ip: Option<IpAddr>, rtt_micros: Option<u32>) -> HopObservation {
+        HopObservation {
+            position,
+            ip,
+            rtt_micros,
+        }
+    }
+
+    fn tracker_ready(window: Duration, protocol: Protocol) -> RouteTracker {
+        let mut t = RouteTracker::new(window);
+        t.reset_for_protocol(Some(protocol));
+        t
+    }
+
+    #[test]
+    fn observe_noop_when_no_protocol() {
+        let mut t = RouteTracker::new(five_min());
+        // No reset_for_protocol call — protocol is None.
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+        // Internal accumulator must remain empty.
+        assert!(t.hops.is_empty());
+        assert!(t.position_totals.is_empty());
+    }
+
+    #[test]
+    fn observe_single_success_populates_accumulator() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+        let key = (1u8, ipv4(10, 0, 0, 1));
+        let acc = t.hops.get(&key).expect("inserted");
+        assert_eq!(acc.seen, 1);
+        assert_eq!(acc.successful, 1);
+        assert_eq!(acc.sum_rtt_micros, 5_000);
+        assert_eq!(acc.sum_rtt_sq_micros, 25_000_000);
+        assert_eq!(t.position_totals.get(&1).copied(), Some(1));
+    }
+
+    #[test]
+    fn observe_hop_timeout_counts_sample_but_not_rtt() {
+        // A hop with ip = None AND rtt = None = total timeout ("star hop").
+        // Star hops have no IP, so they are NOT recorded in the accumulator
+        // at all — there's no (position, ip) key to attribute them to.
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        t.observe(&[hop(3, None, None)], Instant::now());
+        assert!(t.hops.is_empty(), "star hops carry no IP and are ignored");
+        assert!(t.position_totals.is_empty());
+    }
+
+    #[test]
+    fn observe_partial_timeout_with_ip_counts_as_loss() {
+        // A hop with ip = Some (router responded once) but rtt = None on
+        // this particular round — count as a loss sample at that IP.
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        t.observe(&[hop(2, Some(ipv4(10, 0, 0, 2)), None)], Instant::now());
+        let acc = t.hops.get(&(2u8, ipv4(10, 0, 0, 2))).expect("inserted");
+        assert_eq!(acc.seen, 1);
+        assert_eq!(acc.successful, 0);
+        assert_eq!(acc.sum_rtt_micros, 0);
+        assert_eq!(t.position_totals.get(&2).copied(), Some(1));
+    }
+
+    #[test]
+    fn observe_repeated_same_ip_increments_counters() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        for rtt in [1_000_u32, 2_000, 3_000] {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(rtt))], now);
+        }
+        let acc = t.hops.get(&(1u8, ipv4(10, 0, 0, 1))).expect("inserted");
+        assert_eq!(acc.seen, 3);
+        assert_eq!(acc.successful, 3);
+        assert_eq!(acc.sum_rtt_micros, 6_000);
+        assert_eq!(
+            acc.sum_rtt_sq_micros,
+            1_000_u128.pow(2) + 2_000_u128.pow(2) + 3_000_u128.pow(2)
+        );
+        assert_eq!(t.position_totals.get(&1).copied(), Some(3));
+    }
+
+    #[test]
+    fn observe_purges_old_samples() {
+        let base = Instant::now();
+        let mut t = tracker_ready(Duration::from_secs(60), Protocol::Icmp);
+        // First round at t+0.
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], base);
+        // Second round at t+30s.
+        t.observe(
+            &[hop(1, Some(ipv4(10, 0, 0, 1)), Some(2_000))],
+            base + Duration::from_secs(30),
+        );
+        // Fast-forward to t+90s. The t+0 sample falls out.
+        t.observe(
+            &[hop(1, Some(ipv4(10, 0, 0, 1)), Some(3_000))],
+            base + Duration::from_secs(90),
+        );
+        let acc = t
+            .hops
+            .get(&(1u8, ipv4(10, 0, 0, 1)))
+            .expect("still present");
+        assert_eq!(acc.seen, 2, "t+0 sample was purged");
+        assert_eq!(acc.sum_rtt_micros, 2_000 + 3_000);
+        assert_eq!(t.position_totals.get(&1).copied(), Some(2));
+    }
+
+    #[test]
+    fn observe_multiple_ips_at_same_position() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        // ECMP-ish: position 3 sees two different IPs.
+        t.observe(&[hop(3, Some(ipv4(10, 1, 0, 1)), Some(4_000))], now);
+        t.observe(&[hop(3, Some(ipv4(10, 1, 0, 2)), Some(4_500))], now);
+        t.observe(&[hop(3, Some(ipv4(10, 1, 0, 1)), Some(4_100))], now);
+        let a = t.hops.get(&(3u8, ipv4(10, 1, 0, 1))).unwrap();
+        let b = t.hops.get(&(3u8, ipv4(10, 1, 0, 2))).unwrap();
+        assert_eq!(a.seen, 2);
+        assert_eq!(b.seen, 1);
+        assert_eq!(t.position_totals.get(&3).copied(), Some(3));
+    }
+
+    #[test]
+    fn observe_purge_of_all_samples_cleans_up_entry() {
+        let base = Instant::now();
+        let mut t = tracker_ready(Duration::from_secs(60), Protocol::Icmp);
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], base);
+        // All samples at position 1, IP .1 fall out at t+120.
+        t.observe(
+            &[hop(2, Some(ipv4(10, 0, 0, 2)), Some(2_000))],
+            base + Duration::from_secs(120),
+        );
+        // The (1, .1) accumulator is now empty — the implementation MUST
+        // remove it from the HashMap so it doesn't pollute build_snapshot's
+        // iteration with ghost zero-count entries.
+        assert!(
+            !t.hops.contains_key(&(1u8, ipv4(10, 0, 0, 1))),
+            "empty accumulator entries must be pruned, hops={:?}",
+            t.hops.keys().collect::<Vec<_>>(),
+        );
+        assert_eq!(t.position_totals.get(&1).copied(), None);
     }
 }
