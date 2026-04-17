@@ -268,30 +268,33 @@ impl RouteTracker {
             return;
         }
 
-        // Purge samples older than the window. We walk the entire
-        // accumulator because hop entries age independently (one IP at
-        // position 3 might purge while another IP at position 3 stays
-        // fresh). The walk is O(K) in total entries (typically ≤ ~30
-        // hops × a few IPs each = < 100), cheap.
-        //
-        // Boundary semantics match `stats::RollingStats::purge_old`: a
-        // sample with `t == now - window` is exactly window-old and is
-        // purged.
-        let Some(cutoff) = now.checked_sub(self.window) else {
-            // Runtime clock is before the window — nothing is old enough yet.
-            // Still insert new observations below.
-            for obs in hops {
-                let Some(ip) = obs.ip else { continue };
-                let key = (obs.position, ip);
-                let acc = self.hops.entry(key).or_default();
-                acc.insert(now, obs.rtt_micros);
-                *self.position_totals.entry(obs.position).or_insert(0) += 1;
-            }
-            return;
-        };
+        // `now.checked_sub` returns `None` immediately after runtime start
+        // when the window would reach before the tokio runtime epoch. In
+        // that case nothing is old enough to purge yet; fall through to
+        // the insert step unchanged.
+        if let Some(cutoff) = now.checked_sub(self.window) {
+            self.purge_stale(cutoff);
+        }
 
-        // Purge step — walk all entries, prune old samples, decrement
-        // per-position totals, drop entries that became empty.
+        // Star hops (ip = None) are ignored because they can't be
+        // attributed to a (position, ip) key. The histogram tracks OBSERVED
+        // IPs; star hops are the absence of observation.
+        for obs in hops {
+            let Some(ip) = obs.ip else { continue };
+            let key = (obs.position, ip);
+            let acc = self.hops.entry(key).or_default();
+            acc.insert(now, obs.rtt_micros);
+            *self.position_totals.entry(obs.position).or_insert(0) += 1;
+        }
+    }
+
+    /// Walk the accumulator and drop samples older than `cutoff`. Keeps
+    /// `position_totals` in sync and removes `(position, ip)` entries that
+    /// became empty so ghost zero-count rows can't surface in
+    /// `build_snapshot`. Boundary semantics match
+    /// `stats::RollingStats::purge_old`: a sample with `t == cutoff` is
+    /// expired.
+    fn purge_stale(&mut self, cutoff: Instant) {
         let mut empty_keys: Vec<(u8, IpAddr)> = Vec::new();
         for (key, acc) in self.hops.iter_mut() {
             let purged = acc.purge(cutoff);
@@ -312,18 +315,6 @@ impl RouteTracker {
                     self.position_totals.remove(&key.0);
                 }
             }
-        }
-
-        // Insert step — record each hop with an IP. Star hops (ip = None)
-        // are ignored because they can't be attributed to a (position, ip)
-        // key. This matches the spec: the histogram tracks OBSERVED IPs,
-        // and star hops are the absence of observation.
-        for obs in hops {
-            let Some(ip) = obs.ip else { continue };
-            let key = (obs.position, ip);
-            let acc = self.hops.entry(key).or_default();
-            acc.insert(now, obs.rtt_micros);
-            *self.position_totals.entry(obs.position).or_insert(0) += 1;
         }
     }
 
@@ -379,7 +370,6 @@ mod tests {
         Duration::from_secs(300)
     }
 
-    #[allow(dead_code)]
     fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
@@ -464,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_hop_timeout_counts_sample_but_not_rtt() {
+    fn observe_star_hop_is_ignored() {
         // A hop with ip = None AND rtt = None = total timeout ("star hop").
         // Star hops have no IP, so they are NOT recorded in the accumulator
         // at all — there's no (position, ip) key to attribute them to.
