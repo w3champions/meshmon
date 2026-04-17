@@ -21,7 +21,7 @@ if [[ ${#dashboards[@]} -eq 0 ]]; then
 fi
 
 for f in "${dashboards[@]}"; do
-  node -e "JSON.parse(require('node:fs').readFileSync('$f','utf8'))" \
+  node -e "JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8'))" "$f" \
     || { echo "::error ::invalid JSON: $f" >&2; exit 1; }
   echo "  OK syntax: $f"
 done
