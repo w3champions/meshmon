@@ -411,18 +411,14 @@ impl RouteTracker {
     ) -> Option<RouteDiff> {
         let last = self.last_reported.as_ref()?;
 
-        // Defensive: mismatched protocols are always a diff. The supervisor
-        // resets `last_reported` on a primary swing so this should never
-        // actually fire, but we guard against it to keep the diff rules
-        // from comparing semantically-incomparable hop distributions.
-        if new.protocol != last.protocol {
-            return Some(RouteDiff {
-                reasons: vec![DiffReason::HopCountChanged {
-                    from: last.hops.len(),
-                    to: new.hops.len(),
-                }],
-            });
-        }
+        // The supervisor calls `reset_for_protocol` on every primary swing,
+        // which clears `last_reported`. The early `let last = ...?;` above
+        // makes this function a no-op when that happens, so `last` can only
+        // carry the tracker's current protocol.
+        debug_assert_eq!(
+            new.protocol, last.protocol,
+            "protocol mismatch should be prevented by supervisor reset"
+        );
 
         let mut reasons: Vec<DiffReason> = Vec::new();
 
@@ -1182,20 +1178,14 @@ mod tests {
         assert_eq!(t.diff_against(&new, &default_diff()), None);
     }
 
-    // ---------------- Multi-rule + protocol change ----------------
-
-    #[test]
-    fn diff_protocol_mismatch_is_a_diff() {
-        // Defensive: tracker is normally reset on primary swing, but if
-        // a mismatched snapshot somehow lands here, it's a diff.
-        let last = snap(
-            Protocol::Icmp,
-            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
-        );
-        let new = snap(Protocol::Tcp, &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)]);
-        let t = tracker_with_last(Protocol::Icmp, last);
-        assert!(t.diff_against(&new, &default_diff()).is_some());
-    }
+    // ---------------- Multi-rule ----------------
+    //
+    // Protocol mismatch is not tested here: the supervisor calls
+    // `reset_for_protocol` on every primary swing, which clears
+    // `last_reported`, and the early `last_reported.as_ref()?` in
+    // `diff_against` makes protocol mismatch unreachable. The
+    // `debug_assert_eq!` in `diff_against` pins this invariant under
+    // debug builds.
 
     #[test]
     fn diff_collects_multiple_reasons() {
