@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { NearbySnapshotsResult, RouteSnapshotSummary } from "@/api/hooks/nearby-snapshots";
 import type { components } from "@/api/schema.gen";
 import { TimeJumpPopover } from "@/components/TimeJumpPopover";
@@ -59,14 +59,20 @@ export function RouteCompareHeader({
       });
   };
 
-  const handleJumpA = (target: number) => {
-    const snap = nearby.findClosest(target);
-    if (snap) onNavA(snap);
-  };
-  const handleJumpB = (target: number) => {
-    const snap = nearby.findClosest(target);
-    if (snap) onNavB(snap);
-  };
+  const handleJumpA = useCallback(
+    (target: number) => {
+      const snap = nearby.findClosest(target);
+      if (snap) onNavA(snap);
+    },
+    [nearby, onNavA],
+  );
+  const handleJumpB = useCallback(
+    (target: number) => {
+      const snap = nearby.findClosest(target);
+      if (snap) onNavB(snap);
+    },
+    [nearby, onNavB],
+  );
 
   const aCard = useMemo(
     () => ({
