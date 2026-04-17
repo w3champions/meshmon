@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
@@ -38,12 +39,19 @@ function datetimeLocalToIso(local: string): string {
 }
 
 export function CustomRangeInputs({ from, to, onChange, className }: CustomRangeInputsProps) {
+  // Unique, stable per-instance ids so two pickers on one page don't share
+  // `id="range-from"` / `id="range-to"` and break each other's label
+  // binding.
+  const uid = useId();
+  const fromId = `${uid}-from`;
+  const toId = `${uid}-to`;
+
   return (
     <div className={cn("flex flex-wrap items-end gap-2", className)}>
       <div className="flex flex-col gap-1">
-        <Label htmlFor="range-from">From</Label>
+        <Label htmlFor={fromId}>From</Label>
         <input
-          id="range-from"
+          id={fromId}
           type="datetime-local"
           className="rounded border bg-background p-1 text-sm"
           value={isoToDatetimeLocal(from)}
@@ -51,9 +59,9 @@ export function CustomRangeInputs({ from, to, onChange, className }: CustomRange
         />
       </div>
       <div className="flex flex-col gap-1">
-        <Label htmlFor="range-to">To</Label>
+        <Label htmlFor={toId}>To</Label>
         <input
-          id="range-to"
+          id={toId}
           type="datetime-local"
           className="rounded border bg-background p-1 text-sm"
           value={isoToDatetimeLocal(to)}
