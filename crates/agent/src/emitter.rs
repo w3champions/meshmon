@@ -2,11 +2,14 @@
 //! immediately, retries on retriable failures with jittered exponential
 //! backoff, and buffers up to 65 failed RPCs in a drop-oldest ring queue.
 //!
-//! This module is under active construction across T16. Tasks 7-9 land
-//! the primary loop, snapshot builder, and retry worker. Task 8 (this
-//! commit) wires up the real `RouteSnapshotRequest` builder with
-//! `PathSummary` derivation; the retry worker remains a stub until
-//! Task 9 lands.
+//! The retry worker drains the shared `RetryQueue` concurrently with the
+//! primary loop. Retriable failures (UNAVAILABLE / RESOURCE_EXHAUSTED /
+//! transport errors) are rescheduled with jittered exponential backoff;
+//! non-retriable failures (UNAUTHENTICATED / INVALID_ARGUMENT / other)
+//! are dropped on the first retry attempt. A successful `push_metrics`
+//! retry resets both `local_error_count` and the queue's
+//! `dropped_count`; snapshot retries don't touch either counter since
+//! those live in `MetricsBatch.agent_metadata`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -54,24 +57,16 @@ pub struct PathMetricsMsg {
 
 /// A failed RPC awaiting retry. One `VecDeque<PendingRpc>` is shared
 /// between the primary loop (producer) and the retry worker (consumer).
-///
-/// `batch` / `req` / `attempts` are written by `dispatch_*` in this task
-/// but only read by the retry worker (Task 9). The `#[allow(dead_code)]`
-/// on those fields is dropped once Task 9 lands.
 #[derive(Debug, Clone)]
 enum PendingRpc {
     Metrics {
-        #[allow(dead_code)]
         batch: MetricsBatch,
         next_retry_at: Instant,
-        #[allow(dead_code)]
         attempts: u32,
     },
     Snapshot {
-        #[allow(dead_code)]
         req: RouteSnapshotRequest,
         next_retry_at: Instant,
-        #[allow(dead_code)]
         attempts: u32,
     },
 }
@@ -128,9 +123,6 @@ impl RetryQueue {
 
     /// Take up to `n` items whose `next_retry_at <= now`, preserving the
     /// relative order of the remaining (not-yet-due) entries.
-    ///
-    /// Only consumed by the retry worker (Task 9) + unit tests today.
-    #[allow(dead_code)]
     fn take_due(&mut self, now: Instant, n: usize) -> Vec<PendingRpc> {
         let mut out = Vec::new();
         let mut remaining = VecDeque::with_capacity(self.queue.len());
@@ -146,9 +138,6 @@ impl RetryQueue {
     }
 
     /// Minimum `next_retry_at` across the queue, or `None` if empty.
-    ///
-    /// Only consumed by the retry worker (Task 9) + unit tests today.
-    #[allow(dead_code)]
     fn next_due(&self) -> Option<Instant> {
         self.queue.iter().map(|p| p.next_retry_at()).min()
     }
@@ -211,7 +200,6 @@ async fn run_emitter<A: ServiceApi>(
     local_error_count: Arc<AtomicU64>,
     cancel: CancellationToken,
 ) {
-    // Task 9 replaces this stub with the real retry worker.
     let retry_handle = tokio::spawn(run_retry_worker(
         Arc::clone(&api),
         Arc::clone(&queue),
@@ -465,18 +453,134 @@ fn system_time_to_micros_i64(t: SystemTime) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Stub for Task 9
+// Retry worker
 // ---------------------------------------------------------------------------
 
+/// Classification of a retry RPC failure, carrying the original error
+/// for logging. Wraps `classify`'s verdict so the retry worker can
+/// match once and avoid duplicating the status-code logic.
+enum RetryErr {
+    Retriable(anyhow::Error),
+    Drop {
+        level: tracing::Level,
+        err: anyhow::Error,
+    },
+}
+
+impl From<anyhow::Error> for RetryErr {
+    fn from(e: anyhow::Error) -> Self {
+        match classify(&e) {
+            Classify::Retriable => RetryErr::Retriable(e),
+            Classify::Drop(level) => RetryErr::Drop { level, err: e },
+        }
+    }
+}
+
+/// Return a fresh `PendingRpc` with `attempts` incremented and
+/// `next_retry_at` rescheduled according to the new attempt count.
+/// Preserves the variant and payload; saturating_add avoids wrap on
+/// pathological retry counts.
+fn bump_retry(entry: PendingRpc) -> PendingRpc {
+    match entry {
+        PendingRpc::Metrics {
+            batch, attempts, ..
+        } => {
+            let attempts = attempts.saturating_add(1);
+            PendingRpc::Metrics {
+                batch,
+                attempts,
+                next_retry_at: schedule_retry(attempts),
+            }
+        }
+        PendingRpc::Snapshot { req, attempts, .. } => {
+            let attempts = attempts.saturating_add(1);
+            PendingRpc::Snapshot {
+                req,
+                attempts,
+                next_retry_at: schedule_retry(attempts),
+            }
+        }
+    }
+}
+
 async fn run_retry_worker<A: ServiceApi>(
-    _api: Arc<A>,
-    _queue: Arc<Mutex<RetryQueue>>,
-    _notify: Arc<Notify>,
-    _local_error_count: Arc<AtomicU64>,
+    api: Arc<A>,
+    queue: Arc<Mutex<RetryQueue>>,
+    notify: Arc<Notify>,
+    local_error_count: Arc<AtomicU64>,
     cancel: CancellationToken,
 ) {
-    // Task 9 fills this in.
-    cancel.cancelled().await;
+    // Idle sleep when the queue is empty. Long enough that we're not
+    // thrashing the system when nothing is pending; short enough that a
+    // missed notify (theoretically impossible with `notify_one`, but
+    // defensive) still makes forward progress.
+    const IDLE_SLEEP: Duration = Duration::from_secs(60);
+
+    loop {
+        let next_due = queue.lock().await.next_due();
+        let wait = match next_due {
+            Some(t) => t.saturating_duration_since(Instant::now()),
+            None => IDLE_SLEEP,
+        };
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = notify.notified() => continue,
+            _ = tokio::time::sleep(wait) => {}
+        }
+
+        // Drain up to 8 due entries. Taking them out of the queue
+        // temporarily means a concurrent primary-loop push can't evict
+        // them via drop-oldest even if the queue fills while we're
+        // awaiting the RPC. That behaviour is intentional: entries we
+        // already committed to retrying shouldn't lose their turn.
+        let due = {
+            let mut q = queue.lock().await;
+            q.take_due(Instant::now(), 8)
+        };
+
+        for entry in due {
+            let is_metrics = matches!(entry, PendingRpc::Metrics { .. });
+            let rpc_result = match &entry {
+                PendingRpc::Metrics { batch, .. } => api
+                    .push_metrics(batch.clone())
+                    .await
+                    .map(|_| ())
+                    .map_err(RetryErr::from),
+                PendingRpc::Snapshot { req, .. } => api
+                    .push_route_snapshot(req.clone())
+                    .await
+                    .map(|_| ())
+                    .map_err(RetryErr::from),
+            };
+
+            match rpc_result {
+                Ok(()) => {
+                    if is_metrics {
+                        local_error_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                        queue.lock().await.reset_dropped_count();
+                        tracing::info!("push_metrics retry succeeded; counters reset");
+                    } else {
+                        tracing::info!("push_route_snapshot retry succeeded");
+                    }
+                }
+                Err(RetryErr::Retriable(e)) => {
+                    let bumped = bump_retry(entry);
+                    queue.lock().await.push(bumped);
+                    local_error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(error = %e, "retry still retriable; re-enqueued");
+                }
+                Err(RetryErr::Drop { level, err }) => {
+                    emit_at_level(
+                        level,
+                        &format!("retry non-retriable, dropping entry: {err}"),
+                    );
+                    local_error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,5 +1273,249 @@ mod tests {
         let ps = req.path_summary.as_ref().expect("PathSummary stamped");
         assert_eq!(ps.hop_count, 1);
         assert_eq!(ps.avg_rtt_micros, 2_000);
+    }
+
+    /// ServiceApi that fails the first N `push_metrics` calls with
+    /// UNAVAILABLE, then succeeds. Used to assert the retry worker drains
+    /// the queue on transient failures.
+    struct FailNThenSucceedApi {
+        remaining_failures: Mutex<u32>,
+        calls: Mutex<Vec<MetricsBatch>>,
+    }
+    impl FailNThenSucceedApi {
+        fn new(n: u32) -> Self {
+            Self {
+                remaining_failures: Mutex::new(n),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl ServiceApi for FailNThenSucceedApi {
+        async fn register(
+            &self,
+            _: meshmon_protocol::RegisterRequest,
+        ) -> anyhow::Result<meshmon_protocol::RegisterResponse> {
+            unimplemented!()
+        }
+        async fn get_config(&self) -> anyhow::Result<meshmon_protocol::ConfigResponse> {
+            unimplemented!()
+        }
+        async fn get_targets(&self, _: &str) -> anyhow::Result<meshmon_protocol::TargetsResponse> {
+            unimplemented!()
+        }
+        async fn push_metrics(
+            &self,
+            batch: MetricsBatch,
+        ) -> anyhow::Result<meshmon_protocol::PushMetricsResponse> {
+            self.calls.lock().await.push(batch);
+            let mut g = self.remaining_failures.lock().await;
+            if *g > 0 {
+                *g -= 1;
+                return Err(anyhow::Error::from(tonic::Status::unavailable("transient")));
+            }
+            Ok(meshmon_protocol::PushMetricsResponse::default())
+        }
+        async fn push_route_snapshot(
+            &self,
+            _: RouteSnapshotRequest,
+        ) -> anyhow::Result<meshmon_protocol::PushRouteSnapshotResponse> {
+            unimplemented!()
+        }
+    }
+
+    /// ServiceApi that always fails `push_metrics` with a configurable status.
+    /// Used to assert non-retriable failures are dropped on the first retry.
+    struct AlwaysFailApi {
+        status: tonic::Status,
+        calls: Mutex<u32>,
+    }
+    impl AlwaysFailApi {
+        fn new(status: tonic::Status) -> Self {
+            Self {
+                status,
+                calls: Mutex::new(0),
+            }
+        }
+    }
+    impl ServiceApi for AlwaysFailApi {
+        async fn register(
+            &self,
+            _: meshmon_protocol::RegisterRequest,
+        ) -> anyhow::Result<meshmon_protocol::RegisterResponse> {
+            unimplemented!()
+        }
+        async fn get_config(&self) -> anyhow::Result<meshmon_protocol::ConfigResponse> {
+            unimplemented!()
+        }
+        async fn get_targets(&self, _: &str) -> anyhow::Result<meshmon_protocol::TargetsResponse> {
+            unimplemented!()
+        }
+        async fn push_metrics(
+            &self,
+            _: MetricsBatch,
+        ) -> anyhow::Result<meshmon_protocol::PushMetricsResponse> {
+            *self.calls.lock().await += 1;
+            Err(anyhow::Error::from(self.status.clone()))
+        }
+        async fn push_route_snapshot(
+            &self,
+            _: RouteSnapshotRequest,
+        ) -> anyhow::Result<meshmon_protocol::PushRouteSnapshotResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_worker_drains_queue_on_unavailable_then_success() {
+        let api = Arc::new(FailNThenSucceedApi::new(2));
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (mtx, mrx) = mpsc::channel(16);
+        let (_stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        let now = SystemTime::now();
+        mtx.send(PathMetricsMsg {
+            target_id: "t1".into(),
+            protocol: Protocol::Icmp,
+            window_start: now - Duration::from_secs(60),
+            window_end: now,
+            stats: test_stats(),
+            health: ProtoHealth::Healthy,
+        })
+        .await
+        .unwrap();
+
+        // Park the spawned task in select! before advancing time.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Tick 1 → primary dispatch → fails with UNAVAILABLE → enqueued.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        // First retry (after ~1s jitter) → fails again.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        // Second retry (after ~2s jitter) → succeeds.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+        // The fail-counter was 2, so we expect >= 3 total push_metrics calls
+        // (1 primary + 2 retries before the 3rd succeeds). Any flakiness in
+        // jitter might push it up to 4 or 5 — the invariant is >= 3.
+        let calls = api.calls.lock().await;
+        assert!(
+            calls.len() >= 3,
+            "expected at least 3 push_metrics attempts; got {}",
+            calls.len(),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_worker_drops_invalid_argument_after_first_attempt() {
+        let api = Arc::new(AlwaysFailApi::new(tonic::Status::invalid_argument("bad")));
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (mtx, mrx) = mpsc::channel(16);
+        let (_stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        let now = SystemTime::now();
+        mtx.send(PathMetricsMsg {
+            target_id: "t1".into(),
+            protocol: Protocol::Icmp,
+            window_start: now - Duration::from_secs(60),
+            window_end: now,
+            stats: test_stats(),
+            health: ProtoHealth::Healthy,
+        })
+        .await
+        .unwrap();
+
+        // Park the spawned task in select! before advancing time.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Primary fires → InvalidArgument → non-retriable → dropped, no retry.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        // Advance a long time. No retries should ever fire.
+        tokio::time::advance(Duration::from_secs(600)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+        let calls = *api.calls.lock().await;
+        assert_eq!(
+            calls, 1,
+            "InvalidArgument must drop on first attempt, not retry"
+        );
+    }
+
+    #[test]
+    fn bump_retry_increments_attempts_and_reschedules() {
+        let now = Instant::now();
+        let entry = PendingRpc::Metrics {
+            batch: MetricsBatch::default(),
+            next_retry_at: now,
+            attempts: 2,
+        };
+        let bumped = bump_retry(entry);
+        match bumped {
+            PendingRpc::Metrics {
+                attempts,
+                next_retry_at,
+                ..
+            } => {
+                assert_eq!(attempts, 3);
+                assert!(next_retry_at > now);
+            }
+            _ => panic!("variant changed unexpectedly"),
+        }
+
+        let entry2 = PendingRpc::Snapshot {
+            req: RouteSnapshotRequest::default(),
+            next_retry_at: now,
+            attempts: 0,
+        };
+        let bumped2 = bump_retry(entry2);
+        match bumped2 {
+            PendingRpc::Snapshot {
+                attempts,
+                next_retry_at,
+                ..
+            } => {
+                assert_eq!(attempts, 1);
+                assert!(next_retry_at > now);
+            }
+            _ => panic!("variant changed unexpectedly"),
+        }
     }
 }
