@@ -129,7 +129,6 @@ pub struct RouteDiff {
 /// on insert/purge; timeouts contribute to `seen` but not to
 /// `successful` / `sum_rtt_*`.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 struct HopObservationsAcc {
     /// `(t, rtt)` samples. `rtt = None` means the hop timed out this round.
     samples: VecDeque<(Instant, Option<u32>)>,
@@ -139,7 +138,6 @@ struct HopObservationsAcc {
     sum_rtt_sq_micros: u128,
 }
 
-#[allow(dead_code)]
 impl HopObservationsAcc {
     fn insert(&mut self, t: Instant, rtt: Option<u32>) {
         self.samples.push_back((t, rtt));
@@ -171,39 +169,6 @@ impl HopObservationsAcc {
 
     fn is_empty(&self) -> bool {
         self.samples.is_empty()
-    }
-
-    fn avg_rtt_micros(&self) -> u32 {
-        if self.successful == 0 {
-            return 0;
-        }
-        (self.sum_rtt_micros / self.successful as u64).min(u32::MAX as u64) as u32
-    }
-
-    fn stddev_rtt_micros(&self) -> u32 {
-        if self.successful < 2 {
-            return 0;
-        }
-        let n = self.successful as f64;
-        let mean = self.sum_rtt_micros as f64 / n;
-        let mean_sq = self.sum_rtt_sq_micros as f64 / n;
-        let var = (mean_sq - mean * mean).max(0.0);
-        let stddev = var.sqrt();
-        if !stddev.is_finite() || stddev < 0.0 {
-            0
-        } else if stddev >= u32::MAX as f64 {
-            u32::MAX
-        } else {
-            stddev as u32
-        }
-    }
-
-    fn loss_pct(&self) -> f64 {
-        if self.seen == 0 {
-            return 0.0;
-        }
-        let lost = (self.seen - self.successful) as f64;
-        lost / self.seen as f64
     }
 }
 
