@@ -79,4 +79,29 @@ describe("TimeRangePicker", () => {
     expect(emitted.to).toBe("2026-04-13T14:30:00Z");
     expect(emitted.from).toMatch(/^2026-04-13T/);
   });
+
+  test("seeds ISO from/to when switching to 'custom' from a preset without bounds", async () => {
+    const handler = vi.fn();
+    // Starting on a preset with no custom bounds supplied — the common
+    // default-route scenario. Without seeding, the router schema rejects
+    // `custom` with empty from/to and the preset switch silently fails.
+    render(<TimeRangePicker value="24h" onChange={handler} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: /custom/i }));
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    const [[emitted]] = handler.mock.calls;
+    expect(emitted.range).toBe("custom");
+    // Must be non-empty ISO-8601 strings so the router schema accepts them.
+    expect(typeof emitted.from).toBe("string");
+    expect(typeof emitted.to).toBe("string");
+    expect(emitted.from).not.toBe("");
+    expect(emitted.to).not.toBe("");
+    // ISO-8601 with trailing 'Z' (UTC); Date.parse must succeed.
+    expect(emitted.from).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+    expect(emitted.to).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+    expect(Number.isNaN(Date.parse(emitted.from))).toBe(false);
+    expect(Number.isNaN(Date.parse(emitted.to))).toBe(false);
+  });
 });

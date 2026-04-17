@@ -6,7 +6,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { TimeRangeKey } from "@/lib/time-range";
+import { rangeBounds, type TimeRangeKey } from "@/lib/time-range";
 
 const LABELS: Record<TimeRangeKey, string> = {
   "1h": "Last 1 hour",
@@ -43,8 +43,25 @@ export function TimeRangePicker({
 }: TimeRangePickerProps) {
   const handlePresetChange = (next: string) => {
     const range = next as TimeRangeKey;
-    if (range === "custom") onChange({ range, from, to });
-    else onChange({ range });
+    if (range === "custom") {
+      // Seed from/to with the current preset's bounds (or 24h as a universal
+      // fallback when already on 'custom' without bounds) so the router
+      // schema — which rejects empty strings — accepts the switch. Without
+      // this the picker silently refuses to move off the prior preset.
+      if (from && to) {
+        onChange({ range, from, to });
+        return;
+      }
+      const seed = value === "custom" ? "24h" : value;
+      const bounds = rangeBounds(seed);
+      onChange({
+        range,
+        from: bounds.from.toISOString(),
+        to: bounds.to.toISOString(),
+      });
+      return;
+    }
+    onChange({ range });
   };
 
   return (
