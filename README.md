@@ -225,7 +225,7 @@ cargo run -p meshmon-agent
 | `state.rs` | Pure state-machine types: per-protocol + path health, rate/window lookup |
 | `route.rs` | Per-target route-state tracker: accumulates trippy per-hop observations over a rolling window, builds canonical snapshots, detects meaningful diffs |
 | `supervisor.rs` | Per-target supervisor: spawns 4 probers, runs state machine every 10 s, publishes rates, emits diff-gated route snapshots on a 60 s tick, and pushes one `PathMetricsMsg` per healthy protocol on an independent 60 s metrics tick |
-| `emitter.rs` | Single outbound task: batches `PathMetricsMsg` into `MetricsBatch` every 60 s, pushes route snapshots immediately, retries retriable failures (UNAVAILABLE / RESOURCE_EXHAUSTED) with jittered 1 s → 5 min backoff, buffers up to 65 failed RPCs in a drop-oldest ring queue with `dropped_count` reporting |
+| `emitter.rs` | Single outbound task: batches `PathMetricsMsg` into `MetricsBatch` every 60 s, pushes route snapshots immediately, retries retriable failures (UNAVAILABLE / RESOURCE_EXHAUSTED / transport errors) with jittered 1 s → 5 min backoff, buffers up to 65 failed RPCs in a drop-oldest ring queue with `dropped_count` reporting |
 | `bootstrap.rs` | Register → config → targets → spawn emitter + per-target supervisors, 5-minute refresh loop |
 | `probing/mod.rs` | `ProbeObservation` / `HopObservation` types (populated by probers) |
 | `probing/icmp.rs` | ICMP Echo pinger (`surge-ping`), always-on per target for per-protocol health |

@@ -20,8 +20,8 @@
 //! and bumps `dropped_count`, which rides out in the next successful
 //! `MetricsBatch.agent_metadata.dropped_count` and resets on ack.
 //!
-//! Shutdown: the primary loop exits on `cancel.cancelled()` or when both
-//! receivers close. The emitter then enters a bounded 5-second drain
+//! Shutdown: the primary loop exits on `cancel.cancelled()` or when either
+//! receiver closes. The emitter then enters a bounded 5-second drain
 //! phase that biased-polls pending snapshots (time-sensitive), stages
 //! any remaining metrics, and flushes a final best-effort batch before
 //! aborting the retry worker. Any entries still in the retry queue are
