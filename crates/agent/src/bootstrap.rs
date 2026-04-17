@@ -66,6 +66,15 @@ pub struct AgentRuntime<A: ServiceApi> {
     /// runtime's lifetime so the task is cancelled when the runtime is
     /// dropped; not awaited in production (the `_` prefix signals that).
     _route_snapshot_consumer: tokio::task::JoinHandle<()>,
+    /// Sender half of the supervisor → emitter metrics channel. Cloned into
+    /// every supervisor at spawn time. Held on the runtime so its lifetime
+    /// matches the supervisors; dropped explicitly in `shutdown()` (Task 11)
+    /// so the emitter sees clean channel closure before draining.
+    pub(crate) path_metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
+    /// Receiver half of the metrics channel. Taken by Task 11 when the
+    /// emitter is spawned; `Option<_>` because `emitter::spawn` consumes it.
+    #[allow(dead_code)]
+    pub(crate) path_metrics_rx: Option<mpsc::Receiver<crate::emitter::PathMetricsMsg>>,
 }
 
 impl<A: ServiceApi> AgentRuntime<A> {
@@ -141,6 +150,14 @@ impl<A: ServiceApi> AgentRuntime<A> {
             route_snapshot_rx,
             consumer_cancel,
         ));
+
+        // Shared supervisor → emitter metrics channel. Capacity 1024 bounds how
+        // many PathMetricsMsg records can queue up before the emitter catches
+        // up — at 3 protocols × 50 targets / 60 s, steady-state use is 150/min
+        // so 1024 gives >6 minutes of headroom. Overflow is `try_send` drop
+        // at the supervisor side (per-target counter, local tracing only).
+        let (path_metrics_tx, path_metrics_rx) =
+            mpsc::channel::<crate::emitter::PathMetricsMsg>(1024);
 
         // -- Register --
         let reg_req = build_register_request(
@@ -235,6 +252,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 Arc::clone(&trippy_prober),
                 child.clone(),
                 route_snapshot_tx.clone(),
+                path_metrics_tx.clone(),
             );
             supervisors.insert(id, handle);
         }
@@ -264,6 +282,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
             _udp_listener: udp_listener,
             route_snapshot_tx,
             _route_snapshot_consumer: route_snapshot_consumer,
+            path_metrics_tx,
+            path_metrics_rx: Some(path_metrics_rx),
         })
     }
 
@@ -438,6 +458,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 Arc::clone(&self.trippy_prober),
                 self.cancel.clone(),
                 self.route_snapshot_tx.clone(),
+                self.path_metrics_tx.clone(),
             );
             tracing::info!(target_id = %id, "spawned new supervisor");
             self.supervisors.insert(id, handle);
