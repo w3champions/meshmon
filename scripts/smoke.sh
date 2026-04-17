@@ -202,6 +202,34 @@ INSERT INTO route_snapshots (source_id, target_id, protocol, observed_at, hops, 
     '{"avg_rtt_micros": 278000, "hop_count": 5, "loss_pct": 0.0}'::jsonb);
 SQL
 
+# ---- VictoriaMetrics sample seed ---------------------------------------
+# Path overview reads two series from VM via MetricsQL:
+#   - meshmon_path_rtt_avg_micros{source,target,protocol}   (rtt in μs → / 1000 for ms)
+#   - meshmon_path_failure_rate{source,target,protocol}     (0..1 loss fraction)
+# Normally the ingestion layer publishes these from agent probe batches;
+# smoke has no agents, so push a synthetic story directly via VM's
+# /api/v1/import (NDJSON: one line per series). Story mirrors the
+# route-snapshot timeline: stable baseline, hop change at T-10min raises
+# RTT and briefly spikes loss on fra-01 → lon-01, then restabilises.
+echo "[smoke] seeding VictoriaMetrics sample series"
+NOW_MS=$(($(date +%s) * 1000))
+ts() { echo $((NOW_MS - $1 * 60 * 1000)); }
+
+curl -fsS -XPOST "http://127.0.0.1:${VM_PORT}/api/v1/import" \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary @- <<NDJSON >/dev/null
+{"metric":{"__name__":"meshmon_path_rtt_avg_micros","source":"fra-01","target":"lon-01","protocol":"icmp"},"values":[14000,14200,13900,14100,13800,14000,11200,17800,17500,17200],"timestamps":[$(ts 40),$(ts 35),$(ts 30),$(ts 25),$(ts 20),$(ts 15),$(ts 10),$(ts 7),$(ts 4),$(ts 1)]}
+{"metric":{"__name__":"meshmon_path_failure_rate","source":"fra-01","target":"lon-01","protocol":"icmp"},"values":[0,0,0,0,0,0,0.02,0.03,0.01,0],"timestamps":[$(ts 40),$(ts 35),$(ts 30),$(ts 25),$(ts 20),$(ts 15),$(ts 10),$(ts 7),$(ts 4),$(ts 1)]}
+{"metric":{"__name__":"meshmon_path_rtt_avg_micros","source":"lon-01","target":"nrt-01","protocol":"udp"},"values":[248000,249000,250000,249500,251000,250500],"timestamps":[$(ts 15),$(ts 12),$(ts 9),$(ts 6),$(ts 3),$(ts 1)]}
+{"metric":{"__name__":"meshmon_path_failure_rate","source":"lon-01","target":"nrt-01","protocol":"udp"},"values":[0,0,0,0,0,0],"timestamps":[$(ts 15),$(ts 12),$(ts 9),$(ts 6),$(ts 3),$(ts 1)]}
+{"metric":{"__name__":"meshmon_path_rtt_avg_micros","source":"fra-01","target":"nrt-01","protocol":"tcp"},"values":[278000,277000,279000,278500],"timestamps":[$(ts 8),$(ts 6),$(ts 4),$(ts 1)]}
+{"metric":{"__name__":"meshmon_path_failure_rate","source":"fra-01","target":"nrt-01","protocol":"tcp"},"values":[0,0,0,0],"timestamps":[$(ts 8),$(ts 6),$(ts 4),$(ts 1)]}
+NDJSON
+
+# VM buffers writes for a few seconds before making them queryable. Flush
+# so the service sees the samples immediately on first render.
+curl -fsS -XPOST "http://127.0.0.1:${VM_PORT}/internal/force_flush" >/dev/null || true
+
 # ---- Service (background) ----------------------------------------------
 echo "[smoke] starting service on :${SERVICE_PORT} (log: ${SERVICE_LOG})"
 MESHMON_CONFIG="$CONFIG_PATH" cargo run --quiet --package meshmon-service >"$SERVICE_LOG" 2>&1 &
