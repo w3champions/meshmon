@@ -178,6 +178,12 @@ pub fn router(state: AppState) -> Router {
     // handlers can see the session, then prom_layer so unauthenticated
     // 401s still get counted in the request metrics, then compression,
     // then trace at the outside so logs cover every request.
+    //
+    // The SPA fallback is registered BEFORE the layer stack — axum only
+    // wraps routes that exist when `.layer(...)` is called, so a
+    // fallback added after the layers would bypass tracing, metrics,
+    // and compression entirely. Static-asset traffic must show up in
+    // observability the same way API traffic does.
     Router::new()
         .merge(health_router)
         .merge(openapi::swagger_router(api_schema))
@@ -187,11 +193,11 @@ pub fn router(state: AppState) -> Router {
         .merge(api_protected)
         .route("/api", axum::routing::any(backend_path_404))
         .route("/api/{*rest}", axum::routing::any(backend_path_404))
+        .fallback_service(memory_router)
         .layer(auth_layer)
         .layer(prom_layer)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .fallback_service(memory_router)
         .with_state(state)
 }
 
