@@ -32,25 +32,39 @@ fn _assert_client_clone_send_sync() {
 /// Implemented by [`GrpcServiceApi`] for production and by test doubles in
 /// integration tests. The trait is `Send + Sync + 'static` so it can live
 /// behind `Arc<dyn ServiceApi>`.
-#[allow(async_fn_in_trait)]
+///
+/// Methods return `impl Future + Send` (rather than plain `async fn`) so
+/// the emitter's `tokio::spawn(run_emitter(...))` can prove its returned
+/// future is `Send`. The two production impls (`GrpcServiceApi` + test
+/// doubles using `tokio::sync::Mutex`) both naturally produce `Send`
+/// futures, so this is a no-op for real call sites.
 pub trait ServiceApi: Send + Sync + 'static {
     /// Register this agent with the service (or refresh its metadata).
-    async fn register(&self, req: RegisterRequest) -> Result<RegisterResponse>;
+    fn register(
+        &self,
+        req: RegisterRequest,
+    ) -> impl std::future::Future<Output = Result<RegisterResponse>> + Send;
 
     /// Fetch the current probe configuration from the service.
-    async fn get_config(&self) -> Result<ConfigResponse>;
+    fn get_config(&self) -> impl std::future::Future<Output = Result<ConfigResponse>> + Send;
 
     /// Fetch the list of active probe targets, excluding `source_id` itself.
-    async fn get_targets(&self, source_id: &str) -> Result<TargetsResponse>;
+    fn get_targets(
+        &self,
+        source_id: &str,
+    ) -> impl std::future::Future<Output = Result<TargetsResponse>> + Send;
 
     /// Push a batch of aggregated probe metrics.
-    async fn push_metrics(&self, batch: MetricsBatch) -> Result<PushMetricsResponse>;
+    fn push_metrics(
+        &self,
+        batch: MetricsBatch,
+    ) -> impl std::future::Future<Output = Result<PushMetricsResponse>> + Send;
 
     /// Push a route-change snapshot.
-    async fn push_route_snapshot(
+    fn push_route_snapshot(
         &self,
         req: RouteSnapshotRequest,
-    ) -> Result<PushRouteSnapshotResponse>;
+    ) -> impl std::future::Future<Output = Result<PushRouteSnapshotResponse>> + Send;
 }
 
 // ---------------------------------------------------------------------------
