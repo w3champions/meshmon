@@ -48,6 +48,8 @@ envsubst < grafana/provisioning/datasources.yml.template > "$DS_YAML"
 # Postgres isn't part of the smoke harness (no dashboard queries Postgres),
 # so strip the MeshmonPostgres datasource block from the generated file.
 # Simpler than adding conditionals to the template.
+# NOTE: This stripping logic is duplicated in scripts/smoke.sh.
+# If the datasources template gains new datasource blocks, update both.
 node -e "
 const fs=require('node:fs');
 const yaml=fs.readFileSync(process.argv[1],'utf8');
@@ -71,7 +73,7 @@ echo "==> bringing up VM + Grafana (tags: VM=${VM_TAG}, Grafana=${GRAFANA_TAG})"
 echo "==> waiting for Grafana healthcheck"
 ok=false
 for i in {1..60}; do
-  body=$(curl -fsS -u admin:admin http://127.0.0.1:3000/api/health 2>/dev/null || true)
+  body=$(curl -fsS http://127.0.0.1:3000/api/health 2>/dev/null || true)
   if [[ -n "$body" ]] && node -e "const h=JSON.parse(process.argv[1]); if (h.database!=='ok') process.exit(1);" "$body" 2>/dev/null; then
     ok=true
     break

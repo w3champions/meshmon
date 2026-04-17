@@ -120,6 +120,8 @@ MESHMON_PG_DATABASE="" \
 envsubst < grafana/provisioning/datasources.yml.template \
   > "$GRAFANA_PROVISIONING_DIR/datasources/meshmon.yml"
 
+# NOTE: This stripping logic is duplicated in scripts/smoke-dashboards.sh.
+# If the datasources template gains new datasource blocks, update both.
 node -e "
 const fs=require('node:fs');
 const yaml=fs.readFileSync(process.argv[1],'utf8');
@@ -146,6 +148,9 @@ providers:
 YAML
 
 docker rm -f "$GRAFANA_CONTAINER" >/dev/null 2>&1 || true
+# Requires Docker Engine >= 20.10 for host-gateway resolution.
+# Docker Desktop injects host.docker.internal automatically; the flag is
+# a harmless no-op there.
 docker run --rm -d --name "$GRAFANA_CONTAINER" \
   --add-host=host.docker.internal:host-gateway \
   -e GF_SECURITY_ADMIN_USER=admin \
@@ -165,7 +170,7 @@ docker run --rm -d --name "$GRAFANA_CONTAINER" \
 echo "[smoke] waiting for Grafana on :${GRAFANA_PORT}"
 ok=false
 for i in {1..60}; do
-  body=$(curl -fsS -u admin:admin "http://127.0.0.1:${GRAFANA_PORT}/api/health" 2>/dev/null || true)
+  body=$(curl -fsS "http://127.0.0.1:${GRAFANA_PORT}/api/health" 2>/dev/null || true)
   if [[ -n "$body" ]] && node -e "const h=JSON.parse(process.argv[1]); if (h.database!=='ok') process.exit(1);" "$body" 2>/dev/null; then
     ok=true
     break
