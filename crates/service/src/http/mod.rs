@@ -31,6 +31,19 @@
 //! 7. `metrics_auth::require_basic_auth` — attached to the `/metrics`
 //!    sub-router only; no-ops when `[service.metrics_auth]` is unset.
 //!    `/healthz` and `/readyz` stay ungated for k8s probes.
+//!
+//! The embedded React SPA is served via `memory-serve` attached as the
+//! axum `fallback_service`:
+//! - `/`, `/index.html`, and any unregistered, non-backend path serve
+//!   `index.html` (HTML with a `no-cache, no-store, must-revalidate`
+//!   header so SPA deploys take effect on next navigation).
+//! - Hashed asset paths (e.g. `/assets/index-<hash>.js`) get
+//!   `Cache-Control: public, max-age=31536000, immutable` plus an
+//!   ETag; `If-None-Match` returns 304.
+//! - Unknown `/api/*` paths are caught by a `/api/{*rest}` guard route
+//!   that returns 404 explicitly, so the SPA fallback never hijacks a
+//!   genuine backend miss. `/healthz`, `/readyz`, and `/metrics` are
+//!   exact-match routes and therefore cannot be hijacked.
 
 pub mod alerts_proxy;
 pub mod auth;
@@ -135,6 +148,26 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(health::readyz))
         .merge(metrics_route);
 
+    // --- embedded SPA ---
+    // memory-serve owns: asset lookup, MIME detection, ETag / 304,
+    // per-class Cache-Control, pre-compressed brotli+gzip responses,
+    // and SPA fallback-to-index.html for unknown deep links.
+    use memory_serve::{load, CacheControl};
+    let memory_router = load!()
+        .html_cache_control(CacheControl::Custom("no-cache, no-store, must-revalidate"))
+        .cache_control(CacheControl::Long)
+        .fallback(Some("/index.html"))
+        .into_router();
+
+    // Unknown `/api/*` paths must return a clean 404 rather than falling
+    // through to the SPA; otherwise TanStack Query can't distinguish a
+    // real API error from an HTML error page. `/metrics`, `/healthz`,
+    // `/readyz` are exact-match routes already registered above, so they
+    // can't be hijacked by the SPA fallback either.
+    async fn backend_path_404() -> axum::http::StatusCode {
+        axum::http::StatusCode::NOT_FOUND
+    }
+
     // Layer order (inside → out): auth_layer wraps the routes first so
     // handlers can see the session, then prom_layer so unauthenticated
     // 401s still get counted in the request metrics, then compression,
@@ -146,10 +179,12 @@ pub fn router(state: AppState) -> Router {
         .merge(logout_router)
         .merge(grpc_router)
         .merge(api_protected)
+        .route("/api/{*rest}", axum::routing::any(backend_path_404))
         .layer(auth_layer)
         .layer(prom_layer)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
+        .fallback_service(memory_router)
         .with_state(state)
 }
 
