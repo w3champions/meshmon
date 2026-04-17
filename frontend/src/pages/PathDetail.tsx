@@ -62,14 +62,15 @@ export default function PathDetail() {
   // `primary_protocol` honours the `?protocol=` override, so asking the
   // server would make the badge disappear whenever the user picks manually.
   // Mirror the server rule (`icmp > udp > tcp` over `latest_by_protocol`)
-  // locally to keep the badge anchored to what the auto pick *would* be.
-  const autoProtocol = useMemo<Protocol>(() => {
+  // locally. Returns `undefined` when nothing has data so the badge doesn't
+  // anchor to a protocol with no snapshots in window.
+  const autoProtocol = useMemo<Protocol | undefined>(() => {
     const latest = overview.data?.latest_by_protocol;
-    if (!latest) return "icmp";
+    if (!latest) return undefined;
     for (const p of ["icmp", "udp", "tcp"] as const) {
       if (latest[p]) return p;
     }
-    return "icmp";
+    return undefined;
   }, [overview.data]);
 
   if (overview.isLoading) {
@@ -84,22 +85,31 @@ export default function PathDetail() {
   }
 
   const data = overview.data;
-  const effectiveProtocol = (data.primary_protocol ?? "icmp") as Protocol;
-  const latest = data.latest_by_protocol[effectiveProtocol];
+  // `primary_protocol` is null when the pair has no snapshots in the window.
+  // Don't fabricate ICMP — that would mislead the "Primary protocol: …" line
+  // and inject `protocol=icmp` into Grafana vars and report links for data
+  // that doesn't exist. Render an empty state instead; the toggle and range
+  // picker stay so users can adjust without leaving the page.
+  const effectiveProtocol = (data.primary_protocol ?? null) as Protocol | null;
+  const latest = effectiveProtocol ? data.latest_by_protocol[effectiveProtocol] : null;
   const stale = latest ? Date.now() - Date.parse(latest.observed_at) > STALE_SNAPSHOT_MS : false;
   const gt = grafanaTimes(
     range,
     from && to ? { from: new Date(from), to: new Date(to) } : undefined,
   );
-  const vars = { source, target, protocol: effectiveProtocol };
+  const vars: Record<string, string> = effectiveProtocol
+    ? { source, target, protocol: effectiveProtocol }
+    : { source, target };
 
-  const reportHref = buildReportPath({
-    source_ip: data.source.ip,
-    target_ip: data.target.ip,
-    from: data.window.from,
-    to: data.window.to,
-    protocol: effectiveProtocol,
-  });
+  const reportHref = effectiveProtocol
+    ? buildReportPath({
+        source_ip: data.source.ip,
+        target_ip: data.target.ip,
+        from: data.window.from,
+        to: data.window.to,
+        protocol: effectiveProtocol,
+      })
+    : null;
 
   return (
     <div className="p-6 flex flex-col gap-6">
@@ -111,7 +121,8 @@ export default function PathDetail() {
       <section className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-sm text-muted-foreground flex flex-wrap items-center gap-3">
           <span>
-            Primary protocol: <span className="uppercase font-semibold">{effectiveProtocol}</span>
+            Primary protocol:{" "}
+            <span className="uppercase font-semibold">{effectiveProtocol ?? "—"}</span>
           </span>
           {latest && (
             <span title={latest.observed_at}>
@@ -231,19 +242,21 @@ export default function PathDetail() {
         />
       </section>
 
-      <div>
-        {/*
-          `buildReportPath` returns a `/reports/path?...` href. We use a plain
-          `<a>` tag rather than TanStack's typed `<Link to=... search=...>`
-          because `/reports/path` is a T20 placeholder with no search schema
-          yet — threading a typed object through would pin this page to a
-          shape that's about to change. The report URL is fully self-contained
-          (no per-session state) so a document-level navigation is fine.
-        */}
-        <a href={reportHref} className="inline-block text-sm underline underline-offset-2">
-          Generate report
-        </a>
-      </div>
+      {reportHref && (
+        <div>
+          {/*
+            `buildReportPath` returns a `/reports/path?...` href. We use a plain
+            `<a>` tag rather than TanStack's typed `<Link to=... search=...>`
+            because `/reports/path` is a T20 placeholder with no search schema
+            yet — threading a typed object through would pin this page to a
+            shape that's about to change. The report URL is fully self-contained
+            (no per-session state) so a document-level navigation is fine.
+          */}
+          <a href={reportHref} className="inline-block text-sm underline underline-offset-2">
+            Generate report
+          </a>
+        </div>
+      )}
     </div>
   );
 }

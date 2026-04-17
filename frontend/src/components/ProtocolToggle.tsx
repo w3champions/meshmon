@@ -1,7 +1,9 @@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 interface ProtocolToggleProps {
-  value: "icmp" | "udp" | "tcp";
+  // `null` when the page has no primary protocol (empty window). Rendered
+  // with no item highlighted so users can still pick a protocol explicitly.
+  value: "icmp" | "udp" | "tcp" | null;
   autoValue?: "icmp" | "udp" | "tcp";
   onChange: (next: "icmp" | "udp" | "tcp") => void;
   className?: string;
@@ -11,7 +13,7 @@ export function ProtocolToggle({ value, autoValue, onChange, className }: Protoc
   return (
     <ToggleGroup
       type="single"
-      value={value}
+      value={value ?? ""}
       onValueChange={(v) => {
         if (v === "icmp" || v === "udp" || v === "tcp") onChange(v);
       }}

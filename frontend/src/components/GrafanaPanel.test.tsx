@@ -42,6 +42,10 @@ describe("GrafanaPanel", () => {
     expect(iframe.getAttribute("src")).toBe(
       "https://grafana.example/d-solo/abc123?panelId=1&var-source=a&var-target=b&var-protocol=icmp&from=now-1h&to=now&theme=light&kiosk",
     );
+    // The iframe is sandboxed (no top-frame navigation, no popups) and
+    // doesn't leak the page URL (which contains agent IDs) as a referrer.
+    expect(iframe).toHaveAttribute("sandbox", "allow-same-origin allow-scripts");
+    expect(iframe).toHaveAttribute("referrerpolicy", "no-referrer");
   });
 
   test("shows a fallback when Grafana is unconfigured (no base URL)", async () => {

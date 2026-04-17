@@ -152,4 +152,18 @@ describe("PathDetail", () => {
     expect(href).toContain("target_ip=2.2.2.2");
     expect(href).toContain("protocol=icmp");
   });
+
+  test("renders empty-state when no snapshots exist in window", async () => {
+    mockEndpoints({
+      ...overview(),
+      primary_protocol: null,
+      latest_by_protocol: { icmp: null, udp: null, tcp: null },
+    });
+    renderPage();
+    // "Primary protocol: —" instead of a fabricated ICMP label.
+    const label = await screen.findByText(/primary protocol:/i);
+    expect(label.textContent).toMatch(/—/);
+    // Report link is hidden (protocol-specific, and we have no protocol).
+    expect(screen.queryByRole("link", { name: /generate report/i })).toBeNull();
+  });
 });
