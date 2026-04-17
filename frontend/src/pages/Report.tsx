@@ -183,7 +183,16 @@ export default function Report() {
         </span>
       </section>
 
-      {primary == null ? (
+      {primary == null || afterId === undefined ? (
+        // `primary_protocol` can come back non-null even when no snapshots
+        // match (the backend's picker short-circuits to the `?protocol=`
+        // override unconditionally, so `primary_protocol: "tcp"` is
+        // reported even when `latest_by_protocol.tcp` is null and
+        // `recent_snapshots` has no TCP entries). Without also guarding on
+        // `afterId === undefined`, the Summary section sticks on
+        // "Computing…" because the snapshot queries never run. The same
+        // copy applies — the next action is still to adjust the window
+        // or protocol.
         <section className="mt-6 rounded border border-dashed p-6 text-center text-sm text-muted-foreground">
           No data in window — try a wider range or a different protocol.
         </section>

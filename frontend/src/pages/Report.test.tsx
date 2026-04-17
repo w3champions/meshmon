@@ -237,6 +237,26 @@ describe("Report page", () => {
   });
 
   it("shows 'metrics unavailable' when metrics is null", async () => {
+    // Needs at least one matching snapshot so the Report renders the
+    // full section tree (the empty-state short-circuit skips the
+    // Measurement timeline when no protocol-matching snapshots exist).
+    const snap = {
+      id: 1,
+      source_id: "br",
+      target_id: "fr",
+      protocol: "icmp",
+      observed_at: "2026-04-13T10:00:00Z",
+      path_summary: null,
+      hops: [
+        {
+          position: 1,
+          avg_rtt_micros: 1000,
+          loss_pct: 0,
+          stddev_rtt_micros: 0,
+          observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
+        },
+      ],
+    };
     installFetchMock([
       {
         url: /\/api\/web-config$/,
@@ -266,13 +286,16 @@ describe("Report page", () => {
             to: "2026-04-13T14:00:00Z",
           },
           primary_protocol: "icmp",
-          latest_by_protocol: { icmp: null, tcp: null, udp: null },
-          recent_snapshots: [],
+          latest_by_protocol: { icmp: snap, tcp: null, udp: null },
+          recent_snapshots: [
+            { id: 1, observed_at: snap.observed_at, protocol: "icmp", path_summary: null },
+          ],
           recent_snapshots_truncated: false,
           metrics: null,
           step: "1m",
         },
       },
+      { url: /\/api\/paths\/.*\/routes\/1$/, status: 200, body: snap },
     ]);
 
     renderReport(defaultSearch);
@@ -772,6 +795,89 @@ describe("Report page", () => {
     const row = removedCell.closest("tr");
     expect(row).not.toBeNull();
     expect(row).toHaveAttribute("data-diff-state", "removed");
+  });
+
+  it("shows empty state when primary_protocol has no matching snapshots in window", async () => {
+    // Backend's primary-protocol picker short-circuits to the `?protocol=`
+    // override unconditionally — `primary_protocol: "tcp"` comes back even
+    // when `latest_by_protocol.tcp` is null and no TCP entries exist in
+    // `recent_snapshots`. Without this guard, `afterId`/`beforeId` both stay
+    // `undefined`, the snapshot queries sit idle, `summary` stays null, and
+    // the Summary section renders "Computing…" forever. The empty-state
+    // copy already suggests adjusting range or protocol, which matches the
+    // new trigger semantics perfectly.
+    const icmpOnly = {
+      id: 1,
+      source_id: "br",
+      target_id: "fr",
+      protocol: "icmp",
+      observed_at: "2026-04-13T10:00:00Z",
+      path_summary: null,
+      hops: [
+        {
+          position: 1,
+          avg_rtt_micros: 1000,
+          loss_pct: 0,
+          stddev_rtt_micros: 0,
+          observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
+        },
+      ],
+    };
+
+    installFetchMock([
+      {
+        url: /\/api\/web-config$/,
+        status: 200,
+        body: { username: "u", version: "v", grafana_dashboards: {} },
+      },
+      {
+        url: /\/api\/paths\/.*\/overview/,
+        status: 200,
+        body: {
+          source: {
+            id: "br",
+            display_name: "BR",
+            ip: "1.1.1.1",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          target: {
+            id: "fr",
+            display_name: "FR",
+            ip: "2.2.2.2",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          window: {
+            from: "2026-04-13T10:00:00Z",
+            to: "2026-04-13T14:00:00Z",
+          },
+          // Backend reports TCP as primary because `?protocol=tcp` was in
+          // the URL, but no TCP snapshots exist in the window.
+          primary_protocol: "tcp",
+          latest_by_protocol: { icmp: icmpOnly, tcp: null, udp: null },
+          recent_snapshots: [
+            {
+              id: 1,
+              observed_at: icmpOnly.observed_at,
+              protocol: "icmp",
+              path_summary: null,
+            },
+          ],
+          recent_snapshots_truncated: false,
+          metrics: null,
+          step: "1m",
+        },
+      },
+    ]);
+
+    renderReport(`${defaultSearch}&protocol=tcp`);
+
+    // Empty-state copy is the expected outcome.
+    await screen.findByText(/no data in window/i);
+    // Summary section and its "Computing…" placeholder must NOT render.
+    expect(screen.queryByText(/^computing…$/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^summary$/i })).not.toBeInTheDocument();
   });
 
   it("shows truncation banner when recent_snapshots_truncated is true", async () => {
