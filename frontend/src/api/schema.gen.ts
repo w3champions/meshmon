@@ -484,6 +484,12 @@ export interface components {
              *     Capped at [`RECENT_LIMIT`]; no hop detail.
              */
             recent_snapshots: components["schemas"]["RouteSnapshotSummary"][];
+            /**
+             * @description `true` when the `recent_snapshots` list was clamped at
+             *     [`RECENT_LIMIT`] — the frontend surfaces a "narrow the window"
+             *     hint so operators don't silently miss older entries.
+             */
+            recent_snapshots_truncated: boolean;
             /** @description Source agent metadata. */
             source: components["schemas"]["AgentSummary"];
             /** @description Server-chosen Prometheus step (`1m`, `5m`, `1h`, `6h`). */

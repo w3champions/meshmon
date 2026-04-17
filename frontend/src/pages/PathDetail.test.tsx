@@ -60,6 +60,7 @@ const overview = (opts?: { stale?: boolean }) => ({
     tcp: null,
   },
   recent_snapshots: [],
+  recent_snapshots_truncated: false,
   metrics: {
     rtt_series: [[0, 185]],
     loss_series: [[0, 0.001]],
@@ -148,9 +149,13 @@ describe("PathDetail", () => {
     const link = await screen.findByRole("link", { name: /generate report/i });
     const href = link.getAttribute("href") ?? "";
     expect(href).toContain("/reports/path");
-    expect(href).toContain("source_ip=1.1.1.1");
-    expect(href).toContain("target_ip=2.2.2.2");
+    // Agent IDs, not IPs — the report URL is keyed on stable agent IDs so
+    // shared links don't break when an agent's IP changes.
+    expect(href).toContain("source_id=a");
+    expect(href).toContain("target_id=b");
     expect(href).toContain("protocol=icmp");
+    expect(href).not.toContain("source_ip=");
+    expect(href).not.toContain("target_ip=");
   });
 
   test("renders empty-state when no snapshots exist in window", async () => {
