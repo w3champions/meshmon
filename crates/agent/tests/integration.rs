@@ -18,7 +18,7 @@ use tonic::{Request, Response, Status};
 use meshmon_protocol::{
     AgentApi, AgentApiServer, ConfigResponse, GetConfigRequest, GetTargetsRequest, MetricsBatch,
     PushMetricsResponse, PushRouteSnapshotResponse, RegisterRequest, RegisterResponse,
-    RouteSnapshotRequest, Target, TargetsResponse,
+    RouteSnapshotRequest, Target, TargetsResponse, TunnelFrame,
 };
 
 use meshmon_agent::api::GrpcServiceApi;
@@ -122,6 +122,21 @@ impl AgentApi for MockAgentApiServer {
             },
         ];
         Ok(Response::new(TargetsResponse { targets }))
+    }
+
+    type OpenTunnelStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<TunnelFrame, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    async fn open_tunnel(
+        &self,
+        _request: Request<tonic::Streaming<TunnelFrame>>,
+    ) -> Result<Response<Self::OpenTunnelStream>, Status> {
+        Err(Status::unimplemented("open_tunnel not implemented in mock"))
     }
 }
 

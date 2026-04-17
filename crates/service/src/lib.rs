@@ -16,6 +16,7 @@
 #![deny(rust_2018_idioms, unused_must_use)]
 #![warn(missing_docs)]
 
+pub mod commands;
 pub mod config;
 pub mod db;
 pub mod error;

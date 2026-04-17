@@ -8,6 +8,7 @@ use crate::ingestion::IngestionPipeline;
 use crate::metrics::Handle as PrometheusHandle;
 use crate::registry::AgentRegistry;
 use arc_swap::ArcSwap;
+use meshmon_revtunnel::TunnelManager;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -69,6 +70,10 @@ pub struct AppState {
     /// Prometheus render handle. Cheap clone; handlers call
     /// `prom.render()` at scrape time.
     pub prom: PrometheusHandle,
+    /// Reverse-tunnel registry. Per-agent `tonic::Channel` keyed by
+    /// `source_id`. Populated by the `OpenTunnel` handler; consumed by
+    /// `commands::spawn_config_watcher` to broadcast `RefreshConfig`.
+    pub tunnel_manager: Arc<TunnelManager>,
 }
 
 impl AppState {
@@ -91,6 +96,7 @@ impl AppState {
             registry,
             started_at: Instant::now(),
             prom,
+            tunnel_manager: Arc::new(TunnelManager::new()),
         }
     }
 

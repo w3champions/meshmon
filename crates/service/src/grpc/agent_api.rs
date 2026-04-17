@@ -11,6 +11,8 @@ use meshmon_protocol::{
     DiffDetection as PbDiffDetection, PathHealthThresholds as PbPathHealthThresholds,
     ProtocolThresholds as PbProtocolThresholds, RateEntry as PbRateEntry, Windows as PbWindows,
 };
+use meshmon_protocol::TunnelFrame;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 /// Concrete implementation of the `AgentApi` tonic service.
@@ -35,6 +37,53 @@ impl AgentApiImpl {
 
 #[tonic::async_trait]
 impl AgentApi for AgentApiImpl {
+    type OpenTunnelStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<TunnelFrame, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    #[tracing::instrument(skip_all, fields(source_id = tracing::field::Empty))]
+    async fn open_tunnel(
+        &self,
+        request: Request<tonic::Streaming<TunnelFrame>>,
+    ) -> Result<Response<Self::OpenTunnelStream>, Status> {
+        // 1. Pull + validate source-id metadata header.
+        let source_id = request
+            .metadata()
+            .get("x-meshmon-source-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| Status::invalid_argument("x-meshmon-source-id metadata required"))?;
+        if source_id.trim().is_empty() {
+            return Err(Status::invalid_argument("x-meshmon-source-id must not be empty"));
+        }
+        tracing::Span::current().record("source_id", tracing::field::display(&source_id));
+
+        // 2. Validate against the live registry — unknown agents are rejected.
+        // (Bearer auth already gated the RPC upstream; this header is
+        // identification, not authorization.)
+        if self.state.registry.snapshot().get(&source_id).is_none() {
+            return Err(Status::permission_denied("unknown source agent"));
+        }
+
+        // 3. Hand the inbound stream off to the tunnel manager. Its detached
+        // driver task calls `unregister` on session end.
+        let incoming = request.into_inner();
+        let cancel = CancellationToken::new();
+        let stream = self
+            .state
+            .tunnel_manager
+            .clone()
+            .accept(source_id, incoming, cancel)
+            .await
+            .map_err(|e| Status::unavailable(format!("tunnel setup failed: {e}")))?;
+
+        Ok(Response::new(Box::pin(stream) as Self::OpenTunnelStream))
+    }
+
     #[tracing::instrument(skip_all, fields(agent_id = tracing::field::Empty))]
     async fn register(
         &self,
