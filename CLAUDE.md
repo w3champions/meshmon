@@ -44,6 +44,12 @@ Key patterns:
   than per-target sockets — O(1) fd count as targets grow
 - Trippy driver uses `spawn_blocking` + a global `Semaphore`
   (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32) to cap raw-socket + thread use
+- Dedicated ICMP pinger (`surge-ping`, `probing/icmp.rs`) runs always-on alongside
+  trippy so the state machine retains ICMP samples even when the primary protocol
+  swings to TCP or UDP; requires `CAP_NET_RAW`
+- `TargetStateMachine` (in `state.rs`) evaluates per-protocol health and derives
+  path health every 10 s; the supervisor publishes resulting rates and window
+  sizes to the four prober watch channels — probers are never respawned
 - Agents run TCP + UDP echo listeners on `MESHMON_TCP_PROBE_PORT` /
   `MESHMON_UDP_PROBE_PORT`. Both listeners (and the `UdpProberPool`'s
   shared sender socket) bind `[::]` dual-stack (`IPV6_V6ONLY=false`) so
