@@ -1252,4 +1252,236 @@ mod tests {
             .iter()
             .any(|r| matches!(r, DiffReason::HopCountChanged { .. })));
     }
+
+    #[test]
+    fn dod1_constant_observations_produce_stable_snapshots_no_diffs() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let mut now = Instant::now();
+        let wall_base = SystemTime::UNIX_EPOCH;
+
+        // Establish baseline: 30 seconds of identical observations.
+        for _ in 0..30 {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let first = t.build_snapshot(now, wall_base).expect("first snap");
+        t.set_last_reported(first.clone());
+
+        // Another 60 s of identical observations → next snapshot identical → no diff.
+        for _ in 0..60 {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let second = t
+            .build_snapshot(now, wall_base + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            t.diff_against(&second, &default_diff()),
+            None,
+            "stable stream must not produce diffs",
+        );
+    }
+
+    #[test]
+    fn dod2_new_ip_at_30pct_fires_once_then_stable() {
+        // Use a 20-second window so the baseline rolls out of the rolling
+        // accumulator by the time we evaluate the post-change snapshot —
+        // otherwise the 100% baseline dilutes the 30% into 15% overall and
+        // the DoD-intent "30% new IP" wouldn't cross the threshold.
+        let mut t = tracker_ready(Duration::from_secs(20), Protocol::Icmp);
+        let mut now = Instant::now();
+
+        // Baseline: 20 rounds, position 3 only ever shows .1.
+        for _ in 0..20 {
+            t.observe(&[hop(3, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let baseline = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        t.set_last_reported(baseline);
+
+        // Now inject 30% of the next 20 rounds showing a NEW IP.
+        for i in 0..20 {
+            let obs_ip = if i % 10 < 3 {
+                ipv4(10, 0, 0, 2)
+            } else {
+                ipv4(10, 0, 0, 1)
+            };
+            t.observe(&[hop(3, Some(obs_ip), Some(5_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let after = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        let diff = t
+            .diff_against(&after, &default_diff())
+            .expect("diff expected");
+        assert!(
+            diff.reasons
+                .iter()
+                .any(|r| matches!(r, DiffReason::NewIp { position: 3 })),
+            "expected NewIp @ position 3, got {:?}",
+            diff.reasons,
+        );
+
+        // After promoting `after` to last_reported, a second snapshot with
+        // the same 70/30 distribution must NOT re-diff.
+        t.set_last_reported(after);
+        for i in 0..20 {
+            let obs_ip = if i % 10 < 3 {
+                ipv4(10, 0, 0, 2)
+            } else {
+                ipv4(10, 0, 0, 1)
+            };
+            t.observe(&[hop(3, Some(obs_ip), Some(5_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let third = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(
+            t.diff_against(&third, &default_diff()),
+            None,
+            "second snapshot with same distribution must not diff",
+        );
+    }
+
+    #[test]
+    fn dod3_new_ip_at_5pct_does_not_diff() {
+        // 20-second window — mirrors dod2 so that by the time we evaluate
+        // the post-change snapshot, only the 5% post-change window is
+        // represented in the rolling accumulator.
+        let mut t = tracker_ready(Duration::from_secs(20), Protocol::Icmp);
+        let mut now = Instant::now();
+
+        // Baseline: 20 rounds at .1.
+        for _ in 0..20 {
+            t.observe(&[hop(3, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let baseline = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        t.set_last_reported(baseline);
+
+        // Next 20 rounds: 5% .2, 95% .1 — i.e. 1 sample of .2 and 19 of .1,
+        // so freq(.2) ≈ 5% — below 20% threshold.
+        for i in 0..20 {
+            let obs_ip = if i == 0 {
+                ipv4(10, 0, 0, 2)
+            } else {
+                ipv4(10, 0, 0, 1)
+            };
+            t.observe(&[hop(3, Some(obs_ip), Some(5_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let after = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(
+            t.diff_against(&after, &default_diff()),
+            None,
+            "5% new IP must not trigger diff",
+        );
+    }
+
+    #[test]
+    fn dod4_hop_count_increase_by_one_fires() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let mut now = Instant::now();
+
+        // Baseline: single-hop route.
+        for _ in 0..10 {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+            now += Duration::from_secs(1);
+        }
+        let baseline = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        t.set_last_reported(baseline);
+
+        // New window: two-hop route.
+        for _ in 0..10 {
+            t.observe(
+                &[
+                    hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000)),
+                    hop(2, Some(ipv4(10, 0, 0, 2)), Some(2_000)),
+                ],
+                now,
+            );
+            now += Duration::from_secs(1);
+        }
+        let after = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        let diff = t.diff_against(&after, &default_diff()).expect("diff");
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::HopCountChanged { from: 1, to: 2 })));
+    }
+
+    #[test]
+    fn dod5_ecmp_flicker_steady_absorbs_across_multiple_snapshots() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let mut now = Instant::now();
+
+        // Helper: produce a steady 80/20 distribution at position 3 over
+        // 20 observations (16 of .1, 4 of .2).
+        let inject_80_20 = |t: &mut RouteTracker, now: &mut Instant| {
+            for i in 0..20 {
+                let ip = if i < 16 {
+                    ipv4(10, 0, 0, 1)
+                } else {
+                    ipv4(10, 0, 0, 2)
+                };
+                t.observe(&[hop(3, Some(ip), Some(5_000))], *now);
+                *now += Duration::from_secs(1);
+            }
+        };
+
+        // First window: establish baseline.
+        inject_80_20(&mut t, &mut now);
+        let snap1 = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(snap1.hops.len(), 1);
+        let h = &snap1.hops[0];
+        assert_eq!(h.observed_ips.len(), 2);
+        assert!(h.observed_ips[0].frequency > 0.7);
+        assert!(h.observed_ips[1].frequency > 0.19);
+        t.set_last_reported(snap1);
+
+        // Subsequent THREE snapshots: same 80/20 distribution → all must
+        // produce None.
+        for n in 0..3 {
+            inject_80_20(&mut t, &mut now);
+            let snap = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+            let diff = t.diff_against(&snap, &default_diff());
+            assert_eq!(
+                diff,
+                None,
+                "ECMP 80/20 must not diff across tick #{}: got {:?}",
+                n + 2,
+                diff,
+            );
+        }
+    }
+
+    #[test]
+    fn primary_swing_resets_accumulator_and_last_reported() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+        let snap = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        t.set_last_reported(snap);
+        assert!(t.last_reported().is_some());
+        assert!(!t.hops.is_empty());
+
+        // Swing to TCP.
+        t.reset_for_protocol(Some(Protocol::Tcp));
+        assert!(t.last_reported().is_none());
+        assert!(t.hops.is_empty());
+        assert!(t.position_totals.is_empty());
+        assert_eq!(t.protocol(), Some(Protocol::Tcp));
+
+        // Next observation under TCP, snapshot emits as new baseline.
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 99)), Some(1_000))], now);
+        let first_after_swing = t.build_snapshot(now, SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(first_after_swing.protocol, Protocol::Tcp);
+        assert_eq!(first_after_swing.hops.len(), 1);
+        assert_eq!(
+            first_after_swing.hops[0].observed_ips[0].ip,
+            ipv4(10, 0, 0, 99)
+        );
+
+        // diff_against without a last_reported is always None — supervisor
+        // branch takes the "is_none()" path and emits unconditionally.
+        assert_eq!(t.diff_against(&first_after_swing, &default_diff()), None);
+    }
 }
