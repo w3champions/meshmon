@@ -38,8 +38,19 @@ export function RouteCompareHeader({
   const bMs = Date.parse(bDetail.observed_at);
   const nowMs = Date.now();
   const deltaLabel = formatDelta(bMs - aMs);
-  const aNeighbors = nearby.getNeighbors(aDetail.id);
-  const bNeighbors = nearby.getNeighbors(bDetail.id);
+  const rawA = nearby.getNeighbors(aDetail.id);
+  const rawB = nearby.getNeighbors(bDetail.id);
+  // Per spec §160-162: A.next must never cross or equal B, and B.prev must
+  // never cross or equal A. Mask neighbors that would violate that so the
+  // stepper renders disabled instead of dispatching a degenerate a==b nav.
+  const aNeighbors = {
+    prev: rawA.prev,
+    next: rawA.next && Date.parse(rawA.next.observed_at) < bMs ? rawA.next : undefined,
+  };
+  const bNeighbors = {
+    prev: rawB.prev && Date.parse(rawB.prev.observed_at) > aMs ? rawB.prev : undefined,
+    next: rawB.next,
+  };
 
   // Protocol should be consistent across A and B; guard with a sensible
   // fallback so snapshot pairs with drifted protocol don't crash the header.
@@ -59,19 +70,27 @@ export function RouteCompareHeader({
       });
   };
 
+  // Re-check the snapshot returned by findClosest against the other marker:
+  // the popover guards the *typed* target, but in sparse windows the nearest
+  // existing snapshot can sit on the wrong side of B (for A jumps) or A (for
+  // B jumps). Silently drop the jump in that case to preserve A-older/B-newer.
   const handleJumpA = useCallback(
     (target: number) => {
       const snap = nearby.findClosest(target);
-      if (snap) onNavA(snap);
+      if (!snap) return;
+      if (Date.parse(snap.observed_at) >= bMs) return;
+      onNavA(snap);
     },
-    [nearby, onNavA],
+    [nearby, onNavA, bMs],
   );
   const handleJumpB = useCallback(
     (target: number) => {
       const snap = nearby.findClosest(target);
-      if (snap) onNavB(snap);
+      if (!snap) return;
+      if (Date.parse(snap.observed_at) <= aMs) return;
+      onNavB(snap);
     },
-    [nearby, onNavB],
+    [nearby, onNavB, aMs],
   );
 
   const aCard = useMemo(

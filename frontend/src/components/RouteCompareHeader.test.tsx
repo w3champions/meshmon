@@ -103,4 +103,61 @@ describe("RouteCompareHeader", () => {
     await user.click(btns[0]);
     expect(onNavA).toHaveBeenCalled();
   });
+
+  it("masks A.next when it would cross or equal B (no later step for A)", () => {
+    // Neighbors where A.next === B → the stepper must render disabled on A's
+    // "later" arrow and duplicate copies of the label across responsive tiers.
+    const nearby: NearbySnapshotsResult = {
+      ...NEARBY,
+      getNeighbors: (id) => {
+        if (id === 4)
+          return { prev: sum(3, "2026-04-17T09:09:10Z"), next: sum(7, "2026-04-17T09:14:41Z") };
+        if (id === 7)
+          return { prev: sum(4, "2026-04-17T09:12:04Z"), next: sum(8, "2026-04-17T09:16:59Z") };
+        return {};
+      },
+    };
+    render(
+      <RouteCompareHeader
+        source="fra-01"
+        target="nyc-02"
+        aDetail={detail(4, "2026-04-17T09:12:04Z")}
+        bDetail={detail(7, "2026-04-17T09:14:41Z")}
+        nearby={nearby}
+        onNavA={() => {}}
+        onNavB={() => {}}
+      />,
+    );
+    // A's "later" arrows must show the "no later" placeholder, not the time delta.
+    expect(screen.getAllByText(/no later/).length).toBeGreaterThan(0);
+  });
+
+  it("drops a jump whose nearest snapshot lands on the wrong side of the other marker", async () => {
+    const onNavA = vi.fn();
+    // findClosest always returns a snapshot past B (id=8, observed 09:16:59)
+    // — handleJumpA must drop the nav instead of crossing.
+    const nearby: NearbySnapshotsResult = {
+      ...NEARBY,
+      findClosest: () => sum(8, "2026-04-17T09:16:59Z"),
+    };
+    const { default: userEvent } = await import("@testing-library/user-event");
+    const user = userEvent.setup();
+    render(
+      <RouteCompareHeader
+        source="fra-01"
+        target="nyc-02"
+        aDetail={detail(4, "2026-04-17T09:12:04Z")}
+        bDetail={detail(7, "2026-04-17T09:14:41Z")}
+        nearby={nearby}
+        onNavA={onNavA}
+        onNavB={() => {}}
+      />,
+    );
+    // Open the A-card Jump popover (first visible trigger) and click -5m.
+    const jumpBtns = screen.getAllByRole("button", { name: /^jump/i });
+    await user.click(jumpBtns[0]);
+    const minusFive = await screen.findByRole("button", { name: /^-5m$/ });
+    await user.click(minusFive);
+    expect(onNavA).not.toHaveBeenCalled();
+  });
 });

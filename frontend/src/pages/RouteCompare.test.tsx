@@ -129,6 +129,48 @@ describe("RouteCompare (redesigned)", () => {
     ).toBeInTheDocument();
   });
 
+  test("keyboard shortcuts are ignored when a modifier key is held", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/101")) {
+        return new Response(JSON.stringify(detail(101, "2026-04-17T09:12:04Z")));
+      }
+      if (url.endsWith("/102")) {
+        return new Response(JSON.stringify(detail(102, "2026-04-17T09:14:41Z")));
+      }
+      if (url.includes("/api/paths/fra-01/nyc-02/routes") && url.includes("from=")) {
+        return new Response(
+          JSON.stringify(
+            listRoutesResponse([
+              { id: 100, observed_at: "2026-04-17T09:10:00Z" },
+              { id: 101, observed_at: "2026-04-17T09:12:04Z" },
+              { id: 102, observed_at: "2026-04-17T09:14:41Z" },
+              { id: 103, observed_at: "2026-04-17T09:17:00Z" },
+            ]),
+          ),
+        );
+      }
+      return new Response("nf", { status: 404 });
+    });
+    const { qc, router } = makeRouter("/paths/fra-01/nyc-02/routes/compare?a=101&b=102");
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await screen.findAllByRole("button", { name: /jump/i });
+    const urlBefore = router.state.location.search;
+
+    await user.keyboard("{Meta>}j{/Meta}");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("{Alt>}l{/Alt}");
+    await user.keyboard("{Shift>};{/Shift}");
+
+    expect(router.state.location.search).toEqual(urlBefore);
+  });
+
   test("pressing G clicks the Jump trigger of the focused card (defaulting to A)", async () => {
     const { default: userEvent } = await import("@testing-library/user-event");
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

@@ -1,5 +1,5 @@
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   type NearbySnapshotsResult,
   type RouteSnapshotSummary,
@@ -37,11 +37,15 @@ export default function RouteCompare() {
     return { older: snapB.data, newer: snapA.data, olderId: b, newerId: a };
   }, [snapA.data, snapB.data, aMs, bMs, a, b]);
 
+  // Until both snapshots load, pin aroundTimeMs to a single rendered-once
+  // sentinel so the nearby query key doesn't churn on every render. Once
+  // `ordered` is available, switch to the computed midpoint.
+  const fallbackMsRef = useRef<number>(Date.now());
   const midpointMs = ordered
     ? Math.round(
         (Date.parse(ordered.older.observed_at) + Date.parse(ordered.newer.observed_at)) / 2,
       )
-    : Date.now();
+    : fallbackMsRef.current;
   const protocol = ordered?.older.protocol ?? "icmp";
 
   const nearby: NearbySnapshotsResult = useNearbySnapshots({
@@ -82,21 +86,36 @@ export default function RouteCompare() {
   useEffect(() => {
     if (!ordered) return;
     const handler = (e: KeyboardEvent) => {
-      // Ignore when typing in an input/textarea or inside the jump popover.
+      // Ignore when any modifier is held so we don't intercept shortcuts like
+      // Cmd+K (DevTools), Ctrl+L (URL bar focus), etc.
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       const target = e.target as HTMLElement | null;
-      if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
+      if (target) {
+        if (/^(input|textarea|select)$/i.test(target.tagName)) return;
+        if (target.isContentEditable) return;
+      }
 
       const aNeighbors = nearby.getNeighbors(ordered.olderId);
       const bNeighbors = nearby.getNeighbors(ordered.newerId);
+      // Mask step targets that would cross or equal the other marker so
+      // keyboard shortcuts honour the same guard as the TimeRail ticks.
+      const aNext =
+        aNeighbors.next && Date.parse(aNeighbors.next.observed_at) < bMs
+          ? aNeighbors.next
+          : undefined;
+      const bPrev =
+        bNeighbors.prev && Date.parse(bNeighbors.prev.observed_at) > aMs
+          ? bNeighbors.prev
+          : undefined;
       switch (e.key) {
         case "j":
           if (aNeighbors.prev) onNavA(aNeighbors.prev);
           break;
         case "k":
-          if (aNeighbors.next) onNavA(aNeighbors.next);
+          if (aNext) onNavA(aNext);
           break;
         case "l":
-          if (bNeighbors.prev) onNavB(bNeighbors.prev);
+          if (bPrev) onNavB(bPrev);
           break;
         case ";":
           if (bNeighbors.next) onNavB(bNeighbors.next);
@@ -104,12 +123,18 @@ export default function RouteCompare() {
         case "g": {
           // Open the Jump popover for the last-focused card, defaulting to A
           // when no card subtree currently holds focus. Uses DOM data-attrs
-          // instead of React refs so focus tracking stays stateless.
+          // instead of React refs so focus tracking stays stateless. The
+          // responsive tiers all render simultaneously (display:none on
+          // inactive tiers), so pick the first trigger whose offsetParent
+          // is not null — i.e. the one the user can actually see.
           const active = document.activeElement as HTMLElement | null;
           const card = active?.closest<HTMLElement>("[data-card-side]");
           const side = (card?.dataset.cardSide as "A" | "B" | undefined) ?? "A";
-          const btn = document.querySelector<HTMLButtonElement>(`[data-jump-trigger="${side}"]`);
-          btn?.click();
+          const candidates = document.querySelectorAll<HTMLButtonElement>(
+            `[data-jump-trigger="${side}"]`,
+          );
+          const visible = Array.from(candidates).find((el) => el.offsetParent !== null);
+          (visible ?? candidates[0])?.click();
           break;
         }
         default:
@@ -118,7 +143,7 @@ export default function RouteCompare() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [ordered, nearby, onNavA, onNavB]);
+  }, [ordered, nearby, onNavA, onNavB, aMs, bMs]);
 
   if (snapA.isLoading || snapB.isLoading) {
     return <Skeleton className="h-64 w-full" data-testid="route-compare-skeleton" />;

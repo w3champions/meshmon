@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -38,6 +38,13 @@ export function TimeJumpPopover({
 }: TimeJumpPopoverProps) {
   const [open, setOpen] = useState(false);
   const [customValue, setCustomValue] = useState(defaultDatetimeLocal(anchorTimeMs));
+
+  // Keep the custom input in sync with the current anchor snapshot. Without
+  // this, stepping A/B via J/K/L/; would leave the datetime-local input
+  // pinned to the value at mount and `Go` would jump from a stale anchor.
+  useEffect(() => {
+    setCustomValue(defaultDatetimeLocal(anchorTimeMs));
+  }, [anchorTimeMs]);
 
   const wouldCross = (targetMs: number) =>
     side === "A" ? targetMs >= otherMarkerMs : targetMs <= otherMarkerMs;

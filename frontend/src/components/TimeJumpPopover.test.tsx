@@ -48,4 +48,30 @@ describe("TimeJumpPopover", () => {
     await user.click(screen.getByRole("button", { name: /^go$/i }));
     expect(onRequestJump).toHaveBeenCalledWith(Date.UTC(2026, 3, 17, 9, 10, 0));
   });
+
+  it("re-syncs the custom input when the anchor snapshot changes", async () => {
+    const user = userEvent.setup();
+    const onRequestJump = vi.fn();
+    const Harness = ({ anchor }: { anchor: number }) => (
+      <TimeJumpPopover
+        anchorTimeMs={anchor}
+        otherMarkerMs={B_MS}
+        side="A"
+        onRequestJump={onRequestJump}
+      >
+        <button type="button">Jump to time…</button>
+      </TimeJumpPopover>
+    );
+    const { rerender } = render(<Harness anchor={A_MS} />);
+    await user.click(screen.getByRole("button", { name: /jump to time/i }));
+    const input = screen.getByLabelText(/jump to/i) as HTMLInputElement;
+    expect(input.value).toBe("2026-04-17T09:12");
+
+    // Simulate the parent stepping A to a new snapshot while the popover
+    // component stays mounted.
+    const A2_MS = Date.UTC(2026, 3, 17, 9, 13, 8);
+    rerender(<Harness anchor={A2_MS} />);
+    const input2 = screen.getByLabelText(/jump to/i) as HTMLInputElement;
+    expect(input2.value).toBe("2026-04-17T09:13");
+  });
 });
