@@ -30,24 +30,15 @@ function containsI(haystack: string | null | undefined, needle: string): boolean
   return haystack.toLowerCase().includes(needle.toLowerCase());
 }
 
-export function filterAlerts(
-  alerts: AlertSummary[],
-  filter: AlertFilter,
-): AlertSummary[] {
+export function filterAlerts(alerts: AlertSummary[], filter: AlertFilter): AlertSummary[] {
   return alerts.filter((a) => {
     const labels = a.labels ?? {};
-    if (filter.severity !== "all" && labels.severity !== filter.severity)
-      return false;
-    if (filter.category !== "all" && labels.category !== filter.category)
-      return false;
+    if (filter.severity !== "all" && labels.severity !== filter.severity) return false;
+    if (filter.category !== "all" && labels.category !== filter.category) return false;
     if (!containsI(labels.source, filter.source)) return false;
     if (!containsI(labels.target, filter.target)) return false;
     if (filter.text) {
-      const hay = [
-        labels.alertname ?? "",
-        a.summary ?? "",
-        a.description ?? "",
-      ].join(" ");
+      const hay = [labels.alertname ?? "", a.summary ?? "", a.description ?? ""].join(" ");
       if (!containsI(hay, filter.text)) return false;
     }
     return true;

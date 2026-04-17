@@ -233,9 +233,7 @@ describe("Report page", () => {
     expect(protocolCell).toHaveClass("uppercase");
     await screen.findByText("10.0.9.99");
     expect(screen.getByText("10.0.0.10")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /export pdf/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /export pdf/i })).toBeInTheDocument();
   });
 
   it("shows 'metrics unavailable' when metrics is null", async () => {

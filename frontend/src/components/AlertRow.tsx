@@ -20,11 +20,7 @@ const SEVERITY_VARIANT: Record<string, "destructive" | "default" | "secondary"> 
   info: "secondary",
 };
 
-export function AlertRow({
-  alert,
-  alertmanagerBaseUrl,
-  className,
-}: AlertRowProps) {
+export function AlertRow({ alert, alertmanagerBaseUrl, className }: AlertRowProps) {
   const labels = alert.labels ?? {};
   const name = labels.alertname ?? "(unnamed alert)";
   const severity = labels.severity ?? "info";
@@ -41,13 +37,8 @@ export function AlertRow({
       <CardHeader>
         <div className="flex flex-wrap items-center gap-3">
           <h3 className="text-base font-semibold leading-none">{name}</h3>
-          <Badge variant={SEVERITY_VARIANT[severity] ?? "secondary"}>
-            {severity}
-          </Badge>
-          <span
-            className="text-xs text-muted-foreground"
-            title={alert.starts_at}
-          >
+          <Badge variant={SEVERITY_VARIANT[severity] ?? "secondary"}>{severity}</Badge>
+          <span className="text-xs text-muted-foreground" title={alert.starts_at}>
             started{" "}
             {formatDistanceToNowStrict(new Date(alert.starts_at), {
               addSuffix: true,
@@ -84,9 +75,7 @@ export function AlertRow({
         </div>
         {alert.summary && <p className="mt-2 text-sm">{alert.summary}</p>}
         {alert.description && (
-          <p className="mt-1 text-sm text-muted-foreground">
-            {alert.description}
-          </p>
+          <p className="mt-1 text-sm text-muted-foreground">{alert.description}</p>
         )}
         {href && (
           <a

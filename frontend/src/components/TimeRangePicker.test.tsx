@@ -23,8 +23,7 @@ describe("TimeRangePicker", () => {
     render(<TimeRangePicker value="24h" onChange={() => {}} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("combobox"));
-    expect(await screen.findByRole("option", { name: /custom/i }))
-      .toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /custom/i })).toBeInTheDocument();
   });
 
   test("renders CustomRangeInputs when value is 'custom'", () => {

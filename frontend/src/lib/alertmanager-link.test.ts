@@ -3,12 +3,8 @@ import { buildAlertmanagerUrl } from "./alertmanager-link";
 
 describe("buildAlertmanagerUrl", () => {
   it("encodes a single matcher", () => {
-    expect(
-      buildAlertmanagerUrl("https://am.example/", { alertname: "PathPacketLoss" }),
-    ).toBe(
-      `https://am.example/#/alerts?filter=${encodeURIComponent(
-        '{alertname="PathPacketLoss"}',
-      )}`,
+    expect(buildAlertmanagerUrl("https://am.example/", { alertname: "PathPacketLoss" })).toBe(
+      `https://am.example/#/alerts?filter=${encodeURIComponent('{alertname="PathPacketLoss"}')}`,
     );
   });
 
@@ -32,9 +28,7 @@ describe("buildAlertmanagerUrl", () => {
       target: undefined,
     });
     expect(url).toBe(
-      `https://am.example/#/alerts?filter=${encodeURIComponent(
-        '{alertname="PathPacketLoss"}',
-      )}`,
+      `https://am.example/#/alerts?filter=${encodeURIComponent('{alertname="PathPacketLoss"}')}`,
     );
   });
 
@@ -43,9 +37,7 @@ describe("buildAlertmanagerUrl", () => {
       alertname: 'weird"name',
     });
     expect(url).toBe(
-      `https://am.example/#/alerts?filter=${encodeURIComponent(
-        '{alertname="weird\\"name"}',
-      )}`,
+      `https://am.example/#/alerts?filter=${encodeURIComponent('{alertname="weird\\"name"}')}`,
     );
   });
 
@@ -56,8 +48,6 @@ describe("buildAlertmanagerUrl", () => {
   });
 
   it("returns null when no labels remain after stripping", () => {
-    expect(
-      buildAlertmanagerUrl("https://am.example/", { alertname: "" }),
-    ).toBeNull();
+    expect(buildAlertmanagerUrl("https://am.example/", { alertname: "" })).toBeNull();
   });
 });

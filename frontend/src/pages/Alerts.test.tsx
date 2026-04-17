@@ -79,9 +79,7 @@ describe("Alerts page", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("combobox", { name: /severity/i }));
-    await user.click(
-      await screen.findByRole("option", { name: /critical/i }),
-    );
+    await user.click(await screen.findByRole("option", { name: /critical/i }));
 
     await waitFor(() => {
       expect(screen.queryByText(/PathLatencyRegression/)).toBeNull();

@@ -37,12 +37,7 @@ function datetimeLocalToIso(local: string): string {
   return d.toISOString();
 }
 
-export function CustomRangeInputs({
-  from,
-  to,
-  onChange,
-  className,
-}: CustomRangeInputsProps) {
+export function CustomRangeInputs({ from, to, onChange, className }: CustomRangeInputsProps) {
   return (
     <div className={cn("flex flex-wrap items-end gap-2", className)}>
       <div className="flex flex-col gap-1">
@@ -52,9 +47,7 @@ export function CustomRangeInputs({
           type="datetime-local"
           className="rounded border bg-background p-1 text-sm"
           value={isoToDatetimeLocal(from)}
-          onChange={(e) =>
-            onChange({ from: datetimeLocalToIso(e.target.value), to })
-          }
+          onChange={(e) => onChange({ from: datetimeLocalToIso(e.target.value), to })}
         />
       </div>
       <div className="flex flex-col gap-1">
@@ -64,9 +57,7 @@ export function CustomRangeInputs({
           type="datetime-local"
           className="rounded border bg-background p-1 text-sm"
           value={isoToDatetimeLocal(to)}
-          onChange={(e) =>
-            onChange({ from, to: datetimeLocalToIso(e.target.value) })
-          }
+          onChange={(e) => onChange({ from, to: datetimeLocalToIso(e.target.value) })}
         />
       </div>
     </div>

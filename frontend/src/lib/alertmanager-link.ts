@@ -9,16 +9,10 @@ export type AlertmanagerLabels = Partial<Record<string, string | undefined>>;
  * e.g. `{alertname="PathPacketLoss",source="brazil-north"}`, URL-encoded
  * as a single query value.
  */
-export function buildAlertmanagerUrl(
-  base: string,
-  labels: AlertmanagerLabels,
-): string | null {
+export function buildAlertmanagerUrl(base: string, labels: AlertmanagerLabels): string | null {
   const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
   const entries = Object.entries(labels)
-    .filter(
-      (kv): kv is [string, string] =>
-        typeof kv[1] === "string" && kv[1].length > 0,
-    )
+    .filter((kv): kv is [string, string] => typeof kv[1] === "string" && kv[1].length > 0)
     .map(([k, v]) => `${k}="${v.replace(/"/g, '\\"')}"`);
   if (entries.length === 0) return null;
   const filter = `{${entries.join(",")}}`;

@@ -94,19 +94,13 @@ export function RouteTable({ hops, diff, className }: RouteTableProps) {
           const state = diffState(h.position, diff);
           const status = STATUS_LABEL[state];
           return (
-            <TableRow
-              key={h.position}
-              data-diff-state={state}
-              className={ROW_TINT[state]}
-            >
+            <TableRow key={h.position} data-diff-state={state} className={ROW_TINT[state]}>
               <TableCell>{h.position}</TableCell>
               <TableCell className="font-mono">{ip}</TableCell>
               <TableCell>{freq < 1 ? `${Math.round(freq * 100)}%` : "—"}</TableCell>
               <TableCell>{fmtMs(h.avg_rtt_micros)}</TableCell>
               <TableCell>{fmtPct(h.loss_pct)}</TableCell>
-              <TableCell className="text-xs">
-                {status && <span>{status}</span>}
-              </TableCell>
+              <TableCell className="text-xs">{status && <span>{status}</span>}</TableCell>
             </TableRow>
           );
         })}

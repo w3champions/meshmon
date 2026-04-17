@@ -30,9 +30,7 @@ export interface BuildReportSummaryInput {
   metricsLast: MetricsPoint | null;
 }
 
-export function buildReportSummary(
-  input: BuildReportSummaryInput,
-): ReportSummary {
+export function buildReportSummary(input: BuildReportSummaryInput): ReportSummary {
   const { before, after, metricsFirst, metricsLast } = input;
 
   const singleSnapshot = before.id === after.id;
@@ -55,9 +53,7 @@ export function buildReportSummary(
   const lossBeforePct = metricsFirst ? metricsFirst.loss * 100 : null;
   const lossAfterPct = metricsLast ? metricsLast.loss * 100 : null;
   const lossDeltaPct =
-    lossBeforePct !== null && lossAfterPct !== null
-      ? lossAfterPct - lossBeforePct
-      : null;
+    lossBeforePct !== null && lossAfterPct !== null ? lossAfterPct - lossBeforePct : null;
 
   return {
     rttBeforeMs,

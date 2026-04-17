@@ -7,15 +7,8 @@ import { GrafanaPanel } from "@/components/GrafanaPanel";
 import { RouteTable, type RouteTableDiff } from "@/components/RouteTable";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  MESHMON_PATH_DASHBOARD,
-  PANEL_LOSS,
-  PANEL_RTT,
-} from "@/lib/grafana-panels";
-import {
-  buildReportSummary,
-  type MetricsPoint,
-} from "@/lib/report-summary";
+import { MESHMON_PATH_DASHBOARD, PANEL_LOSS, PANEL_RTT } from "@/lib/grafana-panels";
+import { buildReportSummary, type MetricsPoint } from "@/lib/report-summary";
 import { computeRouteDiff } from "@/lib/route-diff";
 
 interface ReportSearch {
@@ -59,8 +52,7 @@ export default function Report() {
   // recent_snapshots is newest-first. AFTER is the first; BEFORE is the
   // last distinct-id entry (the earliest snapshot in the window).
   const afterId = snapshots[0]?.id;
-  const beforeId =
-    [...snapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
+  const beforeId = [...snapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
 
   const beforeQ = useRouteSnapshot({
     source: source_id,
@@ -84,9 +76,7 @@ export default function Report() {
           }
         : null;
     const last: MetricsPoint | null =
-      m && m.rtt_current != null
-        ? { rtt_ms: m.rtt_current, loss: m.loss_current ?? 0 }
-        : null;
+      m && m.rtt_current != null ? { rtt_ms: m.rtt_current, loss: m.loss_current ?? 0 } : null;
     return buildReportSummary({
       before: beforeQ.data,
       after: afterQ.data,
@@ -149,11 +139,7 @@ export default function Report() {
             Generated {format(new Date(), "yyyy-MM-dd HH:mm 'UTC'")}
           </p>
         </div>
-        <Button
-          type="button"
-          onClick={() => window.print()}
-          className="print:hidden"
-        >
+        <Button type="button" onClick={() => window.print()} className="print:hidden">
           Export PDF
         </Button>
       </header>
@@ -187,12 +173,9 @@ export default function Report() {
                   {fmtDeltaPct(summary.rttDeltaPct)})
                 </li>
                 <li>
-                  Loss {fmtPct(summary.lossBeforePct)} →{" "}
-                  {fmtPct(summary.lossAfterPct)}
+                  Loss {fmtPct(summary.lossBeforePct)} → {fmtPct(summary.lossAfterPct)}
                 </li>
-                <li>
-                  Route {summary.routeChanged ? "changed" : "unchanged"} in window
-                </li>
+                <li>Route {summary.routeChanged ? "changed" : "unchanged"} in window</li>
                 {summary.singleSnapshot && (
                   <li className="text-muted-foreground">
                     Single snapshot in window — no before/after comparison.
@@ -224,9 +207,7 @@ export default function Report() {
             ) : beforeQ.data ? (
               <RouteTable hops={beforeQ.data.hops} />
             ) : (
-              <p className="text-sm text-muted-foreground">
-                No BEFORE snapshot available.
-              </p>
+              <p className="text-sm text-muted-foreground">No BEFORE snapshot available.</p>
             )}
           </section>
 
@@ -244,18 +225,14 @@ export default function Report() {
             ) : afterQ.data ? (
               <RouteTable hops={afterQ.data.hops} diff={routeDiff} />
             ) : (
-              <p className="text-sm text-muted-foreground">
-                No AFTER snapshot available.
-              </p>
+              <p className="text-sm text-muted-foreground">No AFTER snapshot available.</p>
             )}
           </section>
 
           <section className="mt-6 print:break-before-page">
             <h2 className="mb-2 text-lg font-semibold">Measurement timeline</h2>
             {data.metrics == null ? (
-              <p className="text-sm text-muted-foreground">
-                Metrics unavailable.
-              </p>
+              <p className="text-sm text-muted-foreground">Metrics unavailable.</p>
             ) : (
               <div className="grid gap-3 md:grid-cols-2">
                 <GrafanaPanel
@@ -279,16 +256,12 @@ export default function Report() {
           </section>
 
           <section className="mt-6 text-sm text-muted-foreground print:break-inside-avoid">
-            <h2 className="mb-1 text-lg font-semibold text-foreground">
-              Methodology
-            </h2>
+            <h2 className="mb-1 text-lg font-semibold text-foreground">Methodology</h2>
             <p>
-              meshmon agents probe every peer with ICMP, UDP echo, and TCP
-              connect continuously. RTT and loss are 60-second rolling
-              averages of every probe; route snapshots are captured whenever
-              the hop chain changes. Numbers in this report come from the
-              agents named above and the window bounds in the header — no
-              derived baselines.
+              meshmon agents probe every peer with ICMP, UDP echo, and TCP connect continuously. RTT
+              and loss are 60-second rolling averages of every probe; route snapshots are captured
+              whenever the hop chain changes. Numbers in this report come from the agents named
+              above and the window bounds in the header — no derived baselines.
             </p>
           </section>
         </>

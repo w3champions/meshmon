@@ -6,13 +6,7 @@ import { RouteTable } from "./RouteTable";
 
 type HopJson = components["schemas"]["HopJson"];
 
-function hop(
-  position: number,
-  ip: string,
-  rtt_us: number,
-  loss_pct: number,
-  freq = 1,
-): HopJson {
+function hop(position: number, ip: string, rtt_us: number, loss_pct: number, freq = 1): HopJson {
   return {
     position,
     avg_rtt_micros: rtt_us,
@@ -25,12 +19,7 @@ function hop(
 describe("RouteTable", () => {
   it("renders one row per hop with formatted values", () => {
     render(
-      <RouteTable
-        hops={[
-          hop(1, "10.0.0.1", 1_200, 0),
-          hop(2, "10.0.0.2", 50_000, 0.02, 0.75),
-        ]}
-      />,
+      <RouteTable hops={[hop(1, "10.0.0.1", 1_200, 0), hop(2, "10.0.0.2", 50_000, 0.02, 0.75)]} />,
     );
     const rows = screen.getAllByRole("row");
     expect(rows).toHaveLength(3); // 1 header + 2 body
@@ -52,10 +41,7 @@ describe("RouteTable", () => {
   });
 
   it("highlights changed rows when a diff is provided", () => {
-    const hops = [
-      hop(1, "10.0.0.1", 1_000, 0),
-      hop(2, "10.0.0.9", 2_000, 0),
-    ];
+    const hops = [hop(1, "10.0.0.1", 1_000, 0), hop(2, "10.0.0.9", 2_000, 0)];
     render(
       <RouteTable
         hops={hops}

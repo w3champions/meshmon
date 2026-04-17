@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AlertSummary } from "@/api/hooks/alerts";
-import {
-  defaultAlertFilter,
-  filterAlerts,
-  uniqueCategories,
-} from "./alerts-filter";
+import { defaultAlertFilter, filterAlerts, uniqueCategories } from "./alerts-filter";
 
 function makeAlert(overrides: Partial<AlertSummary>): AlertSummary {
   return {
@@ -51,9 +47,11 @@ describe("filterAlerts", () => {
   ];
 
   it("no-op when all filters are at defaults", () => {
-    expect(
-      filterAlerts(alerts, defaultAlertFilter()).map((a) => a.fingerprint),
-    ).toEqual(["a", "b", "c"]);
+    expect(filterAlerts(alerts, defaultAlertFilter()).map((a) => a.fingerprint)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
   });
 
   it("severity filter keeps matching rows", () => {
@@ -73,10 +71,7 @@ describe("filterAlerts", () => {
 
   it("target is a case-insensitive substring match on labels.target", () => {
     const f = { ...defaultAlertFilter(), target: "paris" };
-    expect(filterAlerts(alerts, f).map((a) => a.fingerprint)).toEqual([
-      "a",
-      "b",
-    ]);
+    expect(filterAlerts(alerts, f).map((a) => a.fingerprint)).toEqual(["a", "b"]);
   });
 
   it("text searches alertname, summary, description case-insensitively", () => {

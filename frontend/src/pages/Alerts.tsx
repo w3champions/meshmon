@@ -27,10 +27,7 @@ export default function Alerts() {
 
   const alerts = alertsQ.data ?? [];
   const categories = useMemo(() => uniqueCategories(alerts), [alerts]);
-  const visible = useMemo(
-    () => filterAlerts(alerts, filter),
-    [alerts, filter],
-  );
+  const visible = useMemo(() => filterAlerts(alerts, filter), [alerts, filter]);
 
   if (alertsQ.isLoading || cfgQ.isLoading) {
     return (
@@ -56,15 +53,9 @@ export default function Alerts() {
           <Label htmlFor="filter-severity">Severity</Label>
           <Select
             value={filter.severity}
-            onValueChange={(v) =>
-              setFilter({ ...filter, severity: v as Severity })
-            }
+            onValueChange={(v) => setFilter({ ...filter, severity: v as Severity })}
           >
-            <SelectTrigger
-              id="filter-severity"
-              aria-label="Severity"
-              className="w-36"
-            >
+            <SelectTrigger id="filter-severity" aria-label="Severity" className="w-36">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -81,11 +72,7 @@ export default function Alerts() {
             value={filter.category}
             onValueChange={(v) => setFilter({ ...filter, category: v })}
           >
-            <SelectTrigger
-              id="filter-category"
-              aria-label="Category"
-              className="w-36"
-            >
+            <SelectTrigger id="filter-category" aria-label="Category" className="w-36">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -133,17 +120,11 @@ export default function Alerts() {
       {alerts.length === 0 ? (
         <p className="text-sm text-muted-foreground">No active alerts.</p>
       ) : visible.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No alerts match the current filters.
-        </p>
+        <p className="text-sm text-muted-foreground">No alerts match the current filters.</p>
       ) : (
         <div className="grid gap-3">
           {visible.map((a: AlertSummary) => (
-            <AlertRow
-              key={a.fingerprint}
-              alert={a}
-              alertmanagerBaseUrl={amBase}
-            />
+            <AlertRow key={a.fingerprint} alert={a} alertmanagerBaseUrl={amBase} />
           ))}
         </div>
       )}

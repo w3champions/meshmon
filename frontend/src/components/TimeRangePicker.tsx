@@ -66,9 +66,7 @@ export function TimeRangePicker({
           className="mt-2"
           from={from}
           to={to}
-          onChange={({ from: f, to: t }) =>
-            onChange({ range: "custom", from: f, to: t })
-          }
+          onChange={({ from: f, to: t }) => onChange({ range: "custom", from: f, to: t })}
         />
       )}
     </div>
