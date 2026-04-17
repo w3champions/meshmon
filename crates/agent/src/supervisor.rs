@@ -280,6 +280,13 @@ async fn run(
     let mut snapshot_interval = tokio::time::interval(Duration::from_secs(60));
     snapshot_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // Once `snapshot_tx.try_send` reports `Closed`, the receiver is gone
+    // and every future emit attempt on this channel is wasted work that
+    // would also re-log the "closed" message on every 60 s tick. Latch
+    // this flag and skip the snapshot-tick body entirely after the first
+    // Closed observation.
+    let mut snapshot_channel_closed: bool = false;
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -463,6 +470,9 @@ async fn run(
                 }
             }
             _ = snapshot_interval.tick() => {
+                if snapshot_channel_closed {
+                    continue;
+                }
                 let now = Instant::now();
                 let now_wall = SystemTime::now();
                 if let Some(snap) = route_tracker.build_snapshot(now, now_wall) {
@@ -494,6 +504,7 @@ async fn run(
                                     target_id = %target.id,
                                     "route snapshot channel closed; stopping emission path",
                                 );
+                                snapshot_channel_closed = true;
                             }
                         }
                     }
@@ -1447,5 +1458,80 @@ mod tests {
             "publish_if_changed must wake receivers on differing values",
         );
         assert_eq!(rx_guarded.borrow().0, 0.20);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Snapshot channel closed latch — once `try_send` returns `Closed`, the
+    // supervisor must stop rebuilding snapshots and stop re-emitting the
+    // "channel closed" log. We assert the supervisor joins cleanly across
+    // multiple post-close snapshot ticks (no panic, no hang).
+    // ---------------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_stops_snapshot_emission_after_channel_closed() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+
+        // Build a snapshot channel and immediately drop the receiver so any
+        // `try_send` in the supervisor's snapshot tick will observe `Closed`.
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshot>(1);
+        drop(snapshot_rx);
+
+        let handle = spawn(
+            test_target("closed-snap"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Seed enough ICMP samples so the first eval tick elects ICMP primary
+        // and primes the tracker; also inject a trippy round so the tracker
+        // actually has hops to snapshot on the 60 s tick. Without hops the
+        // build_snapshot short-circuits and `try_send` never runs — we need
+        // to exercise the `Closed` branch at least once.
+        for _ in 0..3 {
+            handle
+                .observation_tx
+                .send(icmp_success("closed-snap", 1_000))
+                .await
+                .expect("seed icmp sample");
+        }
+        yield_many(10).await;
+        // First eval tick → seed tracker with ICMP.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        yield_many(10).await;
+        handle
+            .observation_tx
+            .send(trippy_obs(
+                "closed-snap",
+                vec![hop(1, ipv4(10, 0, 0, 1), 1_000)],
+            ))
+            .await
+            .expect("send trippy observation");
+        yield_many(10).await;
+
+        // First snapshot tick — try_send observes Closed, latches the flag.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        yield_many(20).await;
+
+        // Two more snapshot ticks — must be fully skipped (no panic, no hang).
+        tokio::time::advance(Duration::from_secs(120)).await;
+        yield_many(20).await;
+        tokio::time::advance(Duration::from_secs(120)).await;
+        yield_many(20).await;
+
+        parent_cancel.cancel();
+        let join_result = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+        assert!(
+            join_result.is_ok(),
+            "supervisor must join cleanly after multiple post-close snapshot ticks",
+        );
+        join_result
+            .unwrap()
+            .expect("supervisor task must not panic after Closed latch");
     }
 }
