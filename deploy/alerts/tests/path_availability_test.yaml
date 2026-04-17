@@ -54,3 +54,20 @@ tests:
         groupname: meshmon.path_availability
         alertname: PathUnreachable
         exp_alerts: []
+
+  # --- PathUnreachable does NOT fire when only a subset of protocols reports.
+  # a→d: icmp and udp at 100% loss, tcp series absent (agent configured
+  # without TCP probing, or tcp prober silently offline). `count without` = 2
+  # so the `== 3` guard prevents the critical alert — guards against false
+  # positives for partial-protocol paths.
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="d",protocol="icmp"}'
+        values: '1+0x20'
+      - series: 'meshmon_path_failure_rate{source="a",target="d",protocol="udp"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        groupname: meshmon.path_availability
+        alertname: PathUnreachable
+        exp_alerts: []

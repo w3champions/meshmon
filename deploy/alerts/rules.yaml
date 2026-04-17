@@ -116,14 +116,23 @@ groups:
   interval: 30s
   rules:
 
-  # Path is unreachable across every protocol. `min without(protocol)` gives
-  # us one alert per (source, target) pair without a leaked protocol label;
-  # firing semantics are identical to "all three protocols' loss ≥ 0.99".
-  # Retains only source/target/alertname labels — matches the label contract
-  # (protocol omitted when the concept doesn't apply) and the inhibit rule's
-  # `equal: [source, target]` match.
+  # Path is unreachable across every protocol. Fires only when all three
+  # probe protocols are reporting AND each is at ≥ 99 % loss over 5 min.
+  # `count == 3` guard prevents false positives for paths where only a
+  # subset of protocols is emitting series (e.g. agent with UDP probing
+  # disabled or a transiently-absent series). `min without(protocol)`
+  # strips the `protocol` label so the alert fires once per (source,
+  # target) and the inhibit rule's `equal: [source, target]` matches cleanly.
+  #
+  # Note on annotations: `$value` here evaluates against the LHS of `and`,
+  # which is the count expression (always == 3 when firing), NOT the loss
+  # ratio. Do not reference `$value` expecting a loss fraction.
   - alert: PathUnreachable
     expr: |
+      count without(protocol) (
+        avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp|tcp"}[5m])
+      ) == 3
+      and
       min without(protocol) (
         avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp|tcp"}[5m])
       ) >= 0.99
