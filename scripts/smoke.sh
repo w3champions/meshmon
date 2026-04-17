@@ -245,11 +245,9 @@ until curl -fs "http://127.0.0.1:${SERVICE_PORT}/readyz" >/dev/null 2>&1; do
   sleep 0.5
 done
 
-# ---- Frontend node_modules (one-time) ----------------------------------
-if [[ ! -d frontend/node_modules ]]; then
-  echo "[smoke] installing frontend dependencies (first run)"
-  npm --prefix frontend install
-fi
+# ---- Frontend node_modules ---------------------------------------------
+echo "[smoke] installing frontend dependencies"
+npm --prefix frontend install
 
 # ---- Frontend dev server (foreground) ----------------------------------
 cat <<EOF
