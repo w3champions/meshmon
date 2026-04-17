@@ -16,11 +16,15 @@ use crate::stats::Summary;
 /// One per-(target, protocol) metrics record produced by the supervisor's
 /// 60 s metrics tick. The emitter batches these into a `MetricsBatch`.
 ///
-/// `health` is always `Some`-equivalent: the supervisor drops samples where
-/// the last-evaluated `TargetSnapshot` health for that protocol is `None`,
-/// so this struct carries a concrete `ProtoHealth`. That matches the
-/// wire-protocol rule that `ProtocolHealth::Unspecified` is an illegal
-/// payload (rejected by the service with `INVALID_ARGUMENT`).
+/// `health` is a concrete `ProtoHealth` (never `Unspecified`): the
+/// supervisor drops the emission when its last-evaluated
+/// `TargetSnapshot` still carries `None` for that protocol, which
+/// happens only before the first eval tick has fired. After the first
+/// eval tick, the state machine always classifies every protocol as
+/// `Healthy` or `Unhealthy`, so this struct carries a real verdict.
+/// The service rejects `ProtocolHealth::Unspecified` with
+/// `INVALID_ARGUMENT`, so this invariant is load-bearing for wire
+/// validity.
 #[derive(Debug, Clone)]
 pub struct PathMetricsMsg {
     pub target_id: String,

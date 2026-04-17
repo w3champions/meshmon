@@ -623,6 +623,7 @@ async fn run(
                                 "path_metrics channel closed; stopping metrics emission",
                             );
                             metrics_channel_closed = true;
+                            break;
                         }
                     }
                 }
