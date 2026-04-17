@@ -268,21 +268,16 @@ impl RouteTracker {
             return;
         }
 
-        // Purge everything strictly older than `now - window`. We walk the
-        // entire accumulator because hop entries age independently (one IP
-        // at position 3 might purge while another IP at position 3 stays
+        // Purge samples older than the window. We walk the entire
+        // accumulator because hop entries age independently (one IP at
+        // position 3 might purge while another IP at position 3 stays
         // fresh). The walk is O(K) in total entries (typically ≤ ~30
         // hops × a few IPs each = < 100), cheap.
         //
-        // `HopObservationsAcc::purge` has boundary-inclusive semantics
-        // (purges `t <= cutoff`), so we subtract one nanosecond from the
-        // window boundary to get strict semantics: a sample with
-        // `t == now - window` is exactly window-old and stays in the
-        // window; only samples strictly older fall out.
-        let cutoff_strict = now
-            .checked_sub(self.window)
-            .and_then(|c| c.checked_sub(Duration::from_nanos(1)));
-        let Some(cutoff) = cutoff_strict else {
+        // Boundary semantics match `stats::RollingStats::purge_old`: a
+        // sample with `t == now - window` is exactly window-old and is
+        // purged.
+        let Some(cutoff) = now.checked_sub(self.window) else {
             // Runtime clock is before the window — nothing is old enough yet.
             // Still insert new observations below.
             for obs in hops {
@@ -516,10 +511,11 @@ mod tests {
         let mut t = tracker_ready(Duration::from_secs(60), Protocol::Icmp);
         // First round at t+0.
         t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], base);
-        // Second round at t+30s.
+        // Second round at t+35s — strictly inside the window relative to t+90
+        // (cutoff = t+30; t+35 > t+30 so it survives).
         t.observe(
             &[hop(1, Some(ipv4(10, 0, 0, 1)), Some(2_000))],
-            base + Duration::from_secs(30),
+            base + Duration::from_secs(35),
         );
         // Fast-forward to t+90s. The t+0 sample falls out.
         t.observe(
