@@ -69,12 +69,12 @@ type StatsArray = [Mutex<RollingStats>; PROTOCOL_COUNT];
 /// Snapshot of the last evaluated target state. Shared between the supervisor
 /// run loop (writer) and external callers (readers).
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TargetSnapshot {
-    pub(crate) icmp_health: Option<ProtoHealth>,
-    pub(crate) tcp_health: Option<ProtoHealth>,
-    pub(crate) udp_health: Option<ProtoHealth>,
-    pub(crate) primary: Option<Protocol>,
-    pub(crate) path: PathHealthState,
+pub struct TargetSnapshot {
+    pub icmp_health: Option<ProtoHealth>,
+    pub tcp_health: Option<ProtoHealth>,
+    pub udp_health: Option<ProtoHealth>,
+    pub primary: Option<Protocol>,
+    pub path: PathHealthState,
 }
 
 /// Handle returned by [`spawn`].
@@ -95,11 +95,7 @@ pub struct SupervisorHandle {
     /// outside caller should iterate or mutate the vec directly.
     prober_joins: Vec<tokio::task::JoinHandle<()>>,
     /// Most-recently evaluated state snapshot. Written every eval tick by the
-    /// supervisor task; read by tests directly. The future T16 emitter will
-    /// add a public accessor when it consumes this — until then rustc's
-    /// dead-code lint can't see the test-module read because it fires on
-    /// the lib-only pass that gates out `#[cfg(test)]` code.
-    #[allow(dead_code)]
+    /// supervisor task; read via [`SupervisorHandle::snapshot_state`].
     pub(crate) last_state: Arc<Mutex<TargetSnapshot>>,
 }
 
@@ -118,6 +114,17 @@ impl SupervisorHandle {
         let idx = protocol_index(protocol)?;
         let guard = self.stats[idx].try_lock().ok()?;
         Some(guard.summary_fast())
+    }
+
+    /// Non-blocking read of the last evaluated per-target state.
+    ///
+    /// Returns `None` when the supervisor's run loop currently holds the
+    /// inner lock (write happens once per 10 s eval tick). Callers MUST NOT
+    /// rely on always seeing a value — missing a read is cheaper than
+    /// pausing the supervisor. Mirrors [`SupervisorHandle::snapshot`]'s
+    /// try-lock semantics.
+    pub fn snapshot_state(&self) -> Option<TargetSnapshot> {
+        self.last_state.try_lock().ok().map(|g| g.clone())
     }
 
     /// Await all 4 prober JoinHandles and log panics.
@@ -1533,5 +1540,113 @@ mod tests {
         join_result
             .unwrap()
             .expect("supervisor task must not panic after Closed latch");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 3: SupervisorHandle::snapshot_state accessor tests.
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn snapshot_state_returns_target_snapshot_after_eval_tick() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+
+        let handle = spawn(
+            test_target("snapshot-state-test"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        // Inject enough samples per protocol so the state machine has real
+        // health to record on the first eval tick.
+        for _ in 0..5 {
+            for proto in [Protocol::Icmp, Protocol::Tcp, Protocol::Udp] {
+                handle
+                    .observation_tx
+                    .send(ProbeObservation {
+                        protocol: proto,
+                        target_id: "snapshot-state-test".to_string(),
+                        outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+                        hops: None,
+                        observed_at: tokio::time::Instant::now(),
+                    })
+                    .await
+                    .expect("send");
+            }
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Advance past the first eval tick (10 s).
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let snap = handle.snapshot_state().expect(
+            "snapshot_state should not block and the eval tick has released the lock by now",
+        );
+        // Exact value may depend on evaluation — the strong invariant is that
+        // after at least one eval tick, at least one protocol was classified.
+        assert!(
+            snap.icmp_health.is_some() || snap.tcp_health.is_some() || snap.udp_health.is_some(),
+            "expected at least one protocol to have Some(health) after the first eval tick; snap={snap:?}"
+        );
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn snapshot_state_returns_none_when_lock_contended() {
+        // Build a SupervisorHandle with a synthetic `last_state` we can hold
+        // the lock on from the test thread — verifies the accessor never
+        // blocks when the lock is contended.
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let last_state = Arc::new(Mutex::new(TargetSnapshot::default()));
+        let held = Arc::clone(&last_state);
+        let _guard = held.try_lock().expect("lock the state from the test");
+
+        // Minimal handle shim: all we need is `last_state`. The other fields
+        // are unused by `snapshot_state`.
+        let (observation_tx, _observation_rx) = mpsc::channel(1);
+        let stats: Arc<StatsArray> = Arc::new([
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+        ]);
+        // Spawn a do-nothing task so the JoinHandle field is valid.
+        let cancel = CancellationToken::new();
+        let join = tokio::spawn(async {});
+
+        let handle = SupervisorHandle {
+            cancel: cancel.clone(),
+            join,
+            observation_tx,
+            stats,
+            prober_joins: Vec::new(),
+            last_state: Arc::clone(&last_state),
+        };
+
+        assert!(
+            handle.snapshot_state().is_none(),
+            "snapshot_state must return None while the state lock is held elsewhere"
+        );
+
+        drop(_guard);
+        assert!(
+            handle.snapshot_state().is_some(),
+            "after releasing the lock the accessor must return Some(_)"
+        );
+
+        cancel.cancel();
+        let _ = handle.join.await;
     }
 }
