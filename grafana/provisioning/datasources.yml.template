@@ -1,0 +1,62 @@
+# Grafana datasource provisioning template for meshmon.
+#
+# Copy to the target Grafana's provisioning/datasources/ directory and expand
+# ${...} placeholders via the operator's env-var / secret management of
+# choice. Grafana itself supports `$VAR` / `${VAR}` expansion from the
+# process environment, so the simplest path is to export these vars in
+# the Grafana container's compose file.
+#
+# Required:
+#   MESHMON_VM_URL          e.g. http://meshmon-vm:8428
+#   MESHMON_PG_URL          e.g. meshmon-db:5432
+#   MESHMON_PG_DATABASE     usually "meshmon"
+#   MESHMON_PG_USER         usually "meshmon" (a read-only role is preferred)
+#   MESHMON_PG_PASSWORD     injected at deploy time via secret
+#
+# After copying, restart Grafana (or wait for the provisioning reloader) so
+# the datasources appear with the fixed UIDs `MeshmonVM` and
+# `MeshmonPostgres` the dashboard JSON references.
+apiVersion: 1
+
+# Delete entries for datasources with matching `uid` that are no longer in
+# this file. Keeps the provisioning source of truth authoritative.
+deleteDatasources:
+  - { name: MeshmonVM,       orgId: 1 }
+  - { name: MeshmonPostgres, orgId: 1 }
+
+datasources:
+  - name: MeshmonVM
+    uid: MeshmonVM
+    type: prometheus
+    access: proxy
+    orgId: 1
+    url: ${MESHMON_VM_URL}
+    isDefault: false
+    editable: false
+    jsonData:
+      httpMethod: POST
+      # VictoriaMetrics is Prometheus-API-compatible; MetricsQL extensions
+      # (zscore_over_time, …) pass through transparently.
+      prometheusType: Prometheus
+      prometheusVersion: 2.50.0
+      timeInterval: 30s
+
+  - name: MeshmonPostgres
+    uid: MeshmonPostgres
+    type: postgres
+    access: proxy
+    orgId: 1
+    url: ${MESHMON_PG_URL}
+    user: ${MESHMON_PG_USER}
+    database: ${MESHMON_PG_DATABASE}
+    isDefault: false
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true
+      maxOpenConns: 10
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: ${MESHMON_PG_PASSWORD}

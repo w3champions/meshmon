@@ -1,0 +1,256 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+        "enable": true,
+        "expr": "changes(meshmon_route_changes_total{source=\"$source\",target=\"$target\",protocol=\"$protocol\"}[1m]) > 0",
+        "iconColor": "orange",
+        "name": "Route changes",
+        "step": "60s",
+        "tagKeys": "source,target,protocol",
+        "titleFormat": "Route changed ({{protocol}})"
+      }
+    ]
+  },
+  "description": "Per-path RTT, loss, and jitter for one (source, target, protocol) tuple. Panel IDs are frozen: rtt=1, loss=2, stddev=3 — see grafana/panels.json.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "RTT — $source → $target ($protocol)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "pointSize": 3,
+            "axisLabel": "RTT (ms)",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/p95|p99/" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } },
+              { "id": "custom.lineWidth", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "AVG",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_avg_micros{source=\"$source\",target=\"$target\",protocol=\"$protocol\"} / 1000",
+          "legendFormat": "avg"
+        },
+        {
+          "refId": "MIN",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_min_micros{source=\"$source\",target=\"$target\",protocol=\"$protocol\"} / 1000",
+          "legendFormat": "min"
+        },
+        {
+          "refId": "MAX",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_max_micros{source=\"$source\",target=\"$target\",protocol=\"$protocol\"} / 1000",
+          "legendFormat": "max"
+        },
+        {
+          "refId": "P95",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_quantile_micros{source=\"$source\",target=\"$target\",protocol=\"$protocol\",quantile=\"0.95\"} / 1000",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "P99",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_quantile_micros{source=\"$source\",target=\"$target\",protocol=\"$protocol\",quantile=\"0.99\"} / 1000",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Loss — $source → $target ($protocol)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.5 },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 20 }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "gradientMode": "opacity",
+            "axisLabel": "Loss (%)",
+            "thresholdsStyle": { "mode": "line+area" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_failure_rate{source=\"$source\",target=\"$target\",protocol=\"$protocol\"} * 100",
+          "legendFormat": "loss %"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Jitter (stddev) — $source → $target ($protocol)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "axisLabel": "Stddev (ms)",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_stddev_micros{source=\"$source\",target=\"$target\",protocol=\"$protocol\"} / 1000",
+          "legendFormat": "stddev"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["meshmon", "path"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "", "value": "" },
+        "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+        "definition": "label_values(meshmon_path_rtt_avg_micros, source)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Source",
+        "multi": false,
+        "name": "source",
+        "options": [],
+        "query": { "query": "label_values(meshmon_path_rtt_avg_micros, source)", "refId": "source-values" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "", "value": "" },
+        "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+        "definition": "label_values(meshmon_path_rtt_avg_micros{source=\"$source\"}, target)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Target",
+        "multi": false,
+        "name": "target",
+        "options": [],
+        "query": { "query": "label_values(meshmon_path_rtt_avg_micros{source=\"$source\"}, target)", "refId": "target-values" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "icmp", "value": "icmp" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Protocol",
+        "multi": false,
+        "name": "protocol",
+        "options": [
+          { "selected": true, "text": "icmp", "value": "icmp" },
+          { "selected": false, "text": "tcp", "value": "tcp" },
+          { "selected": false, "text": "udp", "value": "udp" }
+        ],
+        "query": "icmp,tcp,udp",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
+    "hidden": false
+  },
+  "timezone": "",
+  "title": "meshmon — Path",
+  "uid": "meshmon-path",
+  "version": 1,
+  "weekStart": ""
+}

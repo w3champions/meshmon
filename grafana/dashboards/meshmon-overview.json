@@ -1,0 +1,201 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Fleet-wide view: per-path health heatmap, active alerts, recent route changes. Panel IDs are frozen — see grafana/panels.json.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [
+    {
+      "title": "Path detail",
+      "type": "link",
+      "url": "/d/meshmon-path/meshmon-path",
+      "targetBlank": false,
+      "icon": "external link",
+      "tooltip": "Drill into per-path charts",
+      "keepTime": true
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Path health heatmap (5m avg loss per source → target)",
+      "type": "heatmap",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "description": "Cell color = worst 5-minute-average failure rate across protocols for each (source, target) pair. Use the path dashboard to drill into a specific cell.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "custom": { "hideFrom": { "legend": false, "tooltip": false, "viz": false } },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 2,
+        "cellValues": { "decimals": 2 },
+        "color": {
+          "exponent": 0.5,
+          "fill": "dark-orange",
+          "mode": "scheme",
+          "reverse": false,
+          "scale": "exponential",
+          "scheme": "RdYlGn",
+          "steps": 64
+        },
+        "exemplars": { "color": "rgba(255,0,255,0.7)" },
+        "filterValues": { "le": 1e-9 },
+        "legend": { "show": true },
+        "rowsFrame": { "layout": "auto" },
+        "showValue": "auto",
+        "tooltip": { "mode": "single", "showColorScale": true, "yHistogram": false },
+        "yAxis": { "axisPlacement": "left", "reverse": false, "unit": "short" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "format": "heatmap",
+          "expr": "max by (source, target) (avg_over_time(meshmon_path_failure_rate[5m]))",
+          "legendFormat": "{{source}} → {{target}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Degraded paths (5 min avg loss > 5%)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 12 },
+      "description": "Paths whose 5-minute-average failure rate currently exceeds 5% across any protocol. Matches the PathPacketLoss alert rule threshold. Uses a fallback-to-zero expression so the panel always renders even when no paths are degraded. For full alert browsing, use the meshmon /alerts page.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red",    "value": 5 }
+            ]
+          },
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "(count(avg_over_time(meshmon_path_failure_rate[5m]) > 0.05) OR on() vector(0))",
+          "instant": true,
+          "legendFormat": "degraded"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Recent route changes (30m)",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 12 },
+      "description": "Paths that experienced at least one route-snapshot write in the last 30 minutes. Counts are meshmon_route_changes_total deltas over the window.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Changes" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Changes" }],
+        "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "sort_desc(sum by (source, target, protocol) (increase(meshmon_route_changes_total[30m])) > 0)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": ""
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true },
+            "indexByName": { "source": 0, "target": 1, "protocol": 2, "Value": 3 },
+            "renameByName": { "Value": "Changes", "source": "Source", "target": "Target", "protocol": "Protocol" }
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["meshmon", "overview"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h"],
+    "hidden": false
+  },
+  "timezone": "",
+  "title": "meshmon — Overview",
+  "uid": "meshmon-overview",
+  "version": 1,
+  "weekStart": ""
+}
