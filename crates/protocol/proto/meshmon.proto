@@ -124,12 +124,19 @@ message AgentMetadata {
   reserved 15 to 31;
 }
 
-// Stats for a single (target, protocol) pair over the agent's tumbling
-// emission window (60s per spec 02).
+// Stats for a single (target, protocol) pair. The agent emits one
+// PathMetrics per healthy protocol every 60 s (emission *cadence*), but
+// the reported *window span* varies: it tracks the agent's active
+// RollingStats window, which equals `primary_window_sec` for the
+// primary protocol and `diversity_window_sec` for others (configurable,
+// defaults 120 s / 900 s). Service consumers computing rates must use
+// `(window_end_micros - window_start_micros)` as the denominator — do
+// not assume 60 s.
 message PathMetrics {
   string target_id = 1;
   Protocol protocol = 2;
-  // Window covered by this observation, Unix micros.
+  // Window covered by this observation, Unix micros. Span equals the
+  // active RollingStats window (primary vs diversity) — see message doc.
   int64 window_start_micros = 3;
   int64 window_end_micros = 4;
   // Counters over the window.
