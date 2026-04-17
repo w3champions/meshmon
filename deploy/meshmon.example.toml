@@ -192,3 +192,27 @@ udp_probe_secret = "hex:0011223344556677"
 # udp_pps   = 0.05
 #
 # # ... repeat for every (primary, health) combination in your priority list
+
+# ---------------------------------------------------------------------------
+# [web] — frontend Grafana integration.
+#
+# The SPA iframes Grafana panels to render time-series charts. When Grafana
+# is not configured, iframes fall back to a "Dashboard not configured"
+# placeholder and the rest of the page still works.
+#
+# Two knobs:
+#   1. `grafana_base_url` — externally-visible Grafana URL the browser loads
+#      iframes from. Must be browser-reachable (same-origin or CORS-
+#      permitting). Either inline or indirected via `grafana_base_url_env`.
+#   2. `[web.grafana_dashboards]` — logical-name → dashboard UID map. The
+#      meshmon repo ships three dashboards at `grafana/dashboards/`; their
+#      UIDs are the stable contract.
+
+# [web]
+# grafana_base_url = "https://grafana.example.com"
+# grafana_base_url_env = "MESHMON_GRAFANA_BASE_URL"
+#
+# [web.grafana_dashboards]
+# meshmon-path     = "meshmon-path"
+# meshmon-overview = "meshmon-overview"
+# meshmon-agent    = "meshmon-agent"
