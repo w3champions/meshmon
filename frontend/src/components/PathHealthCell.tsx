@@ -46,6 +46,7 @@ export function PathHealthCell({ source, target, state, failureRate }: PathHealt
         <Link
           to={"/paths/$source/$target"}
           params={{ source, target }}
+          search={{ range: "24h" }}
           role="gridcell"
           className={cn("block h-6 w-6 rounded-sm transition-colors", COLOUR[state])}
           data-state={state}

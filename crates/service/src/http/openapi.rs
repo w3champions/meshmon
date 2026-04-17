@@ -49,6 +49,10 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::http::auth::LoginResponse,
         crate::http::metrics_proxy::InstantQuery,
         crate::http::metrics_proxy::RangeQuery,
+        crate::http::path_overview::LatestByProtocol,
+        crate::http::path_overview::PathMetrics,
+        crate::http::path_overview::PathOverviewResponse,
+        crate::http::path_overview::WindowBounds,
         crate::http::user_api::AgentSummary,
         crate::http::user_api::RouteSnapshotDetail,
         crate::http::user_api::RouteSnapshotSummary,
@@ -82,6 +86,9 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         ))
         .routes(utoipa_axum::routes!(crate::http::user_api::get_route_by_id))
         .routes(utoipa_axum::routes!(crate::http::user_api::list_routes))
+        .routes(utoipa_axum::routes!(
+            crate::http::path_overview::path_overview
+        ))
         .routes(utoipa_axum::routes!(
             crate::http::user_api::list_recent_routes
         ))

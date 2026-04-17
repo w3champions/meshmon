@@ -191,6 +191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/paths/{src}/{tgt}/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/paths/{src}/{tgt}/overview` — aggregate path-detail payload. */
+        get: operations["path_overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/paths/{src}/{tgt}/routes": {
         parameters: {
             query?: never;
@@ -410,6 +427,15 @@ export interface components {
             /** @description Optional evaluation timestamp (RFC 3339 or Unix epoch). */
             time?: string | null;
         };
+        /**
+         * @description Per-protocol latest-snapshot map. Each field is independent so the UI can
+         *     render "icmp present, udp/tcp empty" without a sentinel value.
+         */
+        LatestByProtocol: {
+            icmp?: null | components["schemas"]["RouteSnapshotDetail"];
+            tcp?: null | components["schemas"]["RouteSnapshotDetail"];
+            udp?: null | components["schemas"]["RouteSnapshotDetail"];
+        };
         /** @description POST body for `/api/auth/login`. */
         LoginRequest: {
             /**
@@ -424,6 +450,48 @@ export interface components {
         LoginResponse: {
             /** @description Echoed username on success. */
             username: string;
+        };
+        /** @description VictoriaMetrics-sourced RTT / loss series for the primary protocol. */
+        PathMetrics: {
+            /**
+             * Format: double
+             * @description Last loss value (fraction), or null if the series is empty.
+             */
+            loss_current?: number | null;
+            /** @description `[epoch_ms, loss_fraction]` tuples. Fractional — `0.05` = 5%. */
+            loss_series: number[][];
+            /**
+             * Format: double
+             * @description Last RTT value (ms), or null if the series is empty.
+             */
+            rtt_current?: number | null;
+            /** @description `[epoch_ms, rtt_ms]` tuples. */
+            rtt_series: number[][];
+        };
+        /** @description Aggregated response for the Path Detail page. */
+        PathOverviewResponse: {
+            /** @description Latest snapshot per protocol within the window (each field optional). */
+            latest_by_protocol: components["schemas"]["LatestByProtocol"];
+            metrics?: null | components["schemas"]["PathMetrics"];
+            /**
+             * @description Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing
+             *     only when no protocol has any snapshot in the window; callers should
+             *     treat that as "show a neutral empty state".
+             */
+            primary_protocol?: string | null;
+            /**
+             * @description Recent snapshots in the window in descending `observed_at` order.
+             *     Capped at [`RECENT_LIMIT`]; no hop detail.
+             */
+            recent_snapshots: components["schemas"]["RouteSnapshotSummary"][];
+            /** @description Source agent metadata. */
+            source: components["schemas"]["AgentSummary"];
+            /** @description Server-chosen Prometheus step (`1m`, `5m`, `1h`, `6h`). */
+            step: string;
+            /** @description Target agent metadata. */
+            target: components["schemas"]["AgentSummary"];
+            /** @description Echoed resolved window bounds (inclusive). */
+            window: components["schemas"]["WindowBounds"];
         };
         /**
          * @description JSON representation of the aggregated path summary stored in
@@ -544,6 +612,19 @@ export interface components {
             username: string;
             /** @description `CARGO_PKG_VERSION` of the running service. */
             version: string;
+        };
+        /** @description Inclusive time window bounds echoed back to the caller. */
+        WindowBounds: {
+            /**
+             * Format: date-time
+             * @description Start of the window (inclusive).
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description End of the window (inclusive).
+             */
+            to: string;
         };
     };
     responses: never;
@@ -881,6 +962,62 @@ export interface operations {
             };
             /** @description VictoriaMetrics not configured */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    path_overview: {
+        parameters: {
+            query?: {
+                /** @description Start of the time window (inclusive). Defaults to `to - 24h`. */
+                from?: string | null;
+                /** @description End of the time window (inclusive). Defaults to now. */
+                to?: string | null;
+                /**
+                 * @description Optional protocol override (`icmp`, `udp`, or `tcp`). Returns 400 on
+                 *     any other value.
+                 */
+                protocol?: string | null;
+            };
+            header?: never;
+            path: {
+                /** @description Source agent id */
+                src: string;
+                /** @description Target agent id */
+                tgt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Aggregated path detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathOverviewResponse"];
+                };
+            };
+            /** @description Invalid protocol override */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Source or target agent not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

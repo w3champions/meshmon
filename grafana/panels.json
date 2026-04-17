@@ -1,0 +1,7 @@
+{
+  "meshmon-path": {
+    "uid_key": "meshmon-path",
+    "panels": { "rtt": 1, "loss": 2, "stddev": 3 },
+    "variables": ["source", "target", "protocol"]
+  }
+}

@@ -79,7 +79,10 @@ describe("PathHealthGrid", () => {
 
     // 2 agents → 4 cells
     const cell = await screen.findByRole("gridcell", { name: "a to b: stale" });
-    expect(cell).toHaveAttribute("href", "/paths/a/b");
+    // Default search `range=24h` is appended because PathDetail's route has a
+    // required search schema (default preset). The link still carries the
+    // `source`/`target` path params.
+    expect(cell).toHaveAttribute("href", "/paths/a/b?range=24h");
 
     // Self-cell renders as a plain div — it has role="gridcell" but no href.
     const selfCellA = screen.getByRole("gridcell", { name: "a (self)" });

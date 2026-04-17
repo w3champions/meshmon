@@ -174,7 +174,11 @@ fn default_protocol() -> String {
 
 /// Validate protocol value; returns `None` on valid input or `Some(response)`
 /// with a 400 error body on invalid input.
-fn invalid_protocol(protocol: &str) -> Option<Response> {
+///
+/// Shared with `path_overview::path_overview` — keep this the single source
+/// of truth so the error shape stays identical across `/api/paths/...`
+/// endpoints.
+pub(crate) fn invalid_protocol(protocol: &str) -> Option<Response> {
     match protocol {
         "icmp" | "tcp" | "udp" => None,
         _ => Some(

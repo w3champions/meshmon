@@ -17,7 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@grafana/*": ["../grafana/*"]
     },
     "types": ["vite/client", "node"]
   },

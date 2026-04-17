@@ -386,6 +386,94 @@
         }
       }
     },
+    "/api/paths/{src}/{tgt}/overview": {
+      "get": {
+        "tags": [
+          "paths"
+        ],
+        "summary": "`GET /api/paths/{src}/{tgt}/overview` — aggregate path-detail payload.",
+        "operationId": "path_overview",
+        "parameters": [
+          {
+            "name": "src",
+            "in": "path",
+            "description": "Source agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tgt",
+            "in": "path",
+            "description": "Target agent id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the time window (inclusive). Defaults to `to - 24h`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the time window (inclusive). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "description": "Optional protocol override (`icmp`, `udp`, or `tcp`). Returns 400 on\nany other value.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated path detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathOverviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid protocol override"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Source or target agent not found"
+          }
+        }
+      }
+    },
     "/api/paths/{src}/{tgt}/routes": {
       "get": {
         "tags": [
@@ -884,6 +972,45 @@
           }
         }
       },
+      "LatestByProtocol": {
+        "type": "object",
+        "description": "Per-protocol latest-snapshot map. Each field is independent so the UI can\nrender \"icmp present, udp/tcp empty\" without a sentinel value.",
+        "properties": {
+          "icmp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RouteSnapshotDetail",
+                "description": "Latest ICMP snapshot in window, if any."
+              }
+            ]
+          },
+          "tcp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RouteSnapshotDetail",
+                "description": "Latest TCP snapshot in window, if any."
+              }
+            ]
+          },
+          "udp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RouteSnapshotDetail",
+                "description": "Latest UDP snapshot in window, if any."
+              }
+            ]
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "POST body for `/api/auth/login`.",
@@ -912,6 +1039,113 @@
           "username": {
             "type": "string",
             "description": "Echoed username on success."
+          }
+        }
+      },
+      "PathMetrics": {
+        "type": "object",
+        "description": "VictoriaMetrics-sourced RTT / loss series for the primary protocol.",
+        "required": [
+          "rtt_series",
+          "loss_series"
+        ],
+        "properties": {
+          "loss_current": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Last loss value (fraction), or null if the series is empty."
+          },
+          "loss_series": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "description": "`[epoch_ms, loss_fraction]` tuples. Fractional — `0.05` = 5%."
+          },
+          "rtt_current": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Last RTT value (ms), or null if the series is empty."
+          },
+          "rtt_series": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "description": "`[epoch_ms, rtt_ms]` tuples."
+          }
+        }
+      },
+      "PathOverviewResponse": {
+        "type": "object",
+        "description": "Aggregated response for the Path Detail page.",
+        "required": [
+          "source",
+          "target",
+          "latest_by_protocol",
+          "recent_snapshots",
+          "window",
+          "step"
+        ],
+        "properties": {
+          "latest_by_protocol": {
+            "$ref": "#/components/schemas/LatestByProtocol",
+            "description": "Latest snapshot per protocol within the window (each field optional)."
+          },
+          "metrics": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PathMetrics",
+                "description": "VM series for the primary protocol, or `null` when the VM was\nunreachable or misconfigured."
+              }
+            ]
+          },
+          "primary_protocol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing\nonly when no protocol has any snapshot in the window; callers should\ntreat that as \"show a neutral empty state\"."
+          },
+          "recent_snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteSnapshotSummary"
+            },
+            "description": "Recent snapshots in the window in descending `observed_at` order.\nCapped at [`RECENT_LIMIT`]; no hop detail."
+          },
+          "source": {
+            "$ref": "#/components/schemas/AgentSummary",
+            "description": "Source agent metadata."
+          },
+          "step": {
+            "type": "string",
+            "description": "Server-chosen Prometheus step (`1m`, `5m`, `1h`, `6h`)."
+          },
+          "target": {
+            "$ref": "#/components/schemas/AgentSummary",
+            "description": "Target agent metadata."
+          },
+          "window": {
+            "$ref": "#/components/schemas/WindowBounds",
+            "description": "Echoed resolved window bounds (inclusive)."
           }
         }
       },
@@ -1132,6 +1366,26 @@
           "version": {
             "type": "string",
             "description": "`CARGO_PKG_VERSION` of the running service."
+          }
+        }
+      },
+      "WindowBounds": {
+        "type": "object",
+        "description": "Inclusive time window bounds echoed back to the caller.",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the window (inclusive)."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the window (inclusive)."
           }
         }
       }

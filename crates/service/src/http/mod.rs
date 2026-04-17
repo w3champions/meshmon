@@ -39,6 +39,7 @@ pub mod http_client;
 pub mod metrics_auth;
 pub mod metrics_proxy;
 pub mod openapi;
+pub mod path_overview;
 pub mod user_api;
 pub mod web_config;
 
