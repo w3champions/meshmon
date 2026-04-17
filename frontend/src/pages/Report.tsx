@@ -74,8 +74,7 @@ export default function Report() {
   // back to AFTER and the summary flags `singleSnapshot` so operators
   // see there's no diff to compare.
   const afterId = protocolSnapshots[0]?.id;
-  const beforeId =
-    [...protocolSnapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
+  const beforeId = [...protocolSnapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
 
   const beforeQ = useRouteSnapshot({
     source: source_id,
@@ -99,9 +98,7 @@ export default function Report() {
           }
         : null;
     const last: MetricsPoint | null =
-      m && m.rtt_current != null
-        ? { rtt_ms: m.rtt_current, loss: m.loss_current ?? null }
-        : null;
+      m && m.rtt_current != null ? { rtt_ms: m.rtt_current, loss: m.loss_current ?? null } : null;
     return buildReportSummary({
       before: beforeQ.data,
       after: afterQ.data,

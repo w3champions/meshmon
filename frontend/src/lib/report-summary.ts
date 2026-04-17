@@ -56,10 +56,8 @@ export function buildReportSummary(input: BuildReportSummaryInput): ReportSummar
 
   // `null * 100 === 0` would silently turn a missing loss reading into a
   // real-looking 0% — guard the null explicitly so fmtPct renders "—".
-  const lossBeforePct =
-    metricsFirst && metricsFirst.loss !== null ? metricsFirst.loss * 100 : null;
-  const lossAfterPct =
-    metricsLast && metricsLast.loss !== null ? metricsLast.loss * 100 : null;
+  const lossBeforePct = metricsFirst && metricsFirst.loss !== null ? metricsFirst.loss * 100 : null;
+  const lossAfterPct = metricsLast && metricsLast.loss !== null ? metricsLast.loss * 100 : null;
   const lossDeltaPct =
     lossBeforePct !== null && lossAfterPct !== null ? lossAfterPct - lossBeforePct : null;
 

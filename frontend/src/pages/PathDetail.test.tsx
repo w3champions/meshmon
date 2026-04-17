@@ -8,7 +8,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import "@/test/cytoscape-mock";
 import PathDetail from "@/pages/PathDetail";
@@ -95,13 +95,40 @@ function mockEndpoints(body: unknown): void {
   });
 }
 
-function renderPage(): ReturnType<typeof render> {
+function renderPage(initialUrl = "/paths/a/b?range=24h"): {
+  rendered: ReturnType<typeof render>;
+  // TanStack Router's return type carries deep route generics that are
+  // hard to restate here; `unknown` plus a narrow cast at use sites keeps
+  // the test helper agnostic of the routeTree shape.
+  router: { state: { location: { search: Record<string, unknown> } } };
+} {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const rootRoute = createRootRoute({ component: Outlet });
   const testRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/paths/$source/$target",
     component: PathDetail,
+    // Mirror the production router schema — z.string().datetime() rejects
+    // empty strings, so the Fix C guard must stop navigation before the
+    // parse throws, otherwise the edit is silently dropped.
+    validateSearch: (s: Record<string, unknown>) => {
+      const from = typeof s.from === "string" ? s.from : undefined;
+      const to = typeof s.to === "string" ? s.to : undefined;
+      if (from !== undefined && from !== "" && Number.isNaN(Date.parse(from))) {
+        throw new Error("invalid from");
+      }
+      if (from === "") throw new Error("custom range rejects empty from");
+      if (to === "") throw new Error("custom range rejects empty to");
+      return {
+        range: (s.range ?? "24h") as "1h" | "6h" | "24h" | "7d" | "30d" | "2y" | "custom",
+        from,
+        to,
+        protocol:
+          s.protocol === "icmp" || s.protocol === "udp" || s.protocol === "tcp"
+            ? s.protocol
+            : undefined,
+      };
+    },
   });
   const compareRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -115,13 +142,14 @@ function renderPage(): ReturnType<typeof render> {
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([testRoute, compareRoute, reportRoute]),
-    history: createMemoryHistory({ initialEntries: ["/paths/a/b?range=24h"] }),
+    history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });
-  return render(
+  const rendered = render(
     <QueryClientProvider client={qc}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  return { rendered, router };
 }
 
 describe("PathDetail", () => {
@@ -170,5 +198,33 @@ describe("PathDetail", () => {
     expect(label.textContent).toMatch(/—/);
     // Report link is hidden (protocol-specific, and we have no protocol).
     expect(screen.queryByRole("link", { name: /generate report/i })).toBeNull();
+  });
+
+  test("drops intermediate custom-range edits with empty from/to", async () => {
+    mockEndpoints(overview());
+    // Start in custom mode with both bounds populated — the realistic
+    // precondition when the user has already opened the date pickers.
+    const initialFrom = "2026-04-13T10:00:00.000Z";
+    const initialTo = "2026-04-13T14:00:00.000Z";
+    const initialUrl = `/paths/a/b?range=custom&from=${encodeURIComponent(
+      initialFrom,
+    )}&to=${encodeURIComponent(initialTo)}`;
+    const { router } = renderPage(initialUrl);
+
+    // Wait for the page to finish first render so CustomRangeInputs exist.
+    await screen.findByText("Agent A");
+
+    // Clearing the `From` input emits from="" while the user types/edits —
+    // the router schema rejects empty strings, so the component must skip
+    // navigation rather than throw and silently lose subsequent edits.
+    const fromInput = screen.getByLabelText(/from/i);
+    fireEvent.change(fromInput, { target: { value: "" } });
+
+    // URL stays on the original custom range — the empty intermediate
+    // state was dropped instead of replacing the valid bounds.
+    const search = router.state.location.search as Record<string, unknown>;
+    expect(search.range).toBe("custom");
+    expect(search.from).toBe(initialFrom);
+    expect(search.to).toBe(initialTo);
   });
 });

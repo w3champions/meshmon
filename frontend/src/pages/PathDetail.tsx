@@ -160,13 +160,20 @@ export default function PathDetail() {
             value={range}
             from={from}
             to={to}
-            onChange={(next) =>
+            onChange={(next) => {
+              // Custom mode requires both bounds — the router schema
+              // rejects empty strings, so an intermediate edit that
+              // clears a datetime-local field would throw inside
+              // validateSearch and silently lose the edit. Drop the
+              // transient invalid state; the next complete edit takes
+              // effect normally.
+              if (next.range === "custom" && (!next.from || !next.to)) return;
               navigate({
                 to: "/paths/$source/$target",
                 params: { source, target },
                 search: { range: next.range, from: next.from, to: next.to, protocol },
-              })
-            }
+              });
+            }}
           />
         </div>
       </section>
