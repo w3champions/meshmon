@@ -158,4 +158,61 @@ describe("Alerts page", () => {
     renderWithProviders(<Alerts />);
     await screen.findByText(/no active alerts/i);
   });
+
+  it("filters by protocol via dropdown", async () => {
+    mockFetchSequence([
+      {
+        url: /\/api\/web-config$/,
+        status: 200,
+        body: { username: "u", version: "v", grafana_dashboards: {} },
+      },
+      {
+        url: /\/api\/alerts/,
+        status: 200,
+        body: [
+          {
+            fingerprint: "a",
+            starts_at: new Date(Date.now() - 60_000).toISOString(),
+            ends_at: "0001-01-01T00:00:00Z",
+            state: "active",
+            labels: {
+              alertname: "PathPacketLoss",
+              severity: "critical",
+              category: "loss",
+              protocol: "icmp",
+            },
+            summary: "loss on a (icmp)",
+            description: null,
+          },
+          {
+            fingerprint: "b",
+            starts_at: new Date(Date.now() - 60_000).toISOString(),
+            ends_at: "0001-01-01T00:00:00Z",
+            state: "active",
+            labels: {
+              alertname: "PathLatencyRegression",
+              severity: "warning",
+              category: "latency",
+              protocol: "tcp",
+            },
+            summary: "latency on b (tcp)",
+            description: null,
+          },
+        ],
+      },
+    ]);
+
+    renderWithProviders(<Alerts />);
+    await screen.findByText(/PathPacketLoss/);
+    expect(screen.getByText(/PathLatencyRegression/)).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: /protocol/i }));
+    await user.click(await screen.findByRole("option", { name: /^icmp$/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/PathLatencyRegression/)).toBeNull();
+    });
+    expect(screen.getByText(/PathPacketLoss/)).toBeInTheDocument();
+  });
 });

@@ -1,11 +1,14 @@
 import type { AlertSummary } from "@/api/hooks/alerts";
 
 export type Severity = "all" | "critical" | "warning" | "info";
+export type ProtocolFilter = "all" | "icmp" | "udp" | "tcp";
 
 export interface AlertFilter {
   severity: Severity;
   /** Concrete category label or "all" for no filter. */
   category: string;
+  /** Concrete protocol label or "all" for no filter. */
+  protocol: ProtocolFilter;
   /** Substring match against `labels.source` (case-insensitive). */
   source: string;
   /** Substring match against `labels.target` (case-insensitive). */
@@ -18,6 +21,7 @@ export function defaultAlertFilter(): AlertFilter {
   return {
     severity: "all",
     category: "all",
+    protocol: "all",
     source: "",
     target: "",
     text: "",
@@ -35,6 +39,7 @@ export function filterAlerts(alerts: AlertSummary[], filter: AlertFilter): Alert
     const labels = a.labels ?? {};
     if (filter.severity !== "all" && labels.severity !== filter.severity) return false;
     if (filter.category !== "all" && labels.category !== filter.category) return false;
+    if (filter.protocol !== "all" && labels.protocol !== filter.protocol) return false;
     if (!containsI(labels.source, filter.source)) return false;
     if (!containsI(labels.target, filter.target)) return false;
     if (filter.text) {

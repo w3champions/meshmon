@@ -25,6 +25,7 @@ describe("filterAlerts", () => {
         category: "loss",
         source: "brazil-north",
         target: "paris-core",
+        protocol: "icmp",
       },
       summary: "packet loss on br→paris",
     }),
@@ -36,6 +37,7 @@ describe("filterAlerts", () => {
         category: "latency",
         source: "tokyo-edge",
         target: "paris-core",
+        protocol: "tcp",
       },
       summary: "latency regression",
     }),
@@ -89,6 +91,21 @@ describe("filterAlerts", () => {
       target: "paris",
     };
     expect(filterAlerts(alerts, f).map((a) => a.fingerprint)).toEqual(["b"]);
+  });
+
+  it("protocol filter keeps matching rows", () => {
+    const f = { ...defaultAlertFilter(), protocol: "icmp" as const };
+    expect(filterAlerts(alerts, f).map((a) => a.fingerprint)).toEqual(["a"]);
+  });
+
+  it("protocol filter excludes rows without a protocol label", () => {
+    const f = { ...defaultAlertFilter(), protocol: "tcp" as const };
+    expect(filterAlerts(alerts, f).map((a) => a.fingerprint)).toEqual(["b"]);
+  });
+
+  it("protocol filter respects 'all' (no-op)", () => {
+    const f = { ...defaultAlertFilter(), protocol: "all" as const };
+    expect(filterAlerts(alerts, f).map((a) => a.fingerprint)).toEqual(["a", "b", "c"]);
   });
 });
 
