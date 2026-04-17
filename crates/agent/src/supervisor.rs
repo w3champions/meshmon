@@ -562,7 +562,6 @@ async fn run(
                 }
                 let now_wall = SystemTime::now();
                 let window_end = now_wall;
-                let window_start = now_wall - Duration::from_secs(60);
 
                 // Read per-protocol health from last_state (non-blocking; skip on contention).
                 let (icmp_h, tcp_h, udp_h) = {
@@ -586,8 +585,19 @@ async fn run(
                     // without percentiles, so we reach into the inner mutex here.
                     // try_lock: if the eval tick is currently running, skip this
                     // protocol for this tick.
-                    let summary = match stats[idx].try_lock() {
-                        Ok(mut g) => g.summary_with_percentiles(),
+                    //
+                    // Capture the effective window *from the stats instance*
+                    // before computing the summary: primary- vs diversity-mode
+                    // RollingStats uses different window sizes (`primary_window_sec`
+                    // vs `diversity_window_sec`), so we must derive
+                    // `window_start` per-protocol rather than assume a fixed
+                    // 60 s. The service computes rates against this window,
+                    // so a mismatch silently mis-reports probe rates.
+                    let (summary, window_start) = match stats[idx].try_lock() {
+                        Ok(mut g) => {
+                            let window = g.window();
+                            (g.summary_with_percentiles(), now_wall - window)
+                        }
                         Err(_) => {
                             tracing::trace!(
                                 target_id = %target.id,
@@ -1868,6 +1878,98 @@ mod tests {
             got.iter().all(|m| m.target_id == "metrics-tick-test"),
             "all messages should carry our target_id",
         );
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn path_metrics_window_reflects_stats_window() {
+        // Regression: the metrics tick previously hard-coded a 60 s window
+        // (`window_start = now_wall - Duration::from_secs(60)`) regardless
+        // of the underlying RollingStats window. With the tight-hysteresis
+        // config (`primary_sec: 300`, `diversity_sec: 900`), every protocol
+        // starts on the 900 s diversity window, so the emitted
+        // PathMetrics.window_(start|end) pair must span ~900 s — the
+        // service computes rates against this span and a 60 s mis-label
+        // silently inflates reported rates 15x.
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, mut metrics_rx) =
+            tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+
+        let handle = spawn(
+            test_target("window-label-test"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+            metrics_tx,
+        );
+
+        // Seed every protocol so the state machine classifies all three
+        // on the first eval tick — without this, metrics_protocols filters
+        // them out and the test passes vacuously with zero observed msgs.
+        for _ in 0..5 {
+            for proto in [Protocol::Icmp, Protocol::Tcp, Protocol::Udp] {
+                handle
+                    .observation_tx
+                    .send(ProbeObservation {
+                        protocol: proto,
+                        target_id: "window-label-test".to_string(),
+                        outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+                        hops: None,
+                        observed_at: tokio::time::Instant::now(),
+                    })
+                    .await
+                    .expect("send");
+            }
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Pass the first 10 s eval tick so last_state is populated.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Pass the 60 s metrics tick so supervisor emits PathMetricsMsg.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let mut got = Vec::new();
+        while let Ok(msg) = metrics_rx.try_recv() {
+            got.push(msg);
+        }
+        assert!(
+            !got.is_empty(),
+            "expected >=1 PathMetricsMsg after eval+metrics tick",
+        );
+
+        // For every emitted message, the span window_end - window_start must
+        // match the effective RollingStats window for that protocol. With
+        // the tight-hysteresis config each protocol uses one of:
+        //   - primary window (300 s) if elected primary by the eval tick
+        //   - diversity window (900 s) otherwise
+        // Either is acceptable; what must never happen is the old 60 s
+        // hard-coded span.
+        for msg in &got {
+            let span = msg
+                .window_end
+                .duration_since(msg.window_start)
+                .expect("window_end >= window_start");
+            let secs = span.as_secs();
+            assert!(
+                secs == 300 || secs == 900,
+                "expected window span to be 300 s (primary) or 900 s (diversity), got {secs} s for proto={:?}",
+                msg.protocol,
+            );
+        }
 
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
