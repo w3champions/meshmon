@@ -17,7 +17,7 @@ use std::time::Duration;
 use meshmon_protocol::{Protocol, Target};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use surge_ping::{Client, Config, PingIdentifier, PingSequence, SurgeError};
+use surge_ping::{Client, Config, PingIdentifier, PingSequence, SurgeError, ICMP};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -31,7 +31,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Spawn an ICMP pinger for a single target. Returns a `JoinHandle<()>`
 /// matching `tcp::spawn`'s shape.
-pub async fn spawn(
+pub fn spawn(
     target: Target,
     rate_rx: watch::Receiver<ProbeRate>,
     obs_tx: mpsc::Sender<ProbeObservation>,
@@ -44,13 +44,22 @@ pub async fn spawn(
             return tokio::spawn(async {});
         }
     };
+    // `Config::default()` hardcodes `ICMP::V4`, so select the right
+    // socket family based on the target's IP. Without this an IPv6
+    // target would bind an ICMPv4 socket and every probe would surface
+    // as `ProbeOutcome::Error` on send — meshmon is dual-stack (agents
+    // bind `[::]`, targets can be v4 or v6), so this is a live path.
+    let config = match ip {
+        IpAddr::V4(_) => Config::default(),
+        IpAddr::V6(_) => Config::builder().kind(ICMP::V6).build(),
+    };
     // Each task builds its own `Client`. The client owns a raw ICMP
     // socket + a background dispatcher task; at 50 targets this means
     // 50 raw sockets + 50 dispatchers, which matches the tokio-task
     // budget in spec 02. Sharing a single client across targets is a
     // future optimization (mirror the `UdpProberPool` pattern) but
     // out of scope for T14.
-    let client = match Client::new(&Config::default()) {
+    let client = match Client::new(&config) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(target_id = %target.id, error = %e, "icmp client bind failed");
@@ -149,7 +158,7 @@ mod tests {
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(10.0));
         let (obs_tx, mut obs_rx) = mpsc::channel::<ProbeObservation>(32);
 
-        let handle = spawn(test_target("loopback"), rate_rx, obs_tx, cancel.clone()).await;
+        let handle = spawn(test_target("loopback"), rate_rx, obs_tx, cancel.clone());
 
         // Wait for the first observation, or fail after 3 s.
         let obs = tokio::time::timeout(Duration::from_secs(3), obs_rx.recv())
@@ -180,7 +189,7 @@ mod tests {
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(5.0));
         let (obs_tx, mut obs_rx) = mpsc::channel::<ProbeObservation>(32);
 
-        let handle = spawn(target, rate_rx, obs_tx, cancel.clone()).await;
+        let handle = spawn(target, rate_rx, obs_tx, cancel.clone());
 
         let obs = tokio::time::timeout(Duration::from_secs(5), obs_rx.recv())
             .await
@@ -208,7 +217,7 @@ mod tests {
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(0.0)); // idle rate
         let (obs_tx, _obs_rx) = mpsc::channel::<ProbeObservation>(32);
 
-        let handle = spawn(test_target("cancel"), rate_rx, obs_tx, cancel.clone()).await;
+        let handle = spawn(test_target("cancel"), rate_rx, obs_tx, cancel.clone());
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
