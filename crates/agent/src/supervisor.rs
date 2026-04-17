@@ -293,11 +293,23 @@ async fn run(
                     now,
                 );
 
-                // Log protocol transitions. Include the triggering FastSummary's
-                // failure_rate + sample_count per spec 02: "Every state change
-                // is logged at INFO with target_id, the before/after state, and
-                // the triggering FastSummary (sample_count, successful,
-                // failure_rate)."
+                // Resolve a `FastSummary` for a given protocol. Hoisted out of
+                // the primary-transition arm so the per-protocol, path, and
+                // primary logs can all include the triggering summary per
+                // spec 02: "Every state change is logged at INFO with
+                // target_id, the before/after state, and the triggering
+                // FastSummary (sample_count, successful, failure_rate)."
+                let summary_for = |p: Option<Protocol>| -> Option<&FastSummary> {
+                    p.and_then(|p| match p {
+                        Protocol::Icmp => Some(&icmp_summary),
+                        Protocol::Tcp => Some(&tcp_summary),
+                        Protocol::Udp => Some(&udp_summary),
+                        Protocol::Unspecified => None,
+                    })
+                };
+
+                // Log protocol transitions, including failure_rate, sample_count,
+                // and successful per spec 02.
                 for pt in &change.protocol_transitions {
                     let summary = match pt.protocol {
                         Protocol::Icmp => &icmp_summary,
@@ -312,44 +324,43 @@ async fn run(
                         to = ?pt.to,
                         failure_rate = summary.failure_rate,
                         sample_count = summary.sample_count,
+                        successful = summary.successful,
                         "per-protocol health changed",
                     );
                 }
-                // Log path transition, including the current primary so an
-                // operator can correlate degraded/unreachable with which
-                // protocol drove the decision.
+                // Log path transition, including the current primary and its
+                // triggering FastSummary so an operator can correlate
+                // degraded/unreachable with which protocol drove the decision
+                // and the signal strength behind it.
                 if let Some((from, to)) = change.path_transition {
                     tracing::info!(
                         target_id = %target.id,
                         from = ?from,
                         to = ?to,
                         primary = ?change.primary,
+                        primary_failure_rate = ?summary_for(change.primary).map(|s| s.failure_rate),
+                        primary_sample_count = ?summary_for(change.primary).map(|s| s.sample_count),
+                        primary_successful = ?summary_for(change.primary).map(|s| s.successful),
                         "path health changed",
                     );
                 }
                 // Log primary transition. Per spec 02, include the
                 // triggering FastSummary context (failure_rate +
-                // sample_count) for BOTH the old and new primary so an
-                // operator can correlate the swing with the signals that
-                // drove it. `None` fields surface when the primary was
+                // sample_count + successful) for BOTH the old and new primary
+                // so an operator can correlate the swing with the signals
+                // that drove it. `None` fields surface when the primary was
                 // or is becoming unset.
                 if let Some((from, to)) = change.primary_transition {
-                    let summary_for = |p: Option<Protocol>| -> Option<&FastSummary> {
-                        p.and_then(|p| match p {
-                            Protocol::Icmp => Some(&icmp_summary),
-                            Protocol::Tcp => Some(&tcp_summary),
-                            Protocol::Udp => Some(&udp_summary),
-                            Protocol::Unspecified => None,
-                        })
-                    };
                     tracing::info!(
                         target_id = %target.id,
                         from = ?from,
                         to = ?to,
                         from_failure_rate = ?summary_for(from).map(|s| s.failure_rate),
                         from_sample_count = ?summary_for(from).map(|s| s.sample_count),
+                        from_successful = ?summary_for(from).map(|s| s.successful),
                         to_failure_rate = ?summary_for(to).map(|s| s.failure_rate),
                         to_sample_count = ?summary_for(to).map(|s| s.sample_count),
+                        to_successful = ?summary_for(to).map(|s| s.successful),
                         "primary protocol changed",
                     );
                 }
@@ -395,6 +406,13 @@ async fn run(
                     break;
                 }
                 tracing::info!(target_id = %target.id, "received config update");
+                // Force the next eval tick to fire immediately so new
+                // thresholds / rate rows apply without a 10s lag. Without
+                // this an operator-visible config change (e.g. tightening
+                // unhealthy_trigger_pct) could take up to the remainder of
+                // the current interval to take effect. `reset_immediately`
+                // (tokio 1.29+) schedules the next tick now.
+                eval_interval.reset_immediately();
             }
         }
     }
