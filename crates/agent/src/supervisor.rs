@@ -716,8 +716,66 @@ mod tests {
         result.unwrap().expect("supervisor task panicked");
     }
 
-    use crate::probing::ProbeOutcome;
+    use crate::probing::{HopObservation, ProbeOutcome};
+    use crate::route::RouteSnapshot;
     use crate::stats::FastSummary;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// Construct a v4 `IpAddr` from four octets.
+    fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// Synthesise a trippy-shaped `ProbeObservation` with hops attached.
+    ///
+    /// Protocol is `Icmp` because the supervisor's first-eval seeding
+    /// elects ICMP as primary, and the route tracker only accepts hops
+    /// whose observation protocol matches its current accumulation
+    /// protocol. TCP/UDP trippy rounds would be filtered out by
+    /// `feed_tracker`'s protocol-match guard.
+    fn trippy_obs(target: &str, hops: Vec<HopObservation>) -> ProbeObservation {
+        ProbeObservation {
+            protocol: Protocol::Icmp,
+            target_id: target.to_string(),
+            outcome: ProbeOutcome::Success { rtt_micros: 10_000 },
+            hops: Some(hops),
+            observed_at: tokio::time::Instant::now(),
+        }
+    }
+
+    /// Build one `HopObservation` with the given 1-indexed position, IP,
+    /// and RTT (microseconds).
+    fn hop(pos: u8, ip: IpAddr, rtt: u32) -> HopObservation {
+        HopObservation {
+            position: pos,
+            ip: Some(ip),
+            rtt_micros: Some(rtt),
+        }
+    }
+
+    /// Yield the executor enough times for the supervisor task to drain
+    /// any pending mpsc observations and process any elapsed ticks. Used
+    /// by the paused-clock integration tests after
+    /// `tokio::time::advance`.
+    async fn yield_many(times: usize) {
+        for _ in 0..times {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Non-blocking pull of a single snapshot. Using `try_recv` avoids
+    /// interacting with tokio's paused-clock timeout, which under
+    /// `start_paused = true` can auto-advance in ways that mask a
+    /// "snapshot never sent" bug as a late send. Callers yield the
+    /// scheduler first to ensure the supervisor has had a chance to
+    /// run.
+    fn try_drain_one(rx: &mut mpsc::Receiver<RouteSnapshot>) -> Option<RouteSnapshot> {
+        match rx.try_recv() {
+            Ok(snap) => Some(snap),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+        }
+    }
 
     fn icmp_success(target: &str, rtt: u32) -> ProbeObservation {
         ProbeObservation {
@@ -1170,6 +1228,155 @@ mod tests {
 
         // Keep the config sender alive until assertions are done.
         drop(config_tx);
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 8: route snapshot integration tests — drive the supervisor end-to-end
+    // via the paused tokio clock.
+    // ---------------------------------------------------------------------------
+
+    /// First snapshot after startup must be emitted unconditionally — no
+    /// `last_reported` exists yet, so the diff-gate in the supervisor's
+    /// 60 s tick falls through to the always-emit branch.
+    ///
+    /// Flow:
+    /// 1. Inject 3 ICMP success observations (without hops) so the state
+    ///    machine's `select_primary` MIN_TRANSITION_SAMPLES=3 floor is
+    ///    satisfied on the first 10 s eval tick.
+    /// 2. Advance 11 s → eval tick fires → seeds tracker with ICMP.
+    /// 3. Inject one trippy ICMP round with two hops. `feed_tracker`
+    ///    routes these into the tracker because obs protocol matches
+    ///    the seeded primary.
+    /// 4. Advance past the 60 s snapshot tick. The tracker builds a
+    ///    snapshot and the supervisor emits it on the first-ever path.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_emits_first_snapshot_unconditionally() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
+
+        let handle = spawn(
+            test_target("first-snap"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Pre-seed ICMP stats so `select_primary` clears its 3-sample floor
+        // on the first eval tick and elects ICMP as primary. Without hops —
+        // `feed_tracker` drops these anyway because the tracker has no
+        // protocol assigned yet, and we want the tracker's hop buffer
+        // empty until AFTER seeding so the assertion below (`hops.len()
+        // == 2`) is unambiguous.
+        for _ in 0..3 {
+            handle
+                .observation_tx
+                .send(icmp_success("first-snap", 1_000))
+                .await
+                .expect("seed icmp sample");
+        }
+        yield_many(10).await;
+
+        // Seed the tracker via the eval tick → first-eval primary adoption.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        yield_many(10).await;
+
+        // Inject one trippy round with two hops. Protocol is ICMP to match
+        // the seeded primary.
+        handle
+            .observation_tx
+            .send(trippy_obs(
+                "first-snap",
+                vec![
+                    hop(1, ipv4(10, 0, 0, 1), 1_000),
+                    hop(2, ipv4(10, 0, 0, 2), 2_000),
+                ],
+            ))
+            .await
+            .expect("send trippy observation");
+        yield_many(10).await;
+
+        // Advance past the 60 s snapshot tick. The first snapshot tick
+        // fires at supervisor start (tracker empty → no emit); the next
+        // fires 60 s after that. We've already burned 11 s of that
+        // budget, so 60 more seconds crosses the boundary.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        yield_many(20).await;
+
+        let snap = try_drain_one(&mut snapshot_rx).expect("first-ever snapshot must emit");
+        assert_eq!(snap.protocol, Protocol::Icmp);
+        assert_eq!(snap.hops.len(), 2);
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    /// A steady route — identical trippy rounds over multiple snapshot
+    /// ticks — must produce exactly ONE snapshot (the first). Subsequent
+    /// builds see no change from `last_reported`, so `diff_against`
+    /// returns `None` and the supervisor skips emit.
+    ///
+    /// Flow:
+    /// 1. Advance 11 s to seed the tracker with ICMP.
+    /// 2. Loop 12 times: send an identical trippy round and advance 10 s.
+    ///    This covers ~120 s of simulated time and spans at least two
+    ///    60 s snapshot ticks.
+    /// 3. Assert exactly one snapshot was delivered (the first).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_emits_one_snapshot_for_steady_route() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
+
+        let handle = spawn(
+            test_target("steady"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Seed the tracker with ICMP primary via the first eval tick.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        yield_many(10).await;
+
+        // Inject identical trippy rounds over ~120 s, crossing at least
+        // two 60 s snapshot ticks.
+        for _ in 0..12 {
+            handle
+                .observation_tx
+                .send(trippy_obs("steady", vec![hop(1, ipv4(10, 0, 0, 1), 1_000)]))
+                .await
+                .expect("send");
+            tokio::time::advance(Duration::from_secs(10)).await;
+            yield_many(5).await;
+        }
+
+        // The first snapshot tick must have emitted the baseline snapshot.
+        let first = try_drain_one(&mut snapshot_rx).expect("first snapshot must emit");
+        assert_eq!(first.hops.len(), 1);
+        assert_eq!(first.protocol, Protocol::Icmp);
+
+        // No further snapshots: subsequent 60 s ticks see an identical
+        // canonical snapshot → `diff_against` returns `None`.
+        yield_many(20).await;
+        let second = try_drain_one(&mut snapshot_rx);
+        assert!(
+            second.is_none(),
+            "steady route must not emit a second snapshot, got {second:?}",
+        );
+
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
     }
