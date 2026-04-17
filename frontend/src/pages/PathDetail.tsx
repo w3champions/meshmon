@@ -1,4 +1,246 @@
-// Temporary stub — replaced in the next commit with the full PathDetail page.
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { formatDistanceToNowStrict } from "date-fns";
+import { useMemo, useState } from "react";
+import { usePathOverview } from "@/api/hooks/path-overview";
+import type { components } from "@/api/schema.gen";
+import { AgentCard } from "@/components/AgentCard";
+import { GrafanaPanel } from "@/components/GrafanaPanel";
+import { HopDetailCard } from "@/components/HopDetailCard";
+import { ProtocolToggle } from "@/components/ProtocolToggle";
+import { RouteHistoryTable } from "@/components/RouteHistoryTable";
+import { RouteTopology } from "@/components/RouteTopology";
+import { Sparkline } from "@/components/Sparkline";
+import { TimeRangePicker } from "@/components/TimeRangePicker";
+import { Skeleton } from "@/components/ui/skeleton";
+import { MESHMON_PATH_DASHBOARD, PANEL_LOSS, PANEL_RTT, PANEL_STDDEV } from "@/lib/grafana-panels";
+import { buildReportPath } from "@/lib/report-link";
+import { grafanaTimes, type TimeRangeKey } from "@/lib/time-range";
+
+type HopJson = components["schemas"]["HopJson"];
+type Protocol = "icmp" | "udp" | "tcp";
+
+// Anything older than this marks the snapshot as stale — matches the threshold
+// the overview API uses to compute `stale` for its own badge, kept here so the
+// banner renders without waiting for a second round-trip.
+const STALE_SNAPSHOT_MS = 30 * 60 * 1000;
+
+/**
+ * Convert the route-search params bag into the `{ range, from, to }` shape
+ * consumed by grafanaTimes and the path-overview hook. Narrows `protocol`.
+ */
+interface PathDetailSearch {
+  range: TimeRangeKey;
+  from?: string;
+  to?: string;
+  protocol?: Protocol;
+}
+
 export default function PathDetail() {
-  return <p className="p-6 text-sm text-muted-foreground">PathDetail stub.</p>;
+  // `strict: false` makes these hooks pull from the closest match in the tree
+  // instead of being tied to a specific route id. The app router mounts this
+  // page under the `auth-guard` id, but component tests wire it directly
+  // under a root route — so the runtime id differs. We re-assert the shape
+  // with `PathDetailSearch` below; Zod has already validated the search at
+  // the router boundary in production.
+  const params = useParams({ strict: false }) as { source: string; target: string };
+  const { source, target } = params;
+  const search = useSearch({ strict: false }) as PathDetailSearch;
+  const { range, from, to, protocol } = search;
+  const navigate = useNavigate();
+
+  const overview = usePathOverview({
+    source,
+    target,
+    range,
+    customFrom: from,
+    customTo: to,
+    protocol,
+  });
+  const [selectedHop, setSelectedHop] = useState<HopJson | null>(null);
+
+  // Auto-pick protocol rule — icmp > udp > tcp, matching the server's choice
+  // for the `(auto)` badge next to the toggle.
+  const autoProtocol = useMemo<Protocol>(() => {
+    const latest = overview.data?.latest_by_protocol;
+    if (!latest) return "icmp";
+    for (const p of ["icmp", "udp", "tcp"] as const) {
+      if (latest[p]) return p;
+    }
+    return "icmp";
+  }, [overview.data]);
+
+  if (overview.isLoading) {
+    return <Skeleton className="h-64 w-full" data-testid="path-detail-skeleton" />;
+  }
+  if (overview.isError || !overview.data) {
+    return (
+      <p role="alert" className="p-6 text-sm text-destructive">
+        Failed to load path overview
+      </p>
+    );
+  }
+
+  const data = overview.data;
+  const effectiveProtocol = (data.primary_protocol ?? "icmp") as Protocol;
+  const latest = data.latest_by_protocol[effectiveProtocol];
+  const stale = latest ? Date.now() - Date.parse(latest.observed_at) > STALE_SNAPSHOT_MS : false;
+  const gt = grafanaTimes(
+    range,
+    from && to ? { from: new Date(from), to: new Date(to) } : undefined,
+  );
+  const vars = { source, target, protocol: effectiveProtocol };
+
+  const reportHref = buildReportPath({
+    source_ip: data.source.ip,
+    target_ip: data.target.ip,
+    from: data.window.from,
+    to: data.window.to,
+    protocol: effectiveProtocol,
+  });
+
+  return (
+    <div className="p-6 flex flex-col gap-6">
+      <header className="grid gap-3 md:grid-cols-2">
+        <AgentCard agent={data.source} compact />
+        <AgentCard agent={data.target} compact />
+      </header>
+
+      <section className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-sm text-muted-foreground flex flex-wrap items-center gap-3">
+          <span>
+            Primary protocol: <span className="uppercase font-semibold">{effectiveProtocol}</span>
+          </span>
+          {latest && (
+            <span title={latest.observed_at}>
+              last observed{" "}
+              {formatDistanceToNowStrict(new Date(latest.observed_at), { addSuffix: true })}
+            </span>
+          )}
+          <span className="inline-flex items-center gap-2">
+            <span>RTT</span>
+            <Sparkline
+              samples={(data.metrics?.rtt_series ?? []) as Array<[number, number]>}
+              ariaLabel="RTT trend"
+            />
+            <span className="font-semibold">
+              {data.metrics?.rtt_current != null
+                ? `${data.metrics.rtt_current.toFixed(1)} ms`
+                : "n/a"}
+            </span>
+          </span>
+          <span className="inline-flex items-center gap-2">
+            <span>Loss</span>
+            <Sparkline
+              samples={(data.metrics?.loss_series ?? []) as Array<[number, number]>}
+              ariaLabel="Loss trend"
+            />
+            <span className="font-semibold">
+              {data.metrics?.loss_current != null
+                ? `${(data.metrics.loss_current * 100).toFixed(2)}%`
+                : "n/a"}
+            </span>
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <ProtocolToggle
+            value={effectiveProtocol}
+            autoValue={autoProtocol}
+            onChange={(p) =>
+              navigate({
+                to: "/paths/$source/$target",
+                params: { source, target },
+                search: { range, from, to, protocol: p },
+              })
+            }
+          />
+          <TimeRangePicker
+            value={range}
+            onChange={(next) =>
+              navigate({
+                to: "/paths/$source/$target",
+                params: { source, target },
+                search: { range: next.range, from: next.from, to: next.to, protocol },
+              })
+            }
+          />
+        </div>
+      </section>
+
+      {stale && latest && (
+        <p className="rounded border border-yellow-500/50 bg-yellow-500/10 p-2 text-sm">
+          Latest snapshot is {formatDistanceToNowStrict(new Date(latest.observed_at))} old — data
+          may be stale.
+        </p>
+      )}
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <GrafanaPanel
+          dashboard={MESHMON_PATH_DASHBOARD}
+          panelId={PANEL_RTT}
+          vars={vars}
+          from={gt.from}
+          to={gt.to}
+          title="RTT"
+        />
+        <GrafanaPanel
+          dashboard={MESHMON_PATH_DASHBOARD}
+          panelId={PANEL_LOSS}
+          vars={vars}
+          from={gt.from}
+          to={gt.to}
+          title="Loss"
+        />
+        <GrafanaPanel
+          dashboard={MESHMON_PATH_DASHBOARD}
+          panelId={PANEL_STDDEV}
+          vars={vars}
+          from={gt.from}
+          to={gt.to}
+          title="Stddev"
+        />
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-[1fr_auto]">
+        <div>
+          <h2 className="mb-2 text-lg font-semibold">Current route</h2>
+          <RouteTopology
+            hops={latest?.hops ?? []}
+            onNodeClick={setSelectedHop}
+            ariaLabel="Current route topology"
+          />
+        </div>
+        {selectedHop && <HopDetailCard hop={selectedHop} onClose={() => setSelectedHop(null)} />}
+      </section>
+
+      <section>
+        <h2 className="mb-2 text-lg font-semibold">Route change history</h2>
+        <RouteHistoryTable
+          source={source}
+          target={target}
+          snapshots={data.recent_snapshots}
+          onCompare={({ a, b }) =>
+            navigate({
+              to: "/paths/$source/$target/routes/compare",
+              params: { source, target },
+              search: { a, b },
+            })
+          }
+        />
+      </section>
+
+      <div>
+        {/*
+          `buildReportPath` returns a `/reports/path?...` href. We use a plain
+          `<a>` tag rather than TanStack's typed `<Link to=... search=...>`
+          because `/reports/path` is a T20 placeholder with no search schema
+          yet — threading a typed object through would pin this page to a
+          shape that's about to change. The report URL is fully self-contained
+          (no per-session state) so a document-level navigation is fine.
+        */}
+        <a href={reportHref} className="inline-block text-sm underline underline-offset-2">
+          Generate report
+        </a>
+      </div>
+    </div>
+  );
 }
