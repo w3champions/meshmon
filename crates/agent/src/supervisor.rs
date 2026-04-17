@@ -337,16 +337,23 @@ async fn run(
                     );
                 }
 
-                // Per-tick publish. watch dedupes on PartialEq so no-change sends
-                // are cheap. Err only when every prober receiver is dropped
-                // (shutdown / prober task exit) — benign, no log needed.
-                let _ = icmp_rate_tx.send(ProbeRate(change.rates.icmp_pps));
-                let _ = tcp_rate_tx.send(ProbeRate(change.rates.tcp_pps));
-                let _ = udp_rate_tx.send(ProbeRate(change.rates.udp_pps));
-                let _ = trippy_rate_tx.send(TrippyRate {
-                    protocol: change.trippy_protocol,
-                    pps: change.trippy_pps,
-                });
+                // Per-tick publish. `watch::Sender::send` does NOT dedupe —
+                // it bumps the version and wakes every receiver. The prober
+                // loops `continue` on any `changed()` wakeup, which restarts
+                // their interval sleep from scratch; left unguarded, a 10s
+                // eval tick starves any prober whose interval is > 10s
+                // (e.g. 0.05 pps / 20s). Use `send_if_modified` so a no-op
+                // publish neither bumps the version nor wakes receivers.
+                publish_if_changed(&icmp_rate_tx, ProbeRate(change.rates.icmp_pps));
+                publish_if_changed(&tcp_rate_tx, ProbeRate(change.rates.tcp_pps));
+                publish_if_changed(&udp_rate_tx, ProbeRate(change.rates.udp_pps));
+                publish_if_changed(
+                    &trippy_rate_tx,
+                    TrippyRate {
+                        protocol: change.trippy_protocol,
+                        pps: change.trippy_pps,
+                    },
+                );
 
                 // Resize windows: primary gets the primary window, others get diversity.
                 resize_windows(&stats, change.primary, &config_snapshot).await;
@@ -405,6 +412,22 @@ async fn resize_windows(stats: &StatsArray, primary: Option<Protocol>, config: &
             slot.set_window(target_window);
         }
     }
+}
+
+/// Publish `new` over a rate `watch` channel only when it differs from the
+/// current value. Prober loops restart their sleep on every `changed()`
+/// wakeup, so a no-op per-tick publish would indefinitely starve probers
+/// whose interval exceeds the 10s eval tick. `send_if_modified` both
+/// dedupes and skips the version bump, so receivers observe no change.
+fn publish_if_changed<T: PartialEq>(tx: &watch::Sender<T>, new: T) {
+    tx.send_if_modified(|cur| {
+        if *cur == new {
+            false
+        } else {
+            *cur = new;
+            true
+        }
+    });
 }
 
 /// Map an inbound observation onto the matching `RollingStats`, applying
@@ -962,5 +985,59 @@ mod tests {
         drop(config_tx);
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // C1 regression: per-tick publishes must dedupe so prober sleeps don't
+    // reset on no-op rate ticks.
+    // ---------------------------------------------------------------------------
+
+    /// Assertion pair pinning the C1 defect: naive `send` always wakes
+    /// receivers on identical values; `publish_if_changed` does not.
+    ///
+    /// A bare `watch::Sender::send(v)` where `*receiver.borrow() == v`
+    /// still bumps the channel version, so `changed()` resolves
+    /// immediately. The prober loops `continue` on any `changed()`
+    /// wakeup, which restarts their interval sleep — left unguarded
+    /// this starved any prober whose interval exceeded the 10s eval
+    /// tick. `publish_if_changed` uses `send_if_modified` to skip the
+    /// version bump when the value is unchanged.
+    #[tokio::test]
+    async fn publish_if_changed_dedupes_identical_rate_updates() {
+        // Control: plain `send` does bump version on identical values.
+        let (tx_send, mut rx_send) = watch::channel(ProbeRate(0.05));
+        rx_send.mark_unchanged();
+        tx_send.send(ProbeRate(0.05)).expect("receiver alive");
+        let changed_after_send = tokio::time::timeout(Duration::from_millis(50), rx_send.changed())
+            .await
+            .expect("watch::send bumps version even on identical values");
+        assert!(
+            changed_after_send.is_ok(),
+            "baseline: plain watch::send must wake receivers on identical values",
+        );
+
+        // Fix under test: `publish_if_changed` must NOT wake receivers
+        // when the new value equals the current value.
+        let (tx_guarded, mut rx_guarded) = watch::channel(ProbeRate(0.05));
+        rx_guarded.mark_unchanged();
+        publish_if_changed(&tx_guarded, ProbeRate(0.05));
+        let changed_after_guarded =
+            tokio::time::timeout(Duration::from_millis(50), rx_guarded.changed()).await;
+        assert!(
+            changed_after_guarded.is_err(),
+            "publish_if_changed must not wake receivers on identical values",
+        );
+
+        // Sanity: a genuinely different value still wakes receivers.
+        publish_if_changed(&tx_guarded, ProbeRate(0.20));
+        let changed_on_real_update =
+            tokio::time::timeout(Duration::from_millis(50), rx_guarded.changed())
+                .await
+                .expect("publish_if_changed must still propagate real updates");
+        assert!(
+            changed_on_real_update.is_ok(),
+            "publish_if_changed must wake receivers on differing values",
+        );
+        assert_eq!(rx_guarded.borrow().0, 0.20);
     }
 }
