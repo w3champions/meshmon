@@ -76,3 +76,6 @@ tokio-stream = "0.1"
 tower = { workspace = true }  # for `ServiceExt::oneshot` in handler tests
 uuid = { workspace = true }
 wiremock = { workspace = true }
+
+[build-dependencies]
+memory-serve = { workspace = true }
