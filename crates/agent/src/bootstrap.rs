@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use rand::Rng;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
+use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -66,6 +67,15 @@ pub struct AgentRuntime<A: ServiceApi> {
     /// Emitter task handle. Awaited on `shutdown()` with a 10 s outer timeout.
     /// No `_` prefix — this handle is actively joined, not just held.
     emitter_handle: tokio::task::JoinHandle<()>,
+    /// Notify fired by `AgentCommand::RefreshConfig` handler, consumed by
+    /// `run_refresh_loop` alongside the 5-minute interval. Default-constructed
+    /// in `bootstrap`; `attach_tunnel` replaces it with the one shared with
+    /// the `RefreshConfigImpl` spawned inside the tunnel task.
+    refresh_trigger: Arc<Notify>,
+    /// Long-lived reverse-tunnel task handle. Default: a `std::future::pending`
+    /// task that never resolves (harmless placeholder for tests). Production
+    /// `main.rs` calls `attach_tunnel` right after `bootstrap`.
+    tunnel_handle: JoinHandle<()>,
 }
 
 impl<A: ServiceApi> AgentRuntime<A> {
@@ -284,11 +294,25 @@ impl<A: ServiceApi> AgentRuntime<A> {
             route_snapshot_tx,
             path_metrics_tx,
             emitter_handle,
+            refresh_trigger: Arc::new(Notify::new()),
+            tunnel_handle: tokio::spawn(std::future::pending::<()>()),
         })
     }
 
+    /// Hand in the reverse-tunnel refresh trigger + task handle after
+    /// `bootstrap` returns. Main.rs spawns the tunnel task against the
+    /// concrete `GrpcServiceApi` (test mocks don't expose the raw channel,
+    /// so this wiring stays out of `bootstrap`).
+    pub fn attach_tunnel(&mut self, refresh_trigger: Arc<Notify>, tunnel_handle: JoinHandle<()>) {
+        // Drop the default placeholder task cleanly.
+        let old = std::mem::replace(&mut self.tunnel_handle, tunnel_handle);
+        old.abort();
+        self.refresh_trigger = refresh_trigger;
+    }
+
     /// Run the periodic config/target refresh loop. Ticks every 5 minutes.
-    /// Returns when the cancellation token fires.
+    /// Also wakes immediately on a `RefreshConfig` command signal from the
+    /// reverse tunnel. Returns when the cancellation token fires.
     pub async fn run_refresh_loop(&mut self) {
         let mut interval = tokio::time::interval(Duration::from_secs(300));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -303,6 +327,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
                     break;
                 }
                 _ = interval.tick() => {
+                    self.refresh_once().await;
+                }
+                _ = self.refresh_trigger.notified() => {
+                    tracing::info!("refresh triggered by AgentCommand::RefreshConfig");
                     self.refresh_once().await;
                 }
             }
@@ -505,6 +533,18 @@ impl<A: ServiceApi> AgentRuntime<A> {
             Ok(Err(e)) => tracing::warn!(error = %e, "emitter panicked during shutdown"),
             Err(_) => {
                 tracing::warn!("emitter did not stop within 10 s during shutdown — aborting");
+                abort_handle.abort();
+            }
+        }
+
+        // Reverse-tunnel task: outlives supervisors + emitter. Cancel fires
+        // automatically via the shared token; await its exit up to 10s.
+        let abort_handle = self.tunnel_handle.abort_handle();
+        match tokio::time::timeout(Duration::from_secs(10), self.tunnel_handle).await {
+            Ok(Ok(())) => tracing::info!("tunnel shut down cleanly"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "tunnel panicked during shutdown"),
+            Err(_) => {
+                tracing::warn!("tunnel did not stop within 10 s during shutdown — aborting");
                 abort_handle.abort();
             }
         }
