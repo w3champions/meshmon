@@ -110,7 +110,17 @@ async fn run(
         // be mis-attributed to a later probe.
         let sequence = PingSequence(rng.random::<u16>());
         let send_time = Instant::now();
-        let outcome = match pinger.ping(sequence, &payload).await {
+        // Race the in-flight ping against the cancel token. Without this,
+        // a shutdown arriving during a ping could wait the full 2s
+        // `PROBE_TIMEOUT` before observing the cancel. `biased;` prefers
+        // the cancel branch when both are ready for deterministic
+        // shutdown behaviour.
+        let ping_result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            r = pinger.ping(sequence, &payload) => r,
+        };
+        let outcome = match ping_result {
             Ok((_pkt, rtt)) => ProbeOutcome::Success {
                 rtt_micros: rtt.as_micros().min(u128::from(u32::MAX)) as u32,
             },

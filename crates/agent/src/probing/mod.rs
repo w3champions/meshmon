@@ -83,6 +83,18 @@ pub struct HopObservation {
 /// A rate update is delivered via `tokio::sync::watch` to TCP and UDP
 /// probers (trippy uses the richer `TrippyRate` because it also needs to
 /// know the current primary protocol).
+///
+/// # NaN invariant
+///
+/// `PartialEq` is derived from the raw `f64`, where `NaN != NaN`. The
+/// supervisor's `publish_if_changed` uses this equality to skip no-op
+/// watch updates; if a `NaN` ever reached a rate watch channel, every
+/// subsequent tick would compare unequal and re-wake the prober even on
+/// identical inputs, defeating the dedup guard. Today `rates_for_mode`
+/// cannot produce NaN because config validation rejects non-finite
+/// values — but any future constructor must sanitize before
+/// constructing `ProbeRate`. Zero is legal (idle); negatives are
+/// treated as idle by `next_interval`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProbeRate(pub f64);
 
@@ -109,6 +121,10 @@ impl ProbeRate {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrippyRate {
     pub protocol: meshmon_protocol::Protocol,
+    /// Probes per second. Same NaN invariant as [`ProbeRate`]: the
+    /// supervisor's `publish_if_changed` dedup relies on raw `f64`
+    /// equality, so callers must not construct `TrippyRate` with a NaN
+    /// pps. Zero is legal (idle).
     pub pps: f64,
 }
 
