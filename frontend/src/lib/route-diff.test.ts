@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { components } from "@/api/schema.gen";
-import { diffRouteSnapshots } from "@/lib/route-diff";
+import { computeRouteDiff, type HopChangeKind } from "@/lib/route-diff";
 
 type HopJson = components["schemas"]["HopJson"];
 
@@ -20,48 +20,66 @@ function hop(
   };
 }
 
-describe("diffRouteSnapshots", () => {
-  test("unchanged hops yield no changes", () => {
+describe("computeRouteDiff", () => {
+  test("identical routes produce all unchanged hops", () => {
     const a = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.2", 2_000)];
-    const b = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.2", 2_000)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.added).toEqual([]);
-    expect(diff.removed).toEqual([]);
-    expect(diff.changed).toEqual([]);
-    expect(diff.unchanged.map((h) => h.position)).toEqual([1, 2]);
+    const diff = computeRouteDiff(a, a);
+    expect(diff.summary).toEqual({
+      totalHops: 2,
+      changedHops: 0,
+      addedHops: 0,
+      removedHops: 0,
+      firstChangedPosition: null,
+    });
+    expect(diff.perHop.get(1)?.kind).toBe("unchanged" satisfies HopChangeKind);
+    expect(diff.perHop.get(2)?.kind).toBe("unchanged" satisfies HopChangeKind);
   });
 
-  test("detects removed hops (present in A, missing in B)", () => {
+  test("ip change at a single hop", () => {
+    const a = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.2", 2_000)];
+    const b = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.99", 2_000)];
+    const diff = computeRouteDiff(a, b);
+    expect(diff.perHop.get(2)?.kind).toBe("ip_changed");
+    expect(diff.summary.changedHops).toBe(1);
+    expect(diff.summary.firstChangedPosition).toBe(2);
+  });
+
+  test("latency change >= 50%", () => {
+    const a = [hop(1, "10.0.0.1", 1_000)];
+    const b = [hop(1, "10.0.0.1", 1_600)];
+    expect(computeRouteDiff(a, b).perHop.get(1)?.kind).toBe("latency_changed");
+  });
+
+  test("latency change below 50% is unchanged", () => {
+    const a = [hop(1, "10.0.0.1", 1_000)];
+    const b = [hop(1, "10.0.0.1", 1_400)];
+    expect(computeRouteDiff(a, b).perHop.get(1)?.kind).toBe("unchanged");
+  });
+
+  test("ip + latency both changed", () => {
+    const a = [hop(1, "10.0.0.1", 1_000)];
+    const b = [hop(1, "10.0.0.9", 1_800)];
+    expect(computeRouteDiff(a, b).perHop.get(1)?.kind).toBe("both_changed");
+  });
+
+  test("added hop", () => {
+    const a = [hop(1, "10.0.0.1", 1_000)];
+    const b = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.2", 2_000)];
+    const diff = computeRouteDiff(a, b);
+    expect(diff.perHop.get(2)?.kind).toBe("added");
+    expect(diff.summary.addedHops).toBe(1);
+    expect(diff.summary.firstChangedPosition).toBe(2);
+  });
+
+  test("removed hop", () => {
     const a = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.2", 2_000)];
     const b = [hop(1, "10.0.0.1", 1_000)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.removed.map((h) => h.position)).toEqual([2]);
-    expect(diff.added).toEqual([]);
-    expect(diff.changed).toEqual([]);
+    const diff = computeRouteDiff(a, b);
+    expect(diff.perHop.get(2)?.kind).toBe("removed");
+    expect(diff.summary.removedHops).toBe(1);
   });
 
-  test("detects added hops (present in B, missing in A)", () => {
-    const a = [hop(1, "10.0.0.1", 1_000)];
-    const b = [hop(1, "10.0.0.1", 1_000), hop(2, "10.0.0.2", 2_000)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.added.map((h) => h.position)).toEqual([2]);
-    expect(diff.removed).toEqual([]);
-    expect(diff.changed).toEqual([]);
-  });
-
-  test("detects changed hops when dominant IP changes", () => {
-    const a = [hop(1, "10.0.0.1", 1_000)];
-    const b = [hop(1, "10.0.0.99", 1_000)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.changed).toHaveLength(1);
-    expect(diff.changed[0].position).toBe(1);
-    expect(diff.changed[0].from.observed_ips[0].ip).toBe("10.0.0.1");
-    expect(diff.changed[0].to.observed_ips[0].ip).toBe("10.0.0.99");
-    expect(diff.added).toEqual([]);
-    expect(diff.removed).toEqual([]);
-  });
-
-  test("dominant IP picks the highest frequency entry, not just the first", () => {
+  test("dominant ip follows highest frequency", () => {
     const twoIps: HopJson = {
       position: 1,
       observed_ips: [
@@ -72,56 +90,16 @@ describe("diffRouteSnapshots", () => {
       stddev_rtt_micros: 100,
       loss_pct: 0,
     };
-    const sameDominant: HopJson = {
-      position: 1,
-      observed_ips: [{ ip: "10.0.0.2", freq: 1 }],
-      avg_rtt_micros: 1_000,
-      stddev_rtt_micros: 100,
-      loss_pct: 0,
-    };
-    // Dominant IP in A is 10.0.0.2 (freq 7); B's dominant is also 10.0.0.2,
-    // so no change.
-    const diff = diffRouteSnapshots([twoIps], [sameDominant]);
-    expect(diff.changed).toEqual([]);
-    expect(diff.unchanged).toHaveLength(1);
+    const a = [twoIps];
+    const b = [{ ...twoIps, observed_ips: [{ ip: "10.0.0.1", freq: 10 }] }];
+    const diff = computeRouteDiff(a, b);
+    expect(diff.perHop.get(1)?.aDominantIp).toBe("10.0.0.2");
+    expect(diff.perHop.get(1)?.bDominantIp).toBe("10.0.0.1");
+    expect(diff.perHop.get(1)?.kind).toBe("ip_changed");
   });
 
-  test("RTT delta > 20% is treated as changed", () => {
+  test("firstChangedPosition is null for identical routes", () => {
     const a = [hop(1, "10.0.0.1", 1_000)];
-    const b = [hop(1, "10.0.0.1", 1_300)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.changed).toHaveLength(1);
-    expect(diff.changed[0].position).toBe(1);
-  });
-
-  test("RTT delta <= 20% is unchanged", () => {
-    const a = [hop(1, "10.0.0.1", 1_000)];
-    const b = [hop(1, "10.0.0.1", 1_150)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.changed).toEqual([]);
-    expect(diff.unchanged).toHaveLength(1);
-  });
-
-  test("loss_pct change > 0.05 (absolute) is changed", () => {
-    const a = [hop(1, "10.0.0.1", 1_000, 0.0)];
-    const b = [hop(1, "10.0.0.1", 1_000, 0.1)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.changed).toHaveLength(1);
-  });
-
-  test("loss_pct change <= 0.05 is unchanged", () => {
-    const a = [hop(1, "10.0.0.1", 1_000, 0.0)];
-    const b = [hop(1, "10.0.0.1", 1_000, 0.04)];
-    const diff = diffRouteSnapshots(a, b);
-    expect(diff.changed).toEqual([]);
-    expect(diff.unchanged).toHaveLength(1);
-  });
-
-  test("returns empty unchanged when both snapshots are empty", () => {
-    const diff = diffRouteSnapshots([], []);
-    expect(diff.added).toEqual([]);
-    expect(diff.removed).toEqual([]);
-    expect(diff.changed).toEqual([]);
-    expect(diff.unchanged).toEqual([]);
+    expect(computeRouteDiff(a, a).summary.firstChangedPosition).toBeNull();
   });
 });

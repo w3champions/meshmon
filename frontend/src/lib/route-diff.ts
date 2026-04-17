@@ -2,28 +2,38 @@ import type { components } from "@/api/schema.gen";
 
 type HopJson = components["schemas"]["HopJson"];
 
-export interface HopChange {
+export type HopChangeKind =
+  | "unchanged"
+  | "ip_changed"
+  | "latency_changed"
+  | "both_changed"
+  | "added"
+  | "removed";
+
+export interface HopDiff {
   position: number;
-  from: HopJson;
-  to: HopJson;
+  kind: HopChangeKind;
+  aAvgRttMicros?: number;
+  bAvgRttMicros?: number;
+  aDominantIp?: string;
+  bDominantIp?: string;
+}
+
+export interface DiffSummary {
+  totalHops: number;
+  changedHops: number;
+  addedHops: number;
+  removedHops: number;
+  firstChangedPosition: number | null;
 }
 
 export interface RouteDiff {
-  added: HopJson[];
-  removed: HopJson[];
-  changed: HopChange[];
-  unchanged: HopJson[];
+  summary: DiffSummary;
+  perHop: Map<number, HopDiff>;
 }
 
-// Thresholds for "meaningfully different" at a hop, matching the path-detail
-// spec: >20% RTT delta or >5-percentage-point loss change.
-const RTT_CHANGE_THRESHOLD = 0.2;
-const LOSS_CHANGE_THRESHOLD = 0.05;
+const LATENCY_CHANGE_THRESHOLD = 0.5;
 
-/**
- * Pick the most-observed IP at a hop (highest `freq`). Returns `undefined`
- * for a hop with no observations so callers can decide how to render.
- */
 function dominantIp(hop: HopJson): string | undefined {
   if (hop.observed_ips.length === 0) return undefined;
   let best = hop.observed_ips[0];
@@ -33,57 +43,73 @@ function dominantIp(hop: HopJson): string | undefined {
   return best.ip;
 }
 
-function rttChanged(a: HopJson, b: HopJson): boolean {
-  if (a.avg_rtt_micros === 0 && b.avg_rtt_micros === 0) return false;
-  const base = Math.max(a.avg_rtt_micros, 1);
-  return Math.abs(a.avg_rtt_micros - b.avg_rtt_micros) / base > RTT_CHANGE_THRESHOLD;
+function byPosition(hops: HopJson[]): Map<number, HopJson> {
+  const out = new Map<number, HopJson>();
+  for (const h of hops) out.set(h.position, h);
+  return out;
 }
 
-function lossChanged(a: HopJson, b: HopJson): boolean {
-  return Math.abs(a.loss_pct - b.loss_pct) > LOSS_CHANGE_THRESHOLD;
+function latencyChanged(a: number, b: number): boolean {
+  if (a <= 0) return b > 0;
+  return Math.abs(b - a) / a >= LATENCY_CHANGE_THRESHOLD;
 }
 
-function hopsAreDifferent(a: HopJson, b: HopJson): boolean {
-  if (dominantIp(a) !== dominantIp(b)) return true;
-  if (rttChanged(a, b)) return true;
-  if (lossChanged(a, b)) return true;
-  return false;
-}
+export function computeRouteDiff(a: HopJson[], b: HopJson[]): RouteDiff {
+  const aByPos = byPosition(a);
+  const bByPos = byPosition(b);
+  const positions = new Set<number>([...aByPos.keys(), ...bByPos.keys()]);
+  const perHop = new Map<number, HopDiff>();
 
-/**
- * Diff two ordered hop lists keyed by `position`. The result partitions hops
- * into added / removed / changed / unchanged buckets so the UI can render a
- * compact "what changed" summary.
- */
-export function diffRouteSnapshots(a: HopJson[], b: HopJson[]): RouteDiff {
-  const byPosA = new Map<number, HopJson>();
-  for (const hop of a) byPosA.set(hop.position, hop);
-  const byPosB = new Map<number, HopJson>();
-  for (const hop of b) byPosB.set(hop.position, hop);
+  let changedHops = 0;
+  let addedHops = 0;
+  let removedHops = 0;
+  let firstChangedPosition: number | null = null;
 
-  const added: HopJson[] = [];
-  const removed: HopJson[] = [];
-  const changed: HopChange[] = [];
-  const unchanged: HopJson[] = [];
+  for (const pos of [...positions].sort((x, y) => x - y)) {
+    const ah = aByPos.get(pos);
+    const bh = bByPos.get(pos);
 
-  const positions = new Set<number>([...byPosA.keys(), ...byPosB.keys()]);
-  const sorted = Array.from(positions).sort((x, y) => x - y);
-
-  for (const pos of sorted) {
-    const hopA = byPosA.get(pos);
-    const hopB = byPosB.get(pos);
-    if (hopA && !hopB) {
-      removed.push(hopA);
-    } else if (!hopA && hopB) {
-      added.push(hopB);
-    } else if (hopA && hopB) {
-      if (hopsAreDifferent(hopA, hopB)) {
-        changed.push({ position: pos, from: hopA, to: hopB });
-      } else {
-        unchanged.push(hopB);
-      }
+    let kind: HopChangeKind;
+    if (ah && !bh) {
+      kind = "removed";
+      removedHops += 1;
+    } else if (!ah && bh) {
+      kind = "added";
+      addedHops += 1;
+    } else if (ah && bh) {
+      const ipDiff = dominantIp(ah) !== dominantIp(bh);
+      const latDiff = latencyChanged(ah.avg_rtt_micros, bh.avg_rtt_micros);
+      if (ipDiff && latDiff) kind = "both_changed";
+      else if (ipDiff) kind = "ip_changed";
+      else if (latDiff) kind = "latency_changed";
+      else kind = "unchanged";
+      if (kind !== "unchanged") changedHops += 1;
+    } else {
+      continue;
     }
+
+    if (kind !== "unchanged" && firstChangedPosition === null) {
+      firstChangedPosition = pos;
+    }
+
+    perHop.set(pos, {
+      position: pos,
+      kind,
+      aAvgRttMicros: ah?.avg_rtt_micros,
+      bAvgRttMicros: bh?.avg_rtt_micros,
+      aDominantIp: ah ? dominantIp(ah) : undefined,
+      bDominantIp: bh ? dominantIp(bh) : undefined,
+    });
   }
 
-  return { added, removed, changed, unchanged };
+  return {
+    summary: {
+      totalHops: positions.size,
+      changedHops,
+      addedHops,
+      removedHops,
+      firstChangedPosition,
+    },
+    perHop,
+  };
 }
