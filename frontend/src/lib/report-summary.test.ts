@@ -92,4 +92,23 @@ describe("buildReportSummary", () => {
     expect(s.routeChanged).toBe(false);
     expect(s.singleSnapshot).toBe(true);
   });
+
+  it("propagates null loss instead of fabricating 0%", () => {
+    // Backend returns RTT but empty/null loss (e.g. VictoriaMetrics has RTT
+    // series but no loss series yet). Previously `null * 100 = 0` made a
+    // missing loss reading indistinguishable from a real zero-loss reading;
+    // now nulls propagate through so the UI renders "—".
+    const hops = [{ position: 1, ip: "10.0.0.1", rtt_us: 1000, loss: 0 }];
+    const s = buildReportSummary({
+      before: snap(1, hops),
+      after: snap(2, hops),
+      metricsFirst: { rtt_ms: 12.5, loss: null },
+      metricsLast: null,
+    });
+    expect(s.rttBeforeMs).toBe(12.5);
+    expect(s.rttAfterMs).toBeNull();
+    expect(s.lossBeforePct).toBeNull();
+    expect(s.lossAfterPct).toBeNull();
+    expect(s.lossDeltaPct).toBeNull();
+  });
 });

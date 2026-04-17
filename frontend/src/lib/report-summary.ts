@@ -4,8 +4,12 @@ import { computeRouteDiff } from "./route-diff";
 export interface MetricsPoint {
   /** Milliseconds — already converted from micros by the caller. */
   rtt_ms: number;
-  /** 0..1 loss fraction. */
-  loss: number;
+  /**
+   * 0..1 loss fraction, or null when the backend returned no loss reading
+   * alongside this RTT sample. Null must propagate through to the rendered
+   * summary so "no data" doesn't masquerade as a real 0% reading.
+   */
+  loss: number | null;
 }
 
 export interface ReportSummary {
@@ -50,8 +54,12 @@ export function buildReportSummary(input: BuildReportSummaryInput): ReportSummar
       ? ((rttAfterMs - rttBeforeMs) / rttBeforeMs) * 100
       : null;
 
-  const lossBeforePct = metricsFirst ? metricsFirst.loss * 100 : null;
-  const lossAfterPct = metricsLast ? metricsLast.loss * 100 : null;
+  // `null * 100 === 0` would silently turn a missing loss reading into a
+  // real-looking 0% — guard the null explicitly so fmtPct renders "—".
+  const lossBeforePct =
+    metricsFirst && metricsFirst.loss !== null ? metricsFirst.loss * 100 : null;
+  const lossAfterPct =
+    metricsLast && metricsLast.loss !== null ? metricsLast.loss * 100 : null;
   const lossDeltaPct =
     lossBeforePct !== null && lossAfterPct !== null ? lossAfterPct - lossBeforePct : null;
 

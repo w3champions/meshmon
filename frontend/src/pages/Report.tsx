@@ -85,11 +85,13 @@ export default function Report() {
       m && m.rtt_series.length > 0
         ? {
             rtt_ms: m.rtt_series[0][1],
-            loss: m.loss_series[0]?.[1] ?? 0,
+            loss: m.loss_series[0]?.[1] ?? null,
           }
         : null;
     const last: MetricsPoint | null =
-      m && m.rtt_current != null ? { rtt_ms: m.rtt_current, loss: m.loss_current ?? 0 } : null;
+      m && m.rtt_current != null
+        ? { rtt_ms: m.rtt_current, loss: m.loss_current ?? null }
+        : null;
     return buildReportSummary({
       before: beforeQ.data,
       after: afterQ.data,
