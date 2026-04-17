@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use meshmon_protocol::{Protocol, Target};
 use rand::rngs::SmallRng;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use surge_ping::{Client, Config, PingIdentifier, PingSequence, SurgeError, ICMP};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -84,7 +84,6 @@ async fn run(
     let identifier = PingIdentifier(rand::random::<u16>());
     let mut pinger = client.pinger(ip, identifier).await;
     pinger.timeout(PROBE_TIMEOUT);
-    let mut sequence: u16 = 0;
     let payload = [0u8; 8];
 
     loop {
@@ -104,15 +103,20 @@ async fn run(
             } => {}
         }
 
+        // Random sequence per probe avoids cross-probe reply confusion
+        // when a delayed reply arrives after the monotonic counter has
+        // wrapped (every ~18h at 1 pps). `surge-ping` filters replies by
+        // (PingIdentifier, PingSequence), so collisions let a stale reply
+        // be mis-attributed to a later probe.
+        let sequence = PingSequence(rng.random::<u16>());
         let send_time = Instant::now();
-        let outcome = match pinger.ping(PingSequence(sequence), &payload).await {
+        let outcome = match pinger.ping(sequence, &payload).await {
             Ok((_pkt, rtt)) => ProbeOutcome::Success {
                 rtt_micros: rtt.as_micros().min(u128::from(u32::MAX)) as u32,
             },
             Err(SurgeError::Timeout { .. }) => ProbeOutcome::Timeout,
             Err(e) => ProbeOutcome::Error(e.to_string()),
         };
-        sequence = sequence.wrapping_add(1);
 
         let obs = ProbeObservation {
             protocol: Protocol::Icmp,
