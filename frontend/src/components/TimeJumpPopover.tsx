@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -38,6 +38,10 @@ export function TimeJumpPopover({
 }: TimeJumpPopoverProps) {
   const [open, setOpen] = useState(false);
   const [customValue, setCustomValue] = useState(defaultDatetimeLocal(anchorTimeMs));
+  // Unique per-instance ID so label/input association works when
+  // `RouteCompareHeader` mounts multiple popovers at once (A & B across
+  // three responsive tiers).
+  const inputId = useId();
 
   // Keep the custom input in sync with the current anchor snapshot. Without
   // this, stepping A/B via J/K/L/; would leave the datetime-local input
@@ -87,11 +91,11 @@ export function TimeJumpPopover({
         </div>
         <div className="flex items-end gap-2 border-t pt-3">
           <div className="flex-1">
-            <Label htmlFor="jump-to" className="text-[0.65rem] uppercase tracking-wide">
+            <Label htmlFor={inputId} className="text-[0.65rem] uppercase tracking-wide">
               Jump to (UTC)
             </Label>
             <Input
-              id="jump-to"
+              id={inputId}
               type="datetime-local"
               value={customValue}
               onChange={(e) => setCustomValue(e.target.value)}
