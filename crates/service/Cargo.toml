@@ -69,11 +69,14 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 ctor = { workspace = true }
+meshmon-agent = { path = "../agent" }
+meshmon-revtunnel = { path = "../revtunnel" }
 metrics-util = "0.20"
 prost = { workspace = true }
 snap = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-stream = { workspace = true, features = ["net"] }
 tower = { workspace = true }  # for `ServiceExt::oneshot` in handler tests
 uuid = { workspace = true }
 wiremock = { workspace = true }
