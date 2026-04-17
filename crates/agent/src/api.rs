@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::Mutex;
 use tonic::service::interceptor::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::transport::{Channel, ClientTlsConfig};
@@ -17,6 +16,12 @@ use meshmon_protocol::{
     PushMetricsResponse, PushRouteSnapshotResponse, RegisterRequest, RegisterResponse,
     RouteSnapshotRequest, TargetsResponse,
 };
+
+#[allow(dead_code)]
+fn _assert_client_clone_send_sync() {
+    fn is_clone_send_sync<T: Clone + Send + Sync + 'static>() {}
+    is_clone_send_sync::<AgentApiClient<InterceptedService<Channel, BearerInterceptor>>>();
+}
 
 // ---------------------------------------------------------------------------
 // ServiceApi trait
@@ -78,14 +83,12 @@ impl Interceptor for BearerInterceptor {
 
 /// Production [`ServiceApi`] backed by a tonic gRPC channel.
 ///
-/// The inner `AgentApiClient` requires `&mut self` for every RPC, so it is
-/// wrapped in a [`Mutex`] to allow shared access from `Arc<Self>`.
-///
-/// TODO(T12): When probers call `push_metrics` concurrently, the single
-/// `Mutex` serializes all outbound RPCs. Consider cloning the tonic
-/// `Channel` (which is cheap and inherently concurrent) instead.
+/// The intercepted client is `Clone` (cheap — clones share the underlying
+/// HTTP/2 connection via tonic's `Channel` Arc semantics), so concurrent
+/// RPCs from different tasks multiplex over one connection instead of
+/// serializing through a mutex.
 pub struct GrpcServiceApi {
-    client: Mutex<AgentApiClient<InterceptedService<Channel, BearerInterceptor>>>,
+    client: AgentApiClient<InterceptedService<Channel, BearerInterceptor>>,
 }
 
 impl GrpcServiceApi {
@@ -123,17 +126,14 @@ impl GrpcServiceApi {
 
         let client = AgentApiClient::with_interceptor(channel, interceptor);
 
-        Ok(Arc::new(Self {
-            client: Mutex::new(client),
-        }))
+        Ok(Arc::new(Self { client }))
     }
 }
 
 impl ServiceApi for GrpcServiceApi {
     async fn register(&self, req: RegisterRequest) -> Result<RegisterResponse> {
         self.client
-            .lock()
-            .await
+            .clone()
             .register(req)
             .await
             .map(|r| r.into_inner())
@@ -142,8 +142,7 @@ impl ServiceApi for GrpcServiceApi {
 
     async fn get_config(&self) -> Result<ConfigResponse> {
         self.client
-            .lock()
-            .await
+            .clone()
             .get_config(GetConfigRequest {})
             .await
             .map(|r| r.into_inner())
@@ -152,8 +151,7 @@ impl ServiceApi for GrpcServiceApi {
 
     async fn get_targets(&self, source_id: &str) -> Result<TargetsResponse> {
         self.client
-            .lock()
-            .await
+            .clone()
             .get_targets(GetTargetsRequest {
                 source_id: source_id.to_owned(),
             })
@@ -164,8 +162,7 @@ impl ServiceApi for GrpcServiceApi {
 
     async fn push_metrics(&self, batch: MetricsBatch) -> Result<PushMetricsResponse> {
         self.client
-            .lock()
-            .await
+            .clone()
             .push_metrics(batch)
             .await
             .map(|r| r.into_inner())
@@ -177,8 +174,7 @@ impl ServiceApi for GrpcServiceApi {
         req: RouteSnapshotRequest,
     ) -> Result<PushRouteSnapshotResponse> {
         self.client
-            .lock()
-            .await
+            .clone()
             .push_route_snapshot(req)
             .await
             .map(|r| r.into_inner())
