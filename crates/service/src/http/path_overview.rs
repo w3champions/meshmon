@@ -29,7 +29,9 @@
 //! the page.
 
 use crate::http::http_client::proxy_client;
-use crate::http::user_api::{AgentSummary, RouteSnapshotDetail, RouteSnapshotSummary};
+use crate::http::user_api::{
+    invalid_protocol, AgentSummary, RouteSnapshotDetail, RouteSnapshotSummary,
+};
 use crate::ingestion::json_shapes::{HopJson, PathSummaryJson};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -244,25 +246,28 @@ async fn fetch_latest_by_protocol(
         tcp: None,
     };
     for r in rows {
+        // Pull the protocol slot out first so the downstream move of
+        // `r.protocol` into `LatestRow` doesn't force an extra clone.
+        let slot = match r.protocol.as_str() {
+            "icmp" => &mut out.icmp,
+            "udp" => &mut out.udp,
+            "tcp" => &mut out.tcp,
+            // Unknown protocols stored by an older agent build are simply
+            // dropped from the per-protocol slots; they still show up in
+            // the recent_snapshots list.
+            _ => continue,
+        };
         let detail: RouteSnapshotDetail = LatestRow {
             id: r.id,
             source_id: r.source_id,
             target_id: r.target_id,
-            protocol: r.protocol.clone(),
+            protocol: r.protocol,
             observed_at: r.observed_at,
             hops: r.hops,
             path_summary: r.path_summary,
         }
         .into();
-        match r.protocol.as_str() {
-            "icmp" => out.icmp = Some(detail),
-            "udp" => out.udp = Some(detail),
-            "tcp" => out.tcp = Some(detail),
-            // Unknown protocols stored by an older agent build are simply
-            // dropped from the per-protocol slots; they still show up in
-            // the recent_snapshots list.
-            _ => {}
-        }
+        *slot = Some(detail);
     }
     Ok(out)
 }
@@ -328,10 +333,36 @@ fn vm_base(state: &AppState) -> Option<String> {
         .map(|u| u.trim_end_matches('/').to_owned())
 }
 
+/// Escape a value for safe interpolation inside a MetricsQL / PromQL label
+/// value quoted with double-quotes. Per Prometheus syntax the only special
+/// characters inside a double-quoted label value are `\`, `"`, and newline;
+/// every other character (including single quotes, braces, spaces, unicode)
+/// rides through unchanged.
+///
+/// Agent IDs today flow from the operator-controlled `AGENT_ID` env var so
+/// the attack surface is small, but the DB schema doesn't constrain the
+/// character set. Escaping here keeps a future noisy/malicious value from
+/// breaking the query or injecting extra label matchers.
+fn escape_label_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Build the RTT-avg MetricsQL expression. The `/ 1000` divides micros
 /// into milliseconds in-query so the handler can pass values through
 /// untouched.
 fn build_rtt_query(src: &str, tgt: &str, protocol: &str) -> String {
+    let src = escape_label_value(src);
+    let tgt = escape_label_value(tgt);
+    let protocol = escape_label_value(protocol);
     format!(
         "avg by(source,target,protocol)(meshmon_path_rtt_avg_micros{{source=\"{src}\",target=\"{tgt}\",protocol=\"{protocol}\"}}) / 1000"
     )
@@ -339,6 +370,9 @@ fn build_rtt_query(src: &str, tgt: &str, protocol: &str) -> String {
 
 /// Build the failure-rate MetricsQL expression. Already a [0, 1] fraction.
 fn build_loss_query(src: &str, tgt: &str, protocol: &str) -> String {
+    let src = escape_label_value(src);
+    let tgt = escape_label_value(tgt);
+    let protocol = escape_label_value(protocol);
     format!(
         "avg by(source,target,protocol)(meshmon_path_failure_rate{{source=\"{src}\",target=\"{tgt}\",protocol=\"{protocol}\"}})"
     )
@@ -451,6 +485,11 @@ async fn fetch_metrics(
         fetch_series(&base, &rtt_q, from, to, step),
         fetch_series(&base, &loss_q, from, to, step),
     );
+    // `fetch_series` returns `Some(vec![])` for an empty VM matrix (normal
+    // "no samples in window" result), so the `?` below short-circuits only
+    // on true VM transport / parse failure. In that case we collapse the
+    // whole metrics block to `null`; partial data (one series up, one down)
+    // would be confusing to render so it's treated as "metrics unavailable".
     let rtt_series = rtt_series?;
     let loss_series = loss_series?;
     let rtt_current = rtt_series.last().map(|p| p[1]);
@@ -466,20 +505,6 @@ async fn fetch_metrics(
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
-
-/// Reject any `?protocol=` other than `icmp` / `udp` / `tcp`.
-fn validate_protocol(p: &str) -> Option<Response> {
-    match p {
-        "icmp" | "udp" | "tcp" => None,
-        _ => Some(
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "protocol must be icmp, udp, or tcp" })),
-            )
-                .into_response(),
-        ),
-    }
-}
 
 /// `GET /api/paths/{src}/{tgt}/overview` — aggregate path-detail payload.
 #[utoipa::path(
@@ -504,8 +529,10 @@ pub async fn path_overview(
     Query(params): Query<PathOverviewParams>,
 ) -> Response {
     // 1. Validate the (optional) protocol override BEFORE any DB/VM work.
+    //    Shared helper keeps the 400 error body identical to the other
+    //    `/api/paths/...` endpoints.
     if let Some(ref p) = params.protocol {
-        if let Some(resp) = validate_protocol(p) {
+        if let Some(resp) = invalid_protocol(p) {
             return resp;
         }
     }
@@ -667,12 +694,45 @@ mod tests {
         assert_eq!(auto_primary(&l, Some("bogus")).as_deref(), Some("icmp"));
     }
 
+    // Protocol validation is shared with `user_api::invalid_protocol` —
+    // see the tests in that module for the 400 branch; no need to duplicate
+    // here.
+
     #[test]
-    fn validate_protocol_rejects_unknown_values() {
-        assert!(validate_protocol("icmp").is_none());
-        assert!(validate_protocol("udp").is_none());
-        assert!(validate_protocol("tcp").is_none());
-        assert!(validate_protocol("bogus").is_some());
-        assert!(validate_protocol("").is_some());
+    fn escape_label_value_passes_plain_input_through() {
+        assert_eq!(escape_label_value("agent-1"), "agent-1");
+        assert_eq!(escape_label_value(""), "");
+        // Unicode and spaces aren't special in PromQL label values.
+        assert_eq!(escape_label_value("ageñt 42"), "ageñt 42");
+    }
+
+    #[test]
+    fn escape_label_value_escapes_double_quote() {
+        assert_eq!(escape_label_value(r#"a"b"#), r#"a\"b"#);
+    }
+
+    #[test]
+    fn escape_label_value_escapes_backslash() {
+        assert_eq!(escape_label_value(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn escape_label_value_escapes_newline() {
+        assert_eq!(escape_label_value("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn build_rtt_query_escapes_hostile_input() {
+        // If a future agent id contained an unescaped quote, the raw format
+        // would close the label value early and let the rest of the string
+        // land outside the selector. Check that every `"` in the input is
+        // escaped so the label value stays a single quoted token.
+        let q = build_rtt_query(r#"src"} or vector(1) {""#, "tgt", "icmp");
+        assert!(
+            q.contains(r#"source="src\"} or vector(1) {\"""#),
+            "escaped source label not found in: {q}"
+        );
+        // The expression is still bracket-balanced at the end.
+        assert!(q.ends_with(") / 1000"));
     }
 }

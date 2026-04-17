@@ -18,7 +18,7 @@
 //! | `.163` | `overview_rejects_invalid_protocol_override`                |
 //! | `.164` | `overview_returns_metrics_null_when_vm_unreachable`         |
 //! | `.165` | `overview_honours_protocol_override`                        |
-//! | `.166` | `overview_auto_picks_udp_when_only_udp_present`             |
+//! | `.166` | `overview_auto_picks_udp_over_tcp_when_icmp_absent`         |
 //! | `.167` | `overview_auto_picks_tcp_when_only_tcp_present`             |
 //! | `.168` | `overview_step_is_1m_for_24h_window`                        |
 //! | `.169` | `overview_step_is_5m_for_7d_window`                         |
@@ -142,20 +142,34 @@ fn parse_body(bytes: &[u8]) -> serde_json::Value {
 
 #[tokio::test]
 async fn overview_happy_path_returns_latest_recent_and_metrics() {
-    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param_contains};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mock = MockServer::start().await;
 
-    // Each call to /api/v1/query_range returns two samples so rtt_current /
-    // loss_current can be pulled from the tail.
+    // Two distinct mocks so RTT and loss use semantically-correct sample
+    // shapes: RTT returns millisecond-scale values (already divided by
+    // 1000 in MetricsQL), loss returns [0, 1] fractions. The mocks are
+    // keyed on the metric name in the `query` param so a bug in either
+    // wiring would mean the wrong mock fires (and `.expect(1)` blows up).
     Mock::given(wm_method("GET"))
         .and(wm_path("/api/v1/query_range"))
+        .and(query_param_contains("query", "rtt_avg_micros"))
         .respond_with(ResponseTemplate::new(200).set_body_json(vm_matrix_body(&[
             (1_700_000_000, "12.5"),
             (1_700_000_060, "13.75"),
         ])))
-        .expect(2) // one for RTT, one for loss
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v1/query_range"))
+        .and(query_param_contains("query", "failure_rate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vm_matrix_body(&[
+            (1_700_000_000, "0.02"),
+            (1_700_000_060, "0.05"),
+        ])))
+        .expect(1)
         .mount(&mock)
         .await;
 
@@ -232,6 +246,8 @@ async fn overview_happy_path_returns_latest_recent_and_metrics() {
     assert!(recent[0].get("hops").is_none(), "items = {recent:?}");
 
     // metrics: 2 samples in each series, current values populated.
+    // RTT series uses ms-scale values (already divided by 1000 in MetricsQL);
+    // loss series uses [0, 1] fractions.
     let metrics = &body["metrics"];
     assert!(metrics.is_object(), "metrics = {metrics}");
     let rtt = metrics["rtt_series"].as_array().expect("rtt_series");
@@ -241,8 +257,12 @@ async fn overview_happy_path_returns_latest_recent_and_metrics() {
     // Values are [epoch_ms, value] — first entry: ts * 1000, second: parsed float.
     assert_eq!(rtt[0][0].as_f64().unwrap(), 1_700_000_000_000.0);
     assert_eq!(rtt[0][1].as_f64().unwrap(), 12.5);
+    assert_eq!(rtt[1][1].as_f64().unwrap(), 13.75);
     assert_eq!(metrics["rtt_current"].as_f64().unwrap(), 13.75);
-    assert_eq!(metrics["loss_current"].as_f64().unwrap(), 13.75);
+    // Loss is a fraction — last sample of the loss mock is 0.05 (5%).
+    assert_eq!(loss[0][1].as_f64().unwrap(), 0.02);
+    assert_eq!(loss[1][1].as_f64().unwrap(), 0.05);
+    assert_eq!(metrics["loss_current"].as_f64().unwrap(), 0.05);
 
     // window / step echoes
     assert!(body["window"]["from"].is_string(), "body = {body}");
@@ -488,12 +508,15 @@ async fn overview_honours_protocol_override() {
 }
 
 #[tokio::test]
-async fn overview_auto_picks_udp_when_only_udp_present() {
+async fn overview_auto_picks_udp_over_tcp_when_icmp_absent() {
     let pool = common::shared_migrated_pool().await.clone();
     let (src, tgt) = ("t19-ov-udp-src", "t19-ov-udp-tgt");
     insert_agent_detailed(&pool, src, "S", "US", "10.0.0.16", 0.0, 0.0).await;
     insert_agent_detailed(&pool, tgt, "T", "DE", "10.0.0.17", 0.0, 0.0).await;
 
+    // Seed both UDP and TCP (and no ICMP): the fixed priority
+    // `icmp > udp > tcp` should make UDP win. Newer TCP observed_at must
+    // NOT tip the pick toward TCP.
     insert_snapshot(
         &pool,
         src,
@@ -593,12 +616,15 @@ async fn overview_auto_picks_tcp_when_only_tcp_present() {
 
 #[tokio::test]
 async fn overview_step_is_1m_for_24h_window() {
-    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mock = MockServer::start().await;
+    // `step=1m` matcher catches a regression where the echoed `step`
+    // differs from what actually went upstream to VM.
     Mock::given(wm_method("GET"))
         .and(wm_path("/api/v1/query_range"))
+        .and(query_param("step", "1m"))
         .respond_with(ResponseTemplate::new(200).set_body_json(vm_matrix_body(&[])))
         .expect(2)
         .mount(&mock)
@@ -656,12 +682,14 @@ async fn overview_step_is_1m_for_24h_window() {
 
 #[tokio::test]
 async fn overview_step_is_5m_for_7d_window() {
-    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mock = MockServer::start().await;
+    // `step=5m` matcher — same rationale as the 24 h test.
     Mock::given(wm_method("GET"))
         .and(wm_path("/api/v1/query_range"))
+        .and(query_param("step", "5m"))
         .respond_with(ResponseTemplate::new(200).set_body_json(vm_matrix_body(&[])))
         .expect(2)
         .mount(&mock)
