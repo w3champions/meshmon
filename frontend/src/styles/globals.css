@@ -48,12 +48,14 @@ body {
 @media print {
   /* Chrome prints at the browser's viewport CSS pixels and scales to
      fit the sheet, which on a wide monitor leaves the report centred
-     in a narrow column surrounded by big empty margins. Pinning
-     @page + an explicit page width forces Chrome to treat the sheet
-     itself as the rendering surface. 15mm margins give a readable
-     line length on Letter without wasting paper. */
+     in a narrow column surrounded by big empty margins. Declaring
+     @page forces Chrome to treat the sheet itself as the rendering
+     surface; `size: auto` lets the print dialog pick the paper size
+     (Letter in NA, A4 elsewhere) instead of hard-coding one. 15mm
+     margins give a readable line length on both Letter (216mm wide)
+     and A4 (210mm wide) without wasting paper. */
   @page {
-    size: letter portrait;
+    size: auto;
     margin: 15mm;
   }
 
