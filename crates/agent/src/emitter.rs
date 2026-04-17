@@ -1,15 +1,31 @@
-//! Outbound emitter: batches metrics every 60 s, pushes route snapshots
-//! immediately, retries on retriable failures with jittered exponential
-//! backoff, and buffers up to 65 failed RPCs in a drop-oldest ring queue.
+//! Outbound emitter: the agent's single outbound-only task.
 //!
-//! The retry worker drains the shared `RetryQueue` concurrently with the
-//! primary loop. Retriable failures (UNAVAILABLE / RESOURCE_EXHAUSTED /
-//! transport errors) are rescheduled with jittered exponential backoff;
-//! non-retriable failures (UNAUTHENTICATED / INVALID_ARGUMENT / other)
-//! are dropped on the first retry attempt. A successful `push_metrics`
-//! retry resets both `local_error_count` and the queue's
-//! `dropped_count`; snapshot retries don't touch either counter since
-//! those live in `MetricsBatch.agent_metadata`.
+//! Batches per-(target, protocol) `PathMetricsMsg` records received from
+//! supervisors every 60 seconds into a `MetricsBatch` and pushes via
+//! `ServiceApi::push_metrics`. Route-snapshot envelopes are dispatched
+//! immediately via `push_route_snapshot` — not batched, because each
+//! snapshot represents a discrete route-change event.
+//!
+//! Retry handling: UNAVAILABLE and RESOURCE_EXHAUSTED responses enqueue
+//! the RPC into a drop-oldest ring queue (capacity 65 entries,
+//! ≈ 230 KiB) and wake a concurrent retry worker that re-invokes on a
+//! jittered exponential schedule (1 s base, 5 min cap, ±25% jitter).
+//! Drop-on-failure codes (UNAUTHENTICATED, INVALID_ARGUMENT) are logged
+//! at `error!` and discarded — retrying a contract violation wastes
+//! cycles. Any other tonic status code is logged at `warn!` and dropped
+//! conservatively. Transport-level errors (no tonic status) are treated
+//! as retriable.
+//!
+//! Buffer overflow: pushing into a full queue evicts the oldest entry
+//! and bumps `dropped_count`, which rides out in the next successful
+//! `MetricsBatch.agent_metadata.dropped_count` and resets on ack.
+//!
+//! Shutdown: the primary loop exits on `cancel.cancelled()` or when both
+//! receivers close. The emitter then enters a bounded 5-second drain
+//! phase that biased-polls pending snapshots (time-sensitive), stages
+//! any remaining metrics, and flushes a final best-effort batch before
+//! aborting the retry worker. Any entries still in the retry queue are
+//! discarded on exit — the spec treats the buffer as ephemeral.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;

@@ -220,11 +220,13 @@ cargo run -p meshmon-agent
 | Module | Responsibility |
 |--------|----------------|
 | `config.rs` | Env var parsing (`AgentEnv`), probe config wrapper |
-| `api.rs` | `ServiceApi` trait + `GrpcServiceApi` (tonic client with bearer auth) |
-| `supervisor.rs` | Per-target supervisor: spawns 4 probers, runs state machine every 10 s, publishes rates, owns the per-target route tracker and emits diff-gated route snapshots on a 60 s tick |
+| `api.rs` | `ServiceApi` trait + `GrpcServiceApi` — tonic client over a cloneable HTTP/2 `Channel` (no mutex; concurrent RPCs multiplex over one connection) |
+| `stats.rs` | Per-protocol rolling stats + on-demand `Summary` with percentiles |
 | `state.rs` | Pure state-machine types: per-protocol + path health, rate/window lookup |
 | `route.rs` | Per-target route-state tracker: accumulates trippy per-hop observations over a rolling window, builds canonical snapshots, detects meaningful diffs |
-| `bootstrap.rs` | Register → config → targets → spawn, 5-minute refresh loop |
+| `supervisor.rs` | Per-target supervisor: spawns 4 probers, runs state machine every 10 s, publishes rates, emits diff-gated route snapshots on a 60 s tick, and pushes one `PathMetricsMsg` per healthy protocol on an independent 60 s metrics tick |
+| `emitter.rs` | Single outbound task: batches `PathMetricsMsg` into `MetricsBatch` every 60 s, pushes route snapshots immediately, retries retriable failures (UNAVAILABLE / RESOURCE_EXHAUSTED) with jittered 1 s → 5 min backoff, buffers up to 65 failed RPCs in a drop-oldest ring queue with `dropped_count` reporting |
+| `bootstrap.rs` | Register → config → targets → spawn emitter + per-target supervisors, 5-minute refresh loop |
 | `probing/mod.rs` | `ProbeObservation` / `HopObservation` types (populated by probers) |
 | `probing/icmp.rs` | ICMP Echo pinger (`surge-ping`), always-on per target for per-protocol health |
 
@@ -232,12 +234,12 @@ cargo run -p meshmon-agent
 
 1. Parse identity from env vars (fail fast on missing/invalid values).
 2. Connect to the service via gRPC with bearer-token interceptor.
-3. Register with exponential-backoff retry (1s → 30s, ±25% jitter).
+3. Register with exponential-backoff retry (1 s → 30 s, ±25% jitter).
 4. Fetch initial config and target list.
-5. Spawn one supervisor task per target (skip self).
-6. Run a 5-minute refresh loop: re-fetch config (broadcast via `watch`),
-   re-fetch targets (reconcile: spawn new, shut down removed).
-7. On `SIGTERM`/`SIGINT`: cancel all supervisors, drain observations, exit.
+5. Spawn the emitter task (consumes metrics + route-snapshot channels).
+6. Spawn one supervisor task per target (skip self); each clones the two channel senders.
+7. Run a 5-minute refresh loop: re-fetch config (broadcast via `watch`), re-fetch targets (reconcile: spawn new, shut down removed).
+8. On `SIGTERM` / `SIGINT`: cancel all supervisors, drop channel senders, await the emitter's 5 s shutdown drain, exit.
 
 ## Status
 

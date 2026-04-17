@@ -1,7 +1,11 @@
 //! gRPC API client for communicating with the meshmon service.
 //!
-//! [`ServiceApi`] abstracts the five RPCs the agent uses so that production
-//! code goes through [`GrpcServiceApi`] while tests can substitute a mock.
+//! [`ServiceApi`] abstracts the five RPCs the agent uses so production
+//! code goes through [`GrpcServiceApi`] while tests can substitute a
+//! mock. The intercepted tonic client is stored by value and cloned per
+//! RPC; `Channel`'s `Arc<Inner>` semantics make cloning cheap and let
+//! concurrent RPCs from different tasks multiplex over a single HTTP/2
+//! connection.
 
 use std::sync::Arc;
 use std::time::Duration;
