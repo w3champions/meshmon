@@ -875,6 +875,34 @@ mod tests {
     }
 
     #[test]
+    fn classify_sees_through_anyhow_context_wrapping() {
+        use anyhow::Context;
+
+        // Simulates the exact production path: GrpcServiceApi wraps every RPC
+        // failure with `.context("... RPC failed")`. anyhow preserves the
+        // inner type across context layers, so downcast_ref::<tonic::Status>
+        // on the wrapped error still finds the status. If this ever regresses
+        // (anyhow API change, api.rs structure change), classify would start
+        // treating permanent INVALID_ARGUMENT / UNAUTHENTICATED failures as
+        // retriable, retrying a bad-contract payload forever.
+
+        let raw_err: Result<(), tonic::Status> =
+            Err(tonic::Status::invalid_argument("bad payload"));
+        let wrapped: anyhow::Error = raw_err.context("PushMetrics RPC failed").unwrap_err();
+        assert!(
+            matches!(classify(&wrapped), Classify::Drop(tracing::Level::ERROR)),
+            "wrapped InvalidArgument should still classify as Drop(ERROR)",
+        );
+
+        let raw_err2: Result<(), tonic::Status> = Err(tonic::Status::unavailable("service down"));
+        let wrapped2: anyhow::Error = raw_err2.context("PushMetrics RPC failed").unwrap_err();
+        assert!(
+            matches!(classify(&wrapped2), Classify::Retriable),
+            "wrapped Unavailable should still classify as Retriable",
+        );
+    }
+
+    #[test]
     fn build_metrics_batch_stamps_identity_and_counts() {
         let identity = EmitterIdentity {
             source_id: "src".into(),
