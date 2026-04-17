@@ -16,6 +16,7 @@ import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
 import PathDetail from "@/pages/PathDetail";
+import RouteCompare from "@/pages/RouteCompare";
 import { useAuthStore } from "@/stores/auth";
 
 interface RouterContext {
@@ -120,7 +121,7 @@ const routeCompareSearchSchema = z.object({
 export const routeCompareRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/paths/$source/$target/routes/compare",
-  component: () => <p className="p-6 text-sm text-muted-foreground">Coming in Task 22.</p>,
+  component: RouteCompare,
   validateSearch: (search) => routeCompareSearchSchema.parse(search),
 });
 
