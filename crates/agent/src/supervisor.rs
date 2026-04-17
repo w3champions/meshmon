@@ -327,12 +327,29 @@ async fn run(
                         "path health changed",
                     );
                 }
-                // Log primary transition.
+                // Log primary transition. Per spec 02, include the
+                // triggering FastSummary context (failure_rate +
+                // sample_count) for BOTH the old and new primary so an
+                // operator can correlate the swing with the signals that
+                // drove it. `None` fields surface when the primary was
+                // or is becoming unset.
                 if let Some((from, to)) = change.primary_transition {
+                    let summary_for = |p: Option<Protocol>| -> Option<&FastSummary> {
+                        p.and_then(|p| match p {
+                            Protocol::Icmp => Some(&icmp_summary),
+                            Protocol::Tcp => Some(&tcp_summary),
+                            Protocol::Udp => Some(&udp_summary),
+                            Protocol::Unspecified => None,
+                        })
+                    };
                     tracing::info!(
                         target_id = %target.id,
                         from = ?from,
                         to = ?to,
+                        from_failure_rate = ?summary_for(from).map(|s| s.failure_rate),
+                        from_sample_count = ?summary_for(from).map(|s| s.sample_count),
+                        to_failure_rate = ?summary_for(to).map(|s| s.failure_rate),
+                        to_sample_count = ?summary_for(to).map(|s| s.sample_count),
                         "primary protocol changed",
                     );
                 }
