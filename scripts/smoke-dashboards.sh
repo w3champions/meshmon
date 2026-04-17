@@ -51,7 +51,9 @@ envsubst < grafana/provisioning/datasources.yml.template > "$DS_YAML"
 node -e "
 const fs=require('node:fs');
 const yaml=fs.readFileSync(process.argv[1],'utf8');
-const out=yaml.replace(/\n  - name: MeshmonPostgres[\s\S]*?(?=\n\w|$)/,'');
+const out=yaml
+  .replace(/\n  - name: MeshmonPostgres[\s\S]*?(?=\n\w|$)/, '')
+  .replace(/\n  - \{[^}]*name: MeshmonPostgres[^}]*\}[^\n]*/, '');
 fs.writeFileSync(process.argv[1], out);
 " "$DS_YAML"
 
@@ -79,6 +81,21 @@ done
 if ! $ok; then
   echo "::error ::Grafana failed to become healthy in 60 s" >&2
   "${COMPOSE[@]}" logs meshmon-grafana >&2 || true
+  exit 1
+fi
+
+echo "==> waiting for VM to accept writes"
+vm_ok=false
+for i in {1..30}; do
+  if curl -fsS http://127.0.0.1:8428/health >/dev/null 2>&1; then
+    vm_ok=true
+    break
+  fi
+  sleep 1
+done
+if ! $vm_ok; then
+  echo "::error ::VictoriaMetrics failed to become ready in 30 s" >&2
+  "${COMPOSE[@]}" logs meshmon-vm >&2 || true
   exit 1
 fi
 
@@ -133,6 +150,10 @@ assert_200 "http://127.0.0.1:3000/d-solo/meshmon-overview/overview?panelId=3&fro
   "overview: route-changes table"
 assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=1&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
   "agent: outgoing RTT"
+assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=2&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
+  "agent: outgoing loss"
+assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=3&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
+  "agent: incoming RTT"
 assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=4&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
   "agent: incoming loss"
 
