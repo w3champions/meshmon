@@ -295,7 +295,9 @@ impl<A: ServiceApi> AgentRuntime<A> {
             path_metrics_tx,
             emitter_handle,
             refresh_trigger: Arc::new(Notify::new()),
-            tunnel_handle: tokio::spawn(std::future::pending::<()>()),
+            // Default placeholder completes immediately so runtimes that never
+            // call `attach_tunnel` don't eat the 10s shutdown timeout.
+            tunnel_handle: tokio::spawn(async {}),
         })
     }
 
