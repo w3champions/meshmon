@@ -71,6 +71,7 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 
+memory-serve = "2.1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 prometheus-reqwest-remote-write = "0.5"
