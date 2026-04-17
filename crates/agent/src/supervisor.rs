@@ -11,13 +11,27 @@
 //! * Four `watch` senders (ICMP rate, TCP rate, UDP rate, Trippy rate) that
 //!   drive the four probers, which are spawned once per target and reconfigured
 //!   via the watch channels — never respawned.
+//! * A per-target [`RouteTracker`] that accumulates trippy per-hop
+//!   observations (for whichever protocol is currently primary) over a
+//!   rolling window sized from `ProbeConfig.primary_window_sec`.
 //!
 //! Every 10 s the eval tick snapshots per-protocol stats, runs
 //! [`TargetStateMachine::evaluate`], publishes new rates via the watch senders,
-//! and resizes the primary protocol's rolling window on primary swings.
+//! resizes the primary protocol's rolling window on primary swings, and calls
+//! [`RouteTracker::reset_for_protocol`] so the next snapshot re-baselines
+//! under the new primary.
+//!
+//! An independent 60 s snapshot tick calls [`RouteTracker::build_snapshot`]
+//! followed by [`RouteTracker::diff_against`]; the first snapshot after a
+//! reset is emitted unconditionally, and subsequent snapshots only emit
+//! when the diff rules from `ProbeConfig.diff_detection` fire. Meaningful
+//! snapshots are pushed into a shared `mpsc::Sender<RouteSnapshot>` owned
+//! by the [`AgentRuntime`](crate::bootstrap::AgentRuntime) via `try_send`
+//! (lossy — a full or closed channel logs and drops). The bootstrap
+//! placeholder consumer logs received snapshots at `info`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -27,6 +41,7 @@ use crate::config::ProbeConfig;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
 use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
+use crate::route::{RouteSnapshot, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
 use meshmon_protocol::{Protocol, Target};
@@ -139,6 +154,7 @@ pub fn spawn(
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
     parent_cancel: CancellationToken,
+    snapshot_tx: mpsc::Sender<RouteSnapshot>,
 ) -> SupervisorHandle {
     let cancel = parent_cancel.child_token();
     let (observation_tx, observation_rx) = mpsc::channel::<ProbeObservation>(256);
@@ -147,6 +163,12 @@ pub fn spawn(
     // watches `config_rx` for live updates.
     let initial = config_rx.borrow().clone();
     let initial_window = Duration::from_secs(initial.diversity_window_sec as u64);
+    // Per-target route tracker. Sized at the primary window; the supervisor
+    // resizes it on config changes / primary swings in Task 7. Starts with
+    // `protocol = None` so it silently drops incoming hops until T14 elects
+    // a primary and the supervisor calls `reset_for_protocol`.
+    let initial_primary_window = Duration::from_secs(initial.primary_window_sec as u64);
+    let route_tracker = RouteTracker::new(initial_primary_window);
     // All three protocols start at the diversity window. The eval tick calls
     // `set_window` on whichever protocol it elects as primary.
     let stats: Arc<StatsArray> = Arc::new([
@@ -211,6 +233,8 @@ pub fn spawn(
         udp_rate_tx,
         trippy_rate_tx,
         task_last_state,
+        route_tracker,
+        snapshot_tx,
     ));
 
     SupervisorHandle {
@@ -236,6 +260,11 @@ async fn run(
     udp_rate_tx: watch::Sender<ProbeRate>,
     trippy_rate_tx: watch::Sender<TrippyRate>,
     last_state: Arc<Mutex<TargetSnapshot>>,
+    mut route_tracker: RouteTracker,
+    // Drained by the 60 s snapshot tick below — each emit is a non-blocking
+    // `try_send`; a full channel or closed receiver is logged and dropped
+    // (snapshots are lossy by design).
+    snapshot_tx: mpsc::Sender<RouteSnapshot>,
 ) {
     tracing::info!(target_id = %target.id, "supervisor started");
 
@@ -243,6 +272,20 @@ async fn run(
 
     let mut eval_interval = tokio::time::interval(Duration::from_secs(10));
     eval_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // T15: separate 60 s cadence for route-snapshot builds. Independent
+    // of the eval tick because the diff thresholds themselves already
+    // gate emission — we do not need eager reset on config changes the
+    // way the rate-eval arm does.
+    let mut snapshot_interval = tokio::time::interval(Duration::from_secs(60));
+    snapshot_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // Once `snapshot_tx.try_send` reports `Closed`, the receiver is gone
+    // and every future emit attempt on this channel is wasted work that
+    // would also re-log the "closed" message on every 60 s tick. Latch
+    // this flag and skip the snapshot-tick body entirely after the first
+    // Closed observation.
+    let mut snapshot_channel_closed: bool = false;
 
     loop {
         tokio::select! {
@@ -252,7 +295,10 @@ async fn run(
             }
             maybe_obs = observation_rx.recv() => {
                 match maybe_obs {
-                    Some(obs) => route_observation(&stats, &obs).await,
+                    Some(obs) => {
+                        route_observation(&stats, &obs).await;
+                        feed_tracker(&mut route_tracker, &obs, Instant::now());
+                    }
                     None => {
                         // All probers dropped their senders — no more
                         // observations possible. Exit so we don't spin
@@ -292,6 +338,32 @@ async fn run(
                     [&icmp_summary, &tcp_summary, &udp_summary],
                     now,
                 );
+
+                // T15: first-eval seeding — if the tracker has never been
+                // assigned a protocol, adopt the current primary. Only then
+                // does `primary_transition.is_some()` drive subsequent resets.
+                if route_tracker.protocol().is_none() {
+                    if let Some(p) = change.primary {
+                        tracing::info!(
+                            target_id = %target.id,
+                            protocol = ?p,
+                            "seeding route tracker with initial primary",
+                        );
+                        route_tracker.reset_for_protocol(Some(p));
+                    }
+                } else if change.primary_transition.is_some() {
+                    reset_tracker_on_swing(
+                        &target.id,
+                        &mut route_tracker,
+                        change.primary,
+                    );
+                }
+
+                // T15: keep the tracker window in sync with the primary
+                // window config. Cheap even if unchanged.
+                route_tracker.set_window(Duration::from_secs(
+                    config_snapshot.primary_window_sec as u64,
+                ));
 
                 // Resolve a `FastSummary` for a given protocol. Hoisted out of
                 // the primary-transition arm so the per-protocol, path, and
@@ -397,6 +469,47 @@ async fn run(
                     snap.path = change.path;
                 }
             }
+            _ = snapshot_interval.tick() => {
+                if snapshot_channel_closed {
+                    continue;
+                }
+                let now = Instant::now();
+                let now_wall = SystemTime::now();
+                if let Some(snap) = route_tracker.build_snapshot(now, now_wall) {
+                    let should_emit = if route_tracker.last_reported().is_none() {
+                        true
+                    } else {
+                        let thresholds = config_rx.borrow().diff_detection();
+                        route_tracker.diff_against(&snap, &thresholds).is_some()
+                    };
+                    if should_emit {
+                        match snapshot_tx.try_send(snap.clone()) {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    target_id = %target.id,
+                                    protocol = ?snap.protocol,
+                                    hops = snap.hops.len(),
+                                    "route snapshot emitted",
+                                );
+                                route_tracker.set_last_reported(snap);
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    target_id = %target.id,
+                                    "route snapshot channel full; dropping",
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::info!(
+                                    target_id = %target.id,
+                                    "route snapshot channel closed; stopping emission path",
+                                );
+                                snapshot_channel_closed = true;
+                            }
+                        }
+                    }
+                }
+            }
             result = config_rx.changed() => {
                 if result.is_err() {
                     tracing::info!(
@@ -420,9 +533,12 @@ async fn run(
     observation_rx.close();
     // Drain any final observations so they're accounted for in the stats
     // before the supervisor exits — useful for tests that race an
-    // observation send against shutdown.
+    // observation send against shutdown. The route tracker also receives
+    // these late observations so any T7 snapshot that fires during
+    // shutdown-adjacent activity sees a fully-populated accumulator.
     while let Ok(obs) = observation_rx.try_recv() {
         route_observation(&stats, &obs).await;
+        feed_tracker(&mut route_tracker, &obs, Instant::now());
     }
     tracing::info!(target_id = %target.id, "supervisor stopped");
 }
@@ -493,6 +609,45 @@ async fn route_observation(stats: &StatsArray, obs: &ProbeObservation) {
     stats[idx].lock().await.insert(obs, Instant::now());
 }
 
+/// If `obs` carries hop data and its protocol matches the tracker's
+/// current accumulation protocol, push the hops into the route tracker.
+/// Observations for non-tracked protocols, observations without hops,
+/// and observations received before the tracker has been assigned a
+/// protocol are silently ignored.
+fn feed_tracker(tracker: &mut RouteTracker, obs: &ProbeObservation, now: Instant) {
+    let Some(hops) = obs.hops.as_deref() else {
+        return;
+    };
+    if hops.is_empty() {
+        return;
+    }
+    let Some(tracked) = tracker.protocol() else {
+        return;
+    };
+    if obs.protocol != tracked {
+        tracing::trace!(
+            target_id = %obs.target_id,
+            obs_protocol = ?obs.protocol,
+            tracked = ?tracked,
+            "dropping hops for non-tracked protocol",
+        );
+        return;
+    }
+    tracker.observe(hops, now);
+}
+
+/// Apply a primary-swing to the route tracker. Separated from the eval
+/// arm so the tracing call is reviewable in isolation.
+fn reset_tracker_on_swing(target_id: &str, tracker: &mut RouteTracker, primary: Option<Protocol>) {
+    tracing::info!(
+        target_id = %target_id,
+        tracker_protocol_before = ?tracker.protocol(),
+        tracker_protocol_after = ?primary,
+        "route tracker reset on primary swing",
+    );
+    tracker.reset_for_protocol(primary);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -514,6 +669,18 @@ mod tests {
             tcp_probe_port: 3555,
             udp_probe_port: 3552,
         }
+    }
+
+    /// Build a snapshot channel for use in supervisor tests. The receiver
+    /// is returned so the caller can bind it to a `_snapshot_rx` variable
+    /// whose lifetime matches the test body — dropping the receiver
+    /// closes the channel, which would cause `try_send` in the (future)
+    /// supervisor snapshot tick to fail.
+    fn test_snapshot_tx() -> (
+        tokio::sync::mpsc::Sender<crate::route::RouteSnapshot>,
+        tokio::sync::mpsc::Receiver<crate::route::RouteSnapshot>,
+    ) {
+        tokio::sync::mpsc::channel(8)
     }
 
     fn test_config() -> ProbeConfig {
@@ -542,6 +709,7 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
 
         let handle = spawn(
             test_target("test-1"),
@@ -549,6 +717,7 @@ mod tests {
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // Give the supervisor a moment to start.
@@ -572,8 +741,66 @@ mod tests {
         result.unwrap().expect("supervisor task panicked");
     }
 
-    use crate::probing::ProbeOutcome;
+    use crate::probing::{HopObservation, ProbeOutcome};
+    use crate::route::RouteSnapshot;
     use crate::stats::FastSummary;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// Construct a v4 `IpAddr` from four octets.
+    fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// Synthesise a trippy-shaped `ProbeObservation` with hops attached.
+    ///
+    /// Protocol is `Icmp` because the supervisor's first-eval seeding
+    /// elects ICMP as primary, and the route tracker only accepts hops
+    /// whose observation protocol matches its current accumulation
+    /// protocol. TCP/UDP trippy rounds would be filtered out by
+    /// `feed_tracker`'s protocol-match guard.
+    fn trippy_obs(target: &str, hops: Vec<HopObservation>) -> ProbeObservation {
+        ProbeObservation {
+            protocol: Protocol::Icmp,
+            target_id: target.to_string(),
+            outcome: ProbeOutcome::Success { rtt_micros: 10_000 },
+            hops: Some(hops),
+            observed_at: tokio::time::Instant::now(),
+        }
+    }
+
+    /// Build one `HopObservation` with the given 1-indexed position, IP,
+    /// and RTT (microseconds).
+    fn hop(pos: u8, ip: IpAddr, rtt: u32) -> HopObservation {
+        HopObservation {
+            position: pos,
+            ip: Some(ip),
+            rtt_micros: Some(rtt),
+        }
+    }
+
+    /// Yield the executor enough times for the supervisor task to drain
+    /// any pending mpsc observations and process any elapsed ticks. Used
+    /// by the paused-clock integration tests after
+    /// `tokio::time::advance`.
+    async fn yield_many(times: usize) {
+        for _ in 0..times {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Non-blocking pull of a single snapshot. Using `try_recv` avoids
+    /// interacting with tokio's paused-clock timeout, which under
+    /// `start_paused = true` can auto-advance in ways that mask a
+    /// "snapshot never sent" bug as a late send. Callers yield the
+    /// scheduler first to ensure the supervisor has had a chance to
+    /// run.
+    fn try_drain_one(rx: &mut mpsc::Receiver<RouteSnapshot>) -> Option<RouteSnapshot> {
+        match rx.try_recv() {
+            Ok(snap) => Some(snap),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+        }
+    }
 
     fn icmp_success(target: &str, rtt: u32) -> ProbeObservation {
         ProbeObservation {
@@ -649,12 +876,14 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("test-2"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         let obs = ProbeObservation {
@@ -698,12 +927,14 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("routed"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // Send one ICMP success and two TCP timeouts.
@@ -748,12 +979,14 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("refused"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // UDP Refused: dropped before insert → no sample contribution.
@@ -921,12 +1154,14 @@ mod tests {
         let (config_tx, config_rx) = watch::channel(cfg);
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("swing-test"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // Yield so the supervisor task actually starts and registers its
@@ -1023,6 +1258,155 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Task 8: route snapshot integration tests — drive the supervisor end-to-end
+    // via the paused tokio clock.
+    // ---------------------------------------------------------------------------
+
+    /// First snapshot after startup must be emitted unconditionally — no
+    /// `last_reported` exists yet, so the diff-gate in the supervisor's
+    /// 60 s tick falls through to the always-emit branch.
+    ///
+    /// Flow:
+    /// 1. Inject 3 ICMP success observations (without hops) so the state
+    ///    machine's `select_primary` MIN_TRANSITION_SAMPLES=3 floor is
+    ///    satisfied on the first 10 s eval tick.
+    /// 2. Advance 11 s → eval tick fires → seeds tracker with ICMP.
+    /// 3. Inject one trippy ICMP round with two hops. `feed_tracker`
+    ///    routes these into the tracker because obs protocol matches
+    ///    the seeded primary.
+    /// 4. Advance past the 60 s snapshot tick. The tracker builds a
+    ///    snapshot and the supervisor emits it on the first-ever path.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_emits_first_snapshot_unconditionally() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
+
+        let handle = spawn(
+            test_target("first-snap"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Pre-seed ICMP stats so `select_primary` clears its 3-sample floor
+        // on the first eval tick and elects ICMP as primary. Without hops —
+        // `feed_tracker` drops these anyway because the tracker has no
+        // protocol assigned yet, and we want the tracker's hop buffer
+        // empty until AFTER seeding so the assertion below (`hops.len()
+        // == 2`) is unambiguous.
+        for _ in 0..3 {
+            handle
+                .observation_tx
+                .send(icmp_success("first-snap", 1_000))
+                .await
+                .expect("seed icmp sample");
+        }
+        yield_many(10).await;
+
+        // Seed the tracker via the eval tick → first-eval primary adoption.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        yield_many(10).await;
+
+        // Inject one trippy round with two hops. Protocol is ICMP to match
+        // the seeded primary.
+        handle
+            .observation_tx
+            .send(trippy_obs(
+                "first-snap",
+                vec![
+                    hop(1, ipv4(10, 0, 0, 1), 1_000),
+                    hop(2, ipv4(10, 0, 0, 2), 2_000),
+                ],
+            ))
+            .await
+            .expect("send trippy observation");
+        yield_many(10).await;
+
+        // Advance past the 60 s snapshot tick. The first snapshot tick
+        // fires at supervisor start (tracker empty → no emit); the next
+        // fires 60 s after that. We've already burned 11 s of that
+        // budget, so 60 more seconds crosses the boundary.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        yield_many(20).await;
+
+        let snap = try_drain_one(&mut snapshot_rx).expect("first-ever snapshot must emit");
+        assert_eq!(snap.protocol, Protocol::Icmp);
+        assert_eq!(snap.hops.len(), 2);
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    /// A steady route — identical trippy rounds over multiple snapshot
+    /// ticks — must produce exactly ONE snapshot (the first). Subsequent
+    /// builds see no change from `last_reported`, so `diff_against`
+    /// returns `None` and the supervisor skips emit.
+    ///
+    /// Flow:
+    /// 1. Advance 11 s to seed the tracker with ICMP.
+    /// 2. Loop 12 times: send an identical trippy round and advance 10 s.
+    ///    This covers ~120 s of simulated time and spans at least two
+    ///    60 s snapshot ticks.
+    /// 3. Assert exactly one snapshot was delivered (the first).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_emits_one_snapshot_for_steady_route() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
+
+        let handle = spawn(
+            test_target("steady"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Seed the tracker with ICMP primary via the first eval tick.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        yield_many(10).await;
+
+        // Inject identical trippy rounds over ~120 s, crossing at least
+        // two 60 s snapshot ticks.
+        for _ in 0..12 {
+            handle
+                .observation_tx
+                .send(trippy_obs("steady", vec![hop(1, ipv4(10, 0, 0, 1), 1_000)]))
+                .await
+                .expect("send");
+            tokio::time::advance(Duration::from_secs(10)).await;
+            yield_many(5).await;
+        }
+
+        // The first snapshot tick must have emitted the baseline snapshot.
+        let first = try_drain_one(&mut snapshot_rx).expect("first snapshot must emit");
+        assert_eq!(first.hops.len(), 1);
+        assert_eq!(first.protocol, Protocol::Icmp);
+
+        // No further snapshots: subsequent 60 s ticks see an identical
+        // canonical snapshot → `diff_against` returns `None`.
+        yield_many(20).await;
+        let second = try_drain_one(&mut snapshot_rx);
+        assert!(
+            second.is_none(),
+            "steady route must not emit a second snapshot, got {second:?}",
+        );
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    // ---------------------------------------------------------------------------
     // C1 regression: per-tick publishes must dedupe so prober sleeps don't
     // reset on no-op rate ticks.
     // ---------------------------------------------------------------------------
@@ -1074,5 +1458,80 @@ mod tests {
             "publish_if_changed must wake receivers on differing values",
         );
         assert_eq!(rx_guarded.borrow().0, 0.20);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Snapshot channel closed latch — once `try_send` returns `Closed`, the
+    // supervisor must stop rebuilding snapshots and stop re-emitting the
+    // "channel closed" log. We assert the supervisor joins cleanly across
+    // multiple post-close snapshot ticks (no panic, no hang).
+    // ---------------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_stops_snapshot_emission_after_channel_closed() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+
+        // Build a snapshot channel and immediately drop the receiver so any
+        // `try_send` in the supervisor's snapshot tick will observe `Closed`.
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshot>(1);
+        drop(snapshot_rx);
+
+        let handle = spawn(
+            test_target("closed-snap"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Seed enough ICMP samples so the first eval tick elects ICMP primary
+        // and primes the tracker; also inject a trippy round so the tracker
+        // actually has hops to snapshot on the 60 s tick. Without hops the
+        // build_snapshot short-circuits and `try_send` never runs — we need
+        // to exercise the `Closed` branch at least once.
+        for _ in 0..3 {
+            handle
+                .observation_tx
+                .send(icmp_success("closed-snap", 1_000))
+                .await
+                .expect("seed icmp sample");
+        }
+        yield_many(10).await;
+        // First eval tick → seed tracker with ICMP.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        yield_many(10).await;
+        handle
+            .observation_tx
+            .send(trippy_obs(
+                "closed-snap",
+                vec![hop(1, ipv4(10, 0, 0, 1), 1_000)],
+            ))
+            .await
+            .expect("send trippy observation");
+        yield_many(10).await;
+
+        // First snapshot tick — try_send observes Closed, latches the flag.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        yield_many(20).await;
+
+        // Two more snapshot ticks — must be fully skipped (no panic, no hang).
+        tokio::time::advance(Duration::from_secs(120)).await;
+        yield_many(20).await;
+        tokio::time::advance(Duration::from_secs(120)).await;
+        yield_many(20).await;
+
+        parent_cancel.cancel();
+        let join_result = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+        assert!(
+            join_result.is_ok(),
+            "supervisor must join cleanly after multiple post-close snapshot ticks",
+        );
+        join_result
+            .unwrap()
+            .expect("supervisor task must not panic after Closed latch");
     }
 }

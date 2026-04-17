@@ -8,7 +8,8 @@ use std::net::IpAddr;
 
 use anyhow::{bail, Result};
 use meshmon_protocol::{
-    PathHealth as PbPathHealth, PathHealthThresholds, Protocol, ProtocolThresholds, RateEntry,
+    DiffDetection, PathHealth as PbPathHealth, PathHealthThresholds, Protocol, ProtocolThresholds,
+    RateEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -284,6 +285,14 @@ impl ProbeConfig {
             .unwrap_or_else(default_path_thresholds)
     }
 
+    /// Route-change detection thresholds. Falls back to spec 02 defaults
+    /// when the service hasn't supplied a `DiffDetection` message.
+    pub fn diff_detection(&self) -> DiffDetection {
+        self.raw
+            .diff_detection
+            .unwrap_or_else(default_diff_detection)
+    }
+
     pub fn rates_for(&self, primary: Protocol, health: PbPathHealth) -> Option<RateEntry> {
         self.raw
             .rates
@@ -330,6 +339,15 @@ fn default_path_thresholds() -> PathHealthThresholds {
         degraded_min_samples: 30,
         normal_recovery_pct: 0.02,
         normal_recovery_sec: 300,
+    }
+}
+
+fn default_diff_detection() -> DiffDetection {
+    DiffDetection {
+        new_ip_min_freq: 0.20,
+        missing_ip_max_freq: 0.05,
+        hop_count_change: 1,
+        rtt_shift_frac: 0.50,
     }
 }
 
@@ -730,5 +748,39 @@ mod tests {
         let t = cfg.thresholds_for(Protocol::Tcp);
         assert!((t.unhealthy_trigger_pct - 0.5).abs() < 1e-9);
         assert!((t.healthy_recovery_pct - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn diff_detection_returns_service_value_when_present() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![0u8; 8].into(),
+            diff_detection: Some(DiffDetection {
+                new_ip_min_freq: 0.30,
+                missing_ip_max_freq: 0.10,
+                hop_count_change: 2,
+                rtt_shift_frac: 0.75,
+            }),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).expect("valid");
+        let d = cfg.diff_detection();
+        assert!((d.new_ip_min_freq - 0.30).abs() < 1e-9);
+        assert!((d.missing_ip_max_freq - 0.10).abs() < 1e-9);
+        assert_eq!(d.hop_count_change, 2);
+        assert!((d.rtt_shift_frac - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn diff_detection_falls_back_to_spec_defaults() {
+        let resp = meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![0u8; 8].into(),
+            ..Default::default()
+        };
+        let cfg = ProbeConfig::from_proto(resp).expect("valid");
+        let d = cfg.diff_detection();
+        assert!((d.new_ip_min_freq - 0.20).abs() < 1e-9);
+        assert!((d.missing_ip_max_freq - 0.05).abs() < 1e-9);
+        assert_eq!(d.hop_count_change, 1);
+        assert!((d.rtt_shift_frac - 0.50).abs() < 1e-9);
     }
 }

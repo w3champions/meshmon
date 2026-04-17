@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use rand::Rng;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +19,7 @@ use crate::probing::echo_udp::SecretSnapshot;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
 use crate::probing::{echo_tcp, echo_udp};
+use crate::route::RouteSnapshot;
 use crate::supervisor::{self, SupervisorHandle};
 use meshmon_protocol::{ConfigResponse, RegisterRequest, Target, TargetsResponse};
 
@@ -54,6 +55,16 @@ pub struct AgentRuntime<A: ServiceApi> {
     _tcp_listener: tokio::task::JoinHandle<()>,
     /// UDP echo listener handle. Held for the same reason as the TCP one.
     _udp_listener: tokio::task::JoinHandle<()>,
+    /// Sender side of the shared route-snapshot channel. Handed to every
+    /// per-target supervisor so each one can push snapshots into a single
+    /// consumer. T16 will replace the placeholder consumer with the real
+    /// emitter; until then this feeds [`run_route_snapshot_consumer`]
+    /// which just logs each snapshot at `info`.
+    route_snapshot_tx: mpsc::Sender<RouteSnapshot>,
+    /// Join handle for the placeholder snapshot consumer. Held for the
+    /// runtime's lifetime so the task is cancelled when the runtime is
+    /// dropped; not awaited in production (the `_` prefix signals that).
+    _route_snapshot_consumer: tokio::task::JoinHandle<()>,
 }
 
 impl<A: ServiceApi> AgentRuntime<A> {
@@ -115,6 +126,20 @@ impl<A: ServiceApi> AgentRuntime<A> {
             .await
             .context("UDP prober pool bind failed")?;
         let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, child.clone());
+
+        // Shared route-snapshot channel. Every supervisor clones the sender;
+        // a single consumer task drains the receiver. Capacity 8 is
+        // deliberately small: snapshots fire at most every 60 s per target,
+        // so contention is rare — a larger buffer would just trade memory
+        // for the time the consumer is behind without any real benefit.
+        // The sender is stashed on the returned `AgentRuntime` so the
+        // channel's lifetime matches the runtime (not this function).
+        let (route_snapshot_tx, route_snapshot_rx) = mpsc::channel::<RouteSnapshot>(8);
+        let consumer_cancel = child.clone();
+        let route_snapshot_consumer = tokio::spawn(run_route_snapshot_consumer(
+            route_snapshot_rx,
+            consumer_cancel,
+        ));
 
         // -- Register --
         let reg_req = build_register_request(
@@ -202,6 +227,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 Arc::clone(&udp_pool),
                 Arc::clone(&trippy_prober),
                 child.clone(),
+                route_snapshot_tx.clone(),
             );
             supervisors.insert(id, handle);
         }
@@ -229,6 +255,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
             trippy_prober,
             _tcp_listener: tcp_listener,
             _udp_listener: udp_listener,
+            route_snapshot_tx,
+            _route_snapshot_consumer: route_snapshot_consumer,
         })
     }
 
@@ -402,6 +430,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 Arc::clone(&self.udp_pool),
                 Arc::clone(&self.trippy_prober),
                 self.cancel.clone(),
+                self.route_snapshot_tx.clone(),
             );
             tracing::info!(target_id = %id, "spawned new supervisor");
             self.supervisors.insert(id, handle);
@@ -437,6 +466,48 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// Number of active supervisors. Useful for testing.
     pub fn supervisor_count(&self) -> usize {
         self.supervisors.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: route snapshot consumer (T15 placeholder, T16 replaces)
+// ---------------------------------------------------------------------------
+
+/// Placeholder consumer for route snapshots. T16 replaces this with the
+/// real emitter that pushes snapshots to the service via
+/// `push_route_snapshot`. Behaves lossily on shutdown: cancellation returns
+/// immediately after a best-effort drain so a hung consumer can't delay
+/// `AgentRuntime::shutdown`.
+async fn run_route_snapshot_consumer(
+    mut rx: mpsc::Receiver<RouteSnapshot>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            maybe = rx.recv() => {
+                match maybe {
+                    Some(snap) => {
+                        tracing::info!(
+                            protocol = ?snap.protocol,
+                            hops = snap.hops.len(),
+                            observed_at_micros = snap.observed_at_micros_i64(),
+                            "route snapshot received (placeholder consumer, T15)",
+                        );
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    // Best-effort drain of any in-flight snapshots so late observations
+    // still surface in logs during shutdown.
+    while let Ok(snap) = rx.try_recv() {
+        tracing::trace!(
+            protocol = ?snap.protocol,
+            hops = snap.hops.len(),
+            "draining route snapshot at shutdown",
+        );
     }
 }
 
