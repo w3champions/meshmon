@@ -303,6 +303,24 @@ async fn agent_reconnects_after_tunnel_dropped() {
 // Task 17: graceful shutdown with an active tunnel
 // ---------------------------------------------------------------------------
 
+/// Proves that server-side shutdown alone tears active tunnels down cleanly,
+/// without requiring cooperation from the agent side.
+///
+/// # What this test proves
+///
+/// `close_all()` cancels the `TunnelManager`'s master token, which cascades
+/// into every driver's effective cancel token. The driver exits its select
+/// loop, drops the yamux connection (and thereby the `TunnelIo` which owns
+/// the outbound mpsc sender). The sender dropping causes the
+/// `ReceiverStream<Result<TunnelFrame, Status>>` returned by `accept` to EOF.
+/// Tonic observes the response body ending and completes the `OpenTunnel` RPC.
+/// The agent's `open_and_run` future then returns, allowing the reconnect loop
+/// to proceed.
+///
+/// `tunnel_cancel` is NOT fired until after we confirm the driver unregistered.
+/// It is only used to stop the agent's reconnect loop so the test can finish —
+/// in real production, agents keep reconnecting (expected; they succeed when
+/// the new service process comes up).
 #[tokio::test]
 async fn active_tunnel_ends_cleanly_on_graceful_shutdown() {
     let pool = shared_migrated_pool().await;
@@ -318,20 +336,28 @@ async fn active_tunnel_ends_cleanly_on_graceful_shutdown() {
     // Wait for the tunnel to come up.
     wait_for_tunnel(&state, 1, Duration::from_secs(5)).await;
 
-    // Simulate graceful shutdown: in production the service broadcasts
-    // shutdown to all agents before stopping its own listener. Here we model
-    // that by cancelling both tokens. `tunnel_cancel` tells the agent's
-    // yamux driver to stop; `shutdown_token` stops the service's accept loop.
-    // Both fires simultaneously — which side observes the EOF first doesn't
-    // matter; the invariant is that `open_and_run` must return cleanly (no
-    // panic) and the driver task must unregister the tunnel.
+    // Step 1: Server-side shutdown — mirrors production main.rs order.
+    // close_all() cancels the master token → drivers exit → response streams
+    // EOF → the agent's open_and_run future returns (RPC completes on both
+    // sides). We do NOT cancel tunnel_cancel here; the whole point is to
+    // prove server-side shutdown alone tears the tunnel down.
+    state.tunnel_manager.close_all();
+
+    // Step 2: Wait for the driver to unregister (async — driver task runs
+    // concurrently). This is the key assertion: drivers actually exited.
+    wait_for_tunnel(&state, 0, Duration::from_secs(5)).await;
+
+    // Step 3: Stop the agent's reconnect loop so the test can finish.
+    // In production agents keep reconnecting; here we need the task to exit.
     tunnel_cancel.cancel();
+
+    // Step 4: Stop the service's accept loop.
     shutdown_token.cancel();
 
-    // The agent task should exit within 10 s.
-    let result = tokio::time::timeout(Duration::from_secs(10), agent_task)
+    // Step 5: The agent task should exit within 5 s once tunnel_cancel fires.
+    let result = tokio::time::timeout(Duration::from_secs(5), agent_task)
         .await
-        .expect("agent task did not exit within 10 s after graceful shutdown");
+        .expect("agent task did not exit within 5 s after graceful shutdown");
 
     // The task itself should not have panicked.
     assert!(
@@ -339,8 +365,4 @@ async fn active_tunnel_ends_cleanly_on_graceful_shutdown() {
         "agent task panicked: {:?}",
         result.unwrap_err()
     );
-
-    // After the driver task unregisters, the manager should be empty (allow
-    // a brief async window for the driver task to call unregister).
-    wait_for_tunnel(&state, 0, Duration::from_secs(3)).await;
 }
