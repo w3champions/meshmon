@@ -169,6 +169,8 @@ export default function PathDetail() {
           />
           <TimeRangePicker
             value={range}
+            from={from}
+            to={to}
             onChange={(next) =>
               navigate({
                 to: "/paths/$source/$target",

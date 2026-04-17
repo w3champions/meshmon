@@ -1,3 +1,4 @@
+import { CustomRangeInputs } from "@/components/CustomRangeInputs";
 import {
   Select,
   SelectContent,
@@ -25,25 +26,51 @@ export interface TimeRangePickerValue {
 
 interface TimeRangePickerProps {
   value: TimeRangeKey;
+  /** ISO-8601 `from` bound — only meaningful when range is 'custom'. */
+  from?: string;
+  /** ISO-8601 `to` bound — only meaningful when range is 'custom'. */
+  to?: string;
   onChange: (next: TimeRangePickerValue) => void;
   className?: string;
 }
 
-export function TimeRangePicker({ value, onChange, className }: TimeRangePickerProps) {
+export function TimeRangePicker({
+  value,
+  from = "",
+  to = "",
+  onChange,
+  className,
+}: TimeRangePickerProps) {
+  const handlePresetChange = (next: string) => {
+    const range = next as TimeRangeKey;
+    if (range === "custom") onChange({ range, from, to });
+    else onChange({ range });
+  };
+
   return (
-    <Select value={value} onValueChange={(next) => onChange({ range: next as TimeRangeKey })}>
-      <SelectTrigger className={className} aria-label="Time range">
-        <SelectValue>{LABELS[value]}</SelectValue>
-      </SelectTrigger>
-      <SelectContent>
-        {(Object.keys(LABELS) as TimeRangeKey[])
-          .filter((k) => k !== "custom")
-          .map((k) => (
+    <div className={className}>
+      <Select value={value} onValueChange={handlePresetChange}>
+        <SelectTrigger aria-label="Time range">
+          <SelectValue>{LABELS[value]}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {(Object.keys(LABELS) as TimeRangeKey[]).map((k) => (
             <SelectItem key={k} value={k}>
               {LABELS[k]}
             </SelectItem>
           ))}
-      </SelectContent>
-    </Select>
+        </SelectContent>
+      </Select>
+      {value === "custom" && (
+        <CustomRangeInputs
+          className="mt-2"
+          from={from}
+          to={to}
+          onChange={({ from: f, to: t }) =>
+            onChange({ range: "custom", from: f, to: t })
+          }
+        />
+      )}
+    </div>
   );
 }
