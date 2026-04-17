@@ -50,4 +50,27 @@ body {
     background: white;
     color: black;
   }
+
+  /* Hide the app chrome on printed pages — the AppBar and NavDrawer
+     belong to the interactive shell, not the report body. Components
+     opt in by tagging themselves with `data-app-chrome="true"` so this
+     rule is authoritative regardless of Tailwind class names. */
+  [data-app-chrome="true"] {
+    display: none !important;
+  }
+
+  /* Grafana iframes render as `loading="lazy"` and may not have a
+     settled layout by the time the print engine rasterises. Pin them
+     to a sensible height and keep them out of mid-page breaks. */
+  iframe {
+    height: 240px !important;
+    break-inside: avoid;
+  }
+
+  /* Major sections opt out of mid-section breaks; per-element
+     `print:break-before-page` classes (see Report.tsx) handle the
+     surgical case where we want a new page. */
+  section {
+    break-inside: avoid;
+  }
 }

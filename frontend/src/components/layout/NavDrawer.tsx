@@ -15,6 +15,7 @@ export function NavDrawer() {
         "hidden md:flex flex-col border-r border-border bg-background transition-all",
         collapsed ? "w-14" : "w-56",
       )}
+      data-app-chrome="true"
     >
       <nav className="flex flex-col p-2 space-y-1 flex-1">
         {navItems.map((item) => (
