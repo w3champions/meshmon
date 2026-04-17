@@ -26,6 +26,7 @@ memory-serve = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 meshmon-protocol = { path = "../protocol" }
+meshmon-revtunnel = { path = "../revtunnel" }
 prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
 chrono = { workspace = true }
@@ -51,6 +52,7 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
+tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }
@@ -67,12 +69,14 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 ctor = { workspace = true }
+meshmon-agent = { path = "../agent" }
+meshmon-revtunnel = { path = "../revtunnel" }
 metrics-util = "0.20"
 prost = { workspace = true }
 snap = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tokio-stream = "0.1"
+tokio-stream = { workspace = true, features = ["net"] }
 tower = { workspace = true }  # for `ServiceExt::oneshot` in handler tests
 uuid = { workspace = true }
 wiremock = { workspace = true }

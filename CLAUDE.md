@@ -10,6 +10,7 @@ a central service ingests, stores, and alerts on regressions and route changes.
 | `crates/service` | Central axum service: API, ingestion, alerting |
 | `crates/agent` | Per-node probe agent (tokio + tonic gRPC client) |
 | `crates/protocol` | Shared protobuf types (`meshmon.proto`, tonic codegen) |
+| `crates/revtunnel` | Reverse-tunnel transport (yamux inside a tonic bidi stream) |
 | `crates/common` | Shared utilities |
 | `frontend/` | React 19 + Tailwind SPA, embedded into the service binary |
 
@@ -68,6 +69,25 @@ Key patterns:
   before allowlist / dispatch-map lookups. UDP is secret-gated (8-byte
   secret from `ConfigResponse`) + allowlist-gated (IPs from
   `GetTargets`).
+- Reverse tunnel (`tunnel.rs`) keeps one long-lived `OpenTunnel` RPC open
+  so the service can invoke `AgentCommand::RefreshConfig` through it —
+  cuts config-fetch latency from up-to-5min (poll) to near-immediate.
+  Reconnects with 1s→60s exponential backoff + ±25% jitter on termination.
+
+## Service
+
+Key patterns:
+- `TunnelManager` (from `meshmon-revtunnel`) tracks one `tonic::Channel`
+  per registered agent tunnel. `commands::spawn_config_watcher` fans out
+  concurrent `AgentCommand::RefreshConfig` calls across the registry on
+  every SIGHUP-driven config reload; per-call deadline 10s, failures
+  logged and counted, no retries (the agent's 5-min poll is the safety net).
+- `TunnelManager::close_all` cancels every driver token on shutdown so
+  outer response streams EOF and the HTTP/2 conn drain completes within
+  `shutdown_deadline`.
+- Self-metrics: `meshmon_service_tunnel_agents` (gauge — registered
+  tunnels) and `meshmon_service_command_rpcs_total{method,outcome}`
+  (counter — fan-out RPC outcomes).
 
 ## Alerting
 

@@ -1929,6 +1929,7 @@ dependencies = [
  "anyhow",
  "dashmap",
  "meshmon-protocol",
+ "meshmon-revtunnel",
  "proptest",
  "prost",
  "rand 0.9.4",
@@ -1962,6 +1963,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "meshmon-revtunnel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "hyper-util",
+ "meshmon-protocol",
+ "pin-project-lite",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "yamux",
+]
+
+[[package]]
 name = "meshmon-service"
 version = "0.1.0"
 dependencies = [
@@ -1978,7 +1999,9 @@ dependencies = [
  "hyper",
  "hyper-util",
  "memory-serve",
+ "meshmon-agent",
  "meshmon-protocol",
+ "meshmon-revtunnel",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
@@ -2127,6 +2150,12 @@ name = "no-std-net"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43794a0ace135be66a25d3ae77d41b91615fb68ae937f904090203e81f755b65"
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nonempty"
@@ -3839,6 +3868,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4137,6 +4172,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "pin-project-lite",
@@ -5371,6 +5407,22 @@ dependencies = [
  "anyhow",
  "meshmon-service",
  "serde_json",
+]
+
+[[package]]
+name = "yamux"
+version = "0.13.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1991f6690292030e31b0144d73f5e8368936c58e45e7068254f7138b23b00672"
+dependencies = [
+ "futures",
+ "log",
+ "nohash-hasher",
+ "parking_lot",
+ "pin-project",
+ "rand 0.9.4",
+ "static_assertions",
+ "web-time",
 ]
 
 [[package]]

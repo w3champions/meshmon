@@ -5,6 +5,7 @@ members = [
     "crates/agent",
     "crates/protocol",
     "crates/common",
+    "crates/revtunnel",
     "xtask",
 ]
 
@@ -25,14 +26,17 @@ axum-extra = "0.12"
 axum-login = "0.18"
 axum-prometheus = "0.10"
 base64 = "0.22"
+bytes = "1"
 ctor = "0.10"
 dashmap = "6"
+futures-util = "0.3"
 # Named directly because our `LoginRateLimitLayer` alias uses
 # `governor::middleware::NoOpMiddleware`, which `tower_governor` does not
 # re-export. Bump this in lockstep with `tower_governor`: the minor
 # version must match what `tower_governor` pulls in transitively, or the
 # type alias will fail to unify.
 governor = "0.10"
+pin-project-lite = "0.2"
 prost = "0.14"
 proptest = "1"
 rand = "0.9"
@@ -44,7 +48,8 @@ sqlx = { version = "0.8", default-features = false }
 testcontainers = "0.27"
 thiserror = "2"
 tokio = "1"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt", "io", "compat"] }
 toml = "1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
@@ -78,6 +83,7 @@ prometheus-reqwest-remote-write = "0.5"
 snap = "1"
 surge-ping = "0.8"
 wiremock = "0.6"
+yamux = "0.13"
 
 [profile.release]
 lto = "thin"

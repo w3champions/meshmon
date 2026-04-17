@@ -17,6 +17,7 @@ meshmon/
 │   ├── service/            # Central axum service + API + embedded frontend
 │   ├── agent/              # Per-node probe agent
 │   ├── protocol/           # Shared Protobuf messages
+│   ├── revtunnel/          # Reverse-tunnel transport (yamux over a tonic bidi stream)
 │   └── common/             # Shared utilities
 ├── frontend/               # React 19 + Tailwind SPA, embedded into service
 ├── docker/                 # Multi-stage Dockerfiles for service and agent

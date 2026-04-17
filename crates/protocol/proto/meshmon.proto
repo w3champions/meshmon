@@ -370,14 +370,51 @@ message PushRouteSnapshotResponse {
   reserved 15 to 31;
 }
 
+// ---------------------------------------------------------------------------
+// Reverse tunnel: agent → service opens this stream; inside it, yamux
+// multiplexes virtual substreams that carry normal gRPC exchanges in
+// the reverse direction (service → agent). See agent-api design spec §3.10.
+// ---------------------------------------------------------------------------
+
+// One raw byte frame riding the outer bidi stream. Yamux framing lives
+// *inside* `data`; the service is oblivious to it — it just forwards the
+// bytes between the tonic stream and its yamux session.
+message TunnelFrame {
+  bytes data = 1;
+  reserved 2 to 14;
+  reserved 15 to 31;
+}
+
 service AgentApi {
   rpc Register          (RegisterRequest)      returns (RegisterResponse);
   rpc PushMetrics       (MetricsBatch)         returns (PushMetricsResponse);
   rpc PushRouteSnapshot (RouteSnapshotRequest) returns (PushRouteSnapshotResponse);
   rpc GetConfig         (GetConfigRequest)     returns (ConfigResponse);
   rpc GetTargets        (GetTargetsRequest)    returns (TargetsResponse);
+  // Long-lived reverse-tunnel opener. Request metadata carries
+  // `x-meshmon-source-id` (agent identity) alongside the bearer token.
+  rpc OpenTunnel        (stream TunnelFrame)   returns (stream TunnelFrame);
+}
 
-  // Reserved for server-push of one-off commands to agents. Documented so
-  // the RPC name isn't reused.
-  // rpc SubscribeCommands(SubscribeRequest) returns (stream Command);
+// ---------------------------------------------------------------------------
+// Service → agent: commands invoked via the reverse tunnel. Each method
+// is a normal gRPC RPC dispatched through the tunnel; add a new method
+// here + implement it in the agent to ship a new command.
+// ---------------------------------------------------------------------------
+
+message RefreshConfigRequest {
+  reserved 1 to 14;
+  reserved 15 to 31;
+}
+
+message RefreshConfigResponse {
+  reserved 1 to 14;
+  reserved 15 to 31;
+}
+
+service AgentCommand {
+  // Signals the agent to re-fetch config + targets from the service
+  // right away instead of waiting for its next 5-minute poll. Idempotent
+  // and cheap; service calls one per config change per agent, no retries.
+  rpc RefreshConfig(RefreshConfigRequest) returns (RefreshConfigResponse);
 }

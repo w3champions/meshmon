@@ -45,6 +45,10 @@ pub const REGISTRY_LAST_REFRESH_AGE_SECONDS: &str =
     "meshmon_service_registry_last_refresh_age_seconds";
 /// Counter: periodic registry refreshes that failed.
 pub const REGISTRY_REFRESH_ERRORS_TOTAL: &str = "meshmon_service_registry_refresh_errors_total";
+/// Gauge: number of agents with an active reverse tunnel.
+pub const TUNNEL_AGENTS: &str = "meshmon_service_tunnel_agents";
+/// Counter: service → agent command RPCs. Labels: `method`, `outcome`.
+pub const COMMAND_RPCS_TOTAL: &str = "meshmon_service_command_rpcs_total";
 
 // HTTP request counter names (`meshmon_service_http_requests_total`,
 // `..._duration_seconds`, `..._pending`) are not declared here — they
@@ -74,6 +78,8 @@ const ALL_METRIC_NAMES: &[&str] = &[
     REGISTRY_AGENTS,
     REGISTRY_LAST_REFRESH_AGE_SECONDS,
     REGISTRY_REFRESH_ERRORS_TOTAL,
+    TUNNEL_AGENTS,
+    COMMAND_RPCS_TOTAL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -115,6 +121,30 @@ impl DropSource {
             DropSource::Metrics => "metrics",
             DropSource::Snapshot => "snapshot",
             DropSource::Touch => "touch",
+        }
+    }
+}
+
+/// Outcome label for [`COMMAND_RPCS_TOTAL`].
+#[derive(Debug, Clone, Copy)]
+pub enum CommandOutcome {
+    /// RPC completed successfully.
+    Ok,
+    /// `tonic::Code::Unavailable` — tunnel dropped or agent gone.
+    Unavailable,
+    /// `tonic::Code::DeadlineExceeded` — per-call timer fired.
+    DeadlineExceeded,
+    /// Any other tonic status code.
+    Other,
+}
+
+impl CommandOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            CommandOutcome::Ok => "ok",
+            CommandOutcome::Unavailable => "unavailable",
+            CommandOutcome::DeadlineExceeded => "deadline_exceeded",
+            CommandOutcome::Other => "other",
         }
     }
 }
@@ -191,6 +221,16 @@ pub fn registry_refresh_errors() -> Counter {
     counter!(REGISTRY_REFRESH_ERRORS_TOTAL)
 }
 
+/// Gauge handle for [`TUNNEL_AGENTS`].
+pub fn tunnel_agents() -> Gauge {
+    gauge!(TUNNEL_AGENTS)
+}
+
+/// Counter handle for [`COMMAND_RPCS_TOTAL`] with the given method + outcome.
+pub fn command_rpcs(method: &'static str, outcome: CommandOutcome) -> Counter {
+    counter!(COMMAND_RPCS_TOTAL, "method" => method, "outcome" => outcome.as_str())
+}
+
 // ---------------------------------------------------------------------------
 // One-shot: emit build_info with its two static labels.
 // ---------------------------------------------------------------------------
@@ -262,6 +302,16 @@ pub fn describe_service_metrics() {
     describe_counter!(
         REGISTRY_REFRESH_ERRORS_TOTAL,
         "Periodic registry refreshes that failed (snapshot retained on failure)"
+    );
+    describe_gauge!(
+        TUNNEL_AGENTS,
+        Unit::Count,
+        "Number of agents with an active reverse tunnel"
+    );
+    describe_counter!(
+        COMMAND_RPCS_TOTAL,
+        Unit::Count,
+        "Service-to-agent command RPCs. Labels: method, outcome"
     );
     // HTTP request metrics: described by axum-prometheus at layer-build
     // time. Metric names are renamed at compile time via
@@ -368,6 +418,8 @@ mod tests {
         registry_agents(AgentState::Active).set(0.0);
         registry_last_refresh_age_seconds().set(0.0);
         registry_refresh_errors().increment(0);
+        tunnel_agents().set(0.0);
+        command_rpcs("refresh_config", CommandOutcome::Ok).increment(0);
         // BUILD_INFO is intentionally not in ALL_METRIC_NAMES (it's a
         // one-shot with non-enumerable labels). Exercise it separately so
         // this test's name ("every metric") doesn't lie.

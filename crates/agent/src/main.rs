@@ -57,8 +57,22 @@ async fn async_main() -> Result<()> {
         cancel_for_signal.cancel();
     });
 
+    // Snapshot the agent ID before `env` is moved into bootstrap.
+    let agent_id = env.identity.id.clone();
+
     // Bootstrap: register, fetch config + targets, spawn supervisors.
-    let mut runtime = AgentRuntime::bootstrap(env, api, cancel.clone()).await?;
+    // Clone `api` so both bootstrap and the tunnel task share the same
+    // Arc<GrpcServiceApi> (clone is a cheap Arc bump).
+    let mut runtime = AgentRuntime::bootstrap(env, api.clone(), cancel.clone()).await?;
+
+    // Spawn the reverse-tunnel task and attach it to the runtime. The
+    // tunnel runs against the concrete GrpcServiceApi; test mocks don't
+    // expose the raw gRPC channel, so this wiring lives here rather than
+    // inside bootstrap.
+    let refresh_trigger = std::sync::Arc::new(tokio::sync::Notify::new());
+    let tunnel_handle =
+        meshmon_agent::tunnel::spawn(api, agent_id, refresh_trigger.clone(), cancel.clone());
+    runtime.attach_tunnel(refresh_trigger, tunnel_handle);
 
     // Run the refresh loop (blocks until cancellation).
     runtime.run_refresh_loop().await;

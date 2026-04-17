@@ -218,6 +218,11 @@ async fn run() -> anyhow::Result<()> {
     let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());
     let upkeep_handle =
         meshmon_service::metrics::spawn_upkeep(prom.clone(), shutdown_token.clone());
+    let command_watcher_handle = meshmon_service::commands::spawn_config_watcher(
+        state.tunnel_manager.clone(),
+        state.config_rx.clone(),
+        shutdown_token.clone(),
+    );
     let app = http::router(state.clone());
 
     // --- Step 8: Serve with a bounded drain ---
@@ -297,6 +302,15 @@ async fn run() -> anyhow::Result<()> {
                 }
                 _ = graceful_token.cancelled() => {
                     graceful_state.mark_not_ready();
+                    // Signal tunnel drivers to exit BEFORE the HTTP drain
+                    // phase. `OpenTunnel` response streams are long-lived —
+                    // their per-connection tasks in `conn_set` won't EOF
+                    // until the driver drops its outbound sender. Closing
+                    // tunnels here lets those streams end cleanly and the
+                    // drain loop below observes the connection tasks
+                    // finishing within `shutdown_deadline`. The post-serve
+                    // `close_all()` call further down is idempotent.
+                    graceful_state.tunnel_manager.close_all();
                     info!(pending = conn_set.len(), "HTTP server draining");
                     break;
                 }
@@ -378,6 +392,17 @@ async fn run() -> anyhow::Result<()> {
         ),
     }
     info!("metrics upkeep loop drained");
+
+    state.tunnel_manager.close_all();
+    match tokio::time::timeout(deadline, command_watcher_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "command watcher task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "command watcher did not drain within shutdown_deadline; aborting",
+        ),
+    }
+    info!("command watcher drained");
 
     serve_result.context("HTTP server")?;
 
