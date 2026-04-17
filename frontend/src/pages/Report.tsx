@@ -1,5 +1,4 @@
 import { useSearch } from "@tanstack/react-router";
-import { format } from "date-fns";
 import { useMemo } from "react";
 import { usePathOverview } from "@/api/hooks/path-overview";
 import { useRouteSnapshot } from "@/api/hooks/route-snapshot";
@@ -17,6 +16,17 @@ interface ReportSearch {
   from: string;
   to: string;
   protocol?: "icmp" | "udp" | "tcp";
+}
+
+/**
+ * Format a Date as `YYYY-MM-DD HH:mm UTC` with real UTC wall-clock time.
+ * date-fns' `format` honours the browser's local timezone, which silently
+ * mislabels displayed timestamps when the label says 'UTC'. ISO-string
+ * slicing sidesteps the formatter entirely for minute precision.
+ */
+function fmtUtcMinute(d: Date): string {
+  // "2026-04-17T10:00:00.000Z" → "2026-04-17 10:00 UTC"
+  return `${d.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 function fmtMs(ms: number | null): string {
@@ -50,7 +60,10 @@ export default function Report() {
 
   const snapshots = overview.data?.recent_snapshots ?? [];
   // recent_snapshots is newest-first. AFTER is the first; BEFORE is the
-  // last distinct-id entry (the earliest snapshot in the window).
+  // last distinct-id entry (the earliest snapshot in the window). When
+  // the window contains only one snapshot (or every snapshot shares the
+  // same id), BEFORE falls back to AFTER — the summary then flags
+  // `singleSnapshot` so operators know there's no diff to compare.
   const afterId = snapshots[0]?.id;
   const beforeId = [...snapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
 
@@ -141,9 +154,7 @@ export default function Report() {
       <header className="flex items-start justify-between gap-4 border-b pb-4 print:border-black">
         <div>
           <h1 className="text-xl font-semibold">Network Issue Report</h1>
-          <p className="text-sm text-muted-foreground">
-            Generated {format(new Date(), "yyyy-MM-dd HH:mm 'UTC'")}
-          </p>
+          <p className="text-sm text-muted-foreground">Generated {fmtUtcMinute(new Date())}</p>
         </div>
         <Button type="button" onClick={() => window.print()} className="print:hidden">
           Export PDF
@@ -159,8 +170,7 @@ export default function Report() {
         <span className="font-semibold uppercase">{primary ?? "—"}</span>
         <span className="text-muted-foreground">Window:</span>
         <span>
-          {format(windowStart, "yyyy-MM-dd HH:mm 'UTC'")} –{" "}
-          {format(windowEnd, "yyyy-MM-dd HH:mm 'UTC'")}
+          {fmtUtcMinute(windowStart)} – {fmtUtcMinute(windowEnd)}
         </span>
       </section>
 
@@ -204,12 +214,14 @@ export default function Report() {
               Route — BEFORE{" "}
               {beforeQ.data && (
                 <span className="text-sm text-muted-foreground">
-                  ({format(new Date(beforeQ.data.observed_at), "yyyy-MM-dd HH:mm 'UTC'")})
+                  ({fmtUtcMinute(new Date(beforeQ.data.observed_at))})
                 </span>
               )}
             </h2>
             {beforeQ.isLoading ? (
               <Skeleton className="h-24 w-full" />
+            ) : beforeQ.isError ? (
+              <p className="text-sm text-destructive">Failed to load BEFORE snapshot.</p>
             ) : beforeQ.data ? (
               <RouteTable hops={beforeQ.data.hops} />
             ) : (
@@ -222,12 +234,14 @@ export default function Report() {
               Route — AFTER{" "}
               {afterQ.data && (
                 <span className="text-sm text-muted-foreground">
-                  ({format(new Date(afterQ.data.observed_at), "yyyy-MM-dd HH:mm 'UTC'")})
+                  ({fmtUtcMinute(new Date(afterQ.data.observed_at))})
                 </span>
               )}
             </h2>
             {afterQ.isLoading ? (
               <Skeleton className="h-24 w-full" />
+            ) : afterQ.isError ? (
+              <p className="text-sm text-destructive">Failed to load AFTER snapshot.</p>
             ) : afterQ.data ? (
               <RouteTable hops={afterQ.data.hops} diff={routeDiff} />
             ) : (
