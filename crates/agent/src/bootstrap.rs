@@ -62,7 +62,7 @@ pub struct AgentRuntime<A: ServiceApi> {
     /// Sender of the supervisor → emitter metrics channel. Same contract as
     /// `route_snapshot_tx`: held alive for supervisor lifetime, dropped
     /// explicitly in `shutdown()`.
-    pub(crate) path_metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
+    path_metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
     /// Emitter task handle. Awaited on `shutdown()` with a 10 s outer timeout.
     /// No `_` prefix — this handle is actively joined, not just held.
     emitter_handle: tokio::task::JoinHandle<()>,

@@ -26,6 +26,10 @@
 //! any remaining metrics, and flushes a final best-effort batch before
 //! aborting the retry worker. Any entries still in the retry queue are
 //! discarded on exit — the spec treats the buffer as ephemeral.
+//! Entries removed by `take_due` but not yet successfully acknowledged
+//! when the retry worker is aborted mid-dispatch are also lost; the
+//! retry buffer is ephemeral by design and is not persisted across
+//! process restarts.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -1114,6 +1118,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn primary_loop_enqueues_on_unavailable_and_bumps_error_counter() {
+        // Keep the API failing throughout so successful retries can never
+        // reset `local_error_count`. Each primary tick then stamps the
+        // accumulated error count onto its batch via agent_metadata, giving
+        // us an observable view of the counter through the public interface.
         let api = Arc::new(RecordingApi::default());
         *api.metrics_result.lock().await = Some(tonic::Status::unavailable("down"));
 
@@ -1148,19 +1156,60 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        cancel.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+        // Second message + tick, still failing. Primary tick 2's batch is
+        // built BEFORE its dispatch, so it stamps the error counter that
+        // was already bumped by tick 1's UNAVAILABLE. A passing assertion
+        // here proves both (a) the increment happened and (b) it's visible
+        // through agent_metadata — not just an internal atomic.
+        mtx.send(PathMetricsMsg {
+            target_id: "t2".into(),
+            protocol: Protocol::Tcp,
+            window_start: now - Duration::from_secs(60),
+            window_end: now,
+            stats: test_stats(),
+            health: ProtoHealth::Healthy,
+        })
+        .await
+        .unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
 
-        // Under `start_paused = true`, the only clock advance is the 61s we
-        // explicitly issued to fire the primary tick. The retry worker enqueues
-        // the failure with `next_retry_at = now + ~1s jitter` and parks in
-        // `sleep(next_retry_at - now).await`; we then cancel before any further
-        // advance, so the worker never wakes. Only the primary dispatch's single
-        // call is observable. Dedicated retry-worker tests
-        // (`retry_worker_drains_...`) cover the wake-and-drain path with
-        // explicit `advance` calls.
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+        // First primary dispatch stamps local_error_count=0 (nothing has
+        // failed yet). The UNAVAILABLE response bumps the counter to 1.
+        // Second primary dispatch stamps that bumped value into its batch
+        // before the retry worker gets any chance to mutate it further.
+        // Retry-worker interactions (additional calls while we advance time)
+        // only *increase* the observed counter — dedicated retry-worker
+        // tests (`retry_worker_drains_...`) cover the drain-then-reset
+        // path explicitly.
         let calls = api.push_metrics_calls.lock().await;
-        assert_eq!(calls.len(), 1, "primary loop attempted once before enqueue");
+        assert!(
+            calls.len() >= 2,
+            "expected >=2 push_metrics calls; got {}",
+            calls.len(),
+        );
+
+        let second_primary = calls
+            .iter()
+            .find(|b| b.paths.first().map(|p| p.target_id.as_str()) == Some("t2"))
+            .expect("second primary batch carrying t2 must be present");
+        let md = second_primary
+            .agent_metadata
+            .as_ref()
+            .expect("AgentMetadata stamped");
+        assert!(
+            md.local_error_count >= 1,
+            "second primary batch must report local_error_count >= 1 from the prior UNAVAILABLE; got {}",
+            md.local_error_count,
+        );
     }
 
     #[tokio::test(start_paused = true)]
