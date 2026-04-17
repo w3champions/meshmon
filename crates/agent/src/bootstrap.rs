@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use rand::Rng;
@@ -55,26 +55,17 @@ pub struct AgentRuntime<A: ServiceApi> {
     _tcp_listener: tokio::task::JoinHandle<()>,
     /// UDP echo listener handle. Held for the same reason as the TCP one.
     _udp_listener: tokio::task::JoinHandle<()>,
-    /// Sender side of the shared route-snapshot channel. Handed to every
-    /// per-target supervisor so each one can push envelopes (target_id +
-    /// snapshot) into a single consumer. T16 will replace the placeholder
-    /// consumer with the real emitter; until then this feeds
-    /// [`run_route_snapshot_consumer`] which just logs each snapshot at
-    /// `info`.
+    /// Sender of the route-snapshot channel. Supervisors clone this to push
+    /// envelopes into the emitter. Dropped explicitly in `shutdown()` so the
+    /// emitter sees a clean channel closure.
     route_snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
-    /// Join handle for the placeholder snapshot consumer. Held for the
-    /// runtime's lifetime so the task is cancelled when the runtime is
-    /// dropped; not awaited in production (the `_` prefix signals that).
-    _route_snapshot_consumer: tokio::task::JoinHandle<()>,
-    /// Sender half of the supervisor → emitter metrics channel. Cloned into
-    /// every supervisor at spawn time. Held on the runtime so its lifetime
-    /// matches the supervisors; dropped explicitly in `shutdown()` (Task 11)
-    /// so the emitter sees clean channel closure before draining.
+    /// Sender of the supervisor → emitter metrics channel. Same contract as
+    /// `route_snapshot_tx`: held alive for supervisor lifetime, dropped
+    /// explicitly in `shutdown()`.
     pub(crate) path_metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
-    /// Receiver half of the metrics channel. Taken by Task 11 when the
-    /// emitter is spawned; `Option<_>` because `emitter::spawn` consumes it.
-    #[allow(dead_code)]
-    pub(crate) path_metrics_rx: Option<mpsc::Receiver<crate::emitter::PathMetricsMsg>>,
+    /// Emitter task handle. Awaited on `shutdown()` with a 10 s outer timeout.
+    /// No `_` prefix — this handle is actively joined, not just held.
+    emitter_handle: tokio::task::JoinHandle<()>,
 }
 
 impl<A: ServiceApi> AgentRuntime<A> {
@@ -138,18 +129,13 @@ impl<A: ServiceApi> AgentRuntime<A> {
         let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, child.clone());
 
         // Shared route-snapshot channel. Every supervisor clones the sender;
-        // a single consumer task drains the receiver. Capacity 8 is
-        // deliberately small: snapshots fire at most every 60 s per target,
-        // so contention is rare — a larger buffer would just trade memory
-        // for the time the consumer is behind without any real benefit.
-        // The sender is stashed on the returned `AgentRuntime` so the
-        // channel's lifetime matches the runtime (not this function).
+        // the emitter drains the receiver. Capacity 8 is deliberately small:
+        // snapshots fire at most every 60 s per target, so contention is rare —
+        // a larger buffer would just trade memory for the time the emitter is
+        // behind without any real benefit. The sender is stashed on the
+        // returned `AgentRuntime` so the channel's lifetime matches the
+        // runtime (not this function).
         let (route_snapshot_tx, route_snapshot_rx) = mpsc::channel::<RouteSnapshotEnvelope>(8);
-        let consumer_cancel = child.clone();
-        let route_snapshot_consumer = tokio::spawn(run_route_snapshot_consumer(
-            route_snapshot_rx,
-            consumer_cancel,
-        ));
 
         // Shared supervisor → emitter metrics channel. Capacity 1024 bounds how
         // many PathMetricsMsg records can queue up before the emitter catches
@@ -158,6 +144,21 @@ impl<A: ServiceApi> AgentRuntime<A> {
         // at the supervisor side (per-target counter, local tracing only).
         let (path_metrics_tx, path_metrics_rx) =
             mpsc::channel::<crate::emitter::PathMetricsMsg>(1024);
+
+        // Spawn the real emitter BEFORE supervisors so each supervisor's
+        // first `try_send` always sees an open receiver. The emitter's
+        // `JoinHandle` is stored on the runtime and awaited on shutdown.
+        let emitter_handle = crate::emitter::spawn(
+            Arc::clone(&api),
+            crate::emitter::EmitterIdentity {
+                source_id: env.identity.id.clone(),
+                agent_version: env.agent_version.clone(),
+                start_time: SystemTime::now(),
+            },
+            path_metrics_rx,
+            route_snapshot_rx,
+            child.clone(),
+        );
 
         // -- Register --
         let reg_req = build_register_request(
@@ -281,9 +282,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
             _tcp_listener: tcp_listener,
             _udp_listener: udp_listener,
             route_snapshot_tx,
-            _route_snapshot_consumer: route_snapshot_consumer,
             path_metrics_tx,
-            path_metrics_rx: Some(path_metrics_rx),
+            emitter_handle,
         })
     }
 
@@ -465,7 +465,8 @@ impl<A: ServiceApi> AgentRuntime<A> {
         }
     }
 
-    /// Graceful shutdown: cancel all supervisors and await their completion.
+    /// Graceful shutdown: cancel all supervisors and await their completion,
+    /// then close the emitter's input channels and await its drain.
     pub async fn shutdown(self) {
         self.cancel.cancel();
 
@@ -489,55 +490,29 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 }
             }
         }
+
+        // Drop senders explicitly AFTER supervisors are done. This prevents any
+        // last-minute supervisor emission from racing the emitter's drain, and
+        // causes the emitter's `recv()` arms to resolve to `None` so its
+        // primary loop exits cleanly.
+        drop(self.route_snapshot_tx);
+        drop(self.path_metrics_tx);
+
+        // Await the emitter's drain-and-exit with a 10 s outer timeout.
+        let abort_handle = self.emitter_handle.abort_handle();
+        match tokio::time::timeout(Duration::from_secs(10), self.emitter_handle).await {
+            Ok(Ok(())) => tracing::info!("emitter shut down cleanly"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "emitter panicked during shutdown"),
+            Err(_) => {
+                tracing::warn!("emitter did not stop within 10 s during shutdown — aborting");
+                abort_handle.abort();
+            }
+        }
     }
 
     /// Number of active supervisors. Useful for testing.
     pub fn supervisor_count(&self) -> usize {
         self.supervisors.len()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper: route snapshot consumer (T15 placeholder, T16 replaces)
-// ---------------------------------------------------------------------------
-
-/// Placeholder consumer for route snapshots. T16 replaces this with the
-/// real emitter that pushes snapshots to the service via
-/// `push_route_snapshot`. Behaves lossily on shutdown: cancellation returns
-/// immediately after a best-effort drain so a hung consumer can't delay
-/// `AgentRuntime::shutdown`.
-async fn run_route_snapshot_consumer(
-    mut rx: mpsc::Receiver<RouteSnapshotEnvelope>,
-    cancel: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            maybe = rx.recv() => {
-                match maybe {
-                    Some(env) => {
-                        tracing::info!(
-                            target_id = %env.target_id,
-                            protocol = ?env.snapshot.protocol,
-                            hops = env.snapshot.hops.len(),
-                            observed_at_micros = env.snapshot.observed_at_micros_i64(),
-                            "route snapshot received (placeholder consumer, T15)",
-                        );
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-    // Best-effort drain of any in-flight snapshots so late observations
-    // still surface in logs during shutdown.
-    while let Ok(env) = rx.try_recv() {
-        tracing::trace!(
-            target_id = %env.target_id,
-            protocol = ?env.snapshot.protocol,
-            hops = env.snapshot.hops.len(),
-            "draining route snapshot at shutdown",
-        );
     }
 }
 
