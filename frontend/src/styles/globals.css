@@ -46,8 +46,74 @@ body {
 }
 
 @media print {
+  /* Chrome prints at the browser's viewport CSS pixels and scales to
+     fit the sheet, which on a wide monitor leaves the report centred
+     in a narrow column surrounded by big empty margins. Pinning
+     @page + an explicit page width forces Chrome to treat the sheet
+     itself as the rendering surface. 15mm margins give a readable
+     line length on Letter without wasting paper. */
+  @page {
+    size: letter portrait;
+    margin: 15mm;
+  }
+
+  /* Neutralise the interactive shell: html/body/#app are pinned to
+     viewport height and the AppShell is a nested flex column with
+     `overflow-hidden` + `overflow-auto`. Without these overrides the
+     Report article renders inside a viewport-sized scroller. */
+  html,
+  body,
+  #app {
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
   body {
     background: white;
     color: black;
+    margin: 0 !important;
+  }
+
+  #app > div,
+  #app > div > div,
+  main {
+    display: block !important;
+    flex: none !important;
+    overflow: visible !important;
+    width: auto !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Hide the app chrome on printed pages — the AppBar and NavDrawer
+     belong to the interactive shell, not the report body. Components
+     opt in by tagging themselves with `data-app-chrome="true"` so this
+     rule is authoritative regardless of Tailwind class names. */
+  [data-app-chrome="true"] {
+    display: none !important;
+  }
+
+  /* Grafana iframes render as `loading="lazy"` and may not have a
+     settled layout by the time the print engine rasterises. Pin them
+     to a sensible height and keep them out of mid-page breaks. */
+  iframe {
+    height: 240px !important;
+    break-inside: avoid;
+  }
+
+  /* Sections stay together on a page when they fit; otherwise they
+     break at natural boundaries. */
+  section {
+    break-inside: avoid;
+  }
+
+  /* Tighten table cells on paper so columns don't balloon when the
+     article fills the page. The screen-size padding (`p-4`) around
+     each cell is too luxurious for print. */
+  article th,
+  article td {
+    padding: 4px 8px !important;
   }
 }

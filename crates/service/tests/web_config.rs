@@ -69,6 +69,41 @@ async fn web_config_returns_body_with_session() {
     // "Option::is_none"`). Lock this in so a later change can't silently
     // start emitting `"grafana_base_url": null`.
     assert!(body.get("grafana_base_url").is_none(), "body = {body}");
+    // Same contract applies to `alertmanager_base_url`: absent from the
+    // JSON body when Alertmanager is not configured.
+    assert!(body.get("alertmanager_base_url").is_none(), "body = {body}",);
+}
+
+#[tokio::test]
+async fn web_config_exposes_alertmanager_base_url_when_configured() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let state =
+        common::state_with_admin_and_alertmanager(pool, "https://alertmanager.example/").await;
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.102").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/web-config")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["alertmanager_base_url"], "https://alertmanager.example/",
+        "body = {body}",
+    );
 }
 
 #[tokio::test]

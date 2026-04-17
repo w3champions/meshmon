@@ -1,17 +1,19 @@
 import type { components } from "@/api/schema.gen";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 type HopJson = components["schemas"]["HopJson"];
 
 interface HopDetailCardProps {
   hop: HopJson;
   onClose: () => void;
+  className?: string;
 }
 
-export function HopDetailCard({ hop, onClose }: HopDetailCardProps) {
+export function HopDetailCard({ hop, onClose, className }: HopDetailCardProps) {
   return (
-    <Card className="max-w-sm">
+    <Card className={cn("max-w-sm", className)}>
       <CardHeader>
         <div className="flex items-start justify-between gap-2">
           <div>

@@ -1,4 +1,4 @@
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { formatDistanceToNowStrict } from "date-fns";
 import { useMemo, useState } from "react";
 import { usePathOverview } from "@/api/hooks/path-overview";
@@ -13,7 +13,6 @@ import { Sparkline } from "@/components/Sparkline";
 import { TimeRangePicker } from "@/components/TimeRangePicker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { MESHMON_PATH_DASHBOARD, PANEL_LOSS, PANEL_RTT, PANEL_STDDEV } from "@/lib/grafana-panels";
-import { buildReportPath } from "@/lib/report-link";
 import { grafanaTimes, type TimeRangeKey } from "@/lib/time-range";
 
 type HopJson = components["schemas"]["HopJson"];
@@ -101,16 +100,6 @@ export default function PathDetail() {
     ? { source, target, protocol: effectiveProtocol }
     : { source, target };
 
-  const reportHref = effectiveProtocol
-    ? buildReportPath({
-        source_id: source,
-        target_id: target,
-        from: data.window.from,
-        to: data.window.to,
-        protocol: effectiveProtocol,
-      })
-    : null;
-
   return (
     <div className="p-6 flex flex-col gap-6">
       <header className="grid gap-3 md:grid-cols-2">
@@ -169,13 +158,22 @@ export default function PathDetail() {
           />
           <TimeRangePicker
             value={range}
-            onChange={(next) =>
+            from={from}
+            to={to}
+            onChange={(next) => {
+              // Custom mode requires both bounds — the router schema
+              // rejects empty strings, so an intermediate edit that
+              // clears a datetime-local field would throw inside
+              // validateSearch and silently lose the edit. Drop the
+              // transient invalid state; the next complete edit takes
+              // effect normally.
+              if (next.range === "custom" && (!next.from || !next.to)) return;
               navigate({
                 to: "/paths/$source/$target",
                 params: { source, target },
                 search: { range: next.range, from: next.from, to: next.to, protocol },
-              })
-            }
+              });
+            }}
           />
         </div>
       </section>
@@ -214,8 +212,15 @@ export default function PathDetail() {
         />
       </section>
 
-      <section className="grid gap-3 md:grid-cols-[1fr_auto]">
-        <div>
+      {/*
+        Grid must use `minmax(0,1fr)` for the graph column, not plain `1fr`.
+        Cytoscape's container reports a min-content width that defeats `1fr`'s
+        default `minmax(auto, 1fr)` and makes the whole section overflow the
+        viewport when the hop card appears. `minmax(0,1fr)` lets the column
+        shrink freely; the card keeps its natural width via `w-80 shrink-0`.
+      */}
+      <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+        <div className="min-w-0">
           <h2 className="mb-2 text-lg font-semibold">Current route</h2>
           <RouteTopology
             hops={latest?.hops ?? []}
@@ -223,7 +228,13 @@ export default function PathDetail() {
             ariaLabel="Current route topology"
           />
         </div>
-        {selectedHop && <HopDetailCard hop={selectedHop} onClose={() => setSelectedHop(null)} />}
+        {selectedHop && (
+          <HopDetailCard
+            hop={selectedHop}
+            onClose={() => setSelectedHop(null)}
+            className="w-80 shrink-0 self-start"
+          />
+        )}
       </section>
 
       <section>
@@ -243,19 +254,21 @@ export default function PathDetail() {
         />
       </section>
 
-      {reportHref && (
+      {effectiveProtocol && (
         <div>
-          {/*
-            `buildReportPath` returns a `/reports/path?...` href. We use a plain
-            `<a>` tag rather than TanStack's typed `<Link to=... search=...>`
-            because `/reports/path` is a T20 placeholder with no search schema
-            yet — threading a typed object through would pin this page to a
-            shape that's about to change. The report URL is fully self-contained
-            (no per-session state) so a document-level navigation is fine.
-          */}
-          <a href={reportHref} className="inline-block text-sm underline underline-offset-2">
+          <Link
+            to="/reports/path"
+            search={{
+              source_id: source,
+              target_id: target,
+              from: data.window.from,
+              to: data.window.to,
+              protocol: effectiveProtocol,
+            }}
+            className="inline-block text-sm underline underline-offset-2"
+          >
             Generate report
-          </a>
+          </Link>
         </div>
       )}
     </div>

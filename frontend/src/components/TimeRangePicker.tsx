@@ -1,3 +1,4 @@
+import { CustomRangeInputs } from "@/components/CustomRangeInputs";
 import {
   Select,
   SelectContent,
@@ -5,7 +6,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { TimeRangeKey } from "@/lib/time-range";
+import { rangeBounds, type TimeRangeKey } from "@/lib/time-range";
 
 const LABELS: Record<TimeRangeKey, string> = {
   "1h": "Last 1 hour",
@@ -25,25 +26,66 @@ export interface TimeRangePickerValue {
 
 interface TimeRangePickerProps {
   value: TimeRangeKey;
+  /** ISO-8601 `from` bound — only meaningful when range is 'custom'. */
+  from?: string;
+  /** ISO-8601 `to` bound — only meaningful when range is 'custom'. */
+  to?: string;
   onChange: (next: TimeRangePickerValue) => void;
   className?: string;
 }
 
-export function TimeRangePicker({ value, onChange, className }: TimeRangePickerProps) {
+export function TimeRangePicker({
+  value,
+  from = "",
+  to = "",
+  onChange,
+  className,
+}: TimeRangePickerProps) {
+  const handlePresetChange = (next: string) => {
+    const range = next as TimeRangeKey;
+    if (range === "custom") {
+      // Seed from/to with the current preset's bounds (or 24h as a universal
+      // fallback when already on 'custom' without bounds) so the router
+      // schema — which rejects empty strings — accepts the switch. Without
+      // this the picker silently refuses to move off the prior preset.
+      if (from && to) {
+        onChange({ range, from, to });
+        return;
+      }
+      const seed = value === "custom" ? "24h" : value;
+      const bounds = rangeBounds(seed);
+      onChange({
+        range,
+        from: bounds.from.toISOString(),
+        to: bounds.to.toISOString(),
+      });
+      return;
+    }
+    onChange({ range });
+  };
+
   return (
-    <Select value={value} onValueChange={(next) => onChange({ range: next as TimeRangeKey })}>
-      <SelectTrigger className={className} aria-label="Time range">
-        <SelectValue>{LABELS[value]}</SelectValue>
-      </SelectTrigger>
-      <SelectContent>
-        {(Object.keys(LABELS) as TimeRangeKey[])
-          .filter((k) => k !== "custom")
-          .map((k) => (
+    <div className={className}>
+      <Select value={value} onValueChange={handlePresetChange}>
+        <SelectTrigger aria-label="Time range">
+          <SelectValue>{LABELS[value]}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {(Object.keys(LABELS) as TimeRangeKey[]).map((k) => (
             <SelectItem key={k} value={k}>
               {LABELS[k]}
             </SelectItem>
           ))}
-      </SelectContent>
-    </Select>
+        </SelectContent>
+      </Select>
+      {value === "custom" && (
+        <CustomRangeInputs
+          className="mt-2"
+          from={from}
+          to={to}
+          onChange={({ from: f, to: t }) => onChange({ range: "custom", from: f, to: t })}
+        />
+      )}
+    </div>
   );
 }

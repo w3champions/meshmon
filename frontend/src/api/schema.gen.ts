@@ -600,6 +600,12 @@ export interface components {
          */
         WebConfigResponse: {
             /**
+             * @description Alertmanager base URL for constructing "view in Alertmanager"
+             *     deep links (e.g., `https://alertmanager.example/`). `None` when
+             *     Alertmanager is not configured — omitted from the JSON body.
+             */
+            alertmanager_base_url?: string | null;
+            /**
              * @description Base URL for embedding Grafana panels (e.g., `https://grafana.example/`).
              *     `None` if Grafana is not configured — omitted from the JSON body.
              */

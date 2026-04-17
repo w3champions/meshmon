@@ -12,10 +12,12 @@ import { api } from "@/api/client";
 import { AppShell } from "@/components/layout/AppShell";
 import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
+import Alerts from "@/pages/Alerts";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
 import PathDetail from "@/pages/PathDetail";
+import Report from "@/pages/Report";
 import RouteCompare from "@/pages/RouteCompare";
 import { useAuthStore } from "@/stores/auth";
 
@@ -125,16 +127,25 @@ export const routeCompareRoute = createRoute({
   validateSearch: (search) => routeCompareSearchSchema.parse(search),
 });
 
-const reportPathPlaceholderRoute = createRoute({
+const reportSearchSchema = z.object({
+  source_id: z.string().min(1),
+  target_id: z.string().min(1),
+  from: z.string().datetime(),
+  to: z.string().datetime(),
+  protocol: z.enum(["icmp", "udp", "tcp"]).optional(),
+});
+
+export const reportRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/reports/path",
-  component: () => <p className="p-6 text-sm text-muted-foreground">Coming in T20.</p>,
+  component: Report,
+  validateSearch: (search) => reportSearchSchema.parse(search),
 });
 
 const alertsRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/alerts",
-  component: () => <p>Coming soon.</p>,
+  component: Alerts,
 });
 
 const routeTree = rootRoute.addChildren([
@@ -145,7 +156,7 @@ const routeTree = rootRoute.addChildren([
     agentDetailRoute,
     pathDetailRoute,
     routeCompareRoute,
-    reportPathPlaceholderRoute,
+    reportRoute,
     alertsRoute,
   ]),
 ]);
