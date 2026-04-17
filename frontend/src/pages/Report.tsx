@@ -239,7 +239,11 @@ export default function Report() {
             ) : beforeQ.isError ? (
               <p className="text-sm text-destructive">Failed to load BEFORE snapshot.</p>
             ) : beforeQ.data ? (
-              <RouteTable hops={beforeQ.data.hops} />
+              // Pass the diff to BOTH tables so hops removed between
+              // BEFORE and AFTER tint red in BEFORE. `removedPositions`
+              // only match hops in BEFORE and `addedPositions` only in
+              // AFTER, so position-based diff sets are safe to share.
+              <RouteTable hops={beforeQ.data.hops} diff={routeDiff} />
             ) : (
               <p className="text-sm text-muted-foreground">No BEFORE snapshot available.</p>
             )}

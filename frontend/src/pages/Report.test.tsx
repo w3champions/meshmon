@@ -670,6 +670,110 @@ describe("Report page", () => {
     expect(screen.queryByText("172.16.0.42")).not.toBeInTheDocument();
   });
 
+  it("passes diff to BEFORE table so removed hops render with diff highlight", async () => {
+    // Previously only the AFTER RouteTable received `diff={routeDiff}`, so
+    // hops removed between BEFORE and AFTER rendered in the BEFORE table
+    // with no visual signal. Both tables must receive the diff — position
+    // semantics mean `removed` only matches in BEFORE and `added` only in
+    // AFTER, so there's no spurious cross-contamination.
+    const beforeSnap = {
+      id: 1,
+      source_id: "br",
+      target_id: "fr",
+      protocol: "icmp",
+      observed_at: "2026-04-13T10:00:00Z",
+      path_summary: null,
+      hops: [
+        {
+          position: 1,
+          avg_rtt_micros: 1000,
+          loss_pct: 0,
+          stddev_rtt_micros: 0,
+          observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
+        },
+        {
+          position: 4,
+          avg_rtt_micros: 4000,
+          loss_pct: 0,
+          stddev_rtt_micros: 0,
+          observed_ips: [{ ip: "10.0.0.40", freq: 1 }],
+        },
+      ],
+    };
+    // AFTER drops position 4 — so BEFORE position 4 must be rendered as
+    // "removed" in the BEFORE table.
+    const afterSnap = {
+      id: 2,
+      source_id: "br",
+      target_id: "fr",
+      protocol: "icmp",
+      observed_at: "2026-04-13T13:00:00Z",
+      path_summary: null,
+      hops: [
+        {
+          position: 1,
+          avg_rtt_micros: 1000,
+          loss_pct: 0,
+          stddev_rtt_micros: 0,
+          observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
+        },
+      ],
+    };
+
+    installFetchMock([
+      {
+        url: /\/api\/web-config$/,
+        status: 200,
+        body: { username: "u", version: "v", grafana_dashboards: {} },
+      },
+      {
+        url: /\/api\/paths\/.*\/overview/,
+        status: 200,
+        body: {
+          source: {
+            id: "br",
+            display_name: "BR",
+            ip: "1.1.1.1",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          target: {
+            id: "fr",
+            display_name: "FR",
+            ip: "2.2.2.2",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          window: {
+            from: "2026-04-13T10:00:00Z",
+            to: "2026-04-13T14:00:00Z",
+          },
+          primary_protocol: "icmp",
+          latest_by_protocol: { icmp: afterSnap, tcp: null, udp: null },
+          recent_snapshots: [
+            { id: 2, observed_at: afterSnap.observed_at, protocol: "icmp", path_summary: null },
+            { id: 1, observed_at: beforeSnap.observed_at, protocol: "icmp", path_summary: null },
+          ],
+          recent_snapshots_truncated: false,
+          metrics: null,
+          step: "1m",
+        },
+      },
+      { url: /\/api\/paths\/.*\/routes\/1$/, status: 200, body: beforeSnap },
+      { url: /\/api\/paths\/.*\/routes\/2$/, status: 200, body: afterSnap },
+    ]);
+
+    renderReport(defaultSearch);
+
+    // Wait for BEFORE table to render its removed-only hop (10.0.0.40 exists
+    // only in BEFORE because position 4 was dropped in AFTER).
+    const removedCell = await screen.findByText("10.0.0.40");
+    // Walk up to the TR — the diff state lives on the row element.
+    const row = removedCell.closest("tr");
+    expect(row).not.toBeNull();
+    expect(row).toHaveAttribute("data-diff-state", "removed");
+  });
+
   it("shows truncation banner when recent_snapshots_truncated is true", async () => {
     const snap = {
       id: 1,
