@@ -193,7 +193,7 @@ export default function Report() {
             </p>
           )}
 
-          <section className="mt-6 print:break-before-page">
+          <section className="mt-6 print:break-inside-avoid">
             <h2 className="mb-2 text-lg font-semibold">
               Route — BEFORE{" "}
               {beforeQ.data && (
@@ -211,7 +211,7 @@ export default function Report() {
             )}
           </section>
 
-          <section className="mt-6 print:break-before-page">
+          <section className="mt-6 print:break-inside-avoid">
             <h2 className="mb-2 text-lg font-semibold">
               Route — AFTER{" "}
               {afterQ.data && (
@@ -229,7 +229,7 @@ export default function Report() {
             )}
           </section>
 
-          <section className="mt-6 print:break-before-page">
+          <section className="mt-6 print:break-inside-avoid">
             <h2 className="mb-2 text-lg font-semibold">Measurement timeline</h2>
             {data.metrics == null ? (
               <p className="text-sm text-muted-foreground">Metrics unavailable.</p>
