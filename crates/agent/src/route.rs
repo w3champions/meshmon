@@ -320,12 +320,106 @@ impl RouteTracker {
 
     /// Build a canonical snapshot from the current window. Returns `None`
     /// when the accumulator is empty (nothing to summarize).
-    pub fn build_snapshot(
-        &mut self,
-        _now: Instant,
-        _now_wall: SystemTime,
-    ) -> Option<RouteSnapshot> {
-        unimplemented!("Task 4")
+    pub fn build_snapshot(&mut self, now: Instant, now_wall: SystemTime) -> Option<RouteSnapshot> {
+        let protocol = self.protocol?;
+        // Refresh the window so a quiet interval (no observe() calls) doesn't
+        // expose stale samples through the snapshot.
+        if let Some(cutoff) = now.checked_sub(self.window) {
+            self.purge_stale(cutoff);
+        }
+
+        if self.hops.is_empty() {
+            return None;
+        }
+
+        // Group accumulator entries by position. Iterate position_totals
+        // as the canonical set of active positions.
+        let mut positions: Vec<u8> = self.position_totals.keys().copied().collect();
+        positions.sort();
+
+        let mut hops_out: Vec<HopSummary> = Vec::with_capacity(positions.len());
+        for position in positions {
+            let total = *self.position_totals.get(&position).unwrap_or(&0);
+            if total == 0 {
+                // Defensive: should have been pruned. Skip instead of
+                // dividing by zero.
+                continue;
+            }
+            let total_f = total as f64;
+            let mut ips: Vec<ObservedIp> = Vec::new();
+            let mut sum_weighted_rtt: u64 = 0;
+            let mut sum_weighted_rtt_sq: u128 = 0;
+            let mut sum_seen: u32 = 0;
+            let mut sum_successful: u32 = 0;
+
+            for (key, acc) in self.hops.iter() {
+                if key.0 != position {
+                    continue;
+                }
+                let frequency = acc.seen as f64 / total_f;
+                ips.push(ObservedIp {
+                    ip: key.1,
+                    frequency,
+                });
+                sum_weighted_rtt += acc.sum_rtt_micros;
+                sum_weighted_rtt_sq += acc.sum_rtt_sq_micros;
+                sum_seen += acc.seen;
+                sum_successful += acc.successful;
+            }
+
+            // Sort IPs by frequency descending; tiebreak on IP for deterministic output.
+            ips.sort_by(|a, b| {
+                b.frequency
+                    .partial_cmp(&a.frequency)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.ip.cmp(&b.ip))
+            });
+
+            let avg_rtt_micros = if sum_successful == 0 {
+                0
+            } else {
+                (sum_weighted_rtt / sum_successful as u64).min(u32::MAX as u64) as u32
+            };
+            let stddev_rtt_micros = if sum_successful < 2 {
+                0
+            } else {
+                let n = sum_successful as f64;
+                let mean = sum_weighted_rtt as f64 / n;
+                let mean_sq = sum_weighted_rtt_sq as f64 / n;
+                let var = (mean_sq - mean * mean).max(0.0);
+                let stddev = var.sqrt();
+                if !stddev.is_finite() || stddev < 0.0 {
+                    0
+                } else if stddev >= u32::MAX as f64 {
+                    u32::MAX
+                } else {
+                    stddev as u32
+                }
+            };
+            let loss_pct = if sum_seen == 0 {
+                0.0
+            } else {
+                (sum_seen - sum_successful) as f64 / sum_seen as f64
+            };
+
+            hops_out.push(HopSummary {
+                position,
+                observed_ips: ips,
+                avg_rtt_micros,
+                stddev_rtt_micros,
+                loss_pct,
+            });
+        }
+
+        if hops_out.is_empty() {
+            return None;
+        }
+
+        Some(RouteSnapshot {
+            protocol,
+            observed_at: now_wall,
+            hops: hops_out,
+        })
     }
 
     /// Compare `new` to the tracker's `last_reported` snapshot. Returns
@@ -555,5 +649,132 @@ mod tests {
             t.hops.keys().collect::<Vec<_>>(),
         );
         assert_eq!(t.position_totals.get(&1).copied(), None);
+    }
+
+    fn systemtime_epoch_plus(micros: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_micros(micros)
+    }
+
+    #[test]
+    fn build_snapshot_returns_none_for_empty_accumulator() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        let wall = systemtime_epoch_plus(1_000);
+        assert!(t.build_snapshot(now, wall).is_none());
+    }
+
+    #[test]
+    fn build_snapshot_returns_none_when_no_protocol() {
+        // Even if hops somehow landed in the accumulator (they can't
+        // via observe(), but defensively), a no-protocol tracker has
+        // nothing meaningful to emit.
+        let mut t = RouteTracker::new(five_min());
+        let now = Instant::now();
+        let wall = systemtime_epoch_plus(1_000);
+        assert!(t.build_snapshot(now, wall).is_none());
+    }
+
+    #[test]
+    fn build_snapshot_single_hop_single_ip() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+        let wall = systemtime_epoch_plus(2_000_000);
+        let snap = t.build_snapshot(now, wall).expect("non-empty");
+        assert_eq!(snap.protocol, Protocol::Icmp);
+        assert_eq!(snap.observed_at, wall);
+        assert_eq!(snap.hops.len(), 1);
+        let h = &snap.hops[0];
+        assert_eq!(h.position, 1);
+        assert_eq!(h.observed_ips.len(), 1);
+        assert_eq!(h.observed_ips[0].ip, ipv4(10, 0, 0, 1));
+        assert!((h.observed_ips[0].frequency - 1.0).abs() < 1e-9);
+        assert_eq!(h.avg_rtt_micros, 5_000);
+        assert_eq!(h.stddev_rtt_micros, 0, "single sample → stddev = 0");
+        assert!((h.loss_pct - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_snapshot_multi_ip_per_hop_is_sorted_by_frequency_desc() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        // Hop 3 ECMP: IP A seen 7 times, IP B seen 3 times → 70/30 split.
+        for _ in 0..7 {
+            t.observe(&[hop(3, Some(ipv4(10, 1, 0, 1)), Some(4_000))], now);
+        }
+        for _ in 0..3 {
+            t.observe(&[hop(3, Some(ipv4(10, 1, 0, 2)), Some(4_500))], now);
+        }
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(snap.hops.len(), 1);
+        let h = &snap.hops[0];
+        assert_eq!(h.observed_ips.len(), 2);
+        // Sorted by frequency descending.
+        assert_eq!(h.observed_ips[0].ip, ipv4(10, 1, 0, 1));
+        assert!((h.observed_ips[0].frequency - 0.7).abs() < 1e-9);
+        assert_eq!(h.observed_ips[1].ip, ipv4(10, 1, 0, 2));
+        assert!((h.observed_ips[1].frequency - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_snapshot_hops_are_sorted_by_position_asc() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        // Insert hops out of order.
+        t.observe(&[hop(5, Some(ipv4(10, 0, 0, 5)), Some(5_000))], now);
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+        t.observe(&[hop(3, Some(ipv4(10, 0, 0, 3)), Some(3_000))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let positions: Vec<u8> = snap.hops.iter().map(|h| h.position).collect();
+        assert_eq!(positions, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn build_snapshot_loss_pct_reflects_timeouts() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        // 3 successful, 1 timeout at the same IP → 25% loss.
+        for rtt in [1_000_u32, 2_000, 3_000] {
+            t.observe(&[hop(2, Some(ipv4(10, 0, 0, 2)), Some(rtt))], now);
+        }
+        t.observe(&[hop(2, Some(ipv4(10, 0, 0, 2)), None)], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let h = &snap.hops[0];
+        assert_eq!(h.position, 2);
+        assert!((h.loss_pct - 0.25).abs() < 1e-9, "got {}", h.loss_pct);
+        // avg = (1000+2000+3000)/3 = 2000 (timeouts don't count toward mean).
+        assert_eq!(h.avg_rtt_micros, 2_000);
+    }
+
+    #[test]
+    fn build_snapshot_stddev_matches_population_formula() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        // RTTs {1000, 2000, 3000, 4000} → mean 2500, population stddev = ~1118.0.
+        for rtt in [1_000_u32, 2_000, 3_000, 4_000] {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(rtt))], now);
+        }
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let h = &snap.hops[0];
+        assert_eq!(h.avg_rtt_micros, 2_500);
+        // Allow ±2 µs rounding on the u32 cast.
+        let diff = (h.stddev_rtt_micros as i64 - 1_118).abs();
+        assert!(
+            diff <= 2,
+            "stddev = {}, diff = {}",
+            h.stddev_rtt_micros,
+            diff
+        );
+    }
+
+    #[test]
+    fn build_snapshot_observed_at_is_wall_parameter_not_recomputed() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+        let wall = systemtime_epoch_plus(1_712_000_000_000_000); // arbitrary
+        let snap = t.build_snapshot(now, wall).unwrap();
+        assert_eq!(snap.observed_at, wall);
+        assert_eq!(snap.observed_at_micros_i64(), 1_712_000_000_000_000);
     }
 }
