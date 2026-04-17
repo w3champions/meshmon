@@ -24,6 +24,11 @@ meshmon/
 └── .github/workflows/      # CI
 ```
 
+Subsystems:
+
+- **Alerting:** VMAlert rules + Alertmanager Discord routing; see
+  [`deploy/alerts/README.md`](deploy/alerts/README.md).
+
 ## Quick start (development)
 
 Prerequisites: Rust 1.94+, Node 20+, Docker.

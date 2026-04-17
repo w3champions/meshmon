@@ -69,6 +69,27 @@ Key patterns:
   secret from `ConfigResponse`) + allowlist-gated (IPs from
   `GetTargets`).
 
+## Alerting
+
+Alert rules and Alertmanager config live under `deploy/`:
+
+- `deploy/alerts/rules.yaml` — VMAlert rules evaluated against
+  VictoriaMetrics. Rule groups map to stable `category` labels
+  consumed by the frontend alerts filter.
+- `deploy/alertmanager/alertmanager.yml` — default routing with
+  per-severity Discord receivers and an unreachable→loss inhibit rule.
+- `deploy/alertmanager/secrets/` — operator-provided Discord webhook
+  URL files (gitignored).
+
+Validate on every change:
+
+```bash
+./scripts/validate-alerts.sh   # syntax + vmalert-tool unit tests + amtool
+./scripts/smoke-alerts.sh      # optional: full VM → AM → webhook dispatch smoke
+```
+
+See `deploy/alerts/README.md` for the label contract and editing workflow.
+
 ## Conventions
 
 - Squash-merge only (no merge commits, no rebase)

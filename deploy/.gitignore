@@ -1,0 +1,15 @@
+# Alertmanager webhook secrets — never commit credentials to version control.
+# Only the placeholder and documentation files are tracked. The ** pattern
+# ensures nested subdirectories (e.g. alertmanager/secrets/prod/webhook) are
+# also ignored recursively.
+alertmanager/secrets/**
+!alertmanager/secrets/.gitkeep
+!alertmanager/secrets/README.md
+
+# Smoke-harness VictoriaMetrics data directory written by the test-harness
+# docker-compose run.
+alerts/test-harness/data/
+
+# Sentinel file written by smoke-alerts.sh to record the timestamp of the
+# last successful smoke run.
+alerts/test-harness/.last-run

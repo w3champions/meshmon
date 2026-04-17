@@ -1,0 +1,52 @@
+# vmalert-tool unit tests for meshmon.route_changes group.
+#
+# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# block and automatically injects an `alertgroup` label equal to the group name.
+#
+# `changes()` counts the number of value changes in the time window. A
+# monotonically increasing counter produces changes on every step that
+# increments. `for: 0m` means the alert fires immediately when the expr > 0.
+rule_files:
+  - ../rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --- PathRouteChanged fires when counter increments are detected ----------
+  # Series: 0 0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 ...
+  # Using the shorthand '0+0x5 1+0x5 2+0x5 3+0x5':
+  #   t=0..150s: 0, t=180..330s: 1, t=360..510s: 2, t=540..690s: 3
+  # At eval_time 7m (420s): the 10m window [0, 7m] = [0, 420s].
+  # MetricsQL changes() returns 3 (counts each step where the value changed).
+  # `for: 0m` fires immediately.
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_route_changes_total{source="a",target="b",protocol="icmp"}'
+        values: '0+0x5 1+0x5 2+0x5 3+0x5'
+    alert_rule_test:
+      - eval_time: 7m
+        groupname: meshmon.route_changes
+        alertname: PathRouteChanged
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.route_changes
+              severity: info
+              category: topology
+              source: a
+              target: b
+              protocol: icmp
+            exp_annotations:
+              summary: 'Route changed: a → b (icmp)'
+              description: 'Route snapshot(s) emitted in the last 10 min: 3'
+
+  # --- PathRouteChanged does NOT fire when counter is flat ------------------
+  # Series flat at 7 for 40 steps — no changes detected in [now-10m, now].
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_route_changes_total{source="c",target="d",protocol="udp"}'
+        values: '7+0x40'
+    alert_rule_test:
+      - eval_time: 12m
+        groupname: meshmon.route_changes
+        alertname: PathRouteChanged
+        exp_alerts: []

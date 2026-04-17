@@ -1,0 +1,181 @@
+# meshmon alerting rules — evaluated by vmalert against VictoriaMetrics.
+#
+# Label contract for the /api/alerts proxy (see deploy/alerts/README.md):
+# every alert carries alertname, severity, category, source, target; plus
+# protocol where applicable. Rename or repurpose a `category` value only
+# as a semver-major change — the frontend alerts filter keys on it.
+#
+# Thresholds below are starting points from spec 05; retune against your
+# environment via git edits (history is the audit trail).
+
+groups:
+- name: meshmon.path_health
+  interval: 30s
+  rules:
+
+  # --- Packet loss (ICMP/UDP have per-packet loss semantics) ---------------
+  - alert: PathPacketLoss
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp"}[5m]) > 0.05
+    for: 2m
+    labels:
+      severity: warning
+      category: loss
+    annotations:
+      summary: 'Elevated packet loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Average {{ $labels.protocol }} loss over 5 min: {{ $value | humanizePercentage }}'
+
+  - alert: PathPacketLossCritical
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp"}[5m]) > 0.20
+    for: 1m
+    labels:
+      severity: critical
+      category: loss
+    annotations:
+      summary: 'Severe packet loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Average {{ $labels.protocol }} loss over 5 min: {{ $value | humanizePercentage }}'
+
+  # --- TCP connect-attempt failures (tighter threshold than ICMP/UDP) ------
+  - alert: PathTcpConnectFailures
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol="tcp"}[5m]) > 0.02
+    for: 2m
+    labels:
+      severity: warning
+      category: loss
+    annotations:
+      summary: 'Elevated TCP connect failures: {{ $labels.source }} → {{ $labels.target }}'
+      description: 'Average TCP connect-attempt failure rate over 5 min: {{ $value | humanizePercentage }}'
+
+  # --- Subtle but persistent loss (long window, very low threshold) --------
+  - alert: PathSubtlePersistentLoss
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp"}[30m]) > 0.005
+    for: 15m
+    labels:
+      severity: info
+      category: loss
+    annotations:
+      summary: 'Persistent subtle loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Average {{ $labels.protocol }} loss over 30 min: {{ $value | humanizePercentage }}'
+
+- name: meshmon.path_latency
+  interval: 30s
+  rules:
+
+  # Ratio-based regression: current 5 min avg vs previous hour's baseline.
+  # Guard with an absolute RTT floor so sub-ms local paths don't alarm on
+  # small absolute changes.
+  - alert: PathLatencyRegression
+    expr: |
+      (
+        avg_over_time(meshmon_path_rtt_avg_micros[5m])
+          /
+        avg_over_time(meshmon_path_rtt_avg_micros[1h] offset 1h)
+        > 1.5
+      )
+      and
+      avg_over_time(meshmon_path_rtt_avg_micros[5m]) > 20000
+    for: 5m
+    labels:
+      severity: warning
+      category: latency
+    annotations:
+      summary: 'Latency regression: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Current 5-min avg RTT is {{ $value | printf "%.2f" }}× the previous hour''s baseline'
+
+  # MetricsQL z-score statistical outlier over the last hour.
+  - alert: PathLatencyAnomaly
+    expr: |
+      zscore_over_time(meshmon_path_rtt_avg_micros[1h]) > 3
+    for: 5m
+    labels:
+      severity: info
+      category: anomaly
+    annotations:
+      summary: 'Latency anomaly: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'z-score over 1h baseline: {{ $value | printf "%.2f" }}'
+
+  # Elevated jitter — stddev sustained above 50 ms.
+  # Metric is microseconds; humanizeDuration expects seconds (so 60000 would
+  # render as "16h 40m 0s"), and vmalert's Go-template engine has no arithmetic
+  # helpers to rescale to ms. Render µs directly with printf.
+  - alert: PathJitterElevated
+    expr: |
+      avg_over_time(meshmon_path_rtt_stddev_micros[5m]) > 50000
+    for: 5m
+    labels:
+      severity: info
+      category: jitter
+    annotations:
+      summary: 'Elevated jitter: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'RTT stddev over 5 min: {{ $value | printf "%.0f" }} µs'
+
+- name: meshmon.path_availability
+  interval: 30s
+  rules:
+
+  # Path is unreachable across every protocol. Fires only when all three
+  # probe protocols are reporting AND each is at ≥ 99 % loss over 5 min.
+  # `count == 3` guard prevents false positives for paths where only a
+  # subset of protocols is emitting series (e.g. agent with UDP probing
+  # disabled or a transiently-absent series). `min without(protocol)`
+  # strips the `protocol` label so the alert fires once per (source,
+  # target) and the inhibit rule's `equal: [source, target]` matches cleanly.
+  #
+  # Note on annotations: `$value` here evaluates against the LHS of `and`,
+  # which is the count expression (always == 3 when firing), NOT the loss
+  # ratio. Do not reference `$value` expecting a loss fraction.
+  - alert: PathUnreachable
+    expr: |
+      count without(protocol) (
+        avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp|tcp"}[5m])
+      ) == 3
+      and
+      min without(protocol) (
+        avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp|tcp"}[5m])
+      ) >= 0.99
+    for: 2m
+    labels:
+      severity: critical
+      category: unreachable
+    annotations:
+      summary: 'Path unreachable: {{ $labels.source }} → {{ $labels.target }}'
+      description: 'Every probe protocol has sustained ≥ 99% loss over 5 min'
+
+- name: meshmon.route_changes
+  interval: 30s
+  rules:
+
+  # Route snapshot written for a path — spec 05 triggers an info-severity
+  # notification on counter increments. `for: 0m` fires immediately; AM
+  # grouping + repeat_interval controls noise, not `for`.
+  - alert: PathRouteChanged
+    expr: |
+      changes(meshmon_route_changes_total[10m]) > 0
+    for: 0m
+    labels:
+      severity: info
+      category: topology
+    annotations:
+      summary: 'Route changed: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Route snapshot(s) emitted in the last 10 min: {{ $value }}'
+
+- name: meshmon.agent_health
+  interval: 60s
+  rules:
+
+  # Agent stopped pushing updates to the service. meshmon-service emits
+  # meshmon_agent_last_seen_seconds{source} on every ingestion; when that
+  # timestamp stops advancing for 5+ min the agent is presumed offline.
+  - alert: AgentOffline
+    expr: |
+      time() - meshmon_agent_last_seen_seconds > 300
+    for: 2m
+    labels:
+      severity: warning
+      category: agent
+    annotations:
+      summary: 'Agent {{ $labels.source }} has not reported in > 5 min'
+      description: 'Seconds since last push: {{ $value | printf "%.0f" }}'
