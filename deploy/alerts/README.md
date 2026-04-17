@@ -67,24 +67,21 @@ this contract.  Do not remove labels; additions are allowed.
 
 ## Validation
 
-### Syntax check (fast, no containers)
+### Fast (hermetic, ~10 s)
 
 ```bash
 ./scripts/validate-alerts.sh
 ```
 
-The script runs `vmalert -dryRun -rule=<file>` against every `*.yaml` in this
-directory.  It sources `deploy/versions.env` for the `VMALERT_TAG` image tag
-and exits non-zero if any file fails validation.
+Runs four checks in sequence, sourcing image tags from `deploy/versions.env`:
 
-### Unit tests
+1. `scripts/check-rule-metrics.sh` — every `meshmon_*` name in `rules.yaml`
+   is present as a quoted string literal under `crates/service/src/`.
+2. `vmalert -dryRun -rule=rules.yaml` — rule-file syntax.
+3. `vmalert-tool unittest` — runs every `tests/*_test.yaml`.
+4. `amtool check-config` — Alertmanager config syntax.
 
-```bash
-./scripts/validate-alerts.sh --unit-tests
-```
-
-Runs `vmalert-tool unittest` against every `tests/*.yaml` file using the
-`VMALERT_TOOL_TAG` image from `deploy/versions.env`.
+Exits non-zero on the first failure.
 
 ### Smoke / end-to-end harness
 
@@ -109,7 +106,7 @@ Follow these steps whenever you add or modify an alert rule:
    at least one edge case (e.g., exactly at threshold).
 3. **Run the validator** to catch syntax errors before committing:
    ```bash
-   ./scripts/validate-alerts.sh --unit-tests
+   ./scripts/validate-alerts.sh
    ```
 4. **If you changed a category** (the `category` label value):
    - Update the taxonomy table in this README.

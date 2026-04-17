@@ -20,7 +20,10 @@ if [[ ! -f "$RULES" ]]; then
 fi
 
 # Extract distinct meshmon_* metric names referenced in the rules file.
-metrics=$(grep -oE 'meshmon_[a-z0-9_]+' "$RULES" | sort -u)
+# `grep` exits 1 when there are zero matches; under `set -e` that would abort
+# the script before the empty-match guard below, so suppress the non-match
+# exit with `|| true` and let the guard handle the empty case.
+metrics=$(grep -oE 'meshmon_[a-z0-9_]+' "$RULES" | sort -u || true)
 
 if [[ -z "$metrics" ]]; then
   echo "No meshmon_* metrics found in $RULES — skipping cross-check"
