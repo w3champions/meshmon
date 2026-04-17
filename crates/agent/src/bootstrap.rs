@@ -19,7 +19,7 @@ use crate::probing::echo_udp::SecretSnapshot;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
 use crate::probing::{echo_tcp, echo_udp};
-use crate::route::RouteSnapshot;
+use crate::route::RouteSnapshotEnvelope;
 use crate::supervisor::{self, SupervisorHandle};
 use meshmon_protocol::{ConfigResponse, RegisterRequest, Target, TargetsResponse};
 
@@ -56,11 +56,12 @@ pub struct AgentRuntime<A: ServiceApi> {
     /// UDP echo listener handle. Held for the same reason as the TCP one.
     _udp_listener: tokio::task::JoinHandle<()>,
     /// Sender side of the shared route-snapshot channel. Handed to every
-    /// per-target supervisor so each one can push snapshots into a single
-    /// consumer. T16 will replace the placeholder consumer with the real
-    /// emitter; until then this feeds [`run_route_snapshot_consumer`]
-    /// which just logs each snapshot at `info`.
-    route_snapshot_tx: mpsc::Sender<RouteSnapshot>,
+    /// per-target supervisor so each one can push envelopes (target_id +
+    /// snapshot) into a single consumer. T16 will replace the placeholder
+    /// consumer with the real emitter; until then this feeds
+    /// [`run_route_snapshot_consumer`] which just logs each snapshot at
+    /// `info`.
+    route_snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
     /// Join handle for the placeholder snapshot consumer. Held for the
     /// runtime's lifetime so the task is cancelled when the runtime is
     /// dropped; not awaited in production (the `_` prefix signals that).
@@ -134,7 +135,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
         // for the time the consumer is behind without any real benefit.
         // The sender is stashed on the returned `AgentRuntime` so the
         // channel's lifetime matches the runtime (not this function).
-        let (route_snapshot_tx, route_snapshot_rx) = mpsc::channel::<RouteSnapshot>(8);
+        let (route_snapshot_tx, route_snapshot_rx) = mpsc::channel::<RouteSnapshotEnvelope>(8);
         let consumer_cancel = child.clone();
         let route_snapshot_consumer = tokio::spawn(run_route_snapshot_consumer(
             route_snapshot_rx,
@@ -485,7 +486,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
 /// immediately after a best-effort drain so a hung consumer can't delay
 /// `AgentRuntime::shutdown`.
 async fn run_route_snapshot_consumer(
-    mut rx: mpsc::Receiver<RouteSnapshot>,
+    mut rx: mpsc::Receiver<RouteSnapshotEnvelope>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -493,11 +494,12 @@ async fn run_route_snapshot_consumer(
             _ = cancel.cancelled() => break,
             maybe = rx.recv() => {
                 match maybe {
-                    Some(snap) => {
+                    Some(env) => {
                         tracing::info!(
-                            protocol = ?snap.protocol,
-                            hops = snap.hops.len(),
-                            observed_at_micros = snap.observed_at_micros_i64(),
+                            target_id = %env.target_id,
+                            protocol = ?env.snapshot.protocol,
+                            hops = env.snapshot.hops.len(),
+                            observed_at_micros = env.snapshot.observed_at_micros_i64(),
                             "route snapshot received (placeholder consumer, T15)",
                         );
                     }
@@ -508,10 +510,11 @@ async fn run_route_snapshot_consumer(
     }
     // Best-effort drain of any in-flight snapshots so late observations
     // still surface in logs during shutdown.
-    while let Ok(snap) = rx.try_recv() {
+    while let Ok(env) = rx.try_recv() {
         tracing::trace!(
-            protocol = ?snap.protocol,
-            hops = snap.hops.len(),
+            target_id = %env.target_id,
+            protocol = ?env.snapshot.protocol,
+            hops = env.snapshot.hops.len(),
             "draining route snapshot at shutdown",
         );
     }

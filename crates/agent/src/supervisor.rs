@@ -25,10 +25,12 @@
 //! followed by [`RouteTracker::diff_against`]; the first snapshot after a
 //! reset is emitted unconditionally, and subsequent snapshots only emit
 //! when the diff rules from `ProbeConfig.diff_detection` fire. Meaningful
-//! snapshots are pushed into a shared `mpsc::Sender<RouteSnapshot>` owned
-//! by the [`AgentRuntime`](crate::bootstrap::AgentRuntime) via `try_send`
+//! snapshots are wrapped in [`RouteSnapshotEnvelope`] (stamped with the
+//! supervisor's `target_id`) and pushed into a shared
+//! `mpsc::Sender<RouteSnapshotEnvelope>` owned by the
+//! [`AgentRuntime`](crate::bootstrap::AgentRuntime) via `try_send`
 //! (lossy — a full or closed channel logs and drops). The bootstrap
-//! placeholder consumer logs received snapshots at `info`.
+//! placeholder consumer logs received envelopes at `info`.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -41,7 +43,7 @@ use crate::config::ProbeConfig;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
 use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
-use crate::route::{RouteSnapshot, RouteTracker};
+use crate::route::{RouteSnapshotEnvelope, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
 use meshmon_protocol::{Protocol, Target};
@@ -161,7 +163,7 @@ pub fn spawn(
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
     parent_cancel: CancellationToken,
-    snapshot_tx: mpsc::Sender<RouteSnapshot>,
+    snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
 ) -> SupervisorHandle {
     let cancel = parent_cancel.child_token();
     let (observation_tx, observation_rx) = mpsc::channel::<ProbeObservation>(256);
@@ -270,8 +272,10 @@ async fn run(
     mut route_tracker: RouteTracker,
     // Drained by the 60 s snapshot tick below — each emit is a non-blocking
     // `try_send`; a full channel or closed receiver is logged and dropped
-    // (snapshots are lossy by design).
-    snapshot_tx: mpsc::Sender<RouteSnapshot>,
+    // (snapshots are lossy by design). The supervisor wraps each snapshot
+    // in a [`RouteSnapshotEnvelope`] so the emitter can stamp the eventual
+    // `RouteSnapshotRequest` with `target_id` without reverse-lookup.
+    snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
 ) {
     tracing::info!(target_id = %target.id, "supervisor started");
 
@@ -490,7 +494,11 @@ async fn run(
                         route_tracker.diff_against(&snap, &thresholds).is_some()
                     };
                     if should_emit {
-                        match snapshot_tx.try_send(snap.clone()) {
+                        let envelope = RouteSnapshotEnvelope {
+                            target_id: target.id.clone(),
+                            snapshot: snap.clone(),
+                        };
+                        match snapshot_tx.try_send(envelope) {
                             Ok(()) => {
                                 tracing::debug!(
                                     target_id = %target.id,
@@ -684,8 +692,8 @@ mod tests {
     /// closes the channel, which would cause `try_send` in the (future)
     /// supervisor snapshot tick to fail.
     fn test_snapshot_tx() -> (
-        tokio::sync::mpsc::Sender<crate::route::RouteSnapshot>,
-        tokio::sync::mpsc::Receiver<crate::route::RouteSnapshot>,
+        tokio::sync::mpsc::Sender<crate::route::RouteSnapshotEnvelope>,
+        tokio::sync::mpsc::Receiver<crate::route::RouteSnapshotEnvelope>,
     ) {
         tokio::sync::mpsc::channel(8)
     }
@@ -749,7 +757,7 @@ mod tests {
     }
 
     use crate::probing::{HopObservation, ProbeOutcome};
-    use crate::route::RouteSnapshot;
+    use crate::route::RouteSnapshotEnvelope;
     use crate::stats::FastSummary;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -801,9 +809,11 @@ mod tests {
     /// "snapshot never sent" bug as a late send. Callers yield the
     /// scheduler first to ensure the supervisor has had a chance to
     /// run.
-    fn try_drain_one(rx: &mut mpsc::Receiver<RouteSnapshot>) -> Option<RouteSnapshot> {
+    fn try_drain_one(
+        rx: &mut mpsc::Receiver<RouteSnapshotEnvelope>,
+    ) -> Option<RouteSnapshotEnvelope> {
         match rx.try_recv() {
-            Ok(snap) => Some(snap),
+            Ok(env) => Some(env),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
         }
@@ -1342,9 +1352,10 @@ mod tests {
         tokio::time::advance(Duration::from_secs(60)).await;
         yield_many(20).await;
 
-        let snap = try_drain_one(&mut snapshot_rx).expect("first-ever snapshot must emit");
-        assert_eq!(snap.protocol, Protocol::Icmp);
-        assert_eq!(snap.hops.len(), 2);
+        let env = try_drain_one(&mut snapshot_rx).expect("first-ever snapshot must emit");
+        assert_eq!(env.target_id, "first-snap");
+        assert_eq!(env.snapshot.protocol, Protocol::Icmp);
+        assert_eq!(env.snapshot.hops.len(), 2);
 
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
@@ -1397,8 +1408,9 @@ mod tests {
 
         // The first snapshot tick must have emitted the baseline snapshot.
         let first = try_drain_one(&mut snapshot_rx).expect("first snapshot must emit");
-        assert_eq!(first.hops.len(), 1);
-        assert_eq!(first.protocol, Protocol::Icmp);
+        assert_eq!(first.target_id, "steady");
+        assert_eq!(first.snapshot.hops.len(), 1);
+        assert_eq!(first.snapshot.protocol, Protocol::Icmp);
 
         // No further snapshots: subsequent 60 s ticks see an identical
         // canonical snapshot → `diff_against` returns `None`.
@@ -1481,7 +1493,7 @@ mod tests {
 
         // Build a snapshot channel and immediately drop the receiver so any
         // `try_send` in the supervisor's snapshot tick will observe `Closed`.
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshot>(1);
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshotEnvelope>(1);
         drop(snapshot_rx);
 
         let handle = spawn(
