@@ -75,6 +75,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 prometheus-reqwest-remote-write = "0.5"
 snap = "1"
+surge-ping = "0.8"
 wiremock = "0.6"
 
 [profile.release]

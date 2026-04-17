@@ -23,6 +23,7 @@ rand.workspace = true
 serde.workspace = true
 socket2.workspace = true
 subtle.workspace = true
+surge-ping.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["tls-native-roots"] }

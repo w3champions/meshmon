@@ -7,6 +7,7 @@
 
 pub mod echo_tcp;
 pub mod echo_udp;
+pub mod icmp;
 pub mod tcp;
 pub mod trippy;
 pub mod udp;
