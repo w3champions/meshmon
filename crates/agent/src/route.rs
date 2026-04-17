@@ -257,8 +257,11 @@ impl RouteTracker {
     /// is a fresh baseline. Passing `None` puts the tracker in the
     /// "no primary" state (no observations recorded until the next
     /// non-`None` reset).
-    pub fn reset_for_protocol(&mut self, _protocol: Option<Protocol>) {
-        unimplemented!("Task 2")
+    pub fn reset_for_protocol(&mut self, protocol: Option<Protocol>) {
+        self.protocol = protocol;
+        self.hops.clear();
+        self.position_totals.clear();
+        self.last_reported = None;
     }
 
     /// Ingest the hop observations from one trippy round. Purges samples
@@ -330,5 +333,37 @@ mod tests {
         assert_eq!(t.protocol(), None);
         assert_eq!(t.window(), five_min());
         assert!(t.last_reported().is_none());
+    }
+
+    #[test]
+    fn reset_for_protocol_sets_protocol() {
+        let mut t = RouteTracker::new(five_min());
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        assert_eq!(t.protocol(), Some(Protocol::Icmp));
+    }
+
+    #[test]
+    fn reset_for_protocol_to_none_clears_protocol() {
+        let mut t = RouteTracker::new(five_min());
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        t.reset_for_protocol(None);
+        assert_eq!(t.protocol(), None);
+    }
+
+    #[test]
+    fn reset_clears_last_reported() {
+        let mut t = RouteTracker::new(five_min());
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        t.set_last_reported(RouteSnapshot {
+            protocol: Protocol::Icmp,
+            observed_at: SystemTime::UNIX_EPOCH,
+            hops: vec![],
+        });
+        assert!(t.last_reported().is_some());
+        t.reset_for_protocol(Some(Protocol::Tcp));
+        assert!(
+            t.last_reported().is_none(),
+            "primary swing must clear last_reported so the first post-swing snapshot emits unconditionally",
+        );
     }
 }
