@@ -231,7 +231,7 @@ impl RouteTracker {
     /// Build a new tracker. `window` should be the primary-protocol window
     /// (`primary_window_sec`, default 300 s). Starts with `protocol = None`
     /// so the tracker silently drops observations until the supervisor
-    /// calls [`reset_for_protocol`] once T14 elects a primary.
+    /// calls [`RouteTracker::reset_for_protocol`] once a primary is elected.
     pub fn new(window: Duration) -> Self {
         Self {
             protocol: None,
@@ -438,7 +438,7 @@ impl RouteTracker {
     /// mutable state untouched by the diff check.
     ///
     /// Caller (supervisor) is responsible for updating `last_reported`
-    /// after a successful emit via [`set_last_reported`].
+    /// after a successful emit via [`RouteTracker::set_last_reported`].
     pub fn diff_against(
         &self,
         new: &RouteSnapshot,
