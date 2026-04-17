@@ -68,6 +68,13 @@ describe("formatRelativeAgo", () => {
     const target = Date.UTC(2026, 3, 16, 23, 50, 0);
     expect(formatRelativeAgo(target, now)).toBe("yesterday");
   });
+  it("shows 'just now' for small future skew (< 45s)", () => {
+    expect(formatRelativeAgo(now + 10 * MS_SEC, now)).toBe("just now");
+  });
+  it("falls back to absolute date for large future drift, never '-Nh ago'", () => {
+    expect(formatRelativeAgo(now + 5 * MS_MIN, now)).toBe("Apr 17");
+    expect(formatRelativeAgo(now + 2 * MS_HOUR, now)).toBe("Apr 17");
+  });
 });
 
 describe("formatClockUtc / formatClockUtcSec", () => {

@@ -52,6 +52,12 @@ export function formatDelta(deltaMs: number): string {
 
 export function formatRelativeAgo(targetMs: number, nowMs: number): string {
   const delta = nowMs - targetMs;
+  // Targets in the future — typically clock skew between data producers and
+  // the frontend. Small skew (< 45s) reads as "just now"; larger drifts fall
+  // back to the absolute date so we never display a negative "-5 min ago".
+  if (delta < 0) {
+    return delta > -45 * MS_SEC ? "just now" : formatShortDate(targetMs);
+  }
   if (delta < 45 * MS_SEC) return "just now";
   // Only fall into "N min ago" / "Nh ago" when the target is still the same
   // UTC day as now. Otherwise we step up the ladder (yesterday → N days ago →
