@@ -357,6 +357,14 @@ fn validate_positive_u32(name: &str, v: u32) -> Result<(), String> {
     }
 }
 
+fn validate_min_u32(name: &str, v: u32, min: u32) -> Result<(), String> {
+    if v >= min {
+        Ok(())
+    } else {
+        Err(format!("`{name}` = {v} must be >= {min}"))
+    }
+}
+
 /// Validate a probe rate in packets-per-second. Zero means "never probe
 /// this (primary × health × protocol) combination" — semantically valid
 /// when operators want to disable a probe type without removing its row
@@ -620,7 +628,11 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             validate_fraction("path_health_thresholds.normal_recovery_pct", nrp)?;
             validate_positive_u32("path_health_thresholds.degraded_trigger_sec", dts)?;
             validate_positive_u32("path_health_thresholds.normal_recovery_sec", nrs)?;
-            validate_positive_u32("path_health_thresholds.degraded_min_samples", dms)?;
+            // Match the agent state machine's hard floor (MIN_TRANSITION_SAMPLES
+            // = 3 in crates/agent/src/state.rs). Values below 3 are clamped
+            // there regardless, so fail fast here instead of shipping a config
+            // that silently behaves differently than written.
+            validate_min_u32("path_health_thresholds.degraded_min_samples", dms, 3)?;
             PathHealthThresholds {
                 degraded_trigger_pct: dtp,
                 degraded_trigger_sec: dts,
@@ -864,6 +876,35 @@ mod tests {
             err.to_lowercase().contains("degraded_min_samples"),
             "expected 'degraded_min_samples' in error, got: {err}"
         );
+    }
+
+    #[test]
+    fn degraded_min_samples_below_transition_floor_rejected() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            [path_health_thresholds]
+            degraded_min_samples = 2
+        "#,
+        )
+        .unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("degraded_min_samples") && err.contains(">= 3"),
+            "expected 'degraded_min_samples' and '>= 3' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn degraded_min_samples_at_floor_accepted() {
+        let raw: RawProbingSection = toml::from_str(
+            r#"
+            udp_probe_secret = "hex:6d73686d6e2d7631"
+            [path_health_thresholds]
+            degraded_min_samples = 3
+        "#,
+        )
+        .unwrap();
+        ProbingSection::try_from(raw).expect("degraded_min_samples = 3 should be accepted");
     }
 
     #[test]
