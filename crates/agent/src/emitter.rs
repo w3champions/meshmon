@@ -73,6 +73,13 @@ pub struct PathMetricsMsg {
 
 /// A failed RPC awaiting retry. One `VecDeque<PendingRpc>` is shared
 /// between the primary loop (producer) and the retry worker (consumer).
+///
+/// `attempts` is the number of retries *already attempted*. An entry
+/// enqueued after the initial primary dispatch fails starts at 0; the
+/// retry worker runs [`bump_retry`] on every retry failure, which
+/// increments `attempts` before computing the next jittered delay.
+/// This keeps the base delay sequence 1 s → 2 s → 4 s → 8 s → … without
+/// a doubled first-retry gap.
 #[derive(Debug, Clone)]
 enum PendingRpc {
     Metrics {
@@ -372,7 +379,12 @@ async fn dispatch_metrics<A: ServiceApi>(
                     q.push(PendingRpc::Metrics {
                         batch,
                         next_retry_at: schedule_retry(0),
-                        attempts: 1,
+                        // `attempts` tracks retries *already attempted*. The
+                        // primary dispatch just failed but no retry has run
+                        // yet, so this is 0 — `bump_retry` will increment it
+                        // to 1 before computing the next delay, keeping the
+                        // 1s→2s→4s→8s doubling sequence intact.
+                        attempts: 0,
                     });
                 }
                 notify.notify_one();
@@ -409,7 +421,10 @@ async fn dispatch_snapshot<A: ServiceApi>(
                     q.push(PendingRpc::Snapshot {
                         req,
                         next_retry_at: schedule_retry(0),
-                        attempts: 1,
+                        // See the matching `Metrics` variant above for the
+                        // attempts=0 rationale: this is the count of retries
+                        // already attempted, not the count of RPC calls made.
+                        attempts: 0,
                     });
                 }
                 notify.notify_one();
@@ -1876,6 +1891,51 @@ mod tests {
             !calls.is_empty(),
             "expected at least one snapshot drained before deadline",
         );
+    }
+
+    #[test]
+    fn schedule_retry_doubles_base_delay_starting_at_one_second() {
+        // Invariant: the delay sequence for attempts 0..N must average to
+        // 1s, 2s, 4s, 8s … within the ±25 % jitter band. Sampling many
+        // draws per attempt averages the jitter out so this stays stable
+        // in CI without flaking on a single unlucky roll.
+        //
+        // Regression: a prior bug initialized freshly-enqueued entries
+        // with attempts=1 paired with schedule_retry(0), producing a
+        // 1s → 4s → 8s jump after the first retry (`bump_retry` advanced
+        // 1 → 2 before passing to `schedule_retry`, which then doubled
+        // again). The correct invariant is strict doubling: each step
+        // should be ~2x the previous one.
+        fn avg_delay(attempts: u32, samples: usize) -> f64 {
+            let mut total = 0.0;
+            for _ in 0..samples {
+                let t0 = Instant::now();
+                let t = schedule_retry(attempts);
+                total += t.saturating_duration_since(t0).as_secs_f64();
+            }
+            total / samples as f64
+        }
+
+        let samples = 200;
+        let d0 = avg_delay(0, samples);
+        let d1 = avg_delay(1, samples);
+        let d2 = avg_delay(2, samples);
+        let d3 = avg_delay(3, samples);
+
+        // Base delay ~1 s with ±25 % jitter, mean ≈ 1.0.
+        assert!(
+            (0.85..=1.15).contains(&d0),
+            "attempts=0 should average ≈1s, got {d0:.3}"
+        );
+        // Doubling should hold across steps: d(n+1) ≈ 2*d(n).
+        // Allow ±15 % slack against jitter + sample variance.
+        for (a, b, label) in [(d0, d1, "d1/d0"), (d1, d2, "d2/d1"), (d2, d3, "d3/d2")] {
+            let ratio = b / a;
+            assert!(
+                (1.7..=2.3).contains(&ratio),
+                "{label} ratio should be ≈2.0, got {ratio:.3} (a={a:.3}, b={b:.3})"
+            );
+        }
     }
 
     #[test]
