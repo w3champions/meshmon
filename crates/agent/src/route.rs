@@ -522,6 +522,15 @@ impl RouteTracker {
     }
 }
 
+/// Envelope pushed onto the supervisor → emitter channel. Stamps
+/// `target_id` so the emitter can construct a [`RouteSnapshotRequest`]
+/// without having to look up supervisors by target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteSnapshotEnvelope {
+    pub target_id: String,
+    pub snapshot: RouteSnapshot,
+}
+
 // ---------------------------------------------------------------------------
 // Tests — populated incrementally from Task 2 onward.
 // ---------------------------------------------------------------------------

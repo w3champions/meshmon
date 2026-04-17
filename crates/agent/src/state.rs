@@ -28,7 +28,7 @@ pub(crate) const MIN_TRANSITION_SAMPLES: u64 = 3;
 
 /// Per-protocol health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProtoHealth {
+pub enum ProtoHealth {
     Healthy,
     Unhealthy,
 }
@@ -46,7 +46,7 @@ impl ProtoHealth {
 
 /// Path-level derived health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum PathHealthState {
+pub enum PathHealthState {
     #[default]
     Normal,
     Degraded,

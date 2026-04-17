@@ -25,10 +25,21 @@
 //! followed by [`RouteTracker::diff_against`]; the first snapshot after a
 //! reset is emitted unconditionally, and subsequent snapshots only emit
 //! when the diff rules from `ProbeConfig.diff_detection` fire. Meaningful
-//! snapshots are pushed into a shared `mpsc::Sender<RouteSnapshot>` owned
-//! by the [`AgentRuntime`](crate::bootstrap::AgentRuntime) via `try_send`
+//! snapshots are wrapped in [`RouteSnapshotEnvelope`] (stamped with the
+//! supervisor's `target_id`) and pushed into a shared
+//! `mpsc::Sender<RouteSnapshotEnvelope>` owned by the
+//! [`AgentRuntime`](crate::bootstrap::AgentRuntime) via `try_send`
 //! (lossy — a full or closed channel logs and drops). The bootstrap
-//! placeholder consumer logs received snapshots at `info`.
+//! placeholder consumer logs received envelopes at `info`.
+//!
+//! A separate 60 s metrics tick reads the last-evaluated [`TargetSnapshot`]
+//! and emits one [`crate::emitter::PathMetricsMsg`] per protocol where the
+//! health is `Some(_)`, pushed into the supervisor → emitter channel via a
+//! non-blocking `try_send`. Protocols with `None` health are dropped so the
+//! wire payload never carries `ProtocolHealth::Unspecified` (the service
+//! rejects that value as `INVALID_ARGUMENT`). Window boundaries are
+//! captured from `SystemTime::now()` at tick fire time, never derived from
+//! monotonic probe timestamps.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -41,7 +52,7 @@ use crate::config::ProbeConfig;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
 use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
-use crate::route::{RouteSnapshot, RouteTracker};
+use crate::route::{RouteSnapshotEnvelope, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
 use meshmon_protocol::{Protocol, Target};
@@ -69,12 +80,12 @@ type StatsArray = [Mutex<RollingStats>; PROTOCOL_COUNT];
 /// Snapshot of the last evaluated target state. Shared between the supervisor
 /// run loop (writer) and external callers (readers).
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TargetSnapshot {
-    pub(crate) icmp_health: Option<ProtoHealth>,
-    pub(crate) tcp_health: Option<ProtoHealth>,
-    pub(crate) udp_health: Option<ProtoHealth>,
-    pub(crate) primary: Option<Protocol>,
-    pub(crate) path: PathHealthState,
+pub struct TargetSnapshot {
+    pub icmp_health: Option<ProtoHealth>,
+    pub tcp_health: Option<ProtoHealth>,
+    pub udp_health: Option<ProtoHealth>,
+    pub primary: Option<Protocol>,
+    pub path: PathHealthState,
 }
 
 /// Handle returned by [`spawn`].
@@ -95,11 +106,7 @@ pub struct SupervisorHandle {
     /// outside caller should iterate or mutate the vec directly.
     prober_joins: Vec<tokio::task::JoinHandle<()>>,
     /// Most-recently evaluated state snapshot. Written every eval tick by the
-    /// supervisor task; read by tests directly. The future T16 emitter will
-    /// add a public accessor when it consumes this — until then rustc's
-    /// dead-code lint can't see the test-module read because it fires on
-    /// the lib-only pass that gates out `#[cfg(test)]` code.
-    #[allow(dead_code)]
+    /// supervisor task; read via [`SupervisorHandle::snapshot_state`].
     pub(crate) last_state: Arc<Mutex<TargetSnapshot>>,
 }
 
@@ -118,6 +125,17 @@ impl SupervisorHandle {
         let idx = protocol_index(protocol)?;
         let guard = self.stats[idx].try_lock().ok()?;
         Some(guard.summary_fast())
+    }
+
+    /// Non-blocking read of the last evaluated per-target state.
+    ///
+    /// Returns `None` when the supervisor's run loop currently holds the
+    /// inner lock (write happens once per 10 s eval tick). Callers MUST NOT
+    /// rely on always seeing a value — missing a read is cheaper than
+    /// pausing the supervisor. Mirrors [`SupervisorHandle::snapshot`]'s
+    /// try-lock semantics.
+    pub fn snapshot_state(&self) -> Option<TargetSnapshot> {
+        self.last_state.try_lock().ok().map(|g| g.clone())
     }
 
     /// Await all 4 prober JoinHandles and log panics.
@@ -154,7 +172,8 @@ pub fn spawn(
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
     parent_cancel: CancellationToken,
-    snapshot_tx: mpsc::Sender<RouteSnapshot>,
+    snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
+    metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
 ) -> SupervisorHandle {
     let cancel = parent_cancel.child_token();
     let (observation_tx, observation_rx) = mpsc::channel::<ProbeObservation>(256);
@@ -235,6 +254,7 @@ pub fn spawn(
         task_last_state,
         route_tracker,
         snapshot_tx,
+        metrics_tx,
     ));
 
     SupervisorHandle {
@@ -263,8 +283,15 @@ async fn run(
     mut route_tracker: RouteTracker,
     // Drained by the 60 s snapshot tick below — each emit is a non-blocking
     // `try_send`; a full channel or closed receiver is logged and dropped
-    // (snapshots are lossy by design).
-    snapshot_tx: mpsc::Sender<RouteSnapshot>,
+    // (snapshots are lossy by design). The supervisor wraps each snapshot
+    // in a [`RouteSnapshotEnvelope`] so the emitter can stamp the eventual
+    // `RouteSnapshotRequest` with `target_id` without reverse-lookup.
+    snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
+    // Drained by the 60 s metrics tick below. Same lossy-`try_send`
+    // semantics as `snapshot_tx`: a full channel increments a per-target
+    // counter and drops; `Closed` latches a flag so subsequent metrics
+    // ticks skip the work entirely.
+    metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
 ) {
     tracing::info!(target_id = %target.id, "supervisor started");
 
@@ -286,6 +313,21 @@ async fn run(
     // this flag and skip the snapshot-tick body entirely after the first
     // Closed observation.
     let mut snapshot_channel_closed: bool = false;
+
+    // Independent 60 s metrics cadence. Emits one PathMetricsMsg per
+    // (target, protocol) where the last-evaluated TargetSnapshot has
+    // Some(health) — protocols with None health are skipped to avoid
+    // sending ProtocolHealth::Unspecified (server rejects as INVALID_ARGUMENT).
+    let mut metrics_interval = tokio::time::interval(Duration::from_secs(60));
+    metrics_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // Latched once try_send reports Closed — the emitter is gone, further
+    // pushes are wasted work. Matches the `snapshot_channel_closed` pattern.
+    let mut metrics_channel_closed: bool = false;
+    // Per-supervisor running counter of Full-channel drops. Local-only;
+    // does NOT feed into agent_metadata.dropped_count (that counter is
+    // reserved for emitter-side ring-buffer evictions per proto semantics).
+    let mut metrics_dropped_full: u64 = 0;
 
     loop {
         tokio::select! {
@@ -483,7 +525,11 @@ async fn run(
                         route_tracker.diff_against(&snap, &thresholds).is_some()
                     };
                     if should_emit {
-                        match snapshot_tx.try_send(snap.clone()) {
+                        let envelope = RouteSnapshotEnvelope {
+                            target_id: target.id.clone(),
+                            snapshot: snap.clone(),
+                        };
+                        match snapshot_tx.try_send(envelope) {
                             Ok(()) => {
                                 tracing::debug!(
                                     target_id = %target.id,
@@ -506,6 +552,88 @@ async fn run(
                                 );
                                 snapshot_channel_closed = true;
                             }
+                        }
+                    }
+                }
+            }
+            _ = metrics_interval.tick() => {
+                if metrics_channel_closed {
+                    continue;
+                }
+                let now_wall = SystemTime::now();
+                let window_end = now_wall;
+
+                // Read per-protocol health from last_state (non-blocking; skip on contention).
+                let (icmp_h, tcp_h, udp_h) = {
+                    match last_state.try_lock() {
+                        Ok(guard) => (guard.icmp_health, guard.tcp_health, guard.udp_health),
+                        Err(_) => {
+                            tracing::trace!(
+                                target_id = %target.id,
+                                "last_state contended on metrics tick; skipping",
+                            );
+                            continue;
+                        }
+                    }
+                };
+
+                for (proto, health) in metrics_protocols(icmp_h, tcp_h, udp_h) {
+                    let Some(idx) = protocol_index(proto) else { continue };
+
+                    // summary_with_percentiles needs &mut self (it sorts the sample
+                    // buffer for p50/p95/p99). snapshot(Protocol) returns FastSummary
+                    // without percentiles, so we reach into the inner mutex here.
+                    // try_lock: if the eval tick is currently running, skip this
+                    // protocol for this tick.
+                    //
+                    // Capture the effective window *from the stats instance*
+                    // before computing the summary: primary- vs diversity-mode
+                    // RollingStats uses different window sizes (`primary_window_sec`
+                    // vs `diversity_window_sec`), so we must derive
+                    // `window_start` per-protocol rather than assume a fixed
+                    // 60 s. The service computes rates against this window,
+                    // so a mismatch silently mis-reports probe rates.
+                    let (summary, window_start) = match stats[idx].try_lock() {
+                        Ok(mut g) => {
+                            let window = g.window();
+                            (g.summary_with_percentiles(), now_wall - window)
+                        }
+                        Err(_) => {
+                            tracing::trace!(
+                                target_id = %target.id,
+                                protocol = ?proto,
+                                "stats contended on metrics tick; skipping protocol",
+                            );
+                            continue;
+                        }
+                    };
+
+                    let msg = crate::emitter::PathMetricsMsg {
+                        target_id: target.id.clone(),
+                        protocol: proto,
+                        window_start,
+                        window_end,
+                        stats: summary,
+                        health,
+                    };
+                    match metrics_tx.try_send(msg) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            metrics_dropped_full = metrics_dropped_full.saturating_add(1);
+                            tracing::warn!(
+                                target_id = %target.id,
+                                protocol = ?proto,
+                                total_dropped_by_this_supervisor = metrics_dropped_full,
+                                "path_metrics channel full; dropping (emitter fell behind)",
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::info!(
+                                target_id = %target.id,
+                                "path_metrics channel closed; stopping metrics emission",
+                            );
+                            metrics_channel_closed = true;
+                            break;
                         }
                     }
                 }
@@ -636,6 +764,24 @@ fn feed_tracker(tracker: &mut RouteTracker, obs: &ProbeObservation, now: Instant
     tracker.observe(hops, now);
 }
 
+/// Enumerate `(protocol, health)` pairs that the 60 s metrics tick should
+/// emit `PathMetricsMsg`s for. Protocols whose classified health is `None`
+/// are dropped — the wire payload must never carry
+/// `ProtocolHealth::Unspecified` (service rejects as `INVALID_ARGUMENT`).
+fn metrics_protocols(
+    icmp: Option<ProtoHealth>,
+    tcp: Option<ProtoHealth>,
+    udp: Option<ProtoHealth>,
+) -> impl Iterator<Item = (Protocol, ProtoHealth)> {
+    [
+        (Protocol::Icmp, icmp),
+        (Protocol::Tcp, tcp),
+        (Protocol::Udp, udp),
+    ]
+    .into_iter()
+    .filter_map(|(p, h)| h.map(|h| (p, h)))
+}
+
 /// Apply a primary-swing to the route tracker. Separated from the eval
 /// arm so the tracing call is reviewable in isolation.
 fn reset_tracker_on_swing(target_id: &str, tracker: &mut RouteTracker, primary: Option<Protocol>) {
@@ -677,8 +823,8 @@ mod tests {
     /// closes the channel, which would cause `try_send` in the (future)
     /// supervisor snapshot tick to fail.
     fn test_snapshot_tx() -> (
-        tokio::sync::mpsc::Sender<crate::route::RouteSnapshot>,
-        tokio::sync::mpsc::Receiver<crate::route::RouteSnapshot>,
+        tokio::sync::mpsc::Sender<crate::route::RouteSnapshotEnvelope>,
+        tokio::sync::mpsc::Receiver<crate::route::RouteSnapshotEnvelope>,
     ) {
         tokio::sync::mpsc::channel(8)
     }
@@ -710,6 +856,7 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
 
         let handle = spawn(
             test_target("test-1"),
@@ -718,6 +865,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         // Give the supervisor a moment to start.
@@ -742,7 +890,7 @@ mod tests {
     }
 
     use crate::probing::{HopObservation, ProbeOutcome};
-    use crate::route::RouteSnapshot;
+    use crate::route::RouteSnapshotEnvelope;
     use crate::stats::FastSummary;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -794,9 +942,11 @@ mod tests {
     /// "snapshot never sent" bug as a late send. Callers yield the
     /// scheduler first to ensure the supervisor has had a chance to
     /// run.
-    fn try_drain_one(rx: &mut mpsc::Receiver<RouteSnapshot>) -> Option<RouteSnapshot> {
+    fn try_drain_one(
+        rx: &mut mpsc::Receiver<RouteSnapshotEnvelope>,
+    ) -> Option<RouteSnapshotEnvelope> {
         match rx.try_recv() {
-            Ok(snap) => Some(snap),
+            Ok(env) => Some(env),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
         }
@@ -877,6 +1027,7 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let handle = spawn(
             test_target("test-2"),
             config_rx,
@@ -884,6 +1035,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         let obs = ProbeObservation {
@@ -928,6 +1080,7 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let handle = spawn(
             test_target("routed"),
             config_rx,
@@ -935,6 +1088,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         // Send one ICMP success and two TCP timeouts.
@@ -980,6 +1134,7 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let handle = spawn(
             test_target("refused"),
             config_rx,
@@ -987,6 +1142,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         // UDP Refused: dropped before insert → no sample contribution.
@@ -1155,6 +1311,7 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let handle = spawn(
             test_target("swing-test"),
             config_rx,
@@ -1162,6 +1319,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         // Yield so the supervisor task actually starts and registers its
@@ -1282,6 +1440,7 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
 
         let handle = spawn(
             test_target("first-snap"),
@@ -1290,6 +1449,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         tokio::task::yield_now().await;
@@ -1335,9 +1495,10 @@ mod tests {
         tokio::time::advance(Duration::from_secs(60)).await;
         yield_many(20).await;
 
-        let snap = try_drain_one(&mut snapshot_rx).expect("first-ever snapshot must emit");
-        assert_eq!(snap.protocol, Protocol::Icmp);
-        assert_eq!(snap.hops.len(), 2);
+        let env = try_drain_one(&mut snapshot_rx).expect("first-ever snapshot must emit");
+        assert_eq!(env.target_id, "first-snap");
+        assert_eq!(env.snapshot.protocol, Protocol::Icmp);
+        assert_eq!(env.snapshot.hops.len(), 2);
 
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
@@ -1360,6 +1521,7 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
 
         let handle = spawn(
             test_target("steady"),
@@ -1368,6 +1530,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         tokio::task::yield_now().await;
@@ -1390,8 +1553,9 @@ mod tests {
 
         // The first snapshot tick must have emitted the baseline snapshot.
         let first = try_drain_one(&mut snapshot_rx).expect("first snapshot must emit");
-        assert_eq!(first.hops.len(), 1);
-        assert_eq!(first.protocol, Protocol::Icmp);
+        assert_eq!(first.target_id, "steady");
+        assert_eq!(first.snapshot.hops.len(), 1);
+        assert_eq!(first.snapshot.protocol, Protocol::Icmp);
 
         // No further snapshots: subsequent 60 s ticks see an identical
         // canonical snapshot → `diff_against` returns `None`.
@@ -1474,8 +1638,9 @@ mod tests {
 
         // Build a snapshot channel and immediately drop the receiver so any
         // `try_send` in the supervisor's snapshot tick will observe `Closed`.
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshot>(1);
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshotEnvelope>(1);
         drop(snapshot_rx);
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
 
         let handle = spawn(
             test_target("closed-snap"),
@@ -1484,6 +1649,7 @@ mod tests {
             trippy,
             parent_cancel.clone(),
             snapshot_tx,
+            metrics_tx,
         );
 
         tokio::task::yield_now().await;
@@ -1533,5 +1699,323 @@ mod tests {
         join_result
             .unwrap()
             .expect("supervisor task must not panic after Closed latch");
+    }
+
+    // ---------------------------------------------------------------------------
+    // SupervisorHandle::snapshot_state accessor tests.
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn snapshot_state_returns_target_snapshot_after_eval_tick() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+
+        let handle = spawn(
+            test_target("snapshot-state-test"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+            metrics_tx,
+        );
+
+        // Inject enough samples per protocol so the state machine has real
+        // health to record on the first eval tick.
+        for _ in 0..5 {
+            for proto in [Protocol::Icmp, Protocol::Tcp, Protocol::Udp] {
+                handle
+                    .observation_tx
+                    .send(ProbeObservation {
+                        protocol: proto,
+                        target_id: "snapshot-state-test".to_string(),
+                        outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+                        hops: None,
+                        observed_at: tokio::time::Instant::now(),
+                    })
+                    .await
+                    .expect("send");
+            }
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Advance past the first eval tick (10 s).
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let snap = handle.snapshot_state().expect(
+            "snapshot_state should not block and the eval tick has released the lock by now",
+        );
+        // Exact value may depend on evaluation — the strong invariant is that
+        // after at least one eval tick, at least one protocol was classified.
+        assert!(
+            snap.icmp_health.is_some() || snap.tcp_health.is_some() || snap.udp_health.is_some(),
+            "expected at least one protocol to have Some(health) after the first eval tick; snap={snap:?}"
+        );
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn snapshot_state_returns_none_when_lock_contended() {
+        // Build a SupervisorHandle with a synthetic `last_state` we can hold
+        // the lock on from the test thread — verifies the accessor never
+        // blocks when the lock is contended.
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let last_state = Arc::new(Mutex::new(TargetSnapshot::default()));
+        let held = Arc::clone(&last_state);
+        let _guard = held.try_lock().expect("lock the state from the test");
+
+        // Minimal handle shim: all we need is `last_state`. The other fields
+        // are unused by `snapshot_state`.
+        let (observation_tx, _observation_rx) = mpsc::channel(1);
+        let stats: Arc<StatsArray> = Arc::new([
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+        ]);
+        // Spawn a do-nothing task so the JoinHandle field is valid.
+        let cancel = CancellationToken::new();
+        let join = tokio::spawn(async {});
+
+        let handle = SupervisorHandle {
+            cancel: cancel.clone(),
+            join,
+            observation_tx,
+            stats,
+            prober_joins: Vec::new(),
+            last_state: Arc::clone(&last_state),
+        };
+
+        assert!(
+            handle.snapshot_state().is_none(),
+            "snapshot_state must return None while the state lock is held elsewhere"
+        );
+
+        drop(_guard);
+        assert!(
+            handle.snapshot_state().is_some(),
+            "after releasing the lock the accessor must return Some(_)"
+        );
+
+        cancel.cancel();
+        let _ = handle.join.await;
+    }
+
+    // -----------------------------------------------------------------------
+    // 60 s metrics tick — emits PathMetricsMsg per protocol with
+    // Some(health) and drops protocols without a classified health value.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_emits_path_metrics_per_protocol_after_eval() {
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, mut metrics_rx) =
+            tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+
+        let handle = spawn(
+            test_target("metrics-tick-test"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+            metrics_tx,
+        );
+
+        // Seed each protocol with enough successes so the state machine
+        // classifies them on the first eval tick.
+        for _ in 0..5 {
+            for proto in [Protocol::Icmp, Protocol::Tcp, Protocol::Udp] {
+                handle
+                    .observation_tx
+                    .send(ProbeObservation {
+                        protocol: proto,
+                        target_id: "metrics-tick-test".to_string(),
+                        outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+                        hops: None,
+                        observed_at: tokio::time::Instant::now(),
+                    })
+                    .await
+                    .expect("send");
+            }
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Advance past the first 10 s eval tick so TargetSnapshot is populated.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Advance past the 60 s metrics tick.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let mut got = Vec::new();
+        while let Ok(msg) = metrics_rx.try_recv() {
+            got.push(msg);
+        }
+        assert!(
+            !got.is_empty(),
+            "expected >=1 PathMetricsMsg after eval+metrics tick",
+        );
+        assert!(
+            got.iter().all(|m| m.target_id == "metrics-tick-test"),
+            "all messages should carry our target_id",
+        );
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn path_metrics_window_reflects_stats_window() {
+        // Regression: the metrics tick previously hard-coded a 60 s window
+        // (`window_start = now_wall - Duration::from_secs(60)`) regardless
+        // of the underlying RollingStats window. With the tight-hysteresis
+        // config (`primary_sec: 300`, `diversity_sec: 900`), every protocol
+        // starts on the 900 s diversity window, so the emitted
+        // PathMetrics.window_(start|end) pair must span ~900 s — the
+        // service computes rates against this span and a 60 s mis-label
+        // silently inflates reported rates 15x.
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, mut metrics_rx) =
+            tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+
+        let handle = spawn(
+            test_target("window-label-test"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+            snapshot_tx,
+            metrics_tx,
+        );
+
+        // Seed every protocol so the state machine classifies all three
+        // on the first eval tick — without this, metrics_protocols filters
+        // them out and the test passes vacuously with zero observed msgs.
+        for _ in 0..5 {
+            for proto in [Protocol::Icmp, Protocol::Tcp, Protocol::Udp] {
+                handle
+                    .observation_tx
+                    .send(ProbeObservation {
+                        protocol: proto,
+                        target_id: "window-label-test".to_string(),
+                        outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+                        hops: None,
+                        observed_at: tokio::time::Instant::now(),
+                    })
+                    .await
+                    .expect("send");
+            }
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Pass the first 10 s eval tick so last_state is populated.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        // Pass the 60 s metrics tick so supervisor emits PathMetricsMsg.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let mut got = Vec::new();
+        while let Ok(msg) = metrics_rx.try_recv() {
+            got.push(msg);
+        }
+        assert!(
+            !got.is_empty(),
+            "expected >=1 PathMetricsMsg after eval+metrics tick",
+        );
+
+        // For every emitted message, the span window_end - window_start must
+        // match the effective RollingStats window for that protocol. With
+        // the tight-hysteresis config each protocol uses one of:
+        //   - primary window (300 s) if elected primary by the eval tick
+        //   - diversity window (900 s) otherwise
+        // Either is acceptable; what must never happen is the old 60 s
+        // hard-coded span.
+        for msg in &got {
+            let span = msg
+                .window_end
+                .duration_since(msg.window_start)
+                .expect("window_end >= window_start");
+            let secs = span.as_secs();
+            assert!(
+                secs == 300 || secs == 900,
+                "expected window span to be 300 s (primary) or 900 s (diversity), got {secs} s for proto={:?}",
+                msg.protocol,
+            );
+        }
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    #[test]
+    fn metrics_protocols_skips_none_and_preserves_order() {
+        // Invariant: `None` health entries are dropped so the wire payload
+        // can never encode `ProtocolHealth::Unspecified`. Kept pairs
+        // preserve the ICMP, TCP, UDP iteration order the metrics tick
+        // relies on for reproducible batching.
+        let all_none = metrics_protocols(None, None, None).collect::<Vec<_>>();
+        assert!(
+            all_none.is_empty(),
+            "no protocols should emit when every health is None"
+        );
+
+        let only_tcp =
+            metrics_protocols(None, Some(ProtoHealth::Unhealthy), None).collect::<Vec<_>>();
+        assert_eq!(
+            only_tcp,
+            vec![(Protocol::Tcp, ProtoHealth::Unhealthy)],
+            "only the TCP-with-Some pair should survive"
+        );
+
+        let icmp_and_udp = metrics_protocols(
+            Some(ProtoHealth::Healthy),
+            None,
+            Some(ProtoHealth::Unhealthy),
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            icmp_and_udp,
+            vec![
+                (Protocol::Icmp, ProtoHealth::Healthy),
+                (Protocol::Udp, ProtoHealth::Unhealthy),
+            ],
+            "ICMP and UDP should emit in input order with TCP's None dropped"
+        );
+
+        let all_some = metrics_protocols(
+            Some(ProtoHealth::Healthy),
+            Some(ProtoHealth::Healthy),
+            Some(ProtoHealth::Healthy),
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(all_some.len(), 3, "all three protocols should emit");
     }
 }
