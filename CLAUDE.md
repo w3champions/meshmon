@@ -23,6 +23,16 @@ cargo clippy --workspace -- -D warnings
 
 Service integration tests require Docker (TimescaleDB via `testcontainers`).
 
+The release service binary embeds the React SPA via `memory-serve`.
+Produce a deployable binary with:
+
+```bash
+./scripts/build-release.sh
+```
+
+`cargo build` alone uses a placeholder `index.html` synthesized by
+`crates/service/build.rs` so backend-only dev flows don't need Node.js.
+
 ## Database
 
 Postgres + TimescaleDB. Migrations in `crates/service/migrations/`.

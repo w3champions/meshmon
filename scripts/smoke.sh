@@ -3,11 +3,12 @@
 #
 # Spins up Postgres + VictoriaMetrics containers, seeds a handful of agents
 # and route snapshots, starts the service in the background, and runs the
-# Vite dev server in the foreground (which proxies /api to the service).
-# Ctrl-C tears everything down.
+# Vite dev server in the foreground (which proxies /api to the service
+# and gives HMR on frontend edits). Ctrl-C tears everything down.
 #
-# The service binary does not yet serve the SPA itself; until the embed
-# task lands, the dev server is the only way to exercise the UI.
+# For a release-mode binary that serves the SPA from its own embedded
+# copy, use `scripts/build-release.sh` and run the resulting binary
+# directly instead.
 #
 # Not for production. For the full stack (vmalert, alertmanager, grafana)
 # see deploy/docker-compose.yml once T24 fills it in.
