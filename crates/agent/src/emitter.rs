@@ -264,15 +264,23 @@ async fn run_emitter<A: ServiceApi>(
     // Drain phase: up to 5 s wall-clock to flush in-flight work before we
     // return. Biased toward route snapshots — they're time-sensitive;
     // metrics are already aggregated into staged.
+    //
+    // `*_done` flags gate each receiver arm: once a channel returns `None`
+    // we stop polling it. Without this, `recv()` on a closed+empty channel
+    // resolves to `Poll::Ready(None)` instantly on every iteration and the
+    // biased select starves the timer arm, busy-spinning until the outer
+    // runtime deadline.
     let drain_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let mut snapshots_done = false;
+    let mut metrics_done = false;
+    while !snapshots_done || !metrics_done {
         if Instant::now() >= drain_deadline {
             break;
         }
         tokio::select! {
             biased;
             _ = tokio::time::sleep_until(drain_deadline) => break,
-            maybe = snapshots_rx.recv() => {
+            maybe = snapshots_rx.recv(), if !snapshots_done => {
                 match maybe {
                     Some(env) => {
                         dispatch_snapshot(
@@ -286,30 +294,25 @@ async fn run_emitter<A: ServiceApi>(
                         .await;
                     }
                     None => {
-                        // Snapshot channel fully drained; keep pulling
-                        // metrics until the deadline or metrics_rx also
-                        // closes. Can't return here: staged may still be
-                        // non-empty and we haven't sent the final batch.
+                        // Snapshot channel fully drained. Stop polling
+                        // this arm; keep the loop alive so metrics_rx
+                        // (if still open) can flush, then we exit when
+                        // both flags are set or the deadline elapses.
+                        snapshots_done = true;
                     }
                 }
             }
-            maybe = metrics_rx.recv() => {
+            maybe = metrics_rx.recv(), if !metrics_done => {
                 match maybe {
                     Some(m) => staged.push(m),
                     None => {
-                        // Both channels closed and no more snapshots
-                        // pending — still need to flush staged below.
+                        // metrics channel fully drained. Mirrors the
+                        // snapshots_done handling — flag it off and let
+                        // the loop fall through to the final flush.
+                        metrics_done = true;
                     }
                 }
             }
-        }
-
-        // Early exit when both channels are closed AND staged is drained.
-        // Checking the receivers' closed state directly avoids spinning
-        // on `Poll::Ready(None)` for the rest of the 5 s deadline once
-        // the senders are all gone.
-        if snapshots_rx.is_closed() && metrics_rx.is_closed() && staged.is_empty() {
-            break;
         }
     }
 
@@ -1897,5 +1900,78 @@ mod tests {
             }
             _ => panic!("variant changed unexpectedly"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drains_buffered_metrics_before_channel_closed_exit() {
+        // Regression: a fast-close shutdown where the supervisor drops
+        // metrics_tx with messages still buffered MUST see those messages
+        // flushed as a final batch — the early-exit check must not fire
+        // while unread messages sit in the mpsc buffer.
+        let api = Arc::new(RecordingApi::default());
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (mtx, mrx) = mpsc::channel(16);
+        let (_stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        // Park emitter in primary select!.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Queue TWO messages, then drop the sender. Critically, do NOT
+        // advance the 60 s metrics tick before cancelling — both messages
+        // must still be in `staged` (they were pushed by the primary loop
+        // in reaction to `metrics_rx.recv()` arms) OR in the mpsc buffer
+        // when the drop + cancel race happens.
+        let now = SystemTime::now();
+        for i in 0..2u64 {
+            mtx.send(PathMetricsMsg {
+                target_id: format!("t{i}"),
+                protocol: Protocol::Icmp,
+                window_start: now - Duration::from_secs(60),
+                window_end: now,
+                stats: test_stats(),
+                health: ProtoHealth::Healthy,
+            })
+            .await
+            .unwrap();
+        }
+        drop(mtx);
+        cancel.cancel();
+
+        // Advance a little so the drain loop runs.
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(500)).await;
+            for _ in 0..30 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+        let calls = api.push_metrics_calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one final flush batch; got {} calls",
+            calls.len(),
+        );
+        let paths = &calls[0].paths;
+        assert_eq!(
+            paths.len(),
+            2,
+            "final batch must contain both messages; got {}",
+            paths.len()
+        );
+        let target_ids: std::collections::HashSet<_> =
+            paths.iter().map(|p| p.target_id.clone()).collect();
+        assert!(target_ids.contains("t0"));
+        assert!(target_ids.contains("t1"));
     }
 }
