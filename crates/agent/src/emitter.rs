@@ -1482,6 +1482,105 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn dropped_count_surfaces_on_overflow_then_resets_on_success() {
+        // Helper: build a PathMetricsMsg seeded by iteration index so each
+        // batch has a distinct 60-second window.
+        fn mk_msg(target_id: &str, protocol: Protocol, seed: u64) -> PathMetricsMsg {
+            let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + seed * 60);
+            PathMetricsMsg {
+                target_id: target_id.to_owned(),
+                protocol,
+                window_start: now - Duration::from_secs(60),
+                window_end: now,
+                stats: test_stats(),
+                health: ProtoHealth::Healthy,
+            }
+        }
+
+        let api = Arc::new(RecordingApi::default());
+        // Start in "fail everything with UNAVAILABLE" mode.
+        *api.metrics_result.lock().await = Some(tonic::Status::unavailable("down"));
+
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (mtx, mrx) = mpsc::channel(4096);
+        let (_stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        // Let the emitter park in its select!.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Feed 80 batches (>> RETRY_QUEUE_CAP = 65) of metrics, one per 60s
+        // tick. Each tick the primary loop dispatches one batch that fails
+        // with UNAVAILABLE → enqueued. After 65, every subsequent push
+        // evicts the oldest and bumps dropped_count.
+        for i in 0..80u64 {
+            mtx.send(mk_msg("t1", Protocol::Icmp, i)).await.unwrap();
+            tokio::time::advance(Duration::from_secs(61)).await;
+            for _ in 0..30 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // At this point the retry queue holds 65 entries, dropped_count >= 15
+        // (80 - 65 evictions), and every push_metrics call so far has failed.
+        // Flip the service to success.
+        *api.metrics_result.lock().await = None;
+
+        // Advance plenty of time so the retry worker drains everything. Each
+        // retry takes up to ~5 s under schedule_retry(0..10), plus jitter.
+        // Several iterations of take_due(8) × sleep(wait) × yield should be
+        // enough to drain 65 entries with the service succeeding.
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            for _ in 0..30 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+        let calls = api.push_metrics_calls.lock().await;
+        // Invariant 1: some batch must carry dropped_count > 0 (the overflow
+        // either happened while failing, so the primary-dispatch or first
+        // retry post-flip both see it).
+        let saw_drop_counter = calls.iter().any(|c| {
+            c.agent_metadata
+                .as_ref()
+                .map(|m| m.dropped_count > 0)
+                .unwrap_or(false)
+        });
+        assert!(
+            saw_drop_counter,
+            "expected at least one MetricsBatch with dropped_count > 0; saw {} calls",
+            calls.len(),
+        );
+
+        // Invariant 2: after the first successful ack, at least one later
+        // batch must carry dropped_count = 0 (reset-on-success). The retry
+        // worker resets the counter on its first metrics-ack; the final
+        // recorded batch after a full drain should therefore see the reset.
+        let last = calls.last().expect("at least one call recorded");
+        let last_dc = last
+            .agent_metadata
+            .as_ref()
+            .expect("agent_metadata always set")
+            .dropped_count;
+        assert_eq!(
+            last_dc, 0,
+            "after drain completes, the final recorded batch should have dropped_count = 0; got {}",
+            last_dc,
+        );
+    }
+
     #[test]
     fn bump_retry_increments_attempts_and_reschedules() {
         let now = Instant::now();
