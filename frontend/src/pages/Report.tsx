@@ -130,12 +130,14 @@ export default function Report() {
   const windowStart = new Date(data.window.from);
   const windowEnd = new Date(data.window.to);
 
-  // `max-w-4xl` (~56rem) is kept at print time too: combined with the
-  // AppShell flex-unwind in globals.css, dropping it made tables
-  // stretch edge-to-edge on Letter. The 4xl cap + p-6 keeps columns
-  // proportionate on both screen and paper.
+  // On screen, `mx-auto max-w-4xl` keeps the report readable on wide
+  // monitors. At print time those combine with Chrome's viewport-based
+  // rendering to leave large empty margins around a narrow block — the
+  // @page rule in globals.css sizes the sheet, `print:mx-0
+  // print:max-w-none` lets the article fill it, and per-cell padding on
+  // tables (see globals.css @media print) keeps columns compact.
   return (
-    <article className="mx-auto max-w-4xl p-6">
+    <article className="mx-auto max-w-4xl p-6 print:mx-0 print:max-w-none print:p-0">
       <header className="flex items-start justify-between gap-4 border-b pb-4 print:border-black">
         <div>
           <h1 className="text-xl font-semibold">Network Issue Report</h1>
