@@ -6,8 +6,10 @@ actually does rather than implementation detail.
 
 ## Exporting a path report as PDF
 
-The Report page (`/report?source_id=…&target_id=…&from=…&to=…`) is
-designed to print directly from a Chromium-based browser.
+The Report page
+(`/reports/path?source_id=…&target_id=…&from=…&to=…`, optional
+`&protocol=icmp|udp|tcp`) is designed to print directly from a
+Chromium-based browser.
 
 1. Open the report and click **Export PDF**.
 2. In the browser print dialog, choose **Save as PDF** (or a physical
