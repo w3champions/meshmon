@@ -103,8 +103,8 @@ export default function PathDetail() {
 
   const reportHref = effectiveProtocol
     ? buildReportPath({
-        source_ip: data.source.ip,
-        target_ip: data.target.ip,
+        source_id: source,
+        target_id: target,
         from: data.window.from,
         to: data.window.to,
         protocol: effectiveProtocol,
@@ -232,6 +232,7 @@ export default function PathDetail() {
           source={source}
           target={target}
           snapshots={data.recent_snapshots}
+          truncated={data.recent_snapshots_truncated}
           onCompare={({ a, b }) =>
             navigate({
               to: "/paths/$source/$target/routes/compare",

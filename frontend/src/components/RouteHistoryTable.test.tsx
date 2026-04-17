@@ -53,4 +53,51 @@ describe("RouteHistoryTable", () => {
     render(<RouteHistoryTable source="a" target="b" snapshots={[]} onCompare={() => {}} />);
     expect(screen.getByText(/no route snapshots/i)).toBeInTheDocument();
   });
+
+  test("disables the B radio on rows whose protocol differs from A's pick", async () => {
+    const mixed: Row[] = [
+      { ...rows[0], id: 2, protocol: "icmp" },
+      { ...rows[1], id: 1, protocol: "tcp" },
+    ];
+    render(<RouteHistoryTable source="a" target="b" snapshots={mixed} onCompare={() => {}} />);
+    const user = userEvent.setup();
+    // Pick A on the ICMP row (id 2).
+    await user.click(screen.getAllByRole("radio", { name: /pick as a/i })[0]);
+    // The B radio on the TCP row (id 1) must now be disabled.
+    const bRadios = screen.getAllByRole("radio", { name: /pick as b/i });
+    expect(bRadios[0]).toBeEnabled(); // ICMP row — still pickable as B
+    expect(bRadios[1]).toBeDisabled(); // TCP row — blocked by same-protocol rule
+  });
+
+  test("Clear button resets both selections so users can switch protocols", async () => {
+    const mixed: Row[] = [
+      { ...rows[0], id: 2, protocol: "icmp" },
+      { ...rows[1], id: 1, protocol: "tcp" },
+    ];
+    render(<RouteHistoryTable source="a" target="b" snapshots={mixed} onCompare={() => {}} />);
+    const user = userEvent.setup();
+    await user.click(screen.getAllByRole("radio", { name: /pick as a/i })[0]);
+    await user.click(screen.getAllByRole("radio", { name: /pick as b/i })[0]);
+    // Both picked on ICMP — the TCP row's B radio is disabled.
+    const bRadios = screen.getAllByRole("radio", { name: /pick as b/i });
+    expect(bRadios[1]).toBeDisabled();
+    // Clear escapes the lock-in.
+    await user.click(screen.getByRole("button", { name: /clear/i }));
+    expect(screen.getAllByRole("radio", { name: /pick as a/i })[0]).not.toBeChecked();
+    expect(screen.getAllByRole("radio", { name: /pick as b/i })[0]).not.toBeChecked();
+    // Now the TCP row is pickable again.
+    expect(screen.getAllByRole("radio", { name: /pick as b/i })[1]).toBeEnabled();
+  });
+
+  test("renders a truncation footnote when `truncated` is true", () => {
+    render(
+      <RouteHistoryTable source="a" target="b" snapshots={rows} truncated onCompare={() => {}} />,
+    );
+    expect(screen.getByText(/showing latest 100/i)).toBeInTheDocument();
+  });
+
+  test("omits the truncation footnote when `truncated` is false or missing", () => {
+    render(<RouteHistoryTable source="a" target="b" snapshots={rows} onCompare={() => {}} />);
+    expect(screen.queryByText(/showing latest 100/i)).toBeNull();
+  });
 });

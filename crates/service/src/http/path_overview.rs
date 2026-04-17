@@ -55,16 +55,19 @@ pub struct PathOverviewResponse {
     pub source: AgentSummary,
     /// Target agent metadata.
     pub target: AgentSummary,
-    /// Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing
+    /// Server-picked primary protocol (`icmp`, `udp`, or `tcp`). `null`
     /// only when no protocol has any snapshot in the window; callers should
     /// treat that as "show a neutral empty state".
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_protocol: Option<String>,
     /// Latest snapshot per protocol within the window (each field optional).
     pub latest_by_protocol: LatestByProtocol,
     /// Recent snapshots in the window in descending `observed_at` order.
     /// Capped at [`RECENT_LIMIT`]; no hop detail.
     pub recent_snapshots: Vec<RouteSnapshotSummary>,
+    /// `true` when the `recent_snapshots` list was clamped at
+    /// [`RECENT_LIMIT`] — the frontend surfaces a "narrow the window"
+    /// hint so operators don't silently miss older entries.
+    pub recent_snapshots_truncated: bool,
     /// VM series for the primary protocol, or `null` when the VM was
     /// unreachable or misconfigured.
     pub metrics: Option<PathMetrics>,
@@ -578,15 +581,23 @@ pub async fn path_overview(
     // 4. Fetch latest-per-protocol + recent list in parallel. Both hit the
     //    same pool so overlapped await points are essentially free.
     let latest_fut = fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to);
-    let recent_fut = fetch_recent_snapshots(&state.pool, &src, &tgt, from, to, RECENT_LIMIT);
+    // Fetch one row past the cap so we can cheaply distinguish "exactly
+    // RECENT_LIMIT rows exist" from "more than RECENT_LIMIT exist". The
+    // extra row is trimmed before it leaves the handler.
+    let recent_fut = fetch_recent_snapshots(&state.pool, &src, &tgt, from, to, RECENT_LIMIT + 1);
 
-    let (latest_by_protocol, recent_snapshots) = match tokio::try_join!(latest_fut, recent_fut) {
+    let (latest_by_protocol, mut recent_snapshots) = match tokio::try_join!(latest_fut, recent_fut)
+    {
         Ok(pair) => pair,
         Err(e) => {
             tracing::error!(error = %e, %src, %tgt, "path_overview: DB fetch failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    let recent_snapshots_truncated = recent_snapshots.len() as i64 > RECENT_LIMIT;
+    if recent_snapshots_truncated {
+        recent_snapshots.truncate(RECENT_LIMIT as usize);
+    }
 
     // 5. Pick the primary protocol. VM queries are only meaningful for a
     //    concrete protocol, so we skip them entirely when every slot is
@@ -607,6 +618,7 @@ pub async fn path_overview(
         primary_protocol,
         latest_by_protocol,
         recent_snapshots,
+        recent_snapshots_truncated,
         metrics,
         window: WindowBounds { from, to },
         step: step.to_string(),

@@ -1098,6 +1098,7 @@
           "target",
           "latest_by_protocol",
           "recent_snapshots",
+          "recent_snapshots_truncated",
           "window",
           "step"
         ],
@@ -1122,7 +1123,7 @@
               "string",
               "null"
             ],
-            "description": "Server-picked primary protocol (`icmp`, `udp`, or `tcp`). Missing\nonly when no protocol has any snapshot in the window; callers should\ntreat that as \"show a neutral empty state\"."
+            "description": "Server-picked primary protocol (`icmp`, `udp`, or `tcp`). `null`\nonly when no protocol has any snapshot in the window; callers should\ntreat that as \"show a neutral empty state\"."
           },
           "recent_snapshots": {
             "type": "array",
@@ -1130,6 +1131,10 @@
               "$ref": "#/components/schemas/RouteSnapshotSummary"
             },
             "description": "Recent snapshots in the window in descending `observed_at` order.\nCapped at [`RECENT_LIMIT`]; no hop detail."
+          },
+          "recent_snapshots_truncated": {
+            "type": "boolean",
+            "description": "`true` when the `recent_snapshots` list was clamped at\n[`RECENT_LIMIT`] — the frontend surfaces a \"narrow the window\"\nhint so operators don't silently miss older entries."
           },
           "source": {
             "$ref": "#/components/schemas/AgentSummary",

@@ -23,6 +23,7 @@
 //! | `.168` | `overview_step_is_1m_for_24h_window`                        |
 //! | `.169` | `overview_step_is_5m_for_7d_window`                         |
 //! | `.170` | `overview_requires_session`                                 |
+//! | `.171` | `overview_sets_truncated_flag_when_recent_hits_limit`       |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -764,4 +765,162 @@ async fn overview_requires_session() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// recent_snapshots truncation signal
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn overview_sets_truncated_flag_when_recent_hits_limit() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t19-ov-trunc-src", "t19-ov-trunc-tgt");
+
+    insert_agent_detailed(&pool, src, "Source", "US", "10.0.0.11", 37.0, -122.0).await;
+    insert_agent_detailed(&pool, tgt, "Target", "DE", "10.0.0.12", 52.0, 13.0).await;
+
+    // Seed 101 snapshots within the default 24h window. The 101st row tells
+    // the handler there's more to see than fits in RECENT_LIMIT.
+    let now = chrono::Utc::now();
+    for i in 0..101 {
+        insert_snapshot(
+            &pool,
+            src,
+            tgt,
+            "icmp",
+            now - chrono::Duration::seconds(i * 10),
+        )
+        .await;
+    }
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.171").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/paths/{src}/{tgt}/overview"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body = parse_body(&bytes);
+
+    // Capped at 100 and flagged as truncated. The 101st row must not leak.
+    let recent = body["recent_snapshots"].as_array().expect("recent array");
+    assert_eq!(recent.len(), 100, "body = {body}");
+    assert_eq!(body["recent_snapshots_truncated"], true, "body = {body}");
+
+    cleanup_pair(&pool, src, tgt).await;
+}
+
+#[tokio::test]
+async fn overview_truncated_flag_is_false_when_below_limit() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t19-ov-nontrunc-src", "t19-ov-nontrunc-tgt");
+
+    insert_agent_detailed(&pool, src, "Source", "US", "10.0.0.13", 37.0, -122.0).await;
+    insert_agent_detailed(&pool, tgt, "Target", "DE", "10.0.0.14", 52.0, 13.0).await;
+
+    let now = chrono::Utc::now();
+    // Exactly RECENT_LIMIT rows — must not be flagged truncated, since no
+    // 101st row exists.
+    for i in 0..100 {
+        insert_snapshot(
+            &pool,
+            src,
+            tgt,
+            "icmp",
+            now - chrono::Duration::seconds(i * 10),
+        )
+        .await;
+    }
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.172").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/paths/{src}/{tgt}/overview"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body = parse_body(&bytes);
+    let recent = body["recent_snapshots"].as_array().expect("recent array");
+    assert_eq!(recent.len(), 100, "body = {body}");
+    assert_eq!(body["recent_snapshots_truncated"], false, "body = {body}");
+
+    cleanup_pair(&pool, src, tgt).await;
+}
+
+/// When the window has no snapshots for any protocol, `primary_protocol`
+/// is serialized as JSON `null` (per spec §meshmon-03) so consumers don't
+/// have to distinguish between "field absent" and "no data" — they both
+/// mean the same thing, and null is less ambiguous than an omitted key.
+#[tokio::test]
+async fn overview_primary_protocol_is_null_when_no_snapshots() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t19-ov-empty-src", "t19-ov-empty-tgt");
+
+    insert_agent_detailed(&pool, src, "Source", "US", "10.0.0.24", 37.0, -122.0).await;
+    insert_agent_detailed(&pool, tgt, "Target", "DE", "10.0.0.25", 52.0, 13.0).await;
+    // Intentionally insert no snapshots.
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.173").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/paths/{src}/{tgt}/overview"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body = parse_body(&bytes);
+    assert!(
+        body.get("primary_protocol").is_some(),
+        "primary_protocol must be present (as null), body = {body}"
+    );
+    assert!(
+        body["primary_protocol"].is_null(),
+        "primary_protocol must be JSON null when no snapshots, body = {body}"
+    );
+
+    cleanup_pair(&pool, src, tgt).await;
 }
