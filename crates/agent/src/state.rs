@@ -502,6 +502,19 @@ mod tests {
         }
     }
 
+    /// Mirrors `config::default_tcp_thresholds()`. Kept duplicated here
+    /// so the state-machine tests remain independent of `config.rs`; if
+    /// the defaults ever diverge, the mismatch surfaces as a deliberate
+    /// code change in both places.
+    fn tcp_thresholds() -> ProtocolThresholds {
+        ProtocolThresholds {
+            unhealthy_trigger_pct: 0.5,
+            healthy_recovery_pct: 0.05,
+            unhealthy_hysteresis_sec: 30,
+            healthy_hysteresis_sec: 60,
+        }
+    }
+
     fn summary(sample_count: u64, successful: u64) -> FastSummary {
         let failure_rate = if sample_count == 0 {
             0.0
@@ -598,6 +611,53 @@ mod tests {
                 to: ProtoHealth::Healthy,
             }),
         );
+    }
+
+    /// Covers TCP's stricter defaults (0.5 trigger / 0.05 recovery)
+    /// instead of ICMP's (0.9 / 0.1). A failure_rate of 0.6 is above
+    /// TCP's trigger but well below ICMP's, so if the SM ever regressed
+    /// to a hardcoded threshold this test would catch it.
+    #[test]
+    fn tcp_transitions_at_tcp_thresholds() {
+        let mut m = ProtocolStateMachine::new(Protocol::Tcp);
+        let t0 = Instant::now();
+        let th = tcp_thresholds();
+
+        // Healthy -> Unhealthy: failure_rate 0.6 is above TCP's 0.5
+        // trigger but below ICMP's 0.9 — proves the threshold is
+        // parameterized per protocol.
+        assert_eq!(m.evaluate(&summary(10, 4), &th, t0), None);
+        assert_eq!(
+            m.evaluate(&summary(20, 8), &th, t0 + Duration::from_secs(29)),
+            None
+        );
+        assert_eq!(
+            m.evaluate(&summary(30, 12), &th, t0 + Duration::from_secs(30)),
+            Some(ProtocolTransition {
+                protocol: Protocol::Tcp,
+                from: ProtoHealth::Healthy,
+                to: ProtoHealth::Unhealthy,
+            }),
+        );
+        assert_eq!(m.state(), ProtoHealth::Unhealthy);
+
+        // Unhealthy -> Healthy: failure_rate 0.0 is at/below TCP's 0.05
+        // recovery ceiling. Requires 60s of recovery hysteresis.
+        let t1 = t0 + Duration::from_secs(30);
+        assert_eq!(m.evaluate(&summary(40, 40), &th, t1), None);
+        assert_eq!(
+            m.evaluate(&summary(50, 50), &th, t1 + Duration::from_secs(59)),
+            None
+        );
+        assert_eq!(
+            m.evaluate(&summary(60, 60), &th, t1 + Duration::from_secs(60)),
+            Some(ProtocolTransition {
+                protocol: Protocol::Tcp,
+                from: ProtoHealth::Unhealthy,
+                to: ProtoHealth::Healthy,
+            }),
+        );
+        assert_eq!(m.state(), ProtoHealth::Healthy);
     }
 
     fn config_with_rates(rates: Vec<meshmon_protocol::RateEntry>) -> ProbeConfig {
