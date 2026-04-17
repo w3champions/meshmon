@@ -1529,55 +1529,86 @@ mod tests {
             }
         }
 
-        // At this point the retry queue holds 65 entries, dropped_count >= 15
-        // (80 - 65 evictions), and every push_metrics call so far has failed.
-        // Flip the service to success.
+        // Flip service back to success.
         *api.metrics_result.lock().await = None;
 
-        // Advance plenty of time so the retry worker drains everything. Each
-        // retry takes up to ~5 s under schedule_retry(0..10), plus jitter.
-        // Several iterations of take_due(8) × sleep(wait) × yield should be
-        // enough to drain 65 entries with the service succeeding.
-        for _ in 0..40 {
-            tokio::time::advance(Duration::from_secs(30)).await;
+        // Drain enough for the retry worker to start acking queued entries.
+        // We don't need to drain the whole 65-entry backlog — as soon as the
+        // first successful push_metrics ack fires, the retry worker calls
+        // queue.reset_dropped_count(), zeroing the LIVE counter. The next
+        // primary-dispatch tick will then read 0. Give the retry worker
+        // enough advance/yield cycles to complete at least one successful
+        // ack.
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(10)).await;
             for _ in 0..30 {
                 tokio::task::yield_now().await;
             }
+        }
+
+        // Send one more message and drive a fresh primary tick. build_metrics_batch
+        // reads queue.dropped_count() live, so this batch reflects whatever
+        // the retry worker has set it to.
+        let pre_probe_count = api.push_metrics_calls.lock().await.len();
+        mtx.send(mk_msg("t1", Protocol::Icmp, 1000)).await.unwrap();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        for _ in 0..40 {
+            tokio::task::yield_now().await;
         }
 
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 
         let calls = api.push_metrics_calls.lock().await;
-        // Invariant 1: some batch must carry dropped_count > 0 (the overflow
-        // either happened while failing, so the primary-dispatch or first
-        // retry post-flip both see it).
-        let saw_drop_counter = calls.iter().any(|c| {
+
+        // Invariant 1: at least one recorded MetricsBatch must carry
+        // dropped_count > 0 — proves the overflow -> counter path worked.
+        let saw_positive_drop_count = calls.iter().any(|c| {
             c.agent_metadata
                 .as_ref()
                 .map(|m| m.dropped_count > 0)
                 .unwrap_or(false)
         });
         assert!(
-            saw_drop_counter,
+            saw_positive_drop_count,
             "expected at least one MetricsBatch with dropped_count > 0; saw {} calls",
             calls.len(),
         );
 
-        // Invariant 2: after the first successful ack, at least one later
-        // batch must carry dropped_count = 0 (reset-on-success). The retry
-        // worker resets the counter on its first metrics-ack; the final
-        // recorded batch after a full drain should therefore see the reset.
-        let last = calls.last().expect("at least one call recorded");
-        let last_dc = last
+        // Invariant 2: the post-drain primary-dispatch batch must carry
+        // dropped_count = 0 — proves reset_dropped_count() mutated live state
+        // after a successful push_metrics ack. Retried batches carry stale
+        // snapshots, so we specifically look for a batch dispatched AFTER
+        // the drain started — i.e., with index >= pre_probe_count.
+        assert!(
+            calls.len() > pre_probe_count,
+            "expected a primary-dispatch batch after the drain probe; got {} total, {} before probe",
+            calls.len(),
+            pre_probe_count,
+        );
+        let post_probe = calls
+            .iter()
+            .skip(pre_probe_count)
+            .find(|c| {
+                // Find the fresh primary tick's batch — it contains exactly
+                // one PathMetrics (the one we just sent) and its single
+                // PathMetrics.target_id matches "t1". (Retried batches are
+                // also for "t1" but contain original windowed payloads with
+                // seed-based timestamps; the probe batch has seed=1000
+                // timestamps ≈ 1_700_060_000 Unix sec.)
+                c.paths.len() == 1
+                    && c.paths[0].window_end_micros == (1_700_000_000 + 1000 * 60) * 1_000_000
+            })
+            .expect("probe batch with seed=1000 window should be recorded");
+        let dc = post_probe
             .agent_metadata
             .as_ref()
             .expect("agent_metadata always set")
             .dropped_count;
         assert_eq!(
-            last_dc, 0,
-            "after drain completes, the final recorded batch should have dropped_count = 0; got {}",
-            last_dc,
+            dc, 0,
+            "post-drain primary batch should see dropped_count = 0 after reset; got {}",
+            dc,
         );
     }
 
