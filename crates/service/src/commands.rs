@@ -66,25 +66,21 @@ async fn broadcast_refresh(manager: &Arc<TunnelManager>) {
             req.set_timeout(REFRESH_CONFIG_TIMEOUT);
             match client.refresh_config(req).await {
                 Ok(_) => {
-                    metrics::counter!(
-                        "meshmon_service_command_rpcs_total",
-                        "method" => "refresh_config",
-                        "outcome" => "ok",
+                    crate::metrics::command_rpcs(
+                        "refresh_config",
+                        crate::metrics::CommandOutcome::Ok,
                     )
                     .increment(1);
                 }
                 Err(status) => {
                     let outcome = match status.code() {
-                        tonic::Code::Unavailable => "unavailable",
-                        tonic::Code::DeadlineExceeded => "deadline_exceeded",
-                        _ => "other",
+                        tonic::Code::Unavailable => crate::metrics::CommandOutcome::Unavailable,
+                        tonic::Code::DeadlineExceeded => {
+                            crate::metrics::CommandOutcome::DeadlineExceeded
+                        }
+                        _ => crate::metrics::CommandOutcome::Other,
                     };
-                    metrics::counter!(
-                        "meshmon_service_command_rpcs_total",
-                        "method" => "refresh_config",
-                        "outcome" => outcome,
-                    )
-                    .increment(1);
+                    crate::metrics::command_rpcs("refresh_config", outcome).increment(1);
                     warn!(
                         agent_id = %id,
                         code = ?status.code(),
