@@ -1,0 +1,79 @@
+# vmalert-tool unit tests for meshmon.path_latency group.
+#
+# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# block and automatically injects an `alertgroup` label equal to the group name.
+#
+# PathLatencyAnomaly (zscore_over_time) is NOT tested here — a synthetic
+# series large enough to produce z > 3 is impractical. The -dryRun syntax
+# check and the Task 8 smoke harness cover it.
+rule_files:
+  - ../rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --- PathLatencyRegression fires on 2x step change above 20ms floor -------
+  # 65 min baseline at 25000 µs, then 10 min at 75000 µs.
+  # The ratio is 3.00x (> 1.5x) and the current 5-min avg (75000) exceeds
+  # the 20000 µs floor. `for: 5m` arms it after 5 min of continuous firing.
+  #
+  # Time math at eval_time 75m:
+  #   offset 1h window [75m-2h, 75m-1h] = [-45m, 15m] => [0, 15m] baseline data ✓
+  #   current 5m window [70m, 75m]       => 75000 elevated ✓
+  #   ratio: 75000 / 25000 = 3.0 > 1.5 ✓; current 75000 > 20000 ✓
+  #   `for: 5m` fires from ~70m onward (5 min into the elevated window at 65m).
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_rtt_avg_micros{source="a",target="b",protocol="icmp"}'
+        values: '25000+0x130 75000+0x20'  # 65 min baseline at 25ms, 10 min at 75ms
+    alert_rule_test:
+      - eval_time: 75m
+        groupname: meshmon.path_latency
+        alertname: PathLatencyRegression
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.path_latency
+              severity: warning
+              category: latency
+              source: a
+              target: b
+              protocol: icmp
+            exp_annotations:
+              summary: 'Latency regression: a → b (icmp)'
+              description: 'Current 5-min avg RTT is 3.00× the previous hour''s baseline'
+
+  # --- PathLatencyRegression does NOT fire when absolute RTT is sub-floor ----
+  # 65 min at 500 µs, step to 5000 µs. Ratio is 10x but current avg (5000)
+  # is below the 20000 µs guard so the alert must NOT fire.
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_rtt_avg_micros{source="c",target="d",protocol="udp"}'
+        values: '500+0x130 5000+0x20'  # 65 min at 0.5ms, then 10 min at 5ms
+    alert_rule_test:
+      - eval_time: 75m
+        groupname: meshmon.path_latency
+        alertname: PathLatencyRegression
+        exp_alerts: []
+
+  # --- PathJitterElevated fires when stddev > 50ms sustained ----------------
+  # 10 min at 60000 µs stddev. `for: 5m` arms it after 5 min.
+  # Rule renders µs directly via `printf "%.0f" µs`, so 60000 µs → "60000 µs".
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_rtt_stddev_micros{source="e",target="f",protocol="tcp"}'
+        values: '60000+0x20'  # 10 min at 60000 µs stddev
+    alert_rule_test:
+      - eval_time: 7m
+        groupname: meshmon.path_latency
+        alertname: PathJitterElevated
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.path_latency
+              severity: info
+              category: jitter
+              source: e
+              target: f
+              protocol: tcp
+            exp_annotations:
+              summary: 'Elevated jitter: e → f (tcp)'
+              description: 'RTT stddev over 5 min: 60000 µs'

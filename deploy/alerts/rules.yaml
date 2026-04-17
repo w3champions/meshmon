@@ -59,3 +59,55 @@ groups:
     annotations:
       summary: 'Persistent subtle loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
       description: 'Average {{ $labels.protocol }} loss over 30 min: {{ $value | humanizePercentage }}'
+
+- name: meshmon.path_latency
+  interval: 30s
+  rules:
+
+  # Ratio-based regression: current 5 min avg vs previous hour's baseline.
+  # Guard with an absolute RTT floor so sub-ms local paths don't alarm on
+  # small absolute changes.
+  - alert: PathLatencyRegression
+    expr: |
+      (
+        avg_over_time(meshmon_path_rtt_avg_micros[5m])
+          /
+        avg_over_time(meshmon_path_rtt_avg_micros[1h] offset 1h)
+        > 1.5
+      )
+      and
+      avg_over_time(meshmon_path_rtt_avg_micros[5m]) > 20000
+    for: 5m
+    labels:
+      severity: warning
+      category: latency
+    annotations:
+      summary: 'Latency regression: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Current 5-min avg RTT is {{ $value | printf "%.2f" }}× the previous hour''s baseline'
+
+  # MetricsQL z-score statistical outlier over the last hour.
+  - alert: PathLatencyAnomaly
+    expr: |
+      zscore_over_time(meshmon_path_rtt_avg_micros[1h]) > 3
+    for: 5m
+    labels:
+      severity: info
+      category: anomaly
+    annotations:
+      summary: 'Latency anomaly: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'z-score over 1h baseline: {{ $value | printf "%.2f" }}'
+
+  # Elevated jitter — stddev sustained above 50 ms.
+  # Metric is microseconds; humanizeDuration expects seconds (so 60000 would
+  # render as "16h 40m 0s"), and vmalert's Go-template engine has no arithmetic
+  # helpers to rescale to ms. Render µs directly with printf.
+  - alert: PathJitterElevated
+    expr: |
+      avg_over_time(meshmon_path_rtt_stddev_micros[5m]) > 50000
+    for: 5m
+    labels:
+      severity: info
+      category: jitter
+    annotations:
+      summary: 'Elevated jitter: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'RTT stddev over 5 min: {{ $value | printf "%.0f" }} µs'
