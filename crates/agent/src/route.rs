@@ -431,10 +431,110 @@ impl RouteTracker {
     /// after a successful emit via [`set_last_reported`].
     pub fn diff_against(
         &self,
-        _new: &RouteSnapshot,
-        _thresholds: &DiffDetection,
+        new: &RouteSnapshot,
+        thresholds: &DiffDetection,
     ) -> Option<RouteDiff> {
-        unimplemented!("Task 5")
+        let last = self.last_reported.as_ref()?;
+
+        // Defensive: mismatched protocols are always a diff. The supervisor
+        // resets `last_reported` on a primary swing so this should never
+        // actually fire, but we guard against it to keep the diff rules
+        // from comparing semantically-incomparable hop distributions.
+        if new.protocol != last.protocol {
+            return Some(RouteDiff {
+                reasons: vec![DiffReason::HopCountChanged {
+                    from: last.hops.len(),
+                    to: new.hops.len(),
+                }],
+            });
+        }
+
+        let mut reasons: Vec<DiffReason> = Vec::new();
+
+        // Rule 3 — hop count change.
+        let from = last.hops.len();
+        let to = new.hops.len();
+        let delta = from.abs_diff(to);
+        if delta >= thresholds.hop_count_change as usize {
+            reasons.push(DiffReason::HopCountChanged { from, to });
+        }
+
+        // Build position → HopSummary lookups for O(H) rules 1/2/4.
+        let last_by_pos: HashMap<u8, &HopSummary> =
+            last.hops.iter().map(|h| (h.position, h)).collect();
+        let new_by_pos: HashMap<u8, &HopSummary> =
+            new.hops.iter().map(|h| (h.position, h)).collect();
+
+        // Rule 1 — new IP ≥ threshold at any position.
+        for new_hop in &new.hops {
+            let last_hop = last_by_pos.get(&new_hop.position);
+            for ip_entry in &new_hop.observed_ips {
+                if ip_entry.frequency < thresholds.new_ip_min_freq {
+                    continue;
+                }
+                // Was this IP present at this position in `last`?
+                let previously_present = last_hop
+                    .map(|h| h.observed_ips.iter().any(|o| o.ip == ip_entry.ip))
+                    .unwrap_or(false);
+                if !previously_present {
+                    reasons.push(DiffReason::NewIp {
+                        position: new_hop.position,
+                    });
+                    break; // one reason per position is enough
+                }
+            }
+        }
+
+        // Rule 2 — previously-seen (≥ new_ip_min_freq) IP is now below missing_ip_max_freq.
+        for last_hop in &last.hops {
+            let new_hop = new_by_pos.get(&last_hop.position);
+            for ip_entry in &last_hop.observed_ips {
+                if ip_entry.frequency < thresholds.new_ip_min_freq {
+                    continue;
+                }
+                // Look up same IP in new snapshot; treat absent as frequency 0.
+                let new_freq = new_hop
+                    .and_then(|h| {
+                        h.observed_ips
+                            .iter()
+                            .find(|o| o.ip == ip_entry.ip)
+                            .map(|o| o.frequency)
+                    })
+                    .unwrap_or(0.0);
+                if new_freq < thresholds.missing_ip_max_freq {
+                    reasons.push(DiffReason::MissingIp {
+                        position: last_hop.position,
+                    });
+                    break; // one reason per position is enough
+                }
+            }
+        }
+
+        // Rule 4 — avg RTT shift ≥ threshold at any hop present in both.
+        for new_hop in &new.hops {
+            let Some(last_hop) = last_by_pos.get(&new_hop.position) else {
+                continue;
+            };
+            let old = last_hop.avg_rtt_micros;
+            let new_rtt = new_hop.avg_rtt_micros;
+            if old == 0 {
+                // Can't compute a relative shift against zero. Skip —
+                // rule 1 or 3 will catch truly meaningful changes.
+                continue;
+            }
+            let shift = (new_rtt as f64 - old as f64).abs() / old as f64;
+            if shift >= thresholds.rtt_shift_frac {
+                reasons.push(DiffReason::RttShift {
+                    position: new_hop.position,
+                });
+            }
+        }
+
+        if reasons.is_empty() {
+            None
+        } else {
+            Some(RouteDiff { reasons })
+        }
     }
 
     /// Update `last_reported` after a successful emit. Exposed as a
@@ -776,5 +876,380 @@ mod tests {
         let snap = t.build_snapshot(now, wall).unwrap();
         assert_eq!(snap.observed_at, wall);
         assert_eq!(snap.observed_at_micros_i64(), 1_712_000_000_000_000);
+    }
+
+    fn default_diff() -> DiffDetection {
+        DiffDetection {
+            new_ip_min_freq: 0.20,
+            missing_ip_max_freq: 0.05,
+            hop_count_change: 1,
+            rtt_shift_frac: 0.50,
+        }
+    }
+
+    /// `(position, [(ip, frequency)…], avg_rtt_micros)` — one hop row for the
+    /// `snap` test helper. Named to sidestep clippy::type_complexity.
+    type HopSpec = (u8, Vec<(IpAddr, f64)>, u32);
+
+    /// Helper: build a snapshot from a list of `(position, Vec<(ip, freq)>, avg_rtt)`.
+    fn snap(protocol: Protocol, hops: &[HopSpec]) -> RouteSnapshot {
+        RouteSnapshot {
+            protocol,
+            observed_at: SystemTime::UNIX_EPOCH,
+            hops: hops
+                .iter()
+                .map(|(pos, ips, rtt)| HopSummary {
+                    position: *pos,
+                    observed_ips: ips
+                        .iter()
+                        .map(|(ip, f)| ObservedIp {
+                            ip: *ip,
+                            frequency: *f,
+                        })
+                        .collect(),
+                    avg_rtt_micros: *rtt,
+                    stddev_rtt_micros: 0,
+                    loss_pct: 0.0,
+                })
+                .collect(),
+        }
+    }
+
+    fn tracker_with_last(protocol: Protocol, last: RouteSnapshot) -> RouteTracker {
+        let mut t = RouteTracker::new(five_min());
+        t.reset_for_protocol(Some(protocol));
+        t.set_last_reported(last);
+        t
+    }
+
+    #[test]
+    fn diff_returns_none_when_snapshots_identical() {
+        let a = snap(
+            Protocol::Icmp,
+            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, a.clone());
+        assert_eq!(t.diff_against(&a, &default_diff()), None);
+    }
+
+    // ---------------- Rule 1: new IP ≥ threshold ----------------
+
+    #[test]
+    fn diff_rule1_fires_on_new_ip_above_threshold() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        // Position 3 now shows a second IP at 30% (above 20% threshold).
+        let new = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.70), (ipv4(10, 0, 0, 2), 0.30)],
+                5_000,
+            )],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(
+            diff.reasons
+                .iter()
+                .any(|r| matches!(r, DiffReason::NewIp { position: 3 })),
+            "expected NewIp at position 3, got {:?}",
+            diff.reasons,
+        );
+    }
+
+    #[test]
+    fn diff_rule1_does_not_fire_below_threshold() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        // Second IP at 5% — below the 20% threshold.
+        let new = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.95), (ipv4(10, 0, 0, 2), 0.05)],
+                5_000,
+            )],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        assert_eq!(t.diff_against(&new, &default_diff()), None);
+    }
+
+    #[test]
+    fn diff_rule1_at_exact_threshold_fires() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        // Exactly at 20%: the comparison is `>=`, so this fires.
+        let new = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.80), (ipv4(10, 0, 0, 2), 0.20)],
+                5_000,
+            )],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t
+            .diff_against(&new, &default_diff())
+            .expect("diff at boundary");
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::NewIp { position: 3 })),);
+    }
+
+    // ---------------- Rule 2: IP dropped below missing threshold ----------------
+
+    #[test]
+    fn diff_rule2_fires_when_previously_seen_ip_vanishes() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.78), (ipv4(10, 0, 0, 2), 0.22)],
+                5_000,
+            )],
+        );
+        // IP .2 dropped to 2% (below 5% missing threshold).
+        let new = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.98), (ipv4(10, 0, 0, 2), 0.02)],
+                5_000,
+            )],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(
+            diff.reasons
+                .iter()
+                .any(|r| matches!(r, DiffReason::MissingIp { position: 3 })),
+            "got {:?}",
+            diff.reasons,
+        );
+    }
+
+    #[test]
+    fn diff_rule2_fires_when_ip_fully_disappears() {
+        // IP previously at frequency ≥ threshold is absent from the new
+        // snapshot. Treated as frequency = 0 → below 5% → MissingIp.
+        let last = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.78), (ipv4(10, 0, 0, 2), 0.22)],
+                5_000,
+            )],
+        );
+        let new = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::MissingIp { position: 3 })),);
+    }
+
+    #[test]
+    fn diff_rule2_does_not_fire_when_ip_was_minor() {
+        // IP was at 10% before (NOT ≥ 20% threshold), still at 1% now.
+        // Rule 2 requires the IP to have been "previously at frequency
+        // ≥ new_ip_min_freq" — otherwise a noisy low-freq IP flickering
+        // out would spam diffs.
+        let last = snap(
+            Protocol::Icmp,
+            &[(
+                3,
+                vec![(ipv4(10, 0, 0, 1), 0.90), (ipv4(10, 0, 0, 2), 0.10)],
+                5_000,
+            )],
+        );
+        let new = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        // IP .2 was at 10% — below new_ip_min_freq (20%). Disappearing doesn't fire rule 2.
+        // Also doesn't fire rule 1 (no new IP above 20%).
+        // Also doesn't fire rule 3 (hop count unchanged).
+        // Also doesn't fire rule 4 (RTT unchanged).
+        assert_eq!(t.diff_against(&new, &default_diff()), None);
+    }
+
+    // ---------------- Rule 3: hop count change ----------------
+
+    #[test]
+    fn diff_rule3_fires_when_route_lengthens() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
+        );
+        let new = snap(
+            Protocol::Icmp,
+            &[
+                (1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000),
+                (2, vec![(ipv4(10, 0, 0, 2), 1.0)], 2_000),
+            ],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::HopCountChanged { from: 1, to: 2 })));
+    }
+
+    #[test]
+    fn diff_rule3_fires_when_route_shortens() {
+        let last = snap(
+            Protocol::Icmp,
+            &[
+                (1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000),
+                (2, vec![(ipv4(10, 0, 0, 2), 1.0)], 2_000),
+            ],
+        );
+        let new = snap(
+            Protocol::Icmp,
+            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::HopCountChanged { from: 2, to: 1 })));
+    }
+
+    #[test]
+    fn diff_rule3_respects_threshold_of_2() {
+        // With hop_count_change = 2, a 1-hop change must not fire Rule 3.
+        // To isolate Rule 3, also disable Rule 1 by setting a freq
+        // threshold no real frequency can cross — otherwise a newly-added
+        // hop's IP would trip Rule 1 at the new position.
+        let last = snap(
+            Protocol::Icmp,
+            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
+        );
+        let new = snap(
+            Protocol::Icmp,
+            &[
+                (1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000),
+                (2, vec![(ipv4(10, 0, 0, 2), 1.0)], 2_000),
+            ],
+        );
+        let mut thr = default_diff();
+        thr.hop_count_change = 2;
+        thr.new_ip_min_freq = 2.0; // disable Rule 1 so only Rule 3 can fire
+        let t = tracker_with_last(Protocol::Icmp, last);
+        assert_eq!(t.diff_against(&new, &thr), None);
+    }
+
+    // ---------------- Rule 4: RTT shift ----------------
+
+    #[test]
+    fn diff_rule4_fires_when_hop_rtt_shifts_above_threshold() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 10_000)],
+        );
+        // 60% shift (10_000 → 16_000) exceeds default 50% threshold.
+        let new = snap(
+            Protocol::Icmp,
+            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 16_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::RttShift { position: 2 })));
+    }
+
+    #[test]
+    fn diff_rule4_does_not_fire_below_threshold() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 10_000)],
+        );
+        // 40% shift.
+        let new = snap(
+            Protocol::Icmp,
+            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 14_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        assert_eq!(t.diff_against(&new, &default_diff()), None);
+    }
+
+    #[test]
+    fn diff_rule4_handles_zero_previous_rtt_gracefully() {
+        // Previous avg_rtt = 0 (no successful samples last window); new
+        // snapshot has a real RTT. We can't compute a relative shift
+        // against zero; treat as "no rule 4 fire" — rule 1 or 3 will
+        // typically catch meaningful changes in that case. This is a
+        // correctness corner: division by zero would otherwise explode.
+        let last = snap(Protocol::Icmp, &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 0)]);
+        let new = snap(
+            Protocol::Icmp,
+            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 5_000)],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        // Hop count unchanged, IP membership unchanged → no diff, no panic.
+        assert_eq!(t.diff_against(&new, &default_diff()), None);
+    }
+
+    // ---------------- Multi-rule + protocol change ----------------
+
+    #[test]
+    fn diff_protocol_mismatch_is_a_diff() {
+        // Defensive: tracker is normally reset on primary swing, but if
+        // a mismatched snapshot somehow lands here, it's a diff.
+        let last = snap(
+            Protocol::Icmp,
+            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        let new = snap(Protocol::Tcp, &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)]);
+        let t = tracker_with_last(Protocol::Icmp, last);
+        assert!(t.diff_against(&new, &default_diff()).is_some());
+    }
+
+    #[test]
+    fn diff_collects_multiple_reasons() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
+        );
+        // Both rule 1 (new IP at position 2 at 100%) AND rule 3 (hop count +1).
+        let new = snap(
+            Protocol::Icmp,
+            &[
+                (1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000),
+                (2, vec![(ipv4(10, 0, 0, 2), 1.0)], 2_000),
+            ],
+        );
+        let t = tracker_with_last(Protocol::Icmp, last);
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(
+            diff.reasons.len() >= 2,
+            "expected at least two reasons, got {:?}",
+            diff.reasons,
+        );
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::NewIp { .. })));
+        assert!(diff
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DiffReason::HopCountChanged { .. })));
     }
 }
