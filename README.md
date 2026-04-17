@@ -20,6 +20,7 @@ meshmon/
 │   ├── revtunnel/          # Reverse-tunnel transport (yamux over a tonic bidi stream)
 │   └── common/             # Shared utilities
 ├── frontend/               # React 19 + Tailwind SPA, embedded into service
+├── grafana/                # Grafana dashboards, provisioning template, contract guard
 ├── docker/                 # Multi-stage Dockerfiles for service and agent
 ├── deploy/                 # docker-compose + example config for standalone
 └── .github/workflows/      # CI

@@ -64,8 +64,9 @@ are required:
    OAuth-via-reverse-proxy, or a shared cookie if the two services are
    same-origin.
 
-The bundled Grafana in `deploy/docker-compose.yml` (T24) sets both; operators
-using an external Grafana configure them once per environment.
+When a future task wires up a bundled Grafana under `deploy/docker-compose.yml`
+it must configure both settings. Operators using an external Grafana
+configure them once per environment as described above.
 
 Meshmon iframes pass `theme=light` on the Report page so printed PDFs stay
 legible. Grafana honours that URL parameter regardless of the dashboard's
