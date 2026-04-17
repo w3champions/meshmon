@@ -8,7 +8,7 @@
 //! - a server-picked primary protocol (auto: `icmp > udp > tcp`, or the
 //!   client-supplied `?protocol=` override).
 //!
-//! `X-Forwarded-For` IP allocations for this binary (`.160`–`.170`):
+//! `X-Forwarded-For` IP allocations for this binary (`.160`–`.176`):
 //!
 //! | Octet  | Test                                                        |
 //! |--------|-------------------------------------------------------------|
@@ -24,6 +24,11 @@
 //! | `.169` | `overview_step_is_5m_for_7d_window`                         |
 //! | `.170` | `overview_requires_session`                                 |
 //! | `.171` | `overview_sets_truncated_flag_when_recent_hits_limit`       |
+//! | `.172` | `overview_truncated_flag_is_false_when_below_limit`         |
+//! | `.173` | `overview_primary_protocol_is_null_when_no_snapshots`       |
+//! | `.174` | `overview_recent_filtered_by_auto_primary`                  |
+//! | `.175` | `overview_truncated_false_when_filtered_pool_below_limit`   |
+//! | `.176` | `overview_truncated_true_when_filtered_pool_exceeds_limit`  |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -235,9 +240,14 @@ async fn overview_happy_path_returns_latest_recent_and_metrics() {
         "latest ICMP should be newer than t-10min ({icmp_latest_ts})"
     );
 
-    // recent_snapshots: all three rows in descending time order.
+    // recent_snapshots: only the two ICMP rows in descending time order
+    // (ICMP is primary, TCP is filtered out post-T32). Cross-protocol
+    // leakage would have kept the TCP row in the list.
     let recent = body["recent_snapshots"].as_array().expect("recent array");
-    assert_eq!(recent.len(), 3, "body = {body}");
+    assert_eq!(recent.len(), 2, "body = {body}");
+    for row in recent {
+        assert_eq!(row["protocol"], "icmp", "row = {row}");
+    }
     for w in recent.windows(2) {
         let a = w[0]["observed_at"].as_str().unwrap();
         let b = w[1]["observed_at"].as_str().unwrap();
@@ -921,6 +931,203 @@ async fn overview_primary_protocol_is_null_when_no_snapshots() {
         body["primary_protocol"].is_null(),
         "primary_protocol must be JSON null when no snapshots, body = {body}"
     );
+
+    cleanup_pair(&pool, src, tgt).await;
+}
+
+// ---------------------------------------------------------------------------
+// T32 — recent_snapshots is always scoped to the resolved primary protocol
+// ---------------------------------------------------------------------------
+
+/// With no `?protocol=` override, the server-picked `primary_protocol`
+/// (ICMP in this fixture) must filter `recent_snapshots`. Rows of other
+/// protocols inside the same window must not leak into the list or the
+/// truncation count.
+#[tokio::test]
+async fn overview_recent_filtered_by_auto_primary() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t32-ov-auto-src", "t32-ov-auto-tgt");
+
+    insert_agent_detailed(&pool, src, "Source", "US", "10.0.0.26", 37.0, -122.0).await;
+    insert_agent_detailed(&pool, tgt, "Target", "DE", "10.0.0.27", 52.0, 13.0).await;
+
+    let now = chrono::Utc::now();
+    // 2 ICMP + 1 TCP within the default 24h window. ICMP wins the
+    // priority pick, so recent should contain exactly the 2 ICMP rows.
+    insert_snapshot(&pool, src, tgt, "icmp", now - chrono::Duration::minutes(2)).await;
+    insert_snapshot(&pool, src, tgt, "icmp", now - chrono::Duration::minutes(3)).await;
+    insert_snapshot(&pool, src, tgt, "tcp", now - chrono::Duration::minutes(1)).await;
+
+    let state = common::state_with_admin_and_vm(pool.clone(), "http://127.0.0.1:1").await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.174").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/paths/{src}/{tgt}/overview"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body = parse_body(&bytes);
+
+    assert_eq!(body["primary_protocol"], "icmp", "body = {body}");
+    let recent = body["recent_snapshots"].as_array().expect("recent array");
+    assert_eq!(recent.len(), 2, "body = {body}");
+    for row in recent {
+        assert_eq!(row["protocol"], "icmp", "row = {row}");
+    }
+    assert_eq!(body["recent_snapshots_truncated"], false, "body = {body}");
+
+    cleanup_pair(&pool, src, tgt).await;
+}
+
+/// When the primary-protocol pool is below the cap but other protocols
+/// push the cross-protocol total past it, the truncation flag must stay
+/// false (reflects the filtered pool, not the cross-protocol total).
+#[tokio::test]
+async fn overview_truncated_false_when_filtered_pool_below_limit() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t32-ov-subcap-src", "t32-ov-subcap-tgt");
+
+    insert_agent_detailed(&pool, src, "Source", "US", "10.0.0.28", 37.0, -122.0).await;
+    insert_agent_detailed(&pool, tgt, "Target", "DE", "10.0.0.29", 52.0, 13.0).await;
+
+    // 101 TCP rows + 5 ICMP rows. `?protocol=icmp` forces the TCP pool
+    // out — the filtered pool (5) is well below RECENT_LIMIT.
+    let now = chrono::Utc::now();
+    for i in 0..101 {
+        insert_snapshot(
+            &pool,
+            src,
+            tgt,
+            "tcp",
+            now - chrono::Duration::seconds(i * 5),
+        )
+        .await;
+    }
+    for i in 0..5 {
+        insert_snapshot(
+            &pool,
+            src,
+            tgt,
+            "icmp",
+            now - chrono::Duration::seconds(i * 5 + 3),
+        )
+        .await;
+    }
+
+    let state = common::state_with_admin_and_vm(pool.clone(), "http://127.0.0.1:1").await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.175").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/paths/{src}/{tgt}/overview?protocol=icmp"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body = parse_body(&bytes);
+
+    let recent = body["recent_snapshots"].as_array().expect("recent array");
+    assert_eq!(recent.len(), 5, "body = {body}");
+    for row in recent {
+        assert_eq!(row["protocol"], "icmp", "row = {row}");
+    }
+    assert_eq!(body["recent_snapshots_truncated"], false, "body = {body}");
+
+    cleanup_pair(&pool, src, tgt).await;
+}
+
+/// When the filtered protocol pool alone exceeds RECENT_LIMIT, the
+/// response must report `recent_snapshots_truncated: true` and return
+/// exactly 100 rows — all of the filtered protocol — in newest-first
+/// order, with no leakage from the noise protocol.
+#[tokio::test]
+async fn overview_truncated_true_when_filtered_pool_exceeds_limit() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t32-ov-overcap-src", "t32-ov-overcap-tgt");
+
+    insert_agent_detailed(&pool, src, "Source", "US", "10.0.0.30", 37.0, -122.0).await;
+    insert_agent_detailed(&pool, tgt, "Target", "DE", "10.0.0.31", 52.0, 13.0).await;
+
+    // 101 ICMP + 50 TCP noise. With `?protocol=icmp` the TCP rows must
+    // not shift which rows land in the 100-row window.
+    let now = chrono::Utc::now();
+    for i in 0..101 {
+        insert_snapshot(
+            &pool,
+            src,
+            tgt,
+            "icmp",
+            now - chrono::Duration::seconds(i * 5),
+        )
+        .await;
+    }
+    for i in 0..50 {
+        insert_snapshot(
+            &pool,
+            src,
+            tgt,
+            "tcp",
+            now - chrono::Duration::seconds(i * 5 + 2),
+        )
+        .await;
+    }
+
+    let state = common::state_with_admin_and_vm(pool.clone(), "http://127.0.0.1:1").await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.176").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/paths/{src}/{tgt}/overview?protocol=icmp"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body = parse_body(&bytes);
+
+    let recent = body["recent_snapshots"].as_array().expect("recent array");
+    assert_eq!(recent.len(), 100, "body = {body}");
+    for row in recent {
+        assert_eq!(row["protocol"], "icmp", "row = {row}");
+    }
+    assert_eq!(body["recent_snapshots_truncated"], true, "body = {body}");
 
     cleanup_pair(&pool, src, tgt).await;
 }

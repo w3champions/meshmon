@@ -4,7 +4,8 @@
 //! request:
 //! - source/target agent metadata (registry snapshot),
 //! - the latest route snapshot per protocol within the time window,
-//! - a recent-snapshots list in that window (no hop detail, capped at 100),
+//! - a recent-snapshots list for the primary protocol in that window
+//!   (no hop detail, capped at 100),
 //! - VM-sourced RTT avg and failure-rate series at a server-chosen step,
 //! - a server-picked primary protocol (auto: `icmp > udp > tcp`, or
 //!   `?protocol=` override),
@@ -61,12 +62,16 @@ pub struct PathOverviewResponse {
     pub primary_protocol: Option<String>,
     /// Latest snapshot per protocol within the window (each field optional).
     pub latest_by_protocol: LatestByProtocol,
-    /// Recent snapshots in the window in descending `observed_at` order.
-    /// Capped at [`RECENT_LIMIT`]; no hop detail.
+    /// Recent snapshots in the window in descending `observed_at` order,
+    /// filtered to the resolved [`PathOverviewResponse::primary_protocol`].
+    /// Capped at [`RECENT_LIMIT`]; no hop detail. `null`/empty when no
+    /// primary protocol could be resolved (no data for any protocol in
+    /// the window).
     pub recent_snapshots: Vec<RouteSnapshotSummary>,
-    /// `true` when the `recent_snapshots` list was clamped at
-    /// [`RECENT_LIMIT`] — the frontend surfaces a "narrow the window"
-    /// hint so operators don't silently miss older entries.
+    /// `true` when the per-primary-protocol `recent_snapshots` list was
+    /// clamped at [`RECENT_LIMIT`]. Since the list is protocol-scoped
+    /// from the start, this flag is always honest for the operator-visible
+    /// banner ("narrow the window for more").
     pub recent_snapshots_truncated: bool,
     /// VM series for the primary protocol, or `null` when the VM was
     /// unreachable or misconfigured.
@@ -275,14 +280,22 @@ async fn fetch_latest_by_protocol(
     Ok(out)
 }
 
-/// Fetch recent snapshot summaries (no hops) for the pair within the
-/// window, capped at [`RECENT_LIMIT`].
+/// Fetch recent snapshot summaries (no hops) for the `(source, target)`
+/// pair within the window, restricted to `protocol`, capped at `limit`.
+///
+/// The protocol is required — overview responses only ever surface
+/// `recent_snapshots` scoped to the resolved primary protocol, so the
+/// handler never calls this with a missing filter. Keeping it concrete
+/// here makes the SQL planner's job easier (the composite index
+/// `(source_id, target_id, protocol, observed_at DESC)` covers the query
+/// end-to-end) and sidesteps a `IS NULL OR` branch in the predicate.
 async fn fetch_recent_snapshots(
     pool: &PgPool,
     source_id: &str,
     target_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    protocol: &str,
     limit: i64,
 ) -> Result<Vec<RouteSnapshotSummary>, sqlx::Error> {
     let rows = sqlx::query!(
@@ -295,12 +308,14 @@ async fn fetch_recent_snapshots(
            FROM route_snapshots
            WHERE source_id   = $1
              AND target_id   = $2
-             AND observed_at >= $3
-             AND observed_at <= $4
+             AND protocol    = $3
+             AND observed_at >= $4
+             AND observed_at <= $5
            ORDER BY observed_at DESC, id DESC
-           LIMIT $5"#,
+           LIMIT $6"#,
         source_id,
         target_id,
+        protocol,
         from,
         to,
         limit,
@@ -578,39 +593,50 @@ pub async fn path_overview(
     };
     drop(snap);
 
-    // 4. Fetch latest-per-protocol + recent list in parallel. Both hit the
-    //    same pool so overlapped await points are essentially free.
-    let latest_fut = fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to);
-    // Fetch one row past the cap so we can cheaply distinguish "exactly
-    // RECENT_LIMIT rows exist" from "more than RECENT_LIMIT exist". The
-    // extra row is trimmed before it leaves the handler.
-    let recent_fut = fetch_recent_snapshots(&state.pool, &src, &tgt, from, to, RECENT_LIMIT + 1);
-
-    let (latest_by_protocol, mut recent_snapshots) = match tokio::try_join!(latest_fut, recent_fut)
+    // 4. Fetch latest-per-protocol first — we need the resolved primary
+    //    protocol before we can kick off the protocol-scoped recent
+    //    snapshots query (T32).
+    let latest_by_protocol = match fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to).await
     {
-        Ok(pair) => pair,
+        Ok(latest) => latest,
         Err(e) => {
-            tracing::error!(error = %e, %src, %tgt, "path_overview: DB fetch failed");
+            tracing::error!(error = %e, %src, %tgt, "path_overview: latest fetch failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+    };
+
+    // 5. Pick the primary protocol. Without one, there is nothing to
+    //    query for recent snapshots or metrics; we short-circuit to
+    //    empty results so the UI renders a neutral empty state.
+    let primary_protocol = auto_primary(&latest_by_protocol, params.protocol.as_deref());
+    let step = pick_step(to - from);
+
+    // 6. Fan out the recent-snapshots query + the two VM range queries
+    //    in parallel. Fetching one row past the cap lets us cheaply
+    //    distinguish "exactly RECENT_LIMIT rows exist" from "more than
+    //    RECENT_LIMIT exist". The extra row is trimmed before it leaves
+    //    the handler.
+    let (mut recent_snapshots, metrics) = match primary_protocol.as_deref() {
+        Some(p) => {
+            let recent_fut =
+                fetch_recent_snapshots(&state.pool, &src, &tgt, from, to, p, RECENT_LIMIT + 1);
+            let metrics_fut = fetch_metrics(&state, &src, &tgt, p, from, to, step);
+            let (recent_res, metrics) = tokio::join!(recent_fut, metrics_fut);
+            let recent = match recent_res {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(error = %e, %src, %tgt, "path_overview: recent fetch failed");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
+            (recent, metrics)
+        }
+        None => (Vec::new(), None),
     };
     let recent_snapshots_truncated = recent_snapshots.len() as i64 > RECENT_LIMIT;
     if recent_snapshots_truncated {
         recent_snapshots.truncate(RECENT_LIMIT as usize);
     }
-
-    // 5. Pick the primary protocol. VM queries are only meaningful for a
-    //    concrete protocol, so we skip them entirely when every slot is
-    //    empty (and no valid override was supplied).
-    let primary_protocol = auto_primary(&latest_by_protocol, params.protocol.as_deref());
-
-    let step = pick_step(to - from);
-
-    // 6. Fetch metrics only when we have a protocol to query against.
-    let metrics = match &primary_protocol {
-        Some(p) => fetch_metrics(&state, &src, &tgt, p, from, to, step).await,
-        None => None,
-    };
 
     Json(PathOverviewResponse {
         source,

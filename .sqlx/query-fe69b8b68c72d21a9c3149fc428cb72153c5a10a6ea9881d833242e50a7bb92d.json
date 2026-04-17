@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id AS \"id!\",\n                  source_id,\n                  target_id,\n                  protocol,\n                  observed_at,\n                  path_summary AS \"path_summary: SqlxJson<PathSummaryJson>\"\n           FROM route_snapshots\n           WHERE source_id   = $1\n             AND target_id   = $2\n             AND observed_at >= $3\n             AND observed_at <= $4\n           ORDER BY observed_at DESC, id DESC\n           LIMIT $5",
+  "query": "SELECT id AS \"id!\",\n                  source_id,\n                  target_id,\n                  protocol,\n                  observed_at,\n                  path_summary AS \"path_summary: SqlxJson<PathSummaryJson>\"\n           FROM route_snapshots\n           WHERE source_id   = $1\n             AND target_id   = $2\n             AND protocol    = $3\n             AND observed_at >= $4\n             AND observed_at <= $5\n           ORDER BY observed_at DESC, id DESC\n           LIMIT $6",
   "describe": {
     "columns": [
       {
@@ -38,6 +38,7 @@
       "Left": [
         "Text",
         "Text",
+        "Text",
         "Timestamptz",
         "Timestamptz",
         "Int8"
@@ -52,5 +53,5 @@
       true
     ]
   },
-  "hash": "02019e5b97d0515c340f5ce894209af6c2f78ed9b2ab5c92aba6ef7705a59303"
+  "hash": "fe69b8b68c72d21a9c3149fc428cb72153c5a10a6ea9881d833242e50a7bb92d"
 }
