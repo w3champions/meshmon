@@ -218,6 +218,11 @@ async fn run() -> anyhow::Result<()> {
     let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());
     let upkeep_handle =
         meshmon_service::metrics::spawn_upkeep(prom.clone(), shutdown_token.clone());
+    let command_watcher_handle = meshmon_service::commands::spawn_config_watcher(
+        state.tunnel_manager.clone(),
+        state.config_rx.clone(),
+        shutdown_token.clone(),
+    );
     let app = http::router(state.clone());
 
     // --- Step 8: Serve with a bounded drain ---
@@ -378,6 +383,17 @@ async fn run() -> anyhow::Result<()> {
         ),
     }
     info!("metrics upkeep loop drained");
+
+    state.tunnel_manager.close_all();
+    match tokio::time::timeout(deadline, command_watcher_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "command watcher task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "command watcher did not drain within shutdown_deadline; aborting",
+        ),
+    }
+    info!("command watcher drained");
 
     serve_result.context("HTTP server")?;
 
