@@ -19,6 +19,19 @@ use axum::response::{IntoResponse, Response};
 use std::borrow::Cow;
 use std::fmt::Write;
 
+// ---------------------------------------------------------------------------
+// Agent metric name constants — single source of truth for names used in the
+// custom text-format block appended to /metrics.  Alert rules in
+// deploy/alerts/rules.yaml reference these metric names; the cross-check
+// script (scripts/check-rule-metrics.sh) looks for the quoted string literal
+// in the service source, which these constants provide.
+// ---------------------------------------------------------------------------
+
+/// Gauge (= 1): registered agent metadata. Labels: `source`, `agent_version`.
+pub const AGENT_INFO: &str = "meshmon_agent_info";
+/// Gauge: Unix timestamp of the agent's last ingestion push. Label: `source`.
+pub const AGENT_LAST_SEEN_SECONDS: &str = "meshmon_agent_last_seen_seconds";
+
 /// `/healthz` — liveness probe. Returns 200 for as long as the process
 /// is up. Never gated by auth.
 pub async fn healthz() -> &'static str {
@@ -64,27 +77,29 @@ fn append_agent_metrics(body: &mut String, mut agents: Vec<AgentInfo>) {
     // reshuffles Grafana legend colors and breaks body diffs. Sort once
     // by id — O(n log n) is dwarfed by the writeln! calls that follow.
     agents.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-    body.push_str(
-        "# HELP meshmon_agent_info Registered agent metadata (gauge=1 per known agent).\n",
+    let _ = writeln!(
+        body,
+        "# HELP {AGENT_INFO} Registered agent metadata (gauge=1 per known agent)."
     );
-    body.push_str("# TYPE meshmon_agent_info gauge\n");
+    let _ = writeln!(body, "# TYPE {AGENT_INFO} gauge");
     for a in &agents {
         let version = a.agent_version.as_deref().unwrap_or("");
         let _ = writeln!(
             body,
-            "meshmon_agent_info{{source=\"{}\",agent_version=\"{}\"}} 1",
+            "{AGENT_INFO}{{source=\"{}\",agent_version=\"{}\"}} 1",
             prom_escape(&a.id),
             prom_escape(version),
         );
     }
-    body.push_str(
-        "# HELP meshmon_agent_last_seen_seconds Unix timestamp of the agent's last push.\n",
+    let _ = writeln!(
+        body,
+        "# HELP {AGENT_LAST_SEEN_SECONDS} Unix timestamp of the agent's last push."
     );
-    body.push_str("# TYPE meshmon_agent_last_seen_seconds gauge\n");
+    let _ = writeln!(body, "# TYPE {AGENT_LAST_SEEN_SECONDS} gauge");
     for a in &agents {
         let _ = writeln!(
             body,
-            "meshmon_agent_last_seen_seconds{{source=\"{}\"}} {}",
+            "{AGENT_LAST_SEEN_SECONDS}{{source=\"{}\"}} {}",
             prom_escape(&a.id),
             a.last_seen_at.timestamp(),
         );

@@ -1,0 +1,77 @@
+# meshmon Alertmanager config.
+#
+# Overlay model: meshmon ships this as the default. Downstream
+# deployments can either:
+#   (a) mount their own alertmanager.yml in place of this one, or
+#   (b) keep this file and override only the Discord webhook files under
+#       /etc/alertmanager/secrets/ (see deploy/alertmanager/secrets/README.md).
+#
+# Requires Alertmanager 0.26+ for discord_configs. Pin via
+# deploy/versions.env.
+
+global:
+  # Shorter than default so a wedged Discord delivery can't block the batch.
+  resolve_timeout: 5m
+
+route:
+  receiver: discord-default
+  # group_by honors the label contract from deploy/alerts/README.md.
+  # Alerts without one of these labels (e.g. AgentOffline has no
+  # target/protocol) group by the labels they do carry — Alertmanager's
+  # default behavior.
+  group_by: [alertname, source, target, protocol]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Critical alerts page immediately and repeat more aggressively.
+    - matchers:
+        - severity="critical"
+      receiver: discord-critical
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1h
+      continue: false
+
+    # Info alerts (route changes, anomalies, subtle loss) — quieter channel.
+    - matchers:
+        - severity="info"
+      receiver: discord-info
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 12h
+      continue: false
+
+receivers:
+  - name: discord-default
+    discord_configs:
+      - webhook_url_file: /etc/alertmanager/secrets/discord_webhook
+        send_resolved: true
+
+  - name: discord-critical
+    discord_configs:
+      - webhook_url_file: /etc/alertmanager/secrets/discord_webhook_critical
+        send_resolved: true
+
+  - name: discord-info
+    discord_configs:
+      - webhook_url_file: /etc/alertmanager/secrets/discord_webhook_info
+        send_resolved: true
+
+inhibit_rules:
+  # Critical unreachable subsumes lower-severity loss alerts for the same
+  # path — avoids Discord storms when a datacenter goes dark. PathUnreachable
+  # carries no `protocol` label (see path_availability group), so the inhibit
+  # matches on the shared (source, target) tuple.
+  - source_matchers:
+      - severity="critical"
+      - category="unreachable"
+    target_matchers:
+      - category="loss"
+    equal: [source, target]
+
+# Templates directory scanned on boot. Empty by default; overlays can drop
+# *.tmpl files to customize Discord embeds.
+templates:
+  - /etc/alertmanager/templates/*.tmpl
