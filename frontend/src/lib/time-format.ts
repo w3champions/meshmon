@@ -30,30 +30,37 @@ export function formatShortDate(ms: number, includeYear = false): string {
 
 export function formatDelta(deltaMs: number): string {
   const abs = Math.abs(deltaMs);
-  if (abs < MS_MIN) return `${Math.round(abs / MS_SEC)}s`;
+  if (abs < MS_MIN) {
+    const secs = Math.round(abs / MS_SEC);
+    // If rounding pushed us to 60s, cascade to "1m" rather than emit "60s".
+    return secs < 60 ? `${secs}s` : "1m";
+  }
   if (abs < MS_HOUR) {
     const mins = Math.floor(abs / MS_MIN);
-    const secs = Math.round((abs % MS_MIN) / MS_SEC);
+    const secs = Math.floor((abs % MS_MIN) / MS_SEC);
     return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
   }
   if (abs < MS_DAY) {
     const hours = Math.floor(abs / MS_HOUR);
-    const mins = Math.round((abs % MS_HOUR) / MS_MIN);
+    const mins = Math.floor((abs % MS_HOUR) / MS_MIN);
     return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
   }
   const days = Math.floor(abs / MS_DAY);
-  const hours = Math.round((abs % MS_DAY) / MS_HOUR);
+  const hours = Math.floor((abs % MS_DAY) / MS_HOUR);
   return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
 export function formatRelativeAgo(targetMs: number, nowMs: number): string {
   const delta = nowMs - targetMs;
   if (delta < 45 * MS_SEC) return "just now";
-  if (delta < MS_HOUR) return `${Math.round(delta / MS_MIN)} min ago`;
-  // Only fall into "Nh ago" when the target is still the same UTC day as now.
-  // Otherwise we step up the ladder (yesterday → N days ago → absolute date)
-  // so that a target from the previous UTC day never reads as "9h ago".
-  if (isSameDayUtc(targetMs, nowMs)) return `${Math.round(delta / MS_HOUR)}h ago`;
+  // Only fall into "N min ago" / "Nh ago" when the target is still the same
+  // UTC day as now. Otherwise we step up the ladder (yesterday → N days ago →
+  // absolute date) so that a target from the previous UTC day never reads as
+  // "20 min ago" or "9h ago" just because it's numerically close to now.
+  if (isSameDayUtc(targetMs, nowMs)) {
+    if (delta < MS_HOUR) return `${Math.round(delta / MS_MIN)} min ago`;
+    return `${Math.round(delta / MS_HOUR)}h ago`;
+  }
   if (isYesterdayUtc(targetMs, nowMs)) return "yesterday";
   if (delta < MS_WEEK) return `${Math.floor(delta / MS_DAY)} days ago`;
   return formatShortDate(targetMs);
@@ -73,7 +80,7 @@ export function dayBoundariesBetween(fromMs: number, toMs: number): number[] {
   if (toMs <= fromMs) return [];
   const boundaries: number[] = [];
   const first = nextUtcMidnight(fromMs);
-  for (let t = first; t <= toMs; t += MS_DAY) boundaries.push(t);
+  for (let t = first; t < toMs; t += MS_DAY) boundaries.push(t);
   return boundaries;
 }
 

@@ -33,6 +33,12 @@ describe("formatDelta", () => {
   it("handles negative deltas by magnitude (caller disambiguates direction)", () => {
     expect(formatDelta(-46 * MS_SEC)).toBe("46s");
   });
+  it("rolls a rounded sub-unit into the parent (no '60s', no '3m 60s')", () => {
+    expect(formatDelta(59_500)).toBe("1m"); // not "60s"
+    expect(formatDelta(3 * 60_000 + 59_500)).toBe("3m 59s"); // not "3m 60s"
+    expect(formatDelta(3 * 3_600_000 + 59 * 60_000 + 30_000)).toBe("3h 59m"); // not "3h 60m"
+    expect(formatDelta(2 * 86_400_000 + 23 * 3_600_000 + 30 * 60_000)).toBe("2d 23h"); // not "2d 24h"
+  });
 });
 
 describe("formatRelativeAgo", () => {
@@ -56,6 +62,11 @@ describe("formatRelativeAgo", () => {
   it("returns absolute short date beyond a week", () => {
     const apr5 = Date.UTC(2026, 3, 5, 12, 0, 0);
     expect(formatRelativeAgo(apr5, now)).toBe("Apr 5");
+  });
+  it("does not read 23h ago as 'Nh ago' when across a UTC midnight", () => {
+    const now = Date.UTC(2026, 3, 17, 0, 10, 0);
+    const target = Date.UTC(2026, 3, 16, 23, 50, 0);
+    expect(formatRelativeAgo(target, now)).toBe("yesterday");
   });
 });
 
@@ -111,6 +122,11 @@ describe("dayBoundariesBetween", () => {
       Date.UTC(2026, 3, 18, 0, 0, 0),
       Date.UTC(2026, 3, 19, 0, 0, 0),
     ]);
+  });
+  it("does not include toMs itself when it falls exactly on UTC midnight", () => {
+    const a = Date.UTC(2026, 3, 16, 23, 55, 0);
+    const b = Date.UTC(2026, 3, 17, 0, 0, 0);
+    expect(dayBoundariesBetween(a, b)).toEqual([]);
   });
 });
 
