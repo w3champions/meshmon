@@ -56,9 +56,10 @@ pub fn spawn(
     // Each task builds its own `Client`. The client owns a raw ICMP
     // socket + a background dispatcher task; at 50 targets this means
     // 50 raw sockets + 50 dispatchers, which matches the tokio-task
-    // budget in spec 02. Sharing a single client across targets is a
-    // future optimization (mirror the `UdpProberPool` pattern) but
-    // out of scope for T14.
+    // budget in spec 02.
+    // TODO(scale): share a single `Client` across targets (mirror the
+    // `UdpProberPool` pattern) once target count grows past ~500 or
+    // profiling flags raw-socket setup as a hot path.
     let client = match Client::new(&config) {
         Ok(c) => c,
         Err(e) => {
