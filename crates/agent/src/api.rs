@@ -107,6 +107,11 @@ impl Interceptor for BearerInterceptor {
 /// serializing through a mutex.
 pub struct GrpcServiceApi {
     client: AgentApiClient<InterceptedService<Channel, BearerInterceptor>>,
+    /// Raw HTTP/2 channel, retained for the reverse-tunnel path where
+    /// bearer auth is stamped per-request rather than via an interceptor.
+    raw_channel: Channel,
+    /// Agent bearer token, shared across the tunnel task.
+    agent_token: Arc<str>,
 }
 
 impl GrpcServiceApi {
@@ -138,13 +143,31 @@ impl GrpcServiceApi {
 
         let channel = endpoint.connect_lazy();
 
+        let token: Arc<str> = Arc::from(agent_token);
+        let raw_channel = channel.clone();
         let interceptor = BearerInterceptor {
-            token: Arc::from(agent_token),
+            token: token.clone(),
         };
-
         let client = AgentApiClient::with_interceptor(channel, interceptor);
 
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self {
+            client,
+            raw_channel,
+            agent_token: token,
+        }))
+    }
+}
+
+impl GrpcServiceApi {
+    /// Raw HTTP/2 Channel. Clones share the connection — use for long-lived
+    /// streams that need to stamp metadata manually (e.g. the reverse tunnel).
+    pub fn channel(&self) -> Channel {
+        self.raw_channel.clone()
+    }
+
+    /// Bearer token shared across the tunnel + per-RPC interceptor.
+    pub fn agent_token(&self) -> Arc<str> {
+        self.agent_token.clone()
     }
 }
 

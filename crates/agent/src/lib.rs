@@ -10,3 +10,4 @@ pub mod route;
 pub mod state;
 pub mod stats;
 pub mod supervisor;
+pub mod tunnel;

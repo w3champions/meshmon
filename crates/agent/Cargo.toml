@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 meshmon-protocol = { path = "../protocol" }
+meshmon-revtunnel = { path = "../revtunnel" }
 anyhow.workspace = true
 dashmap.workspace = true
 prost.workspace = true

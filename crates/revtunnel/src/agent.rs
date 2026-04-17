@@ -36,17 +36,23 @@ impl TunnelClient {
     /// Open the outer bidi RPC, run yamux server mode on our half, and
     /// host the router's services on each substream yamux accepts.
     ///
-    /// - `channel` is the shared tonic `Channel` the agent already uses
-    ///   for its unary RPCs; `OpenTunnel` multiplexes as another HTTP/2
-    ///   stream on the same connection.
+    /// - `channel` is the raw tonic `Channel` (without an interceptor);
+    ///   `OpenTunnel` multiplexes as another HTTP/2 stream on the same
+    ///   connection shared with the unary RPCs.
     /// - `source_id` is stamped on `x-meshmon-source-id` metadata so the
     ///   service-side handler can validate and register this agent.
+    /// - `agent_token` is the bearer token for this agent. Because `channel`
+    ///   is a raw channel (no interceptor), the caller must pass the token
+    ///   explicitly so this function can stamp `Authorization: Bearer <token>`
+    ///   on the request metadata — matching the `BearerInterceptor` that gates
+    ///   the other five RPCs on the service side.
     /// - `router_factory` returns a pre-configured `tonic::transport::server::Router`
     ///   (built via `Server::builder().add_service(AgentCommandServer::new(...))`).
     /// - `cancel` stops the loop on shutdown.
     pub async fn open_and_run(
         channel: Channel,
         source_id: &str,
+        agent_token: &str,
         router_factory: impl FnOnce() -> Router + Send,
         cancel: CancellationToken,
     ) -> Result<(), TunnelError> {
@@ -66,10 +72,22 @@ impl TunnelClient {
                 ))
             })?,
         );
+        // Stamp the bearer token on the request metadata. The raw `Channel`
+        // does not carry an interceptor, so we inject the `Authorization`
+        // header here directly — matching the `BearerInterceptor` the service
+        // expects on every incoming RPC.
+        let bearer_value = format!("Bearer {}", agent_token)
+            .parse()
+            .map_err(|_| {
+                TunnelError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid agent_token characters",
+                ))
+            })?;
+        request.metadata_mut().insert("authorization", bearer_value);
 
-        // 2. Call OpenTunnel. The caller's channel already carries the
-        //    bearer interceptor (built via AgentApiClient::with_interceptor
-        //    in bootstrap); no extra interceptor wiring is needed here.
+        // 2. Call OpenTunnel using the raw channel. Bearer auth is already
+        //    stamped above on the request metadata.
         let mut client = AgentApiClient::new(channel);
         let response = client.open_tunnel(request).await?;
         let incoming = response.into_inner();
