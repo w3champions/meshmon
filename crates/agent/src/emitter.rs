@@ -3,10 +3,10 @@
 //! backoff, and buffers up to 65 failed RPCs in a drop-oldest ring queue.
 //!
 //! This module is under active construction across T16. Tasks 7-9 land
-//! the primary loop, snapshot builder, and retry worker. Task 7 (this
-//! file's primary loop) relies on the retry worker + snapshot-builder
-//! stubs below — they compile away to no-ops until Tasks 8 and 9 fill
-//! them in.
+//! the primary loop, snapshot builder, and retry worker. Task 8 (this
+//! commit) wires up the real `RouteSnapshotRequest` builder with
+//! `PathSummary` derivation; the retry worker remains a stub until
+//! Task 9 lands.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -20,7 +20,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use meshmon_protocol::{
-    AgentMetadata, MetricsBatch, PathMetrics as PathMetricsProto, Protocol, ProtocolHealth,
+    AgentMetadata, HopIp as HopIpProto, HopSummary as HopSummaryProto, MetricsBatch,
+    PathMetrics as PathMetricsProto, PathSummary as PathSummaryProto, Protocol, ProtocolHealth,
     RouteSnapshotRequest,
 };
 
@@ -464,7 +465,7 @@ fn system_time_to_micros_i64(t: SystemTime) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Stubs for Tasks 8 and 9
+// Stub for Task 9
 // ---------------------------------------------------------------------------
 
 async fn run_retry_worker<A: ServiceApi>(
@@ -478,13 +479,90 @@ async fn run_retry_worker<A: ServiceApi>(
     cancel.cancelled().await;
 }
 
+// ---------------------------------------------------------------------------
+// Route snapshot builder (Task 8)
+// ---------------------------------------------------------------------------
+
 fn build_route_snapshot_request(
-    _source_id: &str,
-    _env: RouteSnapshotEnvelope,
+    source_id: &str,
+    env: RouteSnapshotEnvelope,
 ) -> RouteSnapshotRequest {
-    // Task 8 replaces this with the real builder. Returning default keeps
-    // the primary loop compilable; tests in Task 8 exercise the full shape.
-    RouteSnapshotRequest::default()
+    let observed_at_micros = env.snapshot.observed_at_micros_i64();
+    let path_summary = build_path_summary(&env.snapshot.hops);
+    let protocol = env.snapshot.protocol as i32;
+    let hops = env.snapshot.hops.iter().map(hop_to_proto).collect();
+    RouteSnapshotRequest {
+        source_id: source_id.to_owned(),
+        target_id: env.target_id,
+        protocol,
+        observed_at_micros,
+        hops,
+        path_summary: Some(path_summary),
+    }
+}
+
+/// Derive a `PathSummary` from the hops of a `RouteSnapshot`.
+///
+/// - `hop_count` is the vector length.
+/// - `avg_rtt_micros` is the mean of `avg_rtt_micros` across hops that have
+///   a positive RTT. A fully-lost hop (RTT=0) is excluded from the RTT
+///   mean but still contributes to `loss_pct`. `0` when no hop has a
+///   positive RTT.
+/// - `loss_pct` is the mean of `loss_pct` across *all* hops, or `0.0`
+///   when `hops` is empty.
+fn build_path_summary(hops: &[crate::route::HopSummary]) -> PathSummaryProto {
+    let hop_count = hops.len() as u32;
+
+    let (rtt_sum, rtt_n) = hops
+        .iter()
+        .filter(|h| h.avg_rtt_micros > 0)
+        .fold((0u64, 0u64), |(s, n), h| {
+            (s + h.avg_rtt_micros as u64, n + 1)
+        });
+    let avg_rtt_micros = if rtt_n > 0 {
+        (rtt_sum / rtt_n) as u32
+    } else {
+        0
+    };
+
+    let loss_pct = if hops.is_empty() {
+        0.0
+    } else {
+        hops.iter().map(|h| h.loss_pct).sum::<f64>() / hops.len() as f64
+    };
+
+    PathSummaryProto {
+        avg_rtt_micros,
+        loss_pct,
+        hop_count,
+    }
+}
+
+/// Convert an agent-side `route::HopSummary` to the proto `HopSummary`,
+/// mapping IPv4 addresses to 4-byte `HopIp.ip` and IPv6 to 16-byte
+/// `HopIp.ip` (network byte order via `octets()`).
+fn hop_to_proto(h: &crate::route::HopSummary) -> HopSummaryProto {
+    let observed_ips = h
+        .observed_ips
+        .iter()
+        .map(|obs| {
+            let ip_bytes = match obs.ip {
+                std::net::IpAddr::V4(v4) => v4.octets().to_vec(),
+                std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
+            };
+            HopIpProto {
+                ip: ip_bytes.into(),
+                frequency: obs.frequency,
+            }
+        })
+        .collect();
+    HopSummaryProto {
+        position: h.position as u32,
+        observed_ips,
+        avg_rtt_micros: h.avg_rtt_micros,
+        stddev_rtt_micros: h.stddev_rtt_micros,
+        loss_pct: h.loss_pct,
+    }
 }
 
 #[cfg(test)]
@@ -928,5 +1006,174 @@ mod tests {
         assert_eq!(md.dropped_count, 3);
         assert_eq!(batch.paths.len(), 1);
         assert_eq!(batch.paths[0].health, ProtocolHealth::Unhealthy as i32);
+    }
+
+    #[test]
+    fn build_path_summary_empty_hops() {
+        let s = build_path_summary(&[]);
+        assert_eq!(s.hop_count, 0);
+        assert_eq!(s.avg_rtt_micros, 0);
+        assert_eq!(s.loss_pct, 0.0);
+    }
+
+    #[test]
+    fn build_path_summary_averages_rtt_ignoring_zero_hops() {
+        use crate::route::HopSummary as AgentHop;
+        let hops = vec![
+            AgentHop {
+                position: 1,
+                observed_ips: vec![],
+                avg_rtt_micros: 1_000,
+                stddev_rtt_micros: 0,
+                loss_pct: 0.10,
+            },
+            AgentHop {
+                position: 2,
+                observed_ips: vec![],
+                avg_rtt_micros: 0, // fully lost — excluded from RTT mean
+                stddev_rtt_micros: 0,
+                loss_pct: 1.00,
+            },
+            AgentHop {
+                position: 3,
+                observed_ips: vec![],
+                avg_rtt_micros: 3_000,
+                stddev_rtt_micros: 0,
+                loss_pct: 0.20,
+            },
+        ];
+        let s = build_path_summary(&hops);
+        assert_eq!(s.hop_count, 3);
+        // Mean of 1000 and 3000 = 2000 (zero hop excluded).
+        assert_eq!(s.avg_rtt_micros, 2_000);
+        // Loss averages include all 3 hops.
+        assert!((s.loss_pct - (0.10 + 1.00 + 0.20) / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_path_summary_all_zero_rtt() {
+        use crate::route::HopSummary as AgentHop;
+        let hops = vec![AgentHop {
+            position: 1,
+            observed_ips: vec![],
+            avg_rtt_micros: 0,
+            stddev_rtt_micros: 0,
+            loss_pct: 1.0,
+        }];
+        let s = build_path_summary(&hops);
+        assert_eq!(s.avg_rtt_micros, 0); // no positive RTT → fallback 0
+        assert_eq!(s.hop_count, 1);
+        assert_eq!(s.loss_pct, 1.0);
+    }
+
+    #[test]
+    fn hop_to_proto_preserves_ipv4_and_ipv6_bytes() {
+        use crate::route::{HopSummary as AgentHop, ObservedIp};
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let agent_hop = AgentHop {
+            position: 4,
+            observed_ips: vec![
+                ObservedIp {
+                    ip: std::net::IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)),
+                    frequency: 0.6,
+                },
+                ObservedIp {
+                    ip: std::net::IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                    frequency: 0.4,
+                },
+            ],
+            avg_rtt_micros: 12_345,
+            stddev_rtt_micros: 123,
+            loss_pct: 0.05,
+        };
+        let proto = hop_to_proto(&agent_hop);
+        assert_eq!(proto.position, 4);
+        assert_eq!(proto.avg_rtt_micros, 12_345);
+        assert_eq!(proto.stddev_rtt_micros, 123);
+        assert!((proto.loss_pct - 0.05).abs() < 1e-9);
+        assert_eq!(proto.observed_ips.len(), 2);
+        assert_eq!(proto.observed_ips[0].ip.len(), 4);
+        assert_eq!(proto.observed_ips[0].ip, vec![10, 1, 2, 3]);
+        assert!((proto.observed_ips[0].frequency - 0.6).abs() < 1e-9);
+        assert_eq!(proto.observed_ips[1].ip.len(), 16);
+        let v6_expected: Vec<u8> = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)
+            .octets()
+            .to_vec();
+        assert_eq!(proto.observed_ips[1].ip, v6_expected);
+    }
+
+    #[test]
+    fn build_route_snapshot_request_stamps_source_and_target() {
+        use crate::route::{RouteSnapshot, RouteSnapshotEnvelope};
+        let snap = RouteSnapshot {
+            protocol: Protocol::Icmp,
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            hops: vec![],
+        };
+        let env = RouteSnapshotEnvelope {
+            target_id: "t".into(),
+            snapshot: snap,
+        };
+        let req = build_route_snapshot_request("src", env);
+        assert_eq!(req.source_id, "src");
+        assert_eq!(req.target_id, "t");
+        assert_eq!(req.protocol, Protocol::Icmp as i32);
+        assert_eq!(req.observed_at_micros, 1_700_000_000_i64 * 1_000_000);
+        assert!(req.path_summary.is_some());
+        let ps = req.path_summary.unwrap();
+        assert_eq!(ps.hop_count, 0);
+        assert_eq!(ps.avg_rtt_micros, 0);
+        assert_eq!(ps.loss_pct, 0.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn primary_loop_pushes_snapshots_immediately_with_path_summary() {
+        use crate::route::{HopSummary as AgentHop, RouteSnapshot, RouteSnapshotEnvelope};
+        let api = Arc::new(RecordingApi::default());
+        let identity = EmitterIdentity {
+            source_id: "src".into(),
+            agent_version: "t".into(),
+            start_time: SystemTime::now(),
+        };
+        let (_mtx, mrx) = mpsc::channel(8);
+        let (stx, srx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let handle = spawn(api.clone(), identity, mrx, srx, cancel.clone());
+
+        let snap = RouteSnapshot {
+            protocol: Protocol::Tcp,
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060),
+            hops: vec![AgentHop {
+                position: 1,
+                observed_ips: vec![],
+                avg_rtt_micros: 2_000,
+                stddev_rtt_micros: 0,
+                loss_pct: 0.0,
+            }],
+        };
+        stx.send(RouteSnapshotEnvelope {
+            target_id: "t1".into(),
+            snapshot: snap,
+        })
+        .await
+        .unwrap();
+
+        // Park the spawned task in select! so it observes the snapshot recv.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+        let calls = api.push_snapshot_calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        let req = &calls[0];
+        assert_eq!(req.source_id, "src");
+        assert_eq!(req.target_id, "t1");
+        assert_eq!(req.protocol, Protocol::Tcp as i32);
+        let ps = req.path_summary.as_ref().expect("PathSummary stamped");
+        assert_eq!(ps.hop_count, 1);
+        assert_eq!(ps.avg_rtt_micros, 2_000);
     }
 }
