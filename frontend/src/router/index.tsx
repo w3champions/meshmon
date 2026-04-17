@@ -7,6 +7,7 @@ import {
   Outlet,
   redirect,
 } from "@tanstack/react-router";
+import { z } from "zod";
 import { api } from "@/api/client";
 import { AppShell } from "@/components/layout/AppShell";
 import AgentDetail from "@/pages/AgentDetail";
@@ -14,6 +15,7 @@ import AgentsList from "@/pages/AgentsList";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
+import PathDetail from "@/pages/PathDetail";
 import { useAuthStore } from "@/stores/auth";
 
 interface RouterContext {
@@ -92,10 +94,40 @@ export const agentDetailRoute = createRoute({
   component: AgentDetail,
 });
 
-const pathsPlaceholderRoute = createRoute({
+const pathDetailSearchSchema = z
+  .object({
+    range: z.enum(["1h", "6h", "24h", "7d", "30d", "2y", "custom"]).default("24h"),
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+    protocol: z.enum(["icmp", "udp", "tcp"]).optional(),
+  })
+  .refine((s) => s.range !== "custom" || (s.from && s.to), {
+    message: "custom range requires from and to",
+  });
+
+export const pathDetailRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/paths/$source/$target",
-  component: () => <p className="p-6 text-sm text-muted-foreground">Coming in T19.</p>,
+  component: PathDetail,
+  validateSearch: (search) => pathDetailSearchSchema.parse(search),
+});
+
+const routeCompareSearchSchema = z.object({
+  a: z.coerce.number().int().positive(),
+  b: z.coerce.number().int().positive(),
+});
+
+export const routeCompareRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/paths/$source/$target/routes/compare",
+  component: () => <p className="p-6 text-sm text-muted-foreground">Coming in Task 22.</p>,
+  validateSearch: (search) => routeCompareSearchSchema.parse(search),
+});
+
+const reportPathPlaceholderRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/reports/path",
+  component: () => <p className="p-6 text-sm text-muted-foreground">Coming in T20.</p>,
 });
 
 const alertsRoute = createRoute({
@@ -110,7 +142,9 @@ const routeTree = rootRoute.addChildren([
     overviewRoute,
     agentsRoute,
     agentDetailRoute,
-    pathsPlaceholderRoute,
+    pathDetailRoute,
+    routeCompareRoute,
+    reportPathPlaceholderRoute,
     alertsRoute,
   ]),
 ]);

@@ -45,6 +45,16 @@ export function renderWithProviders(ui: ReactElement, initialPath = "/") {
     path: "/paths/$source/$target",
     component: () => null,
   });
+  const compareRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/paths/$source/$target/routes/compare",
+    component: () => null,
+  });
+  const reportPathRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/reports/path",
+    component: () => null,
+  });
   const agentRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/agents/$id",
@@ -57,7 +67,15 @@ export function renderWithProviders(ui: ReactElement, initialPath = "/") {
   });
 
   const router = createRouter({
-    routeTree: rootRoute.addChildren([testRoute, alertsRoute, pathsRoute, agentRoute, agentsRoute]),
+    routeTree: rootRoute.addChildren([
+      testRoute,
+      alertsRoute,
+      pathsRoute,
+      compareRoute,
+      reportPathRoute,
+      agentRoute,
+      agentsRoute,
+    ]),
     history: createMemoryHistory({ initialEntries: [initialPath] }),
   });
 

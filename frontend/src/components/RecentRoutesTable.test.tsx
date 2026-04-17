@@ -108,10 +108,12 @@ describe("RecentRoutesTable", () => {
     const links = await screen.findAllByRole("link", { name: "view" });
     expect(links).toHaveLength(3);
 
-    // TanStack Router renders <a> with the path params substituted
-    expect(links[0]).toHaveAttribute("href", "/paths/a/b");
-    expect(links[1]).toHaveAttribute("href", "/paths/b/c");
-    expect(links[2]).toHaveAttribute("href", "/paths/c/a");
+    // TanStack Router renders <a> with the path params substituted.
+    // `?range=24h` comes from the link's search prop — PathDetail's route has a
+    // required search schema with a default preset.
+    expect(links[0]).toHaveAttribute("href", "/paths/a/b?range=24h");
+    expect(links[1]).toHaveAttribute("href", "/paths/b/c?range=24h");
+    expect(links[2]).toHaveAttribute("href", "/paths/c/a?range=24h");
   });
 
   test("shows skeleton when loading", async () => {

@@ -67,6 +67,7 @@ export function RecentRoutesTable({ className, limit = 10 }: RecentRoutesTablePr
               <Link
                 to={"/paths/$source/$target"}
                 params={{ source: row.source_id, target: row.target_id }}
+                search={{ range: "24h" }}
                 className="text-sm underline underline-offset-2"
               >
                 view
