@@ -23,7 +23,8 @@ pub use pb::{
     AgentMetadata, ConfigResponse, DiffDetection, GetConfigRequest, GetTargetsRequest, HopIp,
     HopSummary, MetricsBatch, PathHealth, PathHealthThresholds, PathMetrics, PathSummary, Protocol,
     ProtocolHealth, ProtocolThresholds, PushMetricsResponse, PushRouteSnapshotResponse, RateEntry,
-    RegisterRequest, RegisterResponse, RouteSnapshotRequest, Target, TargetsResponse, Windows,
+    RefreshConfigRequest, RefreshConfigResponse, RegisterRequest, RegisterResponse,
+    RouteSnapshotRequest, Target, TargetsResponse, TunnelFrame, Windows,
 };
 
 /// Generated tonic server trait + server adapter. Implement [`AgentApi`],
@@ -33,5 +34,15 @@ pub use pb::agent_api_server::{AgentApi, AgentApiServer};
 /// Generated tonic client. Used by integration tests and, eventually, by
 /// `meshmon-agent` (T11).
 pub use pb::agent_api_client::AgentApiClient;
+
+/// Generated tonic server trait + server adapter for the AgentCommand
+/// service (dispatched over the reverse tunnel). Implement [`AgentCommand`],
+/// then wrap in [`AgentCommandServer::new`].
+pub use pb::agent_command_server::{AgentCommand, AgentCommandServer};
+
+/// Generated tonic client for the AgentCommand service. The service
+/// constructs this over a yamux-derived `tonic::transport::Channel` to
+/// invoke native gRPC RPCs on agents via the reverse tunnel.
+pub use pb::agent_command_client::AgentCommandClient;
 
 pub mod ip;
