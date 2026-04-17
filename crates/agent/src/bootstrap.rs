@@ -196,7 +196,13 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 continue;
             }
             let id = target.id.clone();
-            let handle = supervisor::spawn(target, config_rx.clone(), child.clone());
+            let handle = supervisor::spawn(
+                target,
+                config_rx.clone(),
+                Arc::clone(&udp_pool),
+                Arc::clone(&trippy_prober),
+                child.clone(),
+            );
             supervisors.insert(id, handle);
         }
 
@@ -390,7 +396,13 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 continue;
             }
             let id = target.id.clone();
-            let handle = supervisor::spawn(target, self.config_rx.clone(), self.cancel.clone());
+            let handle = supervisor::spawn(
+                target,
+                self.config_rx.clone(),
+                Arc::clone(&self.udp_pool),
+                Arc::clone(&self.trippy_prober),
+                self.cancel.clone(),
+            );
             tracing::info!(target_id = %id, "spawned new supervisor");
             self.supervisors.insert(id, handle);
         }

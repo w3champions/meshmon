@@ -8,13 +8,6 @@
 //! changed and the supervisor translates it into `watch::Sender::send`
 //! calls.
 //!
-//! The module-wide `allow(dead_code)` covers items that are exercised only
-//! by this file's unit tests until the supervisor wiring task in the T14
-//! plan hooks them into the live control loop. Reinstate the lint once
-//! the supervisor calls `TargetStateMachine::evaluate` on every eval tick.
-
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -41,6 +34,7 @@ pub(crate) enum ProtoHealth {
 
 impl ProtoHealth {
     /// Consumed by T16 emitter scaffolding.
+    #[allow(dead_code)]
     pub(crate) fn to_proto(self) -> PbProtocolHealth {
         match self {
             Self::Healthy => PbProtocolHealth::Healthy,
@@ -308,6 +302,7 @@ impl TargetStateMachine {
         ]
     }
 
+    #[allow(dead_code)]
     pub(crate) fn path_state(&self) -> PathHealthState {
         self.path.state()
     }

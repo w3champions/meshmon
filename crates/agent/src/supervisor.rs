@@ -7,10 +7,11 @@
 //! * A `watch` receiver carrying the latest [`ProbeConfig`] from the service.
 //! * A [`CancellationToken`] derived from the parent token so that global
 //!   shutdown propagates automatically.
+//! * Four `watch` senders (ICMP rate, TCP rate, UDP rate, Trippy rate) that
+//!   drive the four probers spawned once per target.
 //!
-//! Real evaluation logic (state machines, metrics emission) arrives in T14.
-//! This skeleton drains observations, reacts to config changes, and shuts down
-//! cleanly.
+//! The eval tick (10 s) snapshots per-protocol stats, runs the state machine,
+//! publishes new rates, and resizes windows on primary swings.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +21,10 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ProbeConfig;
-use crate::probing::{ProbeObservation, ProbeOutcome};
+use crate::probing::trippy::TrippyProber;
+use crate::probing::udp::UdpProberPool;
+use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
+use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
 use meshmon_protocol::{Protocol, Target};
 
@@ -44,6 +48,17 @@ const fn protocol_index(protocol: Protocol) -> Option<usize> {
 /// (which the T14 state machine and tests use to read `summary_fast`).
 type StatsArray = [Mutex<RollingStats>; PROTOCOL_COUNT];
 
+/// Snapshot of the last evaluated target state. Shared between the supervisor
+/// run loop (writer) and external callers (readers).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TargetSnapshot {
+    pub(crate) icmp_health: Option<ProtoHealth>,
+    pub(crate) tcp_health: Option<ProtoHealth>,
+    pub(crate) udp_health: Option<ProtoHealth>,
+    pub(crate) primary: Option<Protocol>,
+    pub(crate) path: PathHealthState,
+}
+
 /// Handle returned by [`spawn`].
 pub struct SupervisorHandle {
     /// Cancel this token to request graceful shutdown of the supervisor.
@@ -57,6 +72,11 @@ pub struct SupervisorHandle {
     /// `pub(crate)` so T14's state machine can reach into the same array
     /// from inside the agent crate; tests use [`SupervisorHandle::snapshot`].
     pub(crate) stats: Arc<StatsArray>,
+    /// Join handles for the 4 per-target prober tasks.
+    pub(crate) prober_joins: Vec<tokio::task::JoinHandle<()>>,
+    /// Most-recently evaluated state snapshot. Read by tests and future T16 emitter.
+    #[allow(dead_code)]
+    pub(crate) last_state: Arc<Mutex<TargetSnapshot>>,
 }
 
 impl SupervisorHandle {
@@ -75,17 +95,29 @@ impl SupervisorHandle {
         let guard = self.stats[idx].try_lock().ok()?;
         Some(guard.summary_fast())
     }
+
+    /// Await all prober tasks to completion. Useful for clean shutdown in
+    /// tests and integration scenarios where callers need to know all probers
+    /// have exited before proceeding.
+    pub async fn await_probers(&mut self) {
+        for handle in self.prober_joins.drain(..) {
+            let _ = handle.await;
+        }
+    }
 }
 
 /// Spawn a per-target supervisor task.
 ///
 /// The supervisor runs until `parent_cancel` (or the returned child token) is
 /// cancelled. It routes incoming [`ProbeObservation`]s into per-protocol
-/// `RollingStats`, runs `purge_old` on each stats slot every 10s, and reacts
-/// to [`ProbeConfig`] updates.
+/// `RollingStats`, runs `purge_old` on each stats slot every 10s, evaluates
+/// the state machine, publishes rates to the 4 prober watch senders, and
+/// reacts to [`ProbeConfig`] updates.
 pub fn spawn(
     target: Target,
     config_rx: watch::Receiver<ProbeConfig>,
+    udp_pool: Arc<UdpProberPool>,
+    trippy_prober: Arc<TrippyProber>,
     parent_cancel: CancellationToken,
 ) -> SupervisorHandle {
     let cancel = parent_cancel.child_token();
@@ -95,7 +127,7 @@ pub fn spawn(
     // watches `config_rx` for live updates.
     let initial = config_rx.borrow().clone();
     let initial_window = Duration::from_secs(initial.diversity_window_sec as u64);
-    // All three protocols start at the diversity window. T14 will call
+    // All three protocols start at the diversity window. The eval tick calls
     // `set_window` on whichever protocol it elects as primary.
     let stats: Arc<StatsArray> = Arc::new([
         Mutex::new(RollingStats::new(initial_window)),
@@ -103,14 +135,62 @@ pub fn spawn(
         Mutex::new(RollingStats::new(initial_window)),
     ]);
 
+    // Create the 4 rate watch channels (ICMP, TCP, UDP, Trippy).
+    // Start at idle (zero rate) — the first eval tick will publish real rates.
+    let (icmp_rate_tx, icmp_rate_rx) = watch::channel(ProbeRate(0.0));
+    let (tcp_rate_tx, tcp_rate_rx) = watch::channel(ProbeRate(0.0));
+    let (udp_rate_tx, udp_rate_rx) = watch::channel(ProbeRate(0.0));
+    let (trippy_rate_tx, trippy_rate_rx) = watch::channel(TrippyRate::idle());
+
+    // Spawn all 4 probers. ICMP spawn is sync (Batch B), matching TCP's shape.
+    let target_for_icmp = target.clone();
+    let icmp_join = icmp::spawn(
+        target_for_icmp,
+        icmp_rate_rx,
+        observation_tx.clone(),
+        cancel.clone(),
+    );
+
+    let target_for_tcp = target.clone();
+    let tcp_join = tcp::spawn(
+        target_for_tcp,
+        tcp_rate_rx,
+        observation_tx.clone(),
+        cancel.clone(),
+    );
+
+    let target_for_udp = target.clone();
+    let udp_join = udp_pool.spawn_target(
+        target_for_udp,
+        udp_rate_rx,
+        observation_tx.clone(),
+        cancel.clone(),
+    );
+
+    let target_for_trippy = target.clone();
+    let trippy_join = trippy_prober.spawn_target(
+        target_for_trippy,
+        trippy_rate_rx,
+        observation_tx.clone(),
+        cancel.clone(),
+    );
+
+    let last_state = Arc::new(Mutex::new(TargetSnapshot::default()));
+
     let task_cancel = cancel.clone();
     let task_stats = Arc::clone(&stats);
+    let task_last_state = Arc::clone(&last_state);
     let join = tokio::spawn(run(
         target,
         config_rx,
         observation_rx,
         task_cancel,
         task_stats,
+        icmp_rate_tx,
+        tcp_rate_tx,
+        udp_rate_tx,
+        trippy_rate_tx,
+        task_last_state,
     ));
 
     SupervisorHandle {
@@ -118,18 +198,28 @@ pub fn spawn(
         join,
         observation_tx,
         stats,
+        prober_joins: vec![icmp_join, tcp_join, udp_join, trippy_join],
+        last_state,
     }
 }
 
 /// Main supervisor loop — runs until cancellation.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     target: Target,
     mut config_rx: watch::Receiver<ProbeConfig>,
     mut observation_rx: mpsc::Receiver<ProbeObservation>,
     cancel: CancellationToken,
     stats: Arc<StatsArray>,
+    icmp_rate_tx: watch::Sender<ProbeRate>,
+    tcp_rate_tx: watch::Sender<ProbeRate>,
+    udp_rate_tx: watch::Sender<ProbeRate>,
+    trippy_rate_tx: watch::Sender<TrippyRate>,
+    last_state: Arc<Mutex<TargetSnapshot>>,
 ) {
     tracing::info!(target_id = %target.id, "supervisor started");
+
+    let mut tsm = TargetStateMachine::new();
 
     let mut eval_interval = tokio::time::interval(Duration::from_secs(10));
     eval_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -160,11 +250,80 @@ async fn run(
                 // Acquire and release each slot lock independently — no slot
                 // is ever held across an `.await` that could acquire another
                 // slot, so no deadlock is reachable from any code path.
-                for slot in stats.iter() {
-                    slot.lock().await.purge_old(now);
+                let icmp_summary = {
+                    let mut s = stats[0].lock().await;
+                    s.purge_old(now);
+                    s.summary_fast()
+                };
+                let tcp_summary = {
+                    let mut s = stats[1].lock().await;
+                    s.purge_old(now);
+                    s.summary_fast()
+                };
+                let udp_summary = {
+                    let mut s = stats[2].lock().await;
+                    s.purge_old(now);
+                    s.summary_fast()
+                };
+
+                let config_snapshot = config_rx.borrow().clone();
+                let change: StateChange = tsm.evaluate(
+                    &config_snapshot,
+                    [&icmp_summary, &tcp_summary, &udp_summary],
+                    now,
+                );
+
+                // Log protocol transitions.
+                for pt in &change.protocol_transitions {
+                    tracing::info!(
+                        target_id = %target.id,
+                        protocol = ?pt.protocol,
+                        from = ?pt.from,
+                        to = ?pt.to,
+                        "protocol health transition",
+                    );
                 }
-                // T14 will read `summary_fast` from each slot here and
-                // run the state machine. T13 just keeps windows fresh.
+                // Log path transition.
+                if let Some((from, to)) = change.path_transition {
+                    tracing::info!(
+                        target_id = %target.id,
+                        from = ?from,
+                        to = ?to,
+                        "path health transition",
+                    );
+                }
+                // Log primary transition.
+                if let Some((from, to)) = change.primary_transition {
+                    tracing::info!(
+                        target_id = %target.id,
+                        from = ?from,
+                        to = ?to,
+                        "primary protocol transition",
+                    );
+                }
+
+                // Publish new rates to all 4 probers.
+                let _ = icmp_rate_tx.send(ProbeRate(change.rates.icmp_pps));
+                let _ = tcp_rate_tx.send(ProbeRate(change.rates.tcp_pps));
+                let _ = udp_rate_tx.send(ProbeRate(change.rates.udp_pps));
+                let _ = trippy_rate_tx.send(TrippyRate {
+                    protocol: change.trippy_protocol,
+                    pps: change.trippy_pps,
+                });
+
+                // Resize windows: primary gets the primary window, others get diversity.
+                resize_windows(&stats, change.primary, &config_snapshot).await;
+
+                // Update the last-state snapshot.
+                {
+                    let health = tsm.health_snapshot();
+                    let mut snap = last_state.lock().await;
+                    snap.icmp_health = Some(health[0].1);
+                    snap.tcp_health = Some(health[1].1);
+                    snap.udp_health = Some(health[2].1);
+                    snap.primary = change.primary;
+                    snap.path = change.path;
+                }
             }
             result = config_rx.changed() => {
                 if result.is_err() {
@@ -175,9 +334,6 @@ async fn run(
                     break;
                 }
                 tracing::info!(target_id = %target.id, "received config update");
-                // T14 will translate the new config into per-protocol
-                // window sizes via `set_window`. T13 deliberately does
-                // not preempt T14 here.
             }
         }
     }
@@ -190,6 +346,28 @@ async fn run(
         route_observation(&stats, &obs).await;
     }
     tracing::info!(target_id = %target.id, "supervisor stopped");
+}
+
+/// Resize per-protocol windows based on which protocol is currently primary.
+/// Primary gets the primary window; all others get the diversity window.
+async fn resize_windows(stats: &StatsArray, primary: Option<Protocol>, config: &ProbeConfig) {
+    let primary_window = Duration::from_secs(config.primary_window_sec as u64);
+    let diversity_window = Duration::from_secs(config.diversity_window_sec as u64);
+
+    for proto in [Protocol::Icmp, Protocol::Tcp, Protocol::Udp] {
+        let Some(idx) = protocol_index(proto) else {
+            continue;
+        };
+        let target_window = if Some(proto) == primary {
+            primary_window
+        } else {
+            diversity_window
+        };
+        let mut slot = stats[idx].lock().await;
+        if slot.window() != target_window {
+            slot.set_window(target_window);
+        }
+    }
 }
 
 /// Map an inbound observation onto the matching `RollingStats`, applying
@@ -251,12 +429,32 @@ mod tests {
         .expect("valid test config")
     }
 
+    /// Build a real `UdpProberPool` + `TrippyProber` for use in supervisor tests.
+    async fn build_test_pool(cancel: CancellationToken) -> (Arc<UdpProberPool>, Arc<TrippyProber>) {
+        use crate::probing::echo_udp::SecretSnapshot;
+        use tokio::sync::watch;
+
+        let (_, sec_rx) = watch::channel(SecretSnapshot::default());
+        let pool = UdpProberPool::new(sec_rx, cancel.clone())
+            .await
+            .expect("udp pool bind");
+        let trippy = TrippyProber::new(1, cancel);
+        (pool, trippy)
+    }
+
     #[tokio::test]
     async fn supervisor_starts_and_cancels() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
-        let handle = spawn(test_target("test-1"), config_rx, parent_cancel.clone());
+        let handle = spawn(
+            test_target("test-1"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+        );
 
         // Give the supervisor a moment to start.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -354,8 +552,15 @@ mod tests {
     async fn supervisor_drains_observations_on_shutdown() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
-        let handle = spawn(test_target("test-2"), config_rx, parent_cancel.clone());
+        let handle = spawn(
+            test_target("test-2"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+        );
 
         let obs = ProbeObservation {
             protocol: Protocol::Icmp,
@@ -397,7 +602,14 @@ mod tests {
     async fn supervisor_routes_by_protocol() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let handle = spawn(test_target("routed"), config_rx, parent_cancel.clone());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let handle = spawn(
+            test_target("routed"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+        );
 
         // Send one ICMP success and two TCP timeouts.
         handle
@@ -440,7 +652,14 @@ mod tests {
     async fn supervisor_drops_udp_refused_but_keeps_tcp_refused() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let handle = spawn(test_target("refused"), config_rx, parent_cancel.clone());
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let handle = spawn(
+            test_target("refused"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+        );
 
         // UDP Refused: dropped before insert → no sample contribution.
         handle
@@ -477,6 +696,217 @@ mod tests {
             "UDP Refused must not contribute to stats"
         );
 
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 8: integration test — state machine swings primary after ICMP fails
+    // ---------------------------------------------------------------------------
+
+    fn full_config_with_tight_hysteresis() -> ProbeConfig {
+        use meshmon_protocol::{
+            PathHealth as H, PathHealthThresholds, Protocol as P, ProtocolThresholds, RateEntry,
+            Windows,
+        };
+        let rates = vec![
+            RateEntry {
+                primary: P::Icmp as i32,
+                health: H::Normal as i32,
+                icmp_pps: 0.2,
+                tcp_pps: 0.05,
+                udp_pps: 0.05,
+            },
+            RateEntry {
+                primary: P::Icmp as i32,
+                health: H::Degraded as i32,
+                icmp_pps: 1.0,
+                tcp_pps: 0.05,
+                udp_pps: 0.05,
+            },
+            RateEntry {
+                primary: P::Icmp as i32,
+                health: H::Unreachable as i32,
+                icmp_pps: 1.0,
+                tcp_pps: 0.05,
+                udp_pps: 0.05,
+            },
+            RateEntry {
+                primary: P::Tcp as i32,
+                health: H::Normal as i32,
+                icmp_pps: 0.05,
+                tcp_pps: 0.2,
+                udp_pps: 0.05,
+            },
+            RateEntry {
+                primary: P::Tcp as i32,
+                health: H::Degraded as i32,
+                icmp_pps: 0.05,
+                tcp_pps: 1.0,
+                udp_pps: 0.05,
+            },
+            RateEntry {
+                primary: P::Tcp as i32,
+                health: H::Unreachable as i32,
+                icmp_pps: 0.05,
+                tcp_pps: 1.0,
+                udp_pps: 0.05,
+            },
+            RateEntry {
+                primary: P::Udp as i32,
+                health: H::Normal as i32,
+                icmp_pps: 0.05,
+                tcp_pps: 0.05,
+                udp_pps: 0.2,
+            },
+            RateEntry {
+                primary: P::Udp as i32,
+                health: H::Degraded as i32,
+                icmp_pps: 0.05,
+                tcp_pps: 0.05,
+                udp_pps: 1.0,
+            },
+            RateEntry {
+                primary: P::Udp as i32,
+                health: H::Unreachable as i32,
+                icmp_pps: 0.05,
+                tcp_pps: 0.05,
+                udp_pps: 1.0,
+            },
+        ];
+        ProbeConfig::from_proto(meshmon_protocol::ConfigResponse {
+            udp_probe_secret: vec![0u8; 8].into(),
+            priority: vec![P::Icmp as i32, P::Tcp as i32, P::Udp as i32],
+            rates,
+            // Tight 1-second hysteresis: fires within 10s eval intervals.
+            icmp_thresholds: Some(ProtocolThresholds {
+                unhealthy_trigger_pct: 0.9,
+                healthy_recovery_pct: 0.1,
+                unhealthy_hysteresis_sec: 1,
+                healthy_hysteresis_sec: 1,
+            }),
+            tcp_thresholds: Some(ProtocolThresholds {
+                unhealthy_trigger_pct: 0.9,
+                healthy_recovery_pct: 0.1,
+                unhealthy_hysteresis_sec: 1,
+                healthy_hysteresis_sec: 1,
+            }),
+            udp_thresholds: Some(ProtocolThresholds {
+                unhealthy_trigger_pct: 0.9,
+                healthy_recovery_pct: 0.1,
+                unhealthy_hysteresis_sec: 1,
+                healthy_hysteresis_sec: 1,
+            }),
+            path_health_thresholds: Some(PathHealthThresholds {
+                degraded_trigger_pct: 0.05,
+                degraded_trigger_sec: 1,
+                degraded_min_samples: 3,
+                normal_recovery_pct: 0.02,
+                normal_recovery_sec: 1,
+            }),
+            windows: Some(Windows {
+                primary_sec: 300,
+                diversity_sec: 900,
+            }),
+            ..Default::default()
+        })
+        .expect("valid test config")
+    }
+
+    /// Feed synthetic observations directly into the supervisor's obs channel,
+    /// then wait for the 10-second eval tick to fire and update `last_state`.
+    ///
+    /// Uses `start_paused = true` with `tokio::time::advance` so 25 simulated
+    /// seconds elapse instantly (two eval ticks), making the test fast and
+    /// deterministic.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_swings_primary_after_icmp_failures() {
+        let parent_cancel = CancellationToken::new();
+        let cfg = full_config_with_tight_hysteresis();
+        let (config_tx, config_rx) = watch::channel(cfg);
+        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+
+        let handle = spawn(
+            test_target("swing-test"),
+            config_rx,
+            pool,
+            trippy,
+            parent_cancel.clone(),
+        );
+
+        // Yield so the supervisor task actually starts and registers its
+        // interval timer before we inject observations.
+        tokio::task::yield_now().await;
+
+        // Inject enough ICMP failures to cross MIN_TRANSITION_SAMPLES (3)
+        // and well above the 90% unhealthy trigger.
+        for _ in 0..10 {
+            handle
+                .observation_tx
+                .send(ProbeObservation {
+                    protocol: Protocol::Icmp,
+                    target_id: "swing-test".to_string(),
+                    outcome: ProbeOutcome::Timeout,
+                    hops: None,
+                    observed_at: tokio::time::Instant::now(),
+                })
+                .await
+                .expect("send icmp failure");
+        }
+        // Inject TCP successes so it can be elected primary.
+        for _ in 0..10 {
+            handle
+                .observation_tx
+                .send(ProbeObservation {
+                    protocol: Protocol::Tcp,
+                    target_id: "swing-test".to_string(),
+                    outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+                    hops: None,
+                    observed_at: tokio::time::Instant::now(),
+                })
+                .await
+                .expect("send tcp success");
+        }
+
+        // Yield so the supervisor processes all queued observations.
+        for _ in 0..30 {
+            tokio::task::yield_now().await;
+        }
+
+        // Advance time past the first eval tick (10s). With 1s hysteresis,
+        // the state machine transitions immediately after crossing the
+        // unhealthy trigger.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        // Yield so the supervisor's eval tick arm fires and runs.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Advance past a second eval tick to ensure any pending transitions complete.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Read the last-state snapshot to assert primary swung to TCP.
+        let snap = handle.last_state.lock().await.clone();
+
+        // After the eval tick processes 10 ICMP failures (failure_rate=1.0 > 0.9
+        // threshold), ICMP must be Unhealthy and TCP (which had 10 successes)
+        // must be elected primary.
+        assert_eq!(
+            snap.icmp_health,
+            Some(ProtoHealth::Unhealthy),
+            "ICMP should be Unhealthy after 10 consecutive failures; snapshot={snap:?}",
+        );
+        assert_eq!(
+            snap.primary,
+            Some(Protocol::Tcp),
+            "primary should swing to TCP when ICMP is Unhealthy; snapshot={snap:?}",
+        );
+
+        // Keep the config sender alive until assertions are done.
+        drop(config_tx);
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
     }

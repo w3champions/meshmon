@@ -208,8 +208,7 @@ pub struct ProbeConfig {
     pub(crate) udp_probe_previous_secret: Option<[u8; 8]>,
     /// Window size (seconds) used by `RollingStats` for the protocol
     /// currently primary on a path. Spec 02 default: 300. Consumed by the
-    /// supervisor's primary-swing `set_window` call in a later T14 task.
-    #[allow(dead_code)]
+    /// supervisor's primary-swing `set_window` call on every eval tick.
     pub(crate) primary_window_sec: u32,
     /// Window size (seconds) for non-primary (diversity) protocols.
     /// Spec 02 default: 900.
