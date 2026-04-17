@@ -233,11 +233,23 @@ mod tests {
     fn retry_queue_drop_oldest_on_full() {
         let now = Instant::now();
         let mut q = RetryQueue::new(2);
-        assert!(!q.push(mk_snapshot_pending(now, 0)));
+        assert!(!q.push(mk_snapshot_pending(now, 0))); // oldest, will be evicted
         assert!(!q.push(mk_snapshot_pending(now, 100)));
-        assert!(q.push(mk_snapshot_pending(now, 200))); // evicts oldest
+        assert!(q.push(mk_snapshot_pending(now, 200))); // evicts offset=0
         assert_eq!(q.queue.len(), 2);
         assert_eq!(q.dropped_count(), 1);
+
+        // Verify the specific entry evicted was the oldest (offset=0) and the
+        // two survivors appear in original insertion order.
+        let due = q.take_due(now + Duration::from_millis(500), 10);
+        let retries: Vec<_> = due.iter().map(|p| p.next_retry_at()).collect();
+        assert_eq!(
+            retries,
+            vec![
+                now + Duration::from_millis(100),
+                now + Duration::from_millis(200),
+            ]
+        );
     }
 
     #[test]
@@ -256,12 +268,38 @@ mod tests {
     fn retry_queue_take_due_caps_at_n() {
         let now = Instant::now();
         let mut q = RetryQueue::new(10);
-        for _ in 0..5 {
-            q.push(mk_snapshot_pending(now, 0));
+        // Offsets 0..=4 — all due at now+10ms; n=3 caps the drain.
+        for i in 0..5u64 {
+            q.push(mk_snapshot_pending(now, i));
         }
         let due = q.take_due(now + Duration::from_millis(10), 3);
         assert_eq!(due.len(), 3);
-        assert_eq!(q.queue.len(), 2); // 5 - 3 = 2 left, order preserved
+        // Survivors preserve the original FIFO order: offsets 3, 4.
+        assert_eq!(q.queue.len(), 2);
+        let survivor_offsets: Vec<_> = q.queue.iter().map(|p| p.next_retry_at()).collect();
+        assert_eq!(
+            survivor_offsets,
+            vec![
+                now + Duration::from_millis(3),
+                now + Duration::from_millis(4),
+            ]
+        );
+        // And the first three popped are the originally-oldest three (0, 1, 2).
+        let popped: Vec<_> = due.iter().map(|p| p.next_retry_at()).collect();
+        assert_eq!(
+            popped,
+            vec![
+                now + Duration::from_millis(0),
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(2),
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "RetryQueue::new requires cap > 0")]
+    fn retry_queue_new_zero_panics() {
+        let _ = RetryQueue::new(0);
     }
 
     #[test]
