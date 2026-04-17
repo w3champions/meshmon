@@ -46,9 +46,39 @@ body {
 }
 
 @media print {
+  /* Neutralise the interactive shell for print. The base rules pin
+     html/body/#app to the viewport height and the AppShell builds a
+     nested flex column with `overflow-hidden` + `overflow-auto`, so
+     without these overrides the Report article renders inside a
+     viewport-sized scroller and prints as a single narrow column on
+     the left of the page. Drop the height / flex / overflow clamps so
+     the article flows naturally across the full page width. */
+  @page {
+    size: auto;
+    margin: 12mm;
+  }
+
+  html,
+  body,
+  #app {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
   body {
     background: white;
     color: black;
+  }
+
+  #app > div,
+  #app > div > div,
+  main {
+    display: block !important;
+    flex: none !important;
+    overflow: visible !important;
+    width: auto !important;
+    max-width: none !important;
+    padding: 0 !important;
   }
 
   /* Hide the app chrome on printed pages — the AppBar and NavDrawer

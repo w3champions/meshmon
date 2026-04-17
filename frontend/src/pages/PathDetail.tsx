@@ -205,8 +205,15 @@ export default function PathDetail() {
         />
       </section>
 
-      <section className="grid gap-3 md:grid-cols-[1fr_auto]">
-        <div>
+      {/*
+        Grid must use `minmax(0,1fr)` for the graph column, not plain `1fr`.
+        Cytoscape's container reports a min-content width that defeats `1fr`'s
+        default `minmax(auto, 1fr)` and makes the whole section overflow the
+        viewport when the hop card appears. `minmax(0,1fr)` lets the column
+        shrink freely; the card keeps its natural width via `w-80 shrink-0`.
+      */}
+      <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+        <div className="min-w-0">
           <h2 className="mb-2 text-lg font-semibold">Current route</h2>
           <RouteTopology
             hops={latest?.hops ?? []}
@@ -214,7 +221,13 @@ export default function PathDetail() {
             ariaLabel="Current route topology"
           />
         </div>
-        {selectedHop && <HopDetailCard hop={selectedHop} onClose={() => setSelectedHop(null)} />}
+        {selectedHop && (
+          <HopDetailCard
+            hop={selectedHop}
+            onClose={() => setSelectedHop(null)}
+            className="w-80 shrink-0 self-start"
+          />
+        )}
       </section>
 
       <section>
