@@ -55,7 +55,7 @@
           "exponent": 0.5,
           "fill": "dark-orange",
           "mode": "scheme",
-          "reverse": false,
+          "reverse": true,
           "scale": "exponential",
           "scheme": "RdYlGn",
           "steps": 64
@@ -72,7 +72,6 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
-          "format": "heatmap",
           "expr": "max by (source, target) (avg_over_time(meshmon_path_failure_rate[5m]))",
           "legendFormat": "{{source}} → {{target}}",
           "instant": true
