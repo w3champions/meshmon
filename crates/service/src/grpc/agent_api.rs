@@ -12,7 +12,6 @@ use meshmon_protocol::{
     DiffDetection as PbDiffDetection, PathHealthThresholds as PbPathHealthThresholds,
     ProtocolThresholds as PbProtocolThresholds, RateEntry as PbRateEntry, Windows as PbWindows,
 };
-use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 /// Concrete implementation of the `AgentApi` tonic service.
@@ -68,14 +67,15 @@ impl AgentApi for AgentApiImpl {
         }
 
         // 3. Hand the inbound stream off to the tunnel manager. Its detached
-        // driver task calls `unregister` on session end.
+        // driver task calls `unregister` on session end. Tear-down is driven
+        // by the manager's per-entry cancel token (fired by `close_all()` or
+        // a same-source reconnect) — no outer cancel is needed here.
         let incoming = request.into_inner();
-        let cancel = CancellationToken::new();
         let stream = self
             .state
             .tunnel_manager
             .clone()
-            .accept(source_id, incoming, cancel)
+            .accept(source_id, incoming)
             .await
             .map_err(|e| Status::unavailable(format!("tunnel setup failed: {e}")))?;
 

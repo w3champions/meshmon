@@ -1971,7 +1971,6 @@ dependencies = [
  "futures-util",
  "hyper-util",
  "meshmon-protocol",
- "metrics",
  "pin-project-lite",
  "thiserror 2.0.18",
  "tokio",

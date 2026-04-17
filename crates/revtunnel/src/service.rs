@@ -12,10 +12,13 @@
 //! is what the RPC handler yields as its response body.
 //!
 //! On stream termination (client disconnect, service shutdown), the
-//! driver task calls `unregister(source_id)` and the registry entry
-//! goes away.
+//! driver task calls `unregister(source_id, generation)` and the registry
+//! entry goes away — but only if the stored generation still matches
+//! this driver, so a reconnect's fresh entry is never clobbered by the
+//! old driver's late exit.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::poll_fn;
@@ -36,7 +39,20 @@ use crate::error::TunnelError;
 /// The driver task fulfills these during its poll cycle.
 type StreamRequest = oneshot::Sender<Result<yamux::Stream, yamux::ConnectionError>>;
 
-/// Per-tunnel registration: the tonic Channel plus the per-driver cancel token.
+/// Callback invoked whenever the registered tunnel count changes. Hosted
+/// binaries wire this to their typed `tunnel_agents` gauge accessor so this
+/// crate does not need to reference any metric name literal directly —
+/// preserving the "all `meshmon_*` literals live in the service crate's
+/// metrics module" invariant.
+pub type TunnelCountObserver = dyn Fn(usize) + Send + Sync + 'static;
+
+/// Monotonic generation counter used to disambiguate tunnel entries when
+/// the same `source_id` reconnects before the previous driver has finished
+/// winding down. See `unregister` for the reason this exists.
+static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Per-tunnel registration: the tonic Channel, the per-driver cancel token,
+/// and a monotonic generation so reconnects don't clobber each other.
 ///
 /// Storing the cancel token alongside the channel lets `close_all()` signal
 /// every active driver to exit without a global master token that would
@@ -46,6 +62,11 @@ struct TunnelEntry {
     channel: Channel,
     /// Cancel token that, when fired, causes the driver task to exit.
     driver_cancel: CancellationToken,
+    /// Generation assigned at `accept()` time. The exiting driver task
+    /// passes its own generation back into `unregister`; the map entry
+    /// is removed only if generations match, so a reconnect that raced
+    /// a previous driver's exit is never wiped out.
+    generation: u64,
 }
 
 /// Service-side registry of per-agent reverse-tunnel Channels.
@@ -62,21 +83,43 @@ pub struct TunnelManager {
     /// `driver_cancel` individually. This means the manager remains usable
     /// for new `accept()` calls after `close_all()` (e.g. reconnect tests).
     master_cancel: CancellationToken,
+    /// Optional observer fired on every len change. Invoked under the
+    /// registry mutex (short, synchronous closure) so callers must not
+    /// re-enter the manager from inside the observer.
+    observer: Option<Arc<TunnelCountObserver>>,
 }
 
 impl TunnelManager {
-    /// Create an empty manager.
+    /// Create an empty manager with no count observer.
     pub fn new() -> Self {
         Self {
             tunnels: Mutex::new(HashMap::new()),
             master_cancel: CancellationToken::new(),
+            observer: None,
+        }
+    }
+
+    /// Create an empty manager that invokes `observer(len)` whenever the
+    /// registered tunnel count changes. Keep the closure cheap — it runs
+    /// inside the registry mutex critical section.
+    pub fn with_observer<F>(observer: F) -> Self
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        Self {
+            tunnels: Mutex::new(HashMap::new()),
+            master_cancel: CancellationToken::new(),
+            observer: Some(Arc::new(observer)),
         }
     }
 
     /// Accept an incoming `OpenTunnel` RPC. Returns the response body
-    /// stream tonic will drive. Spawns a driver task that exits when either
-    /// the caller's `cancel` fires, `close_all()` is called (master cancel),
-    /// the session errors, or the remote end half-closes.
+    /// stream tonic will drive. Spawns a driver task that exits when any of:
+    /// * this entry's `driver_cancel` is fired (`close_all()` for a live
+    ///   entry, or replacement by a new `accept()` for the same `source_id`);
+    /// * `master_cancel` is fired (hard shutdown);
+    /// * the yamux session errors;
+    /// * the remote end half-closes.
     ///
     /// # Mutex discipline
     ///
@@ -86,7 +129,6 @@ impl TunnelManager {
         self: Arc<Self>,
         source_id: String,
         incoming: tonic::Streaming<TunnelFrame>,
-        cancel: CancellationToken,
     ) -> Result<ReceiverStream<Result<TunnelFrame, Status>>, TunnelError> {
         let (out_tx, out_rx) = mpsc::channel::<Result<TunnelFrame, Status>>(16);
 
@@ -142,45 +184,45 @@ impl TunnelManager {
         let channel = endpoint.connect_with_connector_lazy(connector);
 
         // Effective cancel: a child of master_cancel so master's cancellation
-        // cascades automatically. A bridge task additionally cancels it when
-        // the caller's cancel fires, so either side can tear the driver down.
+        // cascades automatically into this driver on hard shutdown.
         let effective = self.master_cancel.child_token();
-        let bridge = {
-            let effective = effective.clone();
-            tokio::spawn(async move {
-                cancel.cancelled().await;
-                effective.cancel();
-            })
-        };
+        let generation = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
 
         // Register. If a prior tunnel for this source_id existed, replace it
-        // (the old driver_cancel is dropped; the old driver will naturally
-        // detect its yamux session is gone). In-flight RPCs on the old Channel
-        // will observe UNAVAILABLE. Callers handle idempotently.
-        {
+        // AND signal its driver to exit. Without the explicit cancel, the old
+        // driver would linger until its own yamux session errored; its
+        // eventual `unregister` call would then find a mismatched generation
+        // and be a no-op, which is correct but wasteful. Cancelling the old
+        // driver here makes the replacement prompt.
+        let new_len = {
             let mut map = self.tunnels.lock().unwrap_or_else(|p| p.into_inner());
             let entry = TunnelEntry {
                 channel,
                 driver_cancel: effective.clone(),
+                generation,
             };
-            if map.insert(source_id.clone(), entry).is_some() {
+            if let Some(old) = map.insert(source_id.clone(), entry) {
                 debug!(source_id = %source_id, "replaced existing tunnel for source_id");
+                // Cancel outside of any await (we're still synchronous here).
+                old.driver_cancel.cancel();
             }
-            update_gauge(map.len());
-        } // mutex released here — no await below this point involves the lock
+            let len = map.len();
+            self.notify(len);
+            len
+        }; // mutex released here — no await below this point involves the lock
+        let _ = new_len;
 
         // Driver: owns the yamux Connection and services:
         //   (a) outbound stream requests from the tonic connector, and
         //   (b) inbound yamux polling (required to drive the connection forward).
         //
         // The driver exits on effective-cancel, session error, or remote EOF,
-        // then aborts the bridge task and unregisters the source_id.
+        // then unregisters the source_id — but only if its generation matches.
         let manager = self.clone();
         let driver_source_id = source_id.clone();
         tokio::spawn(async move {
             drive_yamux_session(yamux_conn, stream_req_rx, effective, &driver_source_id).await;
-            bridge.abort();
-            manager.unregister(&driver_source_id);
+            manager.unregister(&driver_source_id, generation);
         });
 
         Ok(ReceiverStream::new(out_rx))
@@ -205,11 +247,39 @@ impl TunnelManager {
             .collect()
     }
 
-    /// Remove a specific entry (driver task uses this on session exit).
-    fn unregister(&self, source_id: &str) {
-        let mut map = self.tunnels.lock().unwrap_or_else(|p| p.into_inner());
-        map.remove(source_id);
-        update_gauge(map.len());
+    /// Remove a specific entry if — and only if — the stored generation
+    /// matches the caller's. Driver tasks use this on session exit.
+    ///
+    /// # Why the generation guard matters
+    ///
+    /// Without it, the following race deletes a live tunnel:
+    /// 1. Agent A connects, entry at generation 0 is inserted.
+    /// 2. Network blip: A's tunnel starts to wind down; its driver is
+    ///    still running but headed for its select-loop exit.
+    /// 3. Agent A reconnects before the old driver exits. `accept` inserts
+    ///    a fresh entry at generation 1, replacing the old one.
+    /// 4. The old driver finally exits and calls `unregister("A")` — if
+    ///    we unconditionally removed, the generation-1 entry is wiped
+    ///    out and the fan-out layer can't reach agent A again until the
+    ///    next reconnect.
+    ///
+    /// Comparing generations skips the stale removal. `accept` on the same
+    /// `source_id` also proactively cancels the old `driver_cancel` so the
+    /// displaced driver doesn't linger.
+    fn unregister(&self, source_id: &str, generation: u64) {
+        let len = {
+            let mut map = self.tunnels.lock().unwrap_or_else(|p| p.into_inner());
+            match map.get(source_id) {
+                Some(entry) if entry.generation == generation => {
+                    map.remove(source_id);
+                    Some(map.len())
+                }
+                _ => None,
+            }
+        };
+        if let Some(len) = len {
+            self.notify(len);
+        }
     }
 
     /// Drop every registered Channel and cancel all active driver tasks.
@@ -230,13 +300,16 @@ impl TunnelManager {
     /// draining, so no new `accept()` calls arrive after `close_all()`.
     pub fn close_all(&self) {
         // Collect and cancel all driver tokens under the lock, then clear.
-        let tokens: Vec<CancellationToken> = {
+        let (tokens, new_len) = {
             let mut map = self.tunnels.lock().unwrap_or_else(|p| p.into_inner());
-            let tokens = map.values().map(|e| e.driver_cancel.clone()).collect();
+            let tokens: Vec<CancellationToken> =
+                map.values().map(|e| e.driver_cancel.clone()).collect();
             map.clear();
-            update_gauge(0);
-            tokens
+            let len = map.len();
+            self.notify(len);
+            (tokens, len)
         };
+        let _ = new_len;
         // Cancel after releasing the lock so drivers can unregister without
         // deadlocking on the mutex.
         for token in tokens {
@@ -253,6 +326,15 @@ impl TunnelManager {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Fire the count observer with the latest registered len. Called from
+    /// every mutating path so downstream metrics stay in lockstep with the
+    /// map. Cheap no-op when no observer is wired.
+    fn notify(&self, len: usize) {
+        if let Some(obs) = self.observer.as_ref() {
+            obs(len);
+        }
+    }
 }
 
 impl Default for TunnelManager {
@@ -263,12 +345,14 @@ impl Default for TunnelManager {
 
 /// Drive the yamux session.
 ///
-/// Owns the `YamuxConnection` exclusively; no lock is needed. The loop:
-/// - Polls `poll_next_inbound` to drive the connection state machine forward
-///   (required even on the client side — yamux needs it to process ACKs,
-///   window updates, and to flush outbound buffers).
-/// - Services pending `StreamRequest`s: for each pending oneshot, calls
-///   `poll_new_outbound` and replies when a stream is available.
+/// Owns the `YamuxConnection` exclusively; no lock is needed. The loop is a
+/// single `tokio::select!` so inbound frame processing, outbound substream
+/// opening, new stream requests, and cancellation are all polled
+/// concurrently. In particular, `poll_new_outbound` and `poll_next_inbound`
+/// must race for each wakeup: outbound can only make progress once inbound
+/// drains ACKs / window updates from the peer. Polling them sequentially
+/// deadlocks on a full ACK backlog (outbound parks forever, inbound never
+/// runs to drain it, cancel can't fire).
 ///
 /// Service-side is yamux **Client** mode. Inbound substreams from the agent
 /// are unexpected by contract (agents only accept, they don't initiate), so
@@ -285,27 +369,35 @@ async fn drive_yamux_session<T>(
     let mut pending_req: Option<StreamRequest> = None;
 
     loop {
-        // If we have a pending outbound request, try to fulfill it first.
-        if let Some(reply_tx) = pending_req.take() {
-            // poll_new_outbound may return Pending if the backlog is full;
-            // if so we stash the request back and let poll_next_inbound make
-            // progress to drain the backlog.
-            match poll_fn(|cx| conn.poll_new_outbound(cx)).await {
-                Ok(stream) => {
-                    // Ignore send error — connector may have timed out.
-                    let _ = reply_tx.send(Ok(stream));
-                }
-                Err(e) => {
-                    debug!(source_id = %source_id, error = %e, "yamux outbound failed; closing tunnel");
-                    let _ = reply_tx.send(Err(e));
-                    break;
+        // A single `poll_fn` that drives the yamux state machine forward:
+        // both `poll_new_outbound` (when we have a pending request) and
+        // `poll_next_inbound` (always, to flush ACKs / window updates)
+        // share one `&mut conn` borrow. This is a Rust-borrow-checker
+        // concession — two separate `poll_fn`s inside `select!` would each
+        // try to re-borrow `conn` as mutable and won't compile. The logic
+        // is equivalent: whichever of the two sub-polls makes progress
+        // first short-circuits and returns, leaving the other to be tried
+        // again on the next loop iteration.
+        //
+        // Returning `Poll::Pending` when neither side is ready ensures the
+        // `select!` below correctly waits on the same waker for either
+        // side to become ready.
+        let yamux_step = poll_fn(|cx| -> std::task::Poll<YamuxStep> {
+            // Try outbound first when we have a pending request. If
+            // outbound is Pending, fall through to inbound so we keep
+            // draining the session's ACK/window-update traffic —
+            // otherwise outbound backpressure would deadlock.
+            if pending_req.is_some() {
+                if let std::task::Poll::Ready(out) = conn.poll_new_outbound(cx) {
+                    return std::task::Poll::Ready(YamuxStep::Outbound(out));
                 }
             }
-            continue;
-        }
+            match conn.poll_next_inbound(cx) {
+                std::task::Poll::Ready(next) => std::task::Poll::Ready(YamuxStep::Inbound(next)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        });
 
-        // No pending outbound request — wait for either cancellation,
-        // a new stream request, or an inbound event (drives the connection).
         tokio::select! {
             biased;
 
@@ -314,47 +406,64 @@ async fn drive_yamux_session<T>(
                 break;
             }
 
-            req = stream_req_rx.recv() => {
+            // Only accept new stream requests when no outbound is in flight
+            // — otherwise a second request would silently overwrite the first.
+            req = stream_req_rx.recv(), if pending_req.is_none() => {
                 match req {
-                    Some(reply_tx) => {
-                        // Queue it; will be fulfilled at top of next loop iteration.
-                        pending_req = Some(reply_tx);
-                    }
+                    Some(reply_tx) => pending_req = Some(reply_tx),
                     None => {
                         // Channel closed; connector is gone (channel dropped).
-                        debug!(source_id = %source_id, "yamux stream request channel closed");
+                        debug!(source_id = %source_id,
+                               "yamux stream request channel closed");
                         break;
                     }
                 }
             }
 
-            next = poll_fn(|cx| conn.poll_next_inbound(cx)) => {
-                match next {
-                    Some(Ok(_inbound)) => {
-                        // Service is yamux client — agent-initiated substreams
-                        // are not part of the current contract. Log and drop.
-                        warn!(source_id = %source_id,
-                              "unexpected inbound substream on service-side tunnel; ignoring");
+            step = yamux_step => match step {
+                YamuxStep::Outbound(outbound) => {
+                    // The outbound arm only fires when `pending_req.is_some()`;
+                    // take it here to reply.
+                    let reply_tx = pending_req.take()
+                        .expect("outbound arm fires only while pending_req is Some");
+                    match outbound {
+                        Ok(stream) => {
+                            // Ignore send error — connector may have timed out.
+                            let _ = reply_tx.send(Ok(stream));
+                        }
+                        Err(e) => {
+                            debug!(source_id = %source_id, error = %e,
+                                   "yamux outbound failed; closing tunnel");
+                            let _ = reply_tx.send(Err(e));
+                            break;
+                        }
                     }
-                    Some(Err(e)) => {
-                        debug!(source_id = %source_id, error = %e,
-                               "yamux session error; closing tunnel");
-                        break;
-                    }
-                    None => {
-                        debug!(source_id = %source_id, "yamux session ended");
-                        break;
-                    }
+                }
+                YamuxStep::Inbound(Some(Ok(_inbound))) => {
+                    warn!(source_id = %source_id,
+                          "unexpected inbound substream on service-side tunnel; ignoring");
+                }
+                YamuxStep::Inbound(Some(Err(e))) => {
+                    debug!(source_id = %source_id, error = %e,
+                           "yamux session error; closing tunnel");
+                    break;
+                }
+                YamuxStep::Inbound(None) => {
+                    debug!(source_id = %source_id, "yamux session ended");
+                    break;
                 }
             }
         }
     }
 }
 
-fn update_gauge(len: usize) {
-    // The service crate's metrics module owns the descriptor; this call
-    // is a no-op before that module has registered the name.
-    metrics::gauge!("meshmon_service_tunnel_agents").set(len as f64);
+/// Internal result of one yamux state-machine poll. Combining outbound +
+/// inbound into a single enum lets us poll both from a single `&mut conn`
+/// borrow inside one `poll_fn`, which is the only way tokio's `select!`
+/// will accept two mutable uses of `conn` concurrently.
+enum YamuxStep {
+    Outbound(Result<yamux::Stream, yamux::ConnectionError>),
+    Inbound(Option<Result<yamux::Stream, yamux::ConnectionError>>),
 }
 
 #[cfg(test)]
@@ -363,8 +472,8 @@ mod tests {
 
     // TunnelManager::accept needs real yamux + tonic transport, so the
     // integration tests in Tasks 15-17 cover that path end-to-end.
-    // Unit tests here focus on HashMap / gauge-parity semantics that
-    // don't need a live Channel.
+    // Unit tests here focus on HashMap / observer / generation semantics
+    // that don't need a live Channel.
 
     #[test]
     fn new_manager_is_empty() {
@@ -391,5 +500,103 @@ mod tests {
     fn channel_for_missing_is_none() {
         let m = TunnelManager::new();
         assert!(m.channel_for("nobody").is_none());
+    }
+
+    /// Regression for the unregister race described on `unregister` itself.
+    ///
+    /// Simulates a reconnect: the old driver's late exit must not delete
+    /// the newer entry the reconnect just inserted.
+    // Needs a tokio runtime because `Endpoint::connect_lazy` (used to fabricate
+    // a `Channel` in `dummy_channel`) registers timers on the current reactor.
+    #[tokio::test]
+    async fn unregister_with_stale_generation_is_no_op() {
+        let m = TunnelManager::new();
+
+        // Stand in for what `accept()` would insert, minus the live channel:
+        // we only need the generation + cancel token plumbing for the test,
+        // and the map stores `TunnelEntry` which is module-private, so we
+        // insert directly.
+        //
+        // Simulate two successive "accept"s for the same source_id —
+        // generations 10 (old) and 11 (new). Then have the old driver
+        // call `unregister` with generation 10.
+        {
+            let mut map = m.tunnels.lock().unwrap();
+            map.insert(
+                "agent-a".to_string(),
+                TunnelEntry {
+                    channel: dummy_channel(),
+                    driver_cancel: CancellationToken::new(),
+                    generation: 11,
+                },
+            );
+        }
+
+        m.unregister("agent-a", 10);
+
+        assert_eq!(m.len(), 1, "stale unregister must not remove the new entry");
+        let map = m.tunnels.lock().unwrap();
+        let entry = map.get("agent-a").expect("entry still present");
+        assert_eq!(entry.generation, 11);
+    }
+
+    /// Matching generation does remove.
+    #[tokio::test]
+    async fn unregister_with_matching_generation_removes() {
+        let m = TunnelManager::new();
+        {
+            let mut map = m.tunnels.lock().unwrap();
+            map.insert(
+                "agent-b".to_string(),
+                TunnelEntry {
+                    channel: dummy_channel(),
+                    driver_cancel: CancellationToken::new(),
+                    generation: 7,
+                },
+            );
+        }
+
+        m.unregister("agent-b", 7);
+        assert_eq!(m.len(), 0);
+    }
+
+    /// Observer sees the post-mutation len on each change.
+    #[tokio::test]
+    async fn observer_fires_on_mutations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let last = Arc::new(AtomicUsize::new(usize::MAX));
+        let sink = last.clone();
+        let m = TunnelManager::with_observer(move |n| sink.store(n, Ordering::SeqCst));
+
+        // Simulate a successful accept by inserting directly; then invoke
+        // the private `notify` path by unregistering with a match.
+        {
+            let mut map = m.tunnels.lock().unwrap();
+            map.insert(
+                "agent-c".to_string(),
+                TunnelEntry {
+                    channel: dummy_channel(),
+                    driver_cancel: CancellationToken::new(),
+                    generation: 1,
+                },
+            );
+        }
+
+        // Observer hasn't been told yet — call notify directly to mirror what
+        // accept does.
+        m.notify(m.len());
+        assert_eq!(last.load(Ordering::SeqCst), 1);
+
+        m.unregister("agent-c", 1);
+        assert_eq!(last.load(Ordering::SeqCst), 0);
+    }
+
+    /// A placeholder `Channel` for unit tests that never drive it. Built via
+    /// `connect_lazy` against a dummy URI — no I/O occurs until an RPC is
+    /// issued (which these tests never do).
+    fn dummy_channel() -> Channel {
+        Endpoint::try_from("http://unit-test.local")
+            .expect("static URI parses")
+            .connect_lazy()
     }
 }

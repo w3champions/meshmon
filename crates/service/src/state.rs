@@ -96,7 +96,13 @@ impl AppState {
             registry,
             started_at: Instant::now(),
             prom,
-            tunnel_manager: Arc::new(TunnelManager::new()),
+            // Wire the manager's observer to the typed gauge accessor so the
+            // meshmon_service_tunnel_agents metric stays in lockstep with the
+            // registry. Keeping the literal in `crate::metrics` preserves the
+            // "one place for every meshmon_* name" invariant.
+            tunnel_manager: Arc::new(TunnelManager::with_observer(|len| {
+                crate::metrics::tunnel_agents().set(len as f64);
+            })),
         }
     }
 
