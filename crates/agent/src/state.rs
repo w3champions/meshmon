@@ -8,6 +8,7 @@
 //! changed and the supervisor translates it into `watch::Sender::send`
 //! calls.
 //!
+use std::collections::HashSet;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -189,6 +190,18 @@ impl PathStateMachine {
         self.state
     }
 
+    /// Clear any in-flight dwell timer without touching `state`.
+    ///
+    /// Invariant: a mid-dwell primary swing invalidates the condition
+    /// accumulator, because the dwell was measured against a different
+    /// protocol's failure_rate. Calling this before the next
+    /// [`PathStateMachine::evaluate`] guarantees the new primary has to
+    /// build up its own dwell from scratch rather than inheriting elapsed
+    /// time from the previous primary's window.
+    pub(crate) fn reset_condition(&mut self) {
+        self.condition_since = None;
+    }
+
     pub(crate) fn evaluate(
         &mut self,
         primary_stats: Option<&FastSummary>,
@@ -206,7 +219,14 @@ impl PathStateMachine {
                 PathHealthState::Normal
             }
             (PathHealthState::Normal, Some(stats)) => {
-                if stats.sample_count < t.degraded_min_samples as u64
+                // Enforce `MIN_TRANSITION_SAMPLES` as a symmetric floor with
+                // the Degraded → Normal recovery path. Without this, an
+                // operator misconfiguring `degraded_min_samples` below the
+                // floor could drive a degrade with less evidence than
+                // recovery requires — the floor is a correctness invariant,
+                // not a tunable.
+                let effective_floor = (t.degraded_min_samples as u64).max(MIN_TRANSITION_SAMPLES);
+                if stats.sample_count < effective_floor
                     || stats.failure_rate < t.degraded_trigger_pct
                 {
                     self.condition_since = None;
@@ -290,6 +310,14 @@ pub struct TargetStateMachine {
     tcp: ProtocolStateMachine,
     udp: ProtocolStateMachine,
     path: PathStateMachine,
+    /// Set of `(primary, path_health)` rate-lookup keys we've already
+    /// warned about. Once per key per machine lifetime — if an operator
+    /// updates the config to add missing rows, they must restart the
+    /// agent to reset the dedup set (or accept that resolved keys simply
+    /// stop producing warns because the lookup now succeeds). A 10s
+    /// evaluation cadence × 50 targets would otherwise flood logs with
+    /// the same WARN on any partial rate-table misconfig.
+    warned_rate_keys: HashSet<(Protocol, PbPathHealth)>,
 }
 
 impl TargetStateMachine {
@@ -299,7 +327,13 @@ impl TargetStateMachine {
             tcp: ProtocolStateMachine::new(Protocol::Tcp),
             udp: ProtocolStateMachine::new(Protocol::Udp),
             path: PathStateMachine::new(),
+            warned_rate_keys: HashSet::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn warned_rate_key_count(&self) -> usize {
+        self.warned_rate_keys.len()
     }
 
     pub(crate) fn health_snapshot(&self) -> [(Protocol, ProtoHealth); 3] {
@@ -354,6 +388,14 @@ impl TargetStateMachine {
             Some((old_primary, new_primary))
         };
 
+        // A primary swing invalidates any in-flight path dwell, because the
+        // dwell accumulated under a different protocol's failure_rate. Clear
+        // the path machine's condition timer before evaluating so the new
+        // primary has to build up its own dwell from scratch.
+        if primary_transition.is_some() {
+            self.path.reset_condition();
+        }
+
         let primary_stats: Option<&FastSummary> = new_primary.and_then(|p| match p {
             Protocol::Icmp => Some(stats_by_protocol[0]),
             Protocol::Tcp => Some(stats_by_protocol[1]),
@@ -365,13 +407,26 @@ impl TargetStateMachine {
             .evaluate(primary_stats, &config.path_thresholds(), now);
         let path_state = self.path.state();
 
-        let rates = rates_for_mode(
+        let (rates, missing_key) = rates_for_mode(
             config,
             Mode {
                 primary: new_primary,
                 path_health: path_state,
             },
         );
+        if let Some(MissingRateKey { primary, health }) = missing_key {
+            // Throttle the WARN: once per (primary, health) pair per
+            // TargetStateMachine lifetime. Without this, a partial rate
+            // table misconfig would emit a WARN every 10s per target — at
+            // 50 targets that's 30 WARNs/min of pure noise.
+            if self.warned_rate_keys.insert((primary, health)) {
+                tracing::warn!(
+                    primary = ?primary,
+                    health = ?health,
+                    "no RateEntry for mode; publishing zero rates",
+                );
+            }
+        }
         let trippy_protocol = new_primary
             .unwrap_or_else(|| priority.first().copied().unwrap_or(Protocol::Unspecified));
         let trippy_pps = trippy_pps_for(trippy_protocol, rates);
@@ -395,11 +450,29 @@ impl Default for TargetStateMachine {
     }
 }
 
-/// Resolve `(primary, path_health)` → `RateTriple`. Rules:
+/// Signal returned from [`rates_for_mode`] when no `RateEntry` matched the
+/// requested `(primary, path_health)` pair. The caller decides whether to
+/// warn — `TargetStateMachine::evaluate` throttles these into a once-per-
+/// key dedup set so a misconfig doesn't flood logs on every 10s tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MissingRateKey {
+    pub(crate) primary: Protocol,
+    pub(crate) health: PbPathHealth,
+}
+
+/// Resolve `(primary, path_health)` → `(RateTriple, Option<MissingRateKey>)`.
+///
+/// Rules:
 /// - `primary = Some(p)` → lookup `(p, path_health)`.
 /// - `primary = None` → lookup `(priority[0], Unreachable)`.
-/// - Lookup miss → `RateTriple::zero()` + WARN.
-pub(crate) fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
+/// - Lookup miss → `(RateTriple::zero(), Some(MissingRateKey { .. }))`.
+///
+/// Pure: callers own the warn policy. See
+/// [`TargetStateMachine::evaluate`] for the throttled warn wiring.
+pub(crate) fn rates_for_mode(
+    config: &ProbeConfig,
+    mode: Mode,
+) -> (RateTriple, Option<MissingRateKey>) {
     let priority = config.priority_list();
     let (lookup_primary, lookup_health) = match mode.primary {
         Some(p) => (p, mode.path_health.to_proto()),
@@ -409,19 +482,21 @@ pub(crate) fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
         ),
     };
     match config.rates_for(lookup_primary, lookup_health) {
-        Some(row) => RateTriple {
-            icmp_pps: row.icmp_pps,
-            tcp_pps: row.tcp_pps,
-            udp_pps: row.udp_pps,
-        },
-        None => {
-            tracing::warn!(
-                primary = ?lookup_primary,
-                health = ?lookup_health,
-                "no RateEntry for mode; publishing zero rates",
-            );
-            RateTriple::zero()
-        }
+        Some(row) => (
+            RateTriple {
+                icmp_pps: row.icmp_pps,
+                tcp_pps: row.tcp_pps,
+                udp_pps: row.udp_pps,
+            },
+            None,
+        ),
+        None => (
+            RateTriple::zero(),
+            Some(MissingRateKey {
+                primary: lookup_primary,
+                health: lookup_health,
+            }),
+        ),
     }
 }
 
@@ -708,7 +783,7 @@ mod tests {
                 0.05,
             ),
         ]);
-        let r = rates_for_mode(
+        let (r, missing) = rates_for_mode(
             &cfg,
             Mode {
                 primary: Some(Protocol::Icmp),
@@ -716,6 +791,7 @@ mod tests {
             },
         );
         assert_eq!(r.icmp_pps, 1.0);
+        assert_eq!(missing, None);
     }
 
     #[test]
@@ -727,7 +803,7 @@ mod tests {
             0.05,
             0.05,
         )]);
-        let r = rates_for_mode(
+        let (r, missing) = rates_for_mode(
             &cfg,
             Mode {
                 primary: None,
@@ -735,12 +811,13 @@ mod tests {
             },
         );
         assert_eq!(r.icmp_pps, 1.0);
+        assert_eq!(missing, None);
     }
 
     #[test]
     fn rates_for_mode_returns_zero_triple_when_row_missing() {
         let cfg = config_with_rates(vec![]);
-        let r = rates_for_mode(
+        let (r, missing) = rates_for_mode(
             &cfg,
             Mode {
                 primary: Some(Protocol::Udp),
@@ -748,6 +825,13 @@ mod tests {
             },
         );
         assert_eq!(r, RateTriple::zero());
+        assert_eq!(
+            missing,
+            Some(MissingRateKey {
+                primary: Protocol::Udp,
+                health: PbPathHealth::Normal,
+            }),
+        );
     }
 
     #[test]
@@ -1053,5 +1137,206 @@ mod tests {
         assert_eq!(change.primary, Some(Protocol::Icmp));
         assert_eq!(change.path, PathHealthState::Degraded);
         assert_eq!(change.rates.icmp_pps, 1.0);
+    }
+
+    /// A mid-dwell primary swing must invalidate the path machine's
+    /// condition_since accumulator. Otherwise a partial dwell clocked
+    /// under the old primary's failure_rate would carry over to the new
+    /// primary and cause it to degrade sooner than its own evidence
+    /// justifies.
+    #[test]
+    fn path_dwell_resets_on_primary_swing() {
+        // Config with a short path-degrade dwell (5s) so the test advances
+        // easily past the dwell threshold in discrete steps.
+        let cfg = {
+            use meshmon_protocol::PathHealth as H;
+            let rates = vec![
+                rate_row(Protocol::Icmp, H::Normal, 0.2, 0.05, 0.05),
+                rate_row(Protocol::Icmp, H::Degraded, 1.0, 0.05, 0.05),
+                rate_row(Protocol::Icmp, H::Unreachable, 1.0, 0.05, 0.05),
+                rate_row(Protocol::Tcp, H::Normal, 0.05, 0.2, 0.05),
+                rate_row(Protocol::Tcp, H::Degraded, 0.05, 1.0, 0.05),
+                rate_row(Protocol::Tcp, H::Unreachable, 0.05, 1.0, 0.05),
+                rate_row(Protocol::Udp, H::Normal, 0.05, 0.05, 0.2),
+                rate_row(Protocol::Udp, H::Degraded, 0.05, 0.05, 1.0),
+                rate_row(Protocol::Udp, H::Unreachable, 0.05, 0.05, 1.0),
+            ];
+            ProbeConfig::from_proto(meshmon_protocol::ConfigResponse {
+                udp_probe_secret: vec![1u8; 8].into(),
+                priority: vec![
+                    Protocol::Icmp as i32,
+                    Protocol::Tcp as i32,
+                    Protocol::Udp as i32,
+                ],
+                rates,
+                icmp_thresholds: Some(ProtocolThresholds {
+                    unhealthy_trigger_pct: 0.9,
+                    healthy_recovery_pct: 0.1,
+                    // Fire the ICMP unhealthy transition immediately so the
+                    // primary swings on the second tick.
+                    unhealthy_hysteresis_sec: 0,
+                    healthy_hysteresis_sec: 0,
+                }),
+                tcp_thresholds: Some(ProtocolThresholds {
+                    unhealthy_trigger_pct: 0.5,
+                    healthy_recovery_pct: 0.05,
+                    unhealthy_hysteresis_sec: 30,
+                    healthy_hysteresis_sec: 60,
+                }),
+                udp_thresholds: Some(ProtocolThresholds {
+                    unhealthy_trigger_pct: 0.5,
+                    healthy_recovery_pct: 0.05,
+                    unhealthy_hysteresis_sec: 30,
+                    healthy_hysteresis_sec: 60,
+                }),
+                path_health_thresholds: Some(PathHealthThresholds {
+                    degraded_trigger_pct: 0.05,
+                    degraded_trigger_sec: 5,
+                    degraded_min_samples: 3,
+                    normal_recovery_pct: 0.02,
+                    normal_recovery_sec: 30,
+                }),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+
+        // Tick 1: ICMP is primary with a degrading failure_rate (0.1 > 0.05
+        // path-degrade trigger) and enough samples. The path machine starts
+        // its 5s dwell here but does NOT degrade yet.
+        let noisy_icmp = summary(30, 27); // failure_rate = 0.1
+        let healthy = summary(30, 30);
+        let c = tsm.evaluate(&cfg, [&noisy_icmp, &healthy, &healthy], t0);
+        assert_eq!(c.primary, Some(Protocol::Icmp));
+        assert_eq!(c.path, PathHealthState::Normal);
+
+        // Tick 2 (t0+2s): still inside the dwell window. ICMP flips to
+        // Unhealthy (0s hysteresis) so the primary swings to TCP. The path
+        // dwell must reset on the swing, so the path stays Normal.
+        let t1 = t0 + Duration::from_secs(2);
+        let bad_icmp = summary(30, 0); // failure_rate = 1.0 > 0.9 unhealthy
+        let c = tsm.evaluate(&cfg, [&bad_icmp, &healthy, &healthy], t1);
+        assert_eq!(
+            c.primary_transition,
+            Some((Some(Protocol::Icmp), Some(Protocol::Tcp))),
+            "ICMP should go unhealthy and TCP should become primary",
+        );
+        assert_eq!(c.path, PathHealthState::Normal);
+
+        // Tick 3 (t0+4s): 4s after the original dwell start. If the reset
+        // had failed, we'd be close to degrading even on TCP. Feed TCP
+        // with a failure_rate above the degrade trigger (0.05) but only
+        // 4s after t0 — past the original ICMP dwell (5s) only if we
+        // do NOT reset. With the reset, TCP's dwell started at t1 and
+        // the earliest degrade is t1+5s = t0+7s.
+        let t2 = t0 + Duration::from_secs(4);
+        let noisy_tcp = summary(30, 27); // failure_rate = 0.1
+        let c = tsm.evaluate(&cfg, [&bad_icmp, &noisy_tcp, &healthy], t2);
+        assert_eq!(c.primary, Some(Protocol::Tcp));
+        assert_eq!(
+            c.path,
+            PathHealthState::Normal,
+            "path must not degrade before the post-swing dwell elapses",
+        );
+
+        // Tick 4 (t0+10s): the post-swing path-degrade dwell started at
+        // t2 (first tick with noisy_tcp as primary) = t0+4s and needs 5s.
+        // t0+10s is 6s later, past the dwell, so the path must degrade.
+        let t3 = t0 + Duration::from_secs(10);
+        let c = tsm.evaluate(&cfg, [&bad_icmp, &noisy_tcp, &healthy], t3);
+        assert_eq!(c.primary, Some(Protocol::Tcp));
+        assert_eq!(c.path, PathHealthState::Degraded);
+    }
+
+    /// A missing rate-table row must not flood logs with a WARN on every
+    /// 10s eval tick. Track warned keys in the state machine and only
+    /// emit one WARN per (primary, path_health) pair.
+    #[test]
+    fn rate_miss_warns_once_per_key() {
+        // Priority mentions TCP / UDP, but the rates table only covers
+        // ICMP. Force ICMP unhealthy → primary swings to TCP → rate lookup
+        // misses on (Tcp, Normal).
+        use meshmon_protocol::PathHealth as H;
+        let rates = vec![
+            rate_row(Protocol::Icmp, H::Normal, 0.2, 0.05, 0.05),
+            rate_row(Protocol::Icmp, H::Degraded, 1.0, 0.05, 0.05),
+            rate_row(Protocol::Icmp, H::Unreachable, 1.0, 0.05, 0.05),
+        ];
+        let cfg = config_with_rates(rates);
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+        let healthy = summary(30, 30);
+        let bad = summary(30, 0);
+
+        // First tick: ICMP primary, healthy → rate lookup hits.
+        let c = tsm.evaluate(&cfg, [&healthy, &healthy, &healthy], t0);
+        assert_eq!(c.primary, Some(Protocol::Icmp));
+        assert_eq!(tsm.warned_rate_key_count(), 0);
+
+        // Drive ICMP unhealthy so the primary swings to TCP. That trips
+        // the (Tcp, Normal) miss.
+        tsm.evaluate(&cfg, [&bad, &healthy, &healthy], t0);
+        let c = tsm.evaluate(
+            &cfg,
+            [&bad, &healthy, &healthy],
+            t0 + Duration::from_secs(30),
+        );
+        assert_eq!(c.primary, Some(Protocol::Tcp));
+        assert_eq!(
+            tsm.warned_rate_key_count(),
+            1,
+            "(Tcp, Normal) miss should be warned exactly once",
+        );
+
+        // Repeat: same missing key across many ticks must NOT grow the set.
+        for offset in [40u64, 50, 60, 120, 300] {
+            tsm.evaluate(
+                &cfg,
+                [&bad, &healthy, &healthy],
+                t0 + Duration::from_secs(offset),
+            );
+        }
+        assert_eq!(
+            tsm.warned_rate_key_count(),
+            1,
+            "repeated misses on the same key must not bump the dedup set",
+        );
+    }
+
+    /// Normal → Degraded must honor `MIN_TRANSITION_SAMPLES` as a floor
+    /// even when the operator misconfigures `degraded_min_samples` below
+    /// it. Symmetric with the recovery arm.
+    #[test]
+    fn path_degrade_honors_min_transition_samples_floor() {
+        let mut p = PathStateMachine::new();
+        let t0 = Instant::now();
+        let mut th = path_thresholds();
+        // Operator misconfig: sub-floor min-samples.
+        th.degraded_min_samples = 1;
+        th.degraded_trigger_sec = 1;
+
+        // 2 samples — below MIN_TRANSITION_SAMPLES=3 effective floor, so
+        // even across the dwell the path must stay Normal.
+        let two_samples = summary(2, 0);
+        for offset in [0u64, 1, 2, 5] {
+            let r = p.evaluate(Some(&two_samples), &th, t0 + Duration::from_secs(offset));
+            assert_eq!(r, None, "sub-floor sample_count must not degrade");
+        }
+        assert_eq!(p.state(), PathHealthState::Normal);
+
+        // 3 samples (at the floor) with above-trigger failure rate. Dwell
+        // starts on the first tick; degrade fires after the dwell elapses.
+        let three_samples = summary(3, 0);
+        assert_eq!(
+            p.evaluate(Some(&three_samples), &th, t0 + Duration::from_secs(10)),
+            None,
+        );
+        assert_eq!(
+            p.evaluate(Some(&three_samples), &th, t0 + Duration::from_secs(11)),
+            Some((PathHealthState::Normal, PathHealthState::Degraded)),
+        );
     }
 }
