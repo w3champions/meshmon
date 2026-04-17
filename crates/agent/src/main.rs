@@ -70,12 +70,8 @@ async fn async_main() -> Result<()> {
     // expose the raw gRPC channel, so this wiring lives here rather than
     // inside bootstrap.
     let refresh_trigger = std::sync::Arc::new(tokio::sync::Notify::new());
-    let tunnel_handle = meshmon_agent::tunnel::spawn(
-        api,
-        agent_id,
-        refresh_trigger.clone(),
-        cancel.clone(),
-    );
+    let tunnel_handle =
+        meshmon_agent::tunnel::spawn(api, agent_id, refresh_trigger.clone(), cancel.clone());
     runtime.attach_tunnel(refresh_trigger, tunnel_handle);
 
     // Run the refresh loop (blocks until cancellation).

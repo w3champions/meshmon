@@ -106,5 +106,5 @@ async fn run_one_session(
 mod tests {
     //! Full coverage of the tunnel task requires a live tonic server +
     //! yamux session; those paths are exercised by the integration tests
-    //! in `crates/service/tests/revtunnel_e2e.rs` (Task 15).
+    //! in `crates/service/tests/revtunnel_e2e.rs`.
 }

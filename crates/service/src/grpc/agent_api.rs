@@ -2,6 +2,7 @@
 
 use crate::ingestion::validator::{validate_metrics, validate_snapshot};
 use crate::state::AppState;
+use meshmon_protocol::TunnelFrame;
 use meshmon_protocol::{
     ip as proto_ip, AgentApi, ConfigResponse, GetConfigRequest, GetTargetsRequest, MetricsBatch,
     PushMetricsResponse, PushRouteSnapshotResponse, RegisterRequest, RegisterResponse,
@@ -11,7 +12,6 @@ use meshmon_protocol::{
     DiffDetection as PbDiffDetection, PathHealthThresholds as PbPathHealthThresholds,
     ProtocolThresholds as PbProtocolThresholds, RateEntry as PbRateEntry, Windows as PbWindows,
 };
-use meshmon_protocol::TunnelFrame;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
@@ -38,11 +38,7 @@ impl AgentApiImpl {
 #[tonic::async_trait]
 impl AgentApi for AgentApiImpl {
     type OpenTunnelStream = std::pin::Pin<
-        Box<
-            dyn tokio_stream::Stream<Item = Result<TunnelFrame, Status>>
-                + Send
-                + 'static,
-        >,
+        Box<dyn tokio_stream::Stream<Item = Result<TunnelFrame, Status>> + Send + 'static>,
     >;
 
     #[tracing::instrument(skip_all, fields(source_id = tracing::field::Empty))]
@@ -58,7 +54,9 @@ impl AgentApi for AgentApiImpl {
             .map(str::to_owned)
             .ok_or_else(|| Status::invalid_argument("x-meshmon-source-id metadata required"))?;
         if source_id.trim().is_empty() {
-            return Err(Status::invalid_argument("x-meshmon-source-id must not be empty"));
+            return Err(Status::invalid_argument(
+                "x-meshmon-source-id must not be empty",
+            ));
         }
         tracing::Span::current().record("source_id", tracing::field::display(&source_id));
 

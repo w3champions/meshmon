@@ -228,11 +228,7 @@ mod tests {
 
     fn build_with_write_capacity(
         cap: usize,
-    ) -> (
-        TestIo,
-        mpsc::Sender<Frame>,
-        mpsc::Receiver<Frame>,
-    ) {
+    ) -> (TestIo, mpsc::Sender<Frame>, mpsc::Receiver<Frame>) {
         let (incoming_tx, incoming_rx) = mpsc::channel::<Frame>(16);
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(cap);
         let io = TunnelIo::new(ReceiverStream::new(incoming_rx), outgoing_tx);
@@ -336,7 +332,10 @@ mod tests {
 
         // Hold briefly to assert the task is still pending.
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!writer.is_finished(), "second write should still be pending");
+        assert!(
+            !writer.is_finished(),
+            "second write should still be pending"
+        );
 
         // Drain one frame.
         let first = outgoing_rx.recv().await.expect("first frame").expect("ok");

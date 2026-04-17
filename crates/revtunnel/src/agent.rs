@@ -20,8 +20,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 use tonic::transport::server::Router;
+use tonic::transport::Channel;
 use tracing::{debug, warn};
 use yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode};
 
@@ -76,14 +76,12 @@ impl TunnelClient {
         // does not carry an interceptor, so we inject the `Authorization`
         // header here directly — matching the `BearerInterceptor` the service
         // expects on every incoming RPC.
-        let bearer_value = format!("Bearer {}", agent_token)
-            .parse()
-            .map_err(|_| {
-                TunnelError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "invalid agent_token characters",
-                ))
-            })?;
+        let bearer_value = format!("Bearer {}", agent_token).parse().map_err(|_| {
+            TunnelError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid agent_token characters",
+            ))
+        })?;
         request.metadata_mut().insert("authorization", bearer_value);
 
         // 2. Call OpenTunnel using the raw channel. Bearer auth is already

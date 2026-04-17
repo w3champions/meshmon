@@ -27,8 +27,8 @@ use meshmon_service::state::AppState;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Endpoint, Server};
@@ -145,7 +145,11 @@ async fn service_triggers_agent_refresh_via_tunnel() {
     let pool = shared_migrated_pool().await;
     let state = state_with_agent_token(pool.clone()).await;
     insert_agent(&pool, "e2e-agent").await;
-    state.registry.force_refresh().await.expect("registry force_refresh");
+    state
+        .registry
+        .force_refresh()
+        .await
+        .expect("registry force_refresh");
 
     // 2. Spawn the test service (real TcpListener).
     let shutdown_token = CancellationToken::new();
@@ -193,7 +197,11 @@ async fn agent_reconnects_after_tunnel_dropped() {
     let pool = shared_migrated_pool().await;
     let state = state_with_agent_token(pool.clone()).await;
     insert_agent(&pool, "e2e-reconnect").await;
-    state.registry.force_refresh().await.expect("registry force_refresh");
+    state
+        .registry
+        .force_refresh()
+        .await
+        .expect("registry force_refresh");
 
     let shutdown_token = CancellationToken::new();
     let addr = spawn_test_service(state.clone(), shutdown_token.clone()).await;
@@ -235,9 +243,8 @@ async fn agent_reconnects_after_tunnel_dropped() {
 
                 let rt = refresh_trigger.clone();
                 let router_factory = move || {
-                    Server::builder().add_service(AgentCommandServer::new(
-                        RefreshConfigImpl::new(rt.clone()),
-                    ))
+                    Server::builder()
+                        .add_service(AgentCommandServer::new(RefreshConfigImpl::new(rt.clone())))
                 };
                 // open_and_run returns when the session ends (either cleanly
                 // or with an error). We then loop immediately to reconnect.
@@ -326,7 +333,11 @@ async fn active_tunnel_ends_cleanly_on_graceful_shutdown() {
     let pool = shared_migrated_pool().await;
     let state = state_with_agent_token(pool.clone()).await;
     insert_agent(&pool, "e2e-shutdown").await;
-    state.registry.force_refresh().await.expect("registry force_refresh");
+    state
+        .registry
+        .force_refresh()
+        .await
+        .expect("registry force_refresh");
 
     let shutdown_token = CancellationToken::new();
     let addr = spawn_test_service(state.clone(), shutdown_token.clone()).await;

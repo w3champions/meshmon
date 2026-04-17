@@ -24,8 +24,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tokio_util::sync::CancellationToken;
-use tonic::Status;
 use tonic::transport::{Channel, Endpoint};
+use tonic::Status;
 use tracing::{debug, warn};
 use yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode};
 
@@ -108,17 +108,23 @@ impl TunnelManager {
                 let stream_req_tx = stream_req_tx.clone();
                 async move {
                     let (reply_tx, reply_rx) = oneshot::channel();
-                    stream_req_tx
-                        .send(reply_tx)
-                        .await
-                        .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe,
-                            "yamux driver has exited"))?;
+                    stream_req_tx.send(reply_tx).await.map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "yamux driver has exited",
+                        )
+                    })?;
                     let stream = reply_rx
                         .await
-                        .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe,
-                            "yamux driver dropped stream request"))?
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe,
-                            e.to_string()))?;
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "yamux driver dropped stream request",
+                            )
+                        })?
+                        .map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                        })?;
                     // yamux::Stream implements futures_io; bridge back to tokio-io
                     // with FuturesAsyncReadCompatExt, then wrap in TokioIo for hyper.
                     let tokio_io = stream.compat();
@@ -153,7 +159,10 @@ impl TunnelManager {
         // will observe UNAVAILABLE. Callers handle idempotently.
         {
             let mut map = self.tunnels.lock().unwrap_or_else(|p| p.into_inner());
-            let entry = TunnelEntry { channel, driver_cancel: effective.clone() };
+            let entry = TunnelEntry {
+                channel,
+                driver_cancel: effective.clone(),
+            };
             if map.insert(source_id.clone(), entry).is_some() {
                 debug!(source_id = %source_id, "replaced existing tunnel for source_id");
             }
@@ -237,10 +246,7 @@ impl TunnelManager {
 
     /// Current registered count (for tests / metrics parity checks).
     pub fn len(&self) -> usize {
-        self.tunnels
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .len()
+        self.tunnels.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Convenience for `len() == 0`.

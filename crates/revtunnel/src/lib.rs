@@ -14,7 +14,9 @@
 //!   runs yamux in server mode, hosts a tonic server over it.
 //! - [`TunnelManager`] — service side. Accepts `OpenTunnel` RPCs, runs
 //!   yamux in client mode per agent, exposes a `source_id → Channel`
-//!   registry the caller fans out native RPCs across.
+//!   registry the caller fans out native RPCs across. `close_all()`
+//!   cancels every per-driver token so active response streams EOF and
+//!   the HTTP/2 connection drain completes cleanly on shutdown.
 
 #![deny(rust_2018_idioms, unused_must_use)]
 #![warn(missing_docs)]

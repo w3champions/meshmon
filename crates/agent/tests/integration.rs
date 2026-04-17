@@ -125,11 +125,7 @@ impl AgentApi for MockAgentApiServer {
     }
 
     type OpenTunnelStream = std::pin::Pin<
-        Box<
-            dyn tokio_stream::Stream<Item = Result<TunnelFrame, Status>>
-                + Send
-                + 'static,
-        >,
+        Box<dyn tokio_stream::Stream<Item = Result<TunnelFrame, Status>> + Send + 'static>,
     >;
 
     async fn open_tunnel(
