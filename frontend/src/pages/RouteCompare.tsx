@@ -37,9 +37,10 @@ export default function RouteCompare() {
     return { older: snapB.data, newer: snapA.data, olderId: b, newerId: a };
   }, [snapA.data, snapB.data, aMs, bMs, a, b]);
 
-  // Until both snapshots load, pin aroundTimeMs to a single rendered-once
-  // sentinel so the nearby query key doesn't churn on every render. Once
-  // `ordered` is available, switch to the computed midpoint.
+  // Gate the nearby query until both snapshots resolve so the hook never
+  // fetches (or widens) around a placeholder `Date.now()` anchor. The
+  // placeholder `midpointMs` below is stable across renders via the ref so
+  // the queryKey doesn't churn even when the query is disabled.
   const fallbackMsRef = useRef<number>(Date.now());
   const midpointMs = ordered
     ? Math.round(
@@ -53,6 +54,7 @@ export default function RouteCompare() {
     target,
     protocol,
     aroundTimeMs: midpointMs,
+    enabled: !!ordered,
   });
 
   const navigateToPair = useCallback(

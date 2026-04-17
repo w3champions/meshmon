@@ -212,10 +212,12 @@ describe("RouteCompare (redesigned)", () => {
         <RouterProvider router={router} />
       </QueryClientProvider>,
     );
-    // Wait for the A stepper to populate with a concrete neighbor delta —
-    // that tells us `nearby` has finished loading and getNeighbors returns
-    // real snapshots, not an empty {}.
-    await screen.findByRole("button", { name: /step A .* later/i });
+    // Wait for nearby to load and populate a "step A … later" label on the
+    // mobile tier's stepper — that proves getNeighbors has real data.
+    await vi.waitFor(() => {
+      const btn = screen.queryByLabelText(/step A .* later/i);
+      expect(btn).not.toBeNull();
+    });
     // K steps the older (A card) forward. 101 → 105 is valid (105 < newerMs=09:14).
     await user.keyboard("k");
     // onNavA(105) should navigate to a=105, b=ordered.newerId=102.

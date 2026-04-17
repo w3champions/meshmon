@@ -116,6 +116,34 @@ describe("useNearbySnapshots", () => {
     expect(edge.next?.id).toBe(2);
   });
 
+  test("does not fetch or widen while enabled is false", async () => {
+    const calls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      calls.push(url);
+      return new Response(JSON.stringify(page([])), { status: 200 });
+    });
+    const aroundTimeMs = Date.UTC(2026, 3, 17, 9, 13, 0);
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        useNearbySnapshots({
+          source: "a",
+          target: "b",
+          protocol: "icmp",
+          aroundTimeMs,
+          enabled,
+        }),
+      { wrapper: wrap(), initialProps: { enabled: false } },
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.length).toBe(0);
+    expect(result.current.halfWindowMs).toBe(15 * 60 * 1_000);
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+  });
+
   test("widens the window when fewer than 3 neighbors exist on a side", async () => {
     const calls: { fromMs: number; toMs: number }[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

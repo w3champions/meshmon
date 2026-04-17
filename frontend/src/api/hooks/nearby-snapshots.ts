@@ -10,6 +10,14 @@ export interface UseNearbySnapshotsOpts {
   target: string;
   protocol: string;
   aroundTimeMs: number;
+  /**
+   * Gate the underlying query and the adaptive-widen effect. Pass false
+   * while the caller is still resolving the anchor timestamps so the hook
+   * doesn't fetch (and widen) around a placeholder `Date.now()` value.
+   * Defaults to true for backwards compatibility with callers that always
+   * have a real `aroundTimeMs`.
+   */
+  enabled?: boolean;
 }
 
 export interface NearbySnapshotsResult {
@@ -31,7 +39,7 @@ const MAX_HALF_WINDOW_MS = 24 * MS_HOUR;
 const NEIGHBORS_PER_SIDE_TARGET = 3;
 
 export function useNearbySnapshots(opts: UseNearbySnapshotsOpts): NearbySnapshotsResult {
-  const { source, target, protocol, aroundTimeMs } = opts;
+  const { source, target, protocol, aroundTimeMs, enabled = true } = opts;
   const [halfWindowMs, setHalfWindowMs] = useState(INITIAL_HALF_WINDOW_MS);
 
   // Reset widen state only when the (source, target, protocol) triple changes
@@ -48,6 +56,7 @@ export function useNearbySnapshots(opts: UseNearbySnapshotsOpts): NearbySnapshot
 
   const query = useQuery({
     queryKey: ["nearby-snapshots", source, target, protocol, fromIso, toIso],
+    enabled,
     queryFn: async () => {
       const { data, error } = await api.GET("/api/paths/{src}/{tgt}/routes", {
         params: {
@@ -67,8 +76,10 @@ export function useNearbySnapshots(opts: UseNearbySnapshotsOpts): NearbySnapshot
   }, [query.data]);
 
   // Adaptive widening: if either side of the anchor has fewer than N
-  // neighbors, double the window (capped).
+  // neighbors, double the window (capped). Skipped while `enabled` is
+  // false so we don't widen around a placeholder anchor.
   useEffect(() => {
+    if (!enabled) return;
     if (!query.data) return;
     if (halfWindowMs >= MAX_HALF_WINDOW_MS) return;
     const below = snapshots.filter((s) => Date.parse(s.observed_at) < aroundTimeMs).length;
@@ -77,7 +88,7 @@ export function useNearbySnapshots(opts: UseNearbySnapshotsOpts): NearbySnapshot
       const next = Math.min(halfWindowMs * 2, MAX_HALF_WINDOW_MS);
       if (next !== halfWindowMs) setHalfWindowMs(next);
     }
-  }, [query.data, snapshots, aroundTimeMs, halfWindowMs]);
+  }, [enabled, query.data, snapshots, aroundTimeMs, halfWindowMs]);
 
   const findClosest = useCallback(
     (targetMs: number): RouteSnapshotSummary | undefined => {
