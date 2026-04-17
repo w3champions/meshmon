@@ -58,23 +58,16 @@ export default function Report() {
     protocol,
   });
 
+  // `recent_snapshots` is already scoped to the server's resolved
+  // primary protocol (see T32), so the Report can pick BEFORE/AFTER
+  // directly off the newest-first list without an extra filter pass.
   const snapshots = overview.data?.recent_snapshots ?? [];
-  const primaryProto = overview.data?.primary_protocol ?? null;
-  // The Report is scoped to a single protocol per its header. Backend
-  // `recent_snapshots` is newest-first but unfiltered by protocol (see
-  // `path_overview.rs`), so when the window contains mixed protocols a
-  // naive first/last pick can pair AFTER and BEFORE from different
-  // protocols — a meaningless cross-family diff. Restrict the candidate
-  // pool to the primary protocol before selecting ids.
-  const protocolSnapshots = primaryProto
-    ? snapshots.filter((s) => s.protocol === primaryProto)
-    : [];
-  // AFTER is the newest protocol-matching entry; BEFORE is the earliest
-  // distinct-id entry. When only one distinct id exists, BEFORE falls
-  // back to AFTER and the summary flags `singleSnapshot` so operators
-  // see there's no diff to compare.
-  const afterId = protocolSnapshots[0]?.id;
-  const beforeId = [...protocolSnapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
+  // AFTER is the newest entry; BEFORE is the earliest distinct-id entry.
+  // When only one distinct id exists, BEFORE falls back to AFTER and
+  // the summary flags `singleSnapshot` so operators see there's no diff
+  // to compare.
+  const afterId = snapshots[0]?.id;
+  const beforeId = [...snapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
 
   const beforeQ = useRouteSnapshot({
     source: source_id,
