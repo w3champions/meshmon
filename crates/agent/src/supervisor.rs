@@ -17,7 +17,7 @@
 //! and resizes the primary protocol's rolling window on primary swings.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -247,21 +247,24 @@ async fn run(
     trippy_rate_tx: watch::Sender<TrippyRate>,
     last_state: Arc<Mutex<TargetSnapshot>>,
     mut route_tracker: RouteTracker,
-    // Held by the run loop; T7 wires the 60 s snapshot tick that actually
-    // pushes `RouteSnapshot`s onto this channel. The wiring through
-    // bootstrap + supervisor::spawn lands in T6 so T7 only has to add
-    // the tick itself.
+    // Drained by the 60 s snapshot tick below — each emit is a non-blocking
+    // `try_send`; a full channel or closed receiver is logged and dropped
+    // (snapshots are lossy by design).
     snapshot_tx: mpsc::Sender<RouteSnapshot>,
 ) {
-    // Silence the "unused until Task 7" warning without prefixing the
-    // binding, so the T7 patch touches only the tick it adds.
-    let _ = &snapshot_tx;
     tracing::info!(target_id = %target.id, "supervisor started");
 
     let mut tsm = TargetStateMachine::new();
 
     let mut eval_interval = tokio::time::interval(Duration::from_secs(10));
     eval_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // T15: separate 60 s cadence for route-snapshot builds. Independent
+    // of the eval tick because the diff thresholds themselves already
+    // gate emission — we do not need eager reset on config changes the
+    // way the rate-eval arm does.
+    let mut snapshot_interval = tokio::time::interval(Duration::from_secs(60));
+    snapshot_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -314,6 +317,28 @@ async fn run(
                     [&icmp_summary, &tcp_summary, &udp_summary],
                     now,
                 );
+
+                // T15: first-eval seeding — if the tracker has never been
+                // assigned a protocol, adopt the current primary. Only then
+                // does `primary_transition.is_some()` drive subsequent resets.
+                if route_tracker.protocol().is_none() {
+                    if let Some(p) = change.primary {
+                        tracing::info!(
+                            target_id = %target.id,
+                            protocol = ?p,
+                            "seeding route tracker with initial primary",
+                        );
+                        route_tracker.reset_for_protocol(Some(p));
+                    }
+                } else if change.primary_transition.is_some() {
+                    tracer_reset_primary(&mut route_tracker, change.primary);
+                }
+
+                // T15: keep the tracker window in sync with the primary
+                // window config. Cheap even if unchanged.
+                route_tracker.set_window(Duration::from_secs(
+                    config_snapshot.primary_window_sec as u64,
+                ));
 
                 // Resolve a `FastSummary` for a given protocol. Hoisted out of
                 // the primary-transition arm so the per-protocol, path, and
@@ -417,6 +442,43 @@ async fn run(
                     snap.udp_health = Some(health[2].1);
                     snap.primary = change.primary;
                     snap.path = change.path;
+                }
+            }
+            _ = snapshot_interval.tick() => {
+                let now = Instant::now();
+                let now_wall = SystemTime::now();
+                if let Some(snap) = route_tracker.build_snapshot(now, now_wall) {
+                    let should_emit = if route_tracker.last_reported().is_none() {
+                        true
+                    } else {
+                        let thresholds = config_rx.borrow().diff_detection();
+                        route_tracker.diff_against(&snap, &thresholds).is_some()
+                    };
+                    if should_emit {
+                        match snapshot_tx.try_send(snap.clone()) {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    target_id = %target.id,
+                                    protocol = ?snap.protocol,
+                                    hops = snap.hops.len(),
+                                    "route snapshot emitted",
+                                );
+                                route_tracker.set_last_reported(snap);
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    target_id = %target.id,
+                                    "route snapshot channel full; dropping",
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::info!(
+                                    target_id = %target.id,
+                                    "route snapshot channel closed; stopping emission path",
+                                );
+                            }
+                        }
+                    }
                 }
             }
             result = config_rx.changed() => {
@@ -543,6 +605,17 @@ fn feed_tracker(tracker: &mut RouteTracker, obs: &ProbeObservation, now: Instant
         return;
     }
     tracker.observe(hops, now);
+}
+
+/// Apply a primary-swing to the route tracker. Separated from the eval
+/// arm so the tracing call is reviewable in isolation.
+fn tracer_reset_primary(tracker: &mut RouteTracker, primary: Option<Protocol>) {
+    tracing::info!(
+        tracker_protocol_before = ?tracker.protocol(),
+        tracker_protocol_after = ?primary,
+        "route tracker reset on primary swing",
+    );
+    tracker.reset_for_protocol(primary);
 }
 
 // ---------------------------------------------------------------------------
