@@ -27,6 +27,7 @@ use crate::config::ProbeConfig;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
 use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
+use crate::route::{RouteSnapshot, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
 use meshmon_protocol::{Protocol, Target};
@@ -139,6 +140,7 @@ pub fn spawn(
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
     parent_cancel: CancellationToken,
+    snapshot_tx: mpsc::Sender<RouteSnapshot>,
 ) -> SupervisorHandle {
     let cancel = parent_cancel.child_token();
     let (observation_tx, observation_rx) = mpsc::channel::<ProbeObservation>(256);
@@ -147,6 +149,12 @@ pub fn spawn(
     // watches `config_rx` for live updates.
     let initial = config_rx.borrow().clone();
     let initial_window = Duration::from_secs(initial.diversity_window_sec as u64);
+    // Per-target route tracker. Sized at the primary window; the supervisor
+    // resizes it on config changes / primary swings in Task 7. Starts with
+    // `protocol = None` so it silently drops incoming hops until T14 elects
+    // a primary and the supervisor calls `reset_for_protocol`.
+    let initial_primary_window = Duration::from_secs(initial.primary_window_sec as u64);
+    let route_tracker = RouteTracker::new(initial_primary_window);
     // All three protocols start at the diversity window. The eval tick calls
     // `set_window` on whichever protocol it elects as primary.
     let stats: Arc<StatsArray> = Arc::new([
@@ -211,6 +219,8 @@ pub fn spawn(
         udp_rate_tx,
         trippy_rate_tx,
         task_last_state,
+        route_tracker,
+        snapshot_tx,
     ));
 
     SupervisorHandle {
@@ -236,7 +246,16 @@ async fn run(
     udp_rate_tx: watch::Sender<ProbeRate>,
     trippy_rate_tx: watch::Sender<TrippyRate>,
     last_state: Arc<Mutex<TargetSnapshot>>,
+    mut route_tracker: RouteTracker,
+    // Held by the run loop; T7 wires the 60 s snapshot tick that actually
+    // pushes `RouteSnapshot`s onto this channel. The wiring through
+    // bootstrap + supervisor::spawn lands in T6 so T7 only has to add
+    // the tick itself.
+    snapshot_tx: mpsc::Sender<RouteSnapshot>,
 ) {
+    // Silence the "unused until Task 7" warning without prefixing the
+    // binding, so the T7 patch touches only the tick it adds.
+    let _ = &snapshot_tx;
     tracing::info!(target_id = %target.id, "supervisor started");
 
     let mut tsm = TargetStateMachine::new();
@@ -252,7 +271,10 @@ async fn run(
             }
             maybe_obs = observation_rx.recv() => {
                 match maybe_obs {
-                    Some(obs) => route_observation(&stats, &obs).await,
+                    Some(obs) => {
+                        route_observation(&stats, &obs).await;
+                        feed_tracker(&mut route_tracker, &obs, Instant::now());
+                    }
                     None => {
                         // All probers dropped their senders — no more
                         // observations possible. Exit so we don't spin
@@ -420,9 +442,12 @@ async fn run(
     observation_rx.close();
     // Drain any final observations so they're accounted for in the stats
     // before the supervisor exits — useful for tests that race an
-    // observation send against shutdown.
+    // observation send against shutdown. The route tracker also receives
+    // these late observations so any T7 snapshot that fires during
+    // shutdown-adjacent activity sees a fully-populated accumulator.
     while let Ok(obs) = observation_rx.try_recv() {
         route_observation(&stats, &obs).await;
+        feed_tracker(&mut route_tracker, &obs, Instant::now());
     }
     tracing::info!(target_id = %target.id, "supervisor stopped");
 }
@@ -493,6 +518,33 @@ async fn route_observation(stats: &StatsArray, obs: &ProbeObservation) {
     stats[idx].lock().await.insert(obs, Instant::now());
 }
 
+/// If `obs` carries hop data and its protocol matches the tracker's
+/// current accumulation protocol, push the hops into the route tracker.
+/// Observations for non-tracked protocols, observations without hops,
+/// and observations received before the tracker has been assigned a
+/// protocol are silently ignored.
+fn feed_tracker(tracker: &mut RouteTracker, obs: &ProbeObservation, now: Instant) {
+    let Some(hops) = obs.hops.as_deref() else {
+        return;
+    };
+    if hops.is_empty() {
+        return;
+    }
+    let Some(tracked) = tracker.protocol() else {
+        return;
+    };
+    if obs.protocol != tracked {
+        tracing::trace!(
+            target_id = %obs.target_id,
+            obs_protocol = ?obs.protocol,
+            tracked = ?tracked,
+            "dropping hops for non-tracked protocol",
+        );
+        return;
+    }
+    tracker.observe(hops, now);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -514,6 +566,18 @@ mod tests {
             tcp_probe_port: 3555,
             udp_probe_port: 3552,
         }
+    }
+
+    /// Build a snapshot channel for use in supervisor tests. The receiver
+    /// is returned so the caller can bind it to a `_snapshot_rx` variable
+    /// whose lifetime matches the test body — dropping the receiver
+    /// closes the channel, which would cause `try_send` in the (future)
+    /// supervisor snapshot tick to fail.
+    fn test_snapshot_tx() -> (
+        tokio::sync::mpsc::Sender<crate::route::RouteSnapshot>,
+        tokio::sync::mpsc::Receiver<crate::route::RouteSnapshot>,
+    ) {
+        tokio::sync::mpsc::channel(8)
     }
 
     fn test_config() -> ProbeConfig {
@@ -542,6 +606,7 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
 
         let handle = spawn(
             test_target("test-1"),
@@ -549,6 +614,7 @@ mod tests {
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // Give the supervisor a moment to start.
@@ -649,12 +715,14 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("test-2"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         let obs = ProbeObservation {
@@ -698,12 +766,14 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("routed"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // Send one ICMP success and two TCP timeouts.
@@ -748,12 +818,14 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("refused"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // UDP Refused: dropped before insert → no sample contribution.
@@ -921,12 +993,14 @@ mod tests {
         let (config_tx, config_rx) = watch::channel(cfg);
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
 
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let handle = spawn(
             test_target("swing-test"),
             config_rx,
             pool,
             trippy,
             parent_cancel.clone(),
+            snapshot_tx,
         );
 
         // Yield so the supervisor task actually starts and registers its
