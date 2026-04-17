@@ -95,16 +95,21 @@ export default function RouteCompare() {
         if (target.isContentEditable) return;
       }
 
+      // Compare against the *ordered* (older/newer) timestamps so the guards
+      // stay correct when the URL provides `a` and `b` in reverse
+      // chronological order. A uses `ordered.older`; B uses `ordered.newer`.
+      const olderMs = Date.parse(ordered.older.observed_at);
+      const newerMs = Date.parse(ordered.newer.observed_at);
       const aNeighbors = nearby.getNeighbors(ordered.olderId);
       const bNeighbors = nearby.getNeighbors(ordered.newerId);
       // Mask step targets that would cross or equal the other marker so
       // keyboard shortcuts honour the same guard as the TimeRail ticks.
       const aNext =
-        aNeighbors.next && Date.parse(aNeighbors.next.observed_at) < bMs
+        aNeighbors.next && Date.parse(aNeighbors.next.observed_at) < newerMs
           ? aNeighbors.next
           : undefined;
       const bPrev =
-        bNeighbors.prev && Date.parse(bNeighbors.prev.observed_at) > aMs
+        bNeighbors.prev && Date.parse(bNeighbors.prev.observed_at) > olderMs
           ? bNeighbors.prev
           : undefined;
       switch (e.key) {
@@ -143,7 +148,7 @@ export default function RouteCompare() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [ordered, nearby, onNavA, onNavB, aMs, bMs]);
+  }, [ordered, nearby, onNavA, onNavB]);
 
   if (snapA.isLoading || snapB.isLoading) {
     return <Skeleton className="h-64 w-full" data-testid="route-compare-skeleton" />;

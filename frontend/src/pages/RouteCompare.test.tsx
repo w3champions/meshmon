@@ -171,6 +171,59 @@ describe("RouteCompare (redesigned)", () => {
     expect(router.state.location.search).toEqual(urlBefore);
   });
 
+  test("keyboard crossing guards use ordered timestamps on reversed URLs", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    // URL: a=102 (newer, 09:14), b=101 (older, 09:12). Chronologically reversed.
+    // ordered.older = 101, ordered.newer = 102.
+    // Pressing K steps the "A card" (older = 101) forward in time. With the
+    // pre-fix guard comparing against raw aMs=09:14, aNext=102 would be
+    // masked (102 < 09:14 is false), making K a no-op on reversed URLs.
+    // After the fix, aNext is checked against newerMs=09:14, and since 102
+    // is AT 09:14 (equal), it's still masked — which is correct (can't cross).
+    // But inserting id=105 at 09:13 between older and newer should be an
+    // allowed step. Let's verify that path.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/101")) {
+        return new Response(JSON.stringify(detail(101, "2026-04-17T09:12:00Z")));
+      }
+      if (url.endsWith("/102")) {
+        return new Response(JSON.stringify(detail(102, "2026-04-17T09:14:00Z")));
+      }
+      if (url.includes("/api/paths/fra-01/nyc-02/routes") && url.includes("from=")) {
+        return new Response(
+          JSON.stringify(
+            listRoutesResponse([
+              { id: 100, observed_at: "2026-04-17T09:10:00Z" },
+              { id: 101, observed_at: "2026-04-17T09:12:00Z" },
+              { id: 105, observed_at: "2026-04-17T09:13:00Z" },
+              { id: 102, observed_at: "2026-04-17T09:14:00Z" },
+              { id: 103, observed_at: "2026-04-17T09:16:00Z" },
+            ]),
+          ),
+        );
+      }
+      return new Response("nf", { status: 404 });
+    });
+    const { qc, router } = makeRouter("/paths/fra-01/nyc-02/routes/compare?a=102&b=101");
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    // Wait for the A stepper to populate with a concrete neighbor delta —
+    // that tells us `nearby` has finished loading and getNeighbors returns
+    // real snapshots, not an empty {}.
+    await screen.findByRole("button", { name: /step A .* later/i });
+    // K steps the older (A card) forward. 101 → 105 is valid (105 < newerMs=09:14).
+    await user.keyboard("k");
+    // onNavA(105) should navigate to a=105, b=ordered.newerId=102.
+    await vi.waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ a: 105, b: 102 });
+    });
+  });
+
   test("pressing G clicks the Jump trigger of the focused card (defaulting to A)", async () => {
     const { default: userEvent } = await import("@testing-library/user-event");
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
