@@ -67,6 +67,13 @@ export function GrafanaPanel({
       src={src}
       className={cn("h-56 w-full rounded border", className)}
       loading="lazy"
+      // Don't leak the full path + query (which includes agent IDs) to a
+      // cross-origin Grafana when the panel first loads.
+      referrerPolicy="no-referrer"
+      // Grafana's solo panel needs its own origin (for cookies/API calls) and
+      // script execution, but nothing else. Keep the sandbox tight so the
+      // embedded page can't navigate the top frame or spawn popups.
+      sandbox="allow-same-origin allow-scripts"
     />
   );
 }

@@ -335,7 +335,7 @@ fn vm_base(state: &AppState) -> Option<String> {
 
 /// Escape a value for safe interpolation inside a MetricsQL / PromQL label
 /// value quoted with double-quotes. Per Prometheus syntax the only special
-/// characters inside a double-quoted label value are `\`, `"`, and newline;
+/// characters inside a double-quoted label value are `\`, `"`, `\n`, `\r`;
 /// every other character (including single quotes, braces, spaces, unicode)
 /// rides through unchanged.
 ///
@@ -350,6 +350,7 @@ fn escape_label_value(v: &str) -> String {
             '\\' => out.push_str(r"\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
             _ => out.push(c),
         }
     }
@@ -719,6 +720,11 @@ mod tests {
     #[test]
     fn escape_label_value_escapes_newline() {
         assert_eq!(escape_label_value("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn escape_label_value_escapes_carriage_return() {
+        assert_eq!(escape_label_value("a\rb"), r"a\rb");
     }
 
     #[test]

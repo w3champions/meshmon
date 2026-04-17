@@ -58,8 +58,11 @@ export default function PathDetail() {
   });
   const [selectedHop, setSelectedHop] = useState<HopJson | null>(null);
 
-  // Auto-pick protocol rule — icmp > udp > tcp, matching the server's choice
-  // for the `(auto)` badge next to the toggle.
+  // Override-unaware auto-pick for the `(auto)` badge. The server's
+  // `primary_protocol` honours the `?protocol=` override, so asking the
+  // server would make the badge disappear whenever the user picks manually.
+  // Mirror the server rule (`icmp > udp > tcp` over `latest_by_protocol`)
+  // locally to keep the badge anchored to what the auto pick *would* be.
   const autoProtocol = useMemo<Protocol>(() => {
     const latest = overview.data?.latest_by_protocol;
     if (!latest) return "icmp";
