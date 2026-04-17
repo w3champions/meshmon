@@ -11,7 +11,13 @@ export default function RouteCompare() {
   // runtime route id differs. Zod `validateSearch` on `routeCompareRoute`
   // still runs in production, so the casts below are safe.
   const { source, target } = useParams({ strict: false }) as { source: string; target: string };
-  const { a, b } = useSearch({ strict: false }) as { a: number; b: number };
+  // Defense-in-depth: Zod's `z.coerce.number()` on `routeCompareRoute.validateSearch`
+  // coerces URL params in production, but if the schema is ever bypassed or a test
+  // mounts this component without `validateSearch`, we still want numeric values
+  // passed to `useRouteSnapshot`. `Number` is idempotent for already-numeric inputs.
+  const raw = useSearch({ strict: false }) as { a: number | string; b: number | string };
+  const a = Number(raw.a);
+  const b = Number(raw.b);
 
   const snapA = useRouteSnapshot({ source, target, id: a });
   const snapB = useRouteSnapshot({ source, target, id: b });
