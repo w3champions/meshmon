@@ -1048,10 +1048,17 @@ mod tests {
         // This replaces the weaker integration-test equivalent that never
         // injected observations and therefore never exercised batch flow.
         let api = Arc::new(RecordingApi::default());
+        // Back-date start_time so uptime_secs is a meaningful non-zero value
+        // on every batch — `tokio::time::pause()` freezes tokio's virtual
+        // clock but not the wall clock read inside `build_metrics_batch`,
+        // so `SystemTime::now()` still advances a few real milliseconds
+        // across the test. With a 10 s back-date every batch sees
+        // `uptime_secs >= 10`, letting the monotonic check meaningfully
+        // reject a regression that zeros out the value.
         let identity = EmitterIdentity {
             source_id: "src".into(),
             agent_version: "test".into(),
-            start_time: SystemTime::now(),
+            start_time: SystemTime::now() - Duration::from_secs(10),
         };
         let (mtx, mrx) = mpsc::channel::<PathMetricsMsg>(16);
         let (_stx, srx) = mpsc::channel(8);
@@ -1093,9 +1100,10 @@ mod tests {
         );
 
         // Every batch must carry the identity + exactly one path (we pushed
-        // one message per window), and uptime_secs must be monotonic across
-        // successive batches — a regression in the uptime calculation or
-        // start_time plumbing would break this cheaply.
+        // one message per window). `uptime_secs` must be monotonic across
+        // successive batches and at least the 10 s back-date — a regression
+        // in the uptime calculation or start_time plumbing would break this
+        // cheaply.
         let mut prev_uptime = 0u64;
         for (i, batch) in calls.iter().enumerate() {
             assert_eq!(batch.source_id, "src", "batch {i} source_id");
@@ -1107,6 +1115,11 @@ mod tests {
             assert_eq!(md.version, "test", "batch {i} version");
             assert_eq!(md.dropped_count, 0, "batch {i} dropped_count");
             assert_eq!(md.local_error_count, 0, "batch {i} local_error_count");
+            assert!(
+                md.uptime_secs >= 10,
+                "batch {i} uptime_secs {} must be at least the 10 s back-date",
+                md.uptime_secs,
+            );
             assert!(
                 md.uptime_secs >= prev_uptime,
                 "batch {i} uptime_secs {} must be monotonic (prev {prev_uptime})",
