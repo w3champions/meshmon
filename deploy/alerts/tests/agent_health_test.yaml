@@ -1,0 +1,39 @@
+# vmalert-tool unit tests for meshmon.agent_health group.
+#
+# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# block and automatically injects an `alertgroup` label equal to the group name.
+#
+# vmalert-tool uses a synthetic clock starting at epoch 0. With
+# `meshmon_agent_last_seen_seconds = 0`, `time() - 0 = time()` which
+# crosses the 300s threshold at eval_time 5m. With `for: 2m` the alert
+# arms from ~7m onward.
+#
+# The AgentOffline metric has only `source` — no target or protocol.
+# The `description` annotation renders via `printf "%.0f"` so at eval_time
+# 10m (600s), the value is "600" seconds.
+rule_files:
+  - ../rules.yaml
+
+evaluation_interval: 60s
+
+tests:
+  # --- AgentOffline fires when agent stops pushing ---------------------------
+  # Series flat at 0 simulates the last_seen timestamp frozen at epoch.
+  # At eval_time 10m (600s): time() - 0 = 600 > 300 ✓; for: 2m armed since 7m.
+  - interval: 60s
+    input_series:
+      - series: 'meshmon_agent_last_seen_seconds{source="a"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        groupname: meshmon.agent_health
+        alertname: AgentOffline
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.agent_health
+              severity: warning
+              category: agent
+              source: a
+            exp_annotations:
+              summary: 'Agent a has not reported in > 5 min'
+              description: 'Seconds since last push: 600'

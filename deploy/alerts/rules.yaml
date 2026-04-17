@@ -134,3 +134,39 @@ groups:
     annotations:
       summary: 'Path unreachable: {{ $labels.source }} → {{ $labels.target }}'
       description: 'Every probe protocol has sustained ≥ 99% loss over 5 min'
+
+- name: meshmon.route_changes
+  interval: 30s
+  rules:
+
+  # Route snapshot written for a path — spec 05 triggers an info-severity
+  # notification on counter increments. `for: 0m` fires immediately; AM
+  # grouping + repeat_interval controls noise, not `for`.
+  - alert: PathRouteChanged
+    expr: |
+      changes(meshmon_route_changes_total[10m]) > 0
+    for: 0m
+    labels:
+      severity: info
+      category: topology
+    annotations:
+      summary: 'Route changed: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Route snapshot(s) emitted in the last 10 min: {{ $value }}'
+
+- name: meshmon.agent_health
+  interval: 60s
+  rules:
+
+  # Agent stopped pushing updates to the service. meshmon-service emits
+  # meshmon_agent_last_seen_seconds{source} on every ingestion; when that
+  # timestamp stops advancing for 5+ min the agent is presumed offline.
+  - alert: AgentOffline
+    expr: |
+      time() - meshmon_agent_last_seen_seconds > 300
+    for: 2m
+    labels:
+      severity: warning
+      category: agent
+    annotations:
+      summary: 'Agent {{ $labels.source }} has not reported in > 5 min'
+      description: 'Seconds since last push: {{ $value | printf "%.0f" }}'
