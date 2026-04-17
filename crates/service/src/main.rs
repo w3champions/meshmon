@@ -302,6 +302,15 @@ async fn run() -> anyhow::Result<()> {
                 }
                 _ = graceful_token.cancelled() => {
                     graceful_state.mark_not_ready();
+                    // Signal tunnel drivers to exit BEFORE the HTTP drain
+                    // phase. `OpenTunnel` response streams are long-lived —
+                    // their per-connection tasks in `conn_set` won't EOF
+                    // until the driver drops its outbound sender. Closing
+                    // tunnels here lets those streams end cleanly and the
+                    // drain loop below observes the connection tasks
+                    // finishing within `shutdown_deadline`. The post-serve
+                    // `close_all()` call further down is idempotent.
+                    graceful_state.tunnel_manager.close_all();
                     info!(pending = conn_set.len(), "HTTP server draining");
                     break;
                 }
