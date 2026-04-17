@@ -1,0 +1,61 @@
+# meshmon alerting rules — evaluated by vmalert against VictoriaMetrics.
+#
+# Label contract for the /api/alerts proxy (see deploy/alerts/README.md):
+# every alert carries alertname, severity, category, source, target; plus
+# protocol where applicable. Rename or repurpose a `category` value only
+# as a semver-major change — the frontend alerts filter keys on it.
+#
+# Thresholds below are starting points from spec 05; retune against your
+# environment via git edits (history is the audit trail).
+
+groups:
+- name: meshmon.path_health
+  interval: 30s
+  rules:
+
+  # --- Packet loss (ICMP/UDP have per-packet loss semantics) ---------------
+  - alert: PathPacketLoss
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp"}[5m]) > 0.05
+    for: 2m
+    labels:
+      severity: warning
+      category: loss
+    annotations:
+      summary: 'Elevated packet loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Average {{ $labels.protocol }} loss over 5 min: {{ $value | humanizePercentage }}'
+
+  - alert: PathPacketLossCritical
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp"}[5m]) > 0.20
+    for: 1m
+    labels:
+      severity: critical
+      category: loss
+    annotations:
+      summary: 'Severe packet loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Average {{ $labels.protocol }} loss over 5 min: {{ $value | humanizePercentage }}'
+
+  # --- TCP connect-attempt failures (tighter threshold than ICMP/UDP) ------
+  - alert: PathTcpConnectFailures
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol="tcp"}[5m]) > 0.02
+    for: 2m
+    labels:
+      severity: warning
+      category: loss
+    annotations:
+      summary: 'Elevated TCP connect failures: {{ $labels.source }} → {{ $labels.target }}'
+      description: 'Average TCP connect-attempt failure rate over 5 min: {{ $value | humanizePercentage }}'
+
+  # --- Subtle but persistent loss (long window, very low threshold) --------
+  - alert: PathSubtlePersistentLoss
+    expr: |
+      avg_over_time(meshmon_path_failure_rate{protocol=~"icmp|udp"}[30m]) > 0.005
+    for: 15m
+    labels:
+      severity: info
+      category: loss
+    annotations:
+      summary: 'Persistent subtle loss: {{ $labels.source }} → {{ $labels.target }} ({{ $labels.protocol }})'
+      description: 'Average {{ $labels.protocol }} loss over 30 min: {{ $value | humanizePercentage }}'

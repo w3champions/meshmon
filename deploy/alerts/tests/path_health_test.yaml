@@ -1,0 +1,118 @@
+# vmalert-tool unit tests for meshmon.path_health group.
+# Series values use `N+0xM` shorthand meaning "value N, step 0, repeated M+1 times".
+#
+# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# block and automatically injects an `alertgroup` label equal to the group name.
+rule_files:
+  - ../rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --- PathPacketLoss warning fires after sustained >5% ICMP loss ----------
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="b",protocol="icmp"}'
+        values: '0+0x20 0.10+0x20'  # 10 min clean, then 10 min at 10% loss
+    alert_rule_test:
+      - eval_time: 15m
+        groupname: meshmon.path_health
+        alertname: PathPacketLoss
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.path_health
+              severity: warning
+              category: loss
+              source: a
+              target: b
+              protocol: icmp
+            exp_annotations:
+              summary: 'Elevated packet loss: a → b (icmp)'
+              description: 'Average icmp loss over 5 min: 10%'
+
+  # --- PathPacketLossCritical fires at >20% sustained loss ------------------
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="b",protocol="udp"}'
+        values: '0+0x10 0.30+0x20'  # 5 min clean, then 10 min at 30% loss
+    alert_rule_test:
+      - eval_time: 12m
+        groupname: meshmon.path_health
+        alertname: PathPacketLossCritical
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.path_health
+              severity: critical
+              category: loss
+              source: a
+              target: b
+              protocol: udp
+            exp_annotations:
+              summary: 'Severe packet loss: a → b (udp)'
+              description: 'Average udp loss over 5 min: 30%'
+
+  # --- PathPacketLossCritical does NOT fire at sub-critical loss -----------
+  # Guards against a future edit that accidentally drops the critical
+  # threshold below the warning threshold (they share the icmp|udp regex).
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="b",protocol="icmp"}'
+        values: '0+0x10 0.10+0x20'  # 10 min at 10% loss — above warning, below critical
+    alert_rule_test:
+      - eval_time: 15m
+        groupname: meshmon.path_health
+        alertname: PathPacketLossCritical
+        exp_alerts: []
+
+  # --- No ICMP rule fires for TCP (regex excludes it) -----------------------
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="b",protocol="tcp"}'
+        values: '0.10+0x40'  # 20 min at 10% TCP loss
+    alert_rule_test:
+      - eval_time: 15m
+        groupname: meshmon.path_health
+        alertname: PathPacketLoss
+        exp_alerts: []  # TCP is excluded from the icmp|udp regex
+
+  # --- PathTcpConnectFailures fires on tighter TCP threshold ----------------
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="b",protocol="tcp"}'
+        values: '0+0x10 0.05+0x20'  # 5 min clean, 10 min at 5% TCP failures
+    alert_rule_test:
+      - eval_time: 12m
+        groupname: meshmon.path_health
+        alertname: PathTcpConnectFailures
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.path_health
+              severity: warning
+              category: loss
+              source: a
+              target: b
+              protocol: tcp
+            exp_annotations:
+              summary: 'Elevated TCP connect failures: a → b'
+              description: 'Average TCP connect-attempt failure rate over 5 min: 5%'
+
+  # --- PathSubtlePersistentLoss fires on low sustained loss -----------------
+  - interval: 30s
+    input_series:
+      - series: 'meshmon_path_failure_rate{source="a",target="b",protocol="icmp"}'
+        values: '0.01+0x80'  # 40 min at 1% loss
+    alert_rule_test:
+      - eval_time: 35m
+        groupname: meshmon.path_health
+        alertname: PathSubtlePersistentLoss
+        exp_alerts:
+          - exp_labels:
+              alertgroup: meshmon.path_health
+              severity: info
+              category: loss
+              source: a
+              target: b
+              protocol: icmp
+            exp_annotations:
+              summary: 'Persistent subtle loss: a → b (icmp)'
+              description: 'Average icmp loss over 30 min: 1%'
