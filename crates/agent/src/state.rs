@@ -7,6 +7,13 @@
 //! not this module's — `evaluate` returns a [`StateChange`] describing what
 //! changed and the supervisor translates it into `watch::Sender::send`
 //! calls.
+//!
+//! The module-wide `allow(dead_code)` covers items that are exercised only
+//! by this file's unit tests until the supervisor wiring task in the T14
+//! plan hooks them into the live control loop. Reinstate the lint once
+//! the supervisor calls `TargetStateMachine::evaluate` on every eval tick.
+
+#![allow(dead_code)]
 
 use std::time::Duration;
 
@@ -23,17 +30,18 @@ use meshmon_protocol::{
 /// Prevents the empty-window → `failure_rate=0.0` → spurious
 /// `Unhealthy→Healthy` oscillation. Hard-coded rather than config-driven
 /// because it's a correctness floor, not a tunable.
-pub const MIN_TRANSITION_SAMPLES: u64 = 3;
+pub(crate) const MIN_TRANSITION_SAMPLES: u64 = 3;
 
 /// Per-protocol health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtoHealth {
+pub(crate) enum ProtoHealth {
     Healthy,
     Unhealthy,
 }
 
 impl ProtoHealth {
-    pub fn to_proto(self) -> PbProtocolHealth {
+    /// Consumed by T16 emitter scaffolding.
+    pub(crate) fn to_proto(self) -> PbProtocolHealth {
         match self {
             Self::Healthy => PbProtocolHealth::Healthy,
             Self::Unhealthy => PbProtocolHealth::Unhealthy,
@@ -43,7 +51,7 @@ impl ProtoHealth {
 
 /// Path-level derived health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PathHealthState {
+pub(crate) enum PathHealthState {
     #[default]
     Normal,
     Degraded,
@@ -51,7 +59,7 @@ pub enum PathHealthState {
 }
 
 impl PathHealthState {
-    pub fn to_proto(self) -> PbPathHealth {
+    pub(crate) fn to_proto(self) -> PbPathHealth {
         match self {
             Self::Normal => PbPathHealth::Normal,
             Self::Degraded => PbPathHealth::Degraded,
@@ -62,24 +70,24 @@ impl PathHealthState {
 
 /// Inputs a `RateEntry` lookup needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mode {
+pub(crate) struct Mode {
     /// `None` when all protocols are Unhealthy.
-    pub primary: Option<Protocol>,
-    pub path_health: PathHealthState,
+    pub(crate) primary: Option<Protocol>,
+    pub(crate) path_health: PathHealthState,
 }
 
 /// Rates published to the four prober watch channels on every eval tick.
 /// Zero values are legal (spec 02 — "never probe this cell"); the probers
 /// idle until a positive rate arrives.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RateTriple {
-    pub icmp_pps: f64,
-    pub tcp_pps: f64,
-    pub udp_pps: f64,
+pub(crate) struct RateTriple {
+    pub(crate) icmp_pps: f64,
+    pub(crate) tcp_pps: f64,
+    pub(crate) udp_pps: f64,
 }
 
 impl RateTriple {
-    pub const fn zero() -> Self {
+    pub(crate) const fn zero() -> Self {
         Self {
             icmp_pps: 0.0,
             tcp_pps: 0.0,
@@ -90,14 +98,14 @@ impl RateTriple {
 
 /// Per-protocol hysteresis state.
 #[derive(Debug)]
-pub struct ProtocolStateMachine {
-    pub protocol: Protocol,
+pub(crate) struct ProtocolStateMachine {
+    pub(crate) protocol: Protocol,
     state: ProtoHealth,
     condition_since: Option<Instant>,
 }
 
 impl ProtocolStateMachine {
-    pub fn new(protocol: Protocol) -> Self {
+    pub(crate) fn new(protocol: Protocol) -> Self {
         Self {
             protocol,
             state: ProtoHealth::Healthy,
@@ -105,11 +113,11 @@ impl ProtocolStateMachine {
         }
     }
 
-    pub fn state(&self) -> ProtoHealth {
+    pub(crate) fn state(&self) -> ProtoHealth {
         self.state
     }
 
-    pub fn evaluate(
+    pub(crate) fn evaluate(
         &mut self,
         stats: &FastSummary,
         thresholds: &ProtocolThresholds,
@@ -127,8 +135,7 @@ impl ProtocolStateMachine {
             }
             Some(target) => {
                 let since = *self.condition_since.get_or_insert(now);
-                let hysteresis =
-                    Duration::from_secs(hysteresis_sec(self.state, thresholds) as u64);
+                let hysteresis = Duration::from_secs(hysteresis_sec(self.state, thresholds) as u64);
                 if now.duration_since(since) >= hysteresis {
                     let from = self.state;
                     self.state = target;
@@ -171,24 +178,24 @@ fn hysteresis_sec(state: ProtoHealth, t: &ProtocolThresholds) -> u32 {
 
 /// Path-level state machine. Driven by the primary protocol's stats.
 #[derive(Debug)]
-pub struct PathStateMachine {
+pub(crate) struct PathStateMachine {
     state: PathHealthState,
     condition_since: Option<Instant>,
 }
 
 impl PathStateMachine {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: PathHealthState::Normal,
             condition_since: None,
         }
     }
 
-    pub fn state(&self) -> PathHealthState {
+    pub(crate) fn state(&self) -> PathHealthState {
         self.state
     }
 
-    pub fn evaluate(
+    pub(crate) fn evaluate(
         &mut self,
         primary_stats: Option<&FastSummary>,
         t: &PathHealthThresholds,
@@ -254,24 +261,24 @@ impl Default for PathStateMachine {
 
 /// One per-protocol transition event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProtocolTransition {
-    pub protocol: Protocol,
-    pub from: ProtoHealth,
-    pub to: ProtoHealth,
+pub(crate) struct ProtocolTransition {
+    pub(crate) protocol: Protocol,
+    pub(crate) from: ProtoHealth,
+    pub(crate) to: ProtoHealth,
 }
 
 /// Composite result of one `TargetStateMachine::evaluate` call.
 #[derive(Debug, Clone, PartialEq)]
-pub struct StateChange {
+pub(crate) struct StateChange {
     /// Per-protocol transitions that fired this tick.
-    pub protocol_transitions: Vec<ProtocolTransition>,
-    pub path: PathHealthState,
-    pub path_transition: Option<(PathHealthState, PathHealthState)>,
-    pub primary: Option<Protocol>,
-    pub primary_transition: Option<(Option<Protocol>, Option<Protocol>)>,
-    pub rates: RateTriple,
-    pub trippy_protocol: Protocol,
-    pub trippy_pps: f64,
+    pub(crate) protocol_transitions: Vec<ProtocolTransition>,
+    pub(crate) path: PathHealthState,
+    pub(crate) path_transition: Option<(PathHealthState, PathHealthState)>,
+    pub(crate) primary: Option<Protocol>,
+    pub(crate) primary_transition: Option<(Option<Protocol>, Option<Protocol>)>,
+    pub(crate) rates: RateTriple,
+    pub(crate) trippy_protocol: Protocol,
+    pub(crate) trippy_pps: f64,
 }
 
 /// Composed per-target state: three per-protocol machines + one path machine.
@@ -284,7 +291,7 @@ pub struct TargetStateMachine {
 }
 
 impl TargetStateMachine {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             icmp: ProtocolStateMachine::new(Protocol::Icmp),
             tcp: ProtocolStateMachine::new(Protocol::Tcp),
@@ -293,7 +300,7 @@ impl TargetStateMachine {
         }
     }
 
-    pub fn health_snapshot(&self) -> [(Protocol, ProtoHealth); 3] {
+    pub(crate) fn health_snapshot(&self) -> [(Protocol, ProtoHealth); 3] {
         [
             (Protocol::Icmp, self.icmp.state()),
             (Protocol::Tcp, self.tcp.state()),
@@ -301,11 +308,11 @@ impl TargetStateMachine {
         ]
     }
 
-    pub fn path_state(&self) -> PathHealthState {
+    pub(crate) fn path_state(&self) -> PathHealthState {
         self.path.state()
     }
 
-    pub fn evaluate(
+    pub(crate) fn evaluate(
         &mut self,
         config: &ProbeConfig,
         stats_by_protocol: [&FastSummary; 3],
@@ -350,7 +357,9 @@ impl TargetStateMachine {
             Protocol::Udp => Some(stats_by_protocol[2]),
             Protocol::Unspecified => None,
         });
-        let path_transition = self.path.evaluate(primary_stats, &config.path_thresholds(), now);
+        let path_transition = self
+            .path
+            .evaluate(primary_stats, &config.path_thresholds(), now);
         let path_state = self.path.state();
 
         let rates = rates_for_mode(
@@ -387,10 +396,10 @@ impl Default for TargetStateMachine {
 /// - `primary = Some(p)` → lookup `(p, path_health)`.
 /// - `primary = None` → lookup `(priority[0], Unreachable)`.
 /// - Lookup miss → `RateTriple::zero()` + WARN.
-pub fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
+pub(crate) fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
     let priority = config.priority_list();
     let (lookup_primary, lookup_health) = match mode.primary {
-        Some(p) => (p, path_to_proto(mode.path_health)),
+        Some(p) => (p, mode.path_health.to_proto()),
         None => (
             priority.first().copied().unwrap_or(Protocol::Icmp),
             PbPathHealth::Unreachable,
@@ -413,15 +422,7 @@ pub fn rates_for_mode(config: &ProbeConfig, mode: Mode) -> RateTriple {
     }
 }
 
-fn path_to_proto(state: PathHealthState) -> PbPathHealth {
-    match state {
-        PathHealthState::Normal => PbPathHealth::Normal,
-        PathHealthState::Degraded => PbPathHealth::Degraded,
-        PathHealthState::Unreachable => PbPathHealth::Unreachable,
-    }
-}
-
-pub fn select_primary(
+pub(crate) fn select_primary(
     priority: &[Protocol],
     healths: &[(Protocol, ProtoHealth)],
 ) -> Option<Protocol> {
@@ -435,7 +436,7 @@ pub fn select_primary(
     None
 }
 
-pub fn trippy_pps_for(protocol: Protocol, rates: RateTriple) -> f64 {
+pub(crate) fn trippy_pps_for(protocol: Protocol, rates: RateTriple) -> f64 {
     match protocol {
         Protocol::Icmp => rates.icmp_pps,
         Protocol::Tcp => rates.tcp_pps,
@@ -449,7 +450,7 @@ impl ProtocolStateMachine {
     /// Test-only: seed the machine into a specific state, skipping
     /// hysteresis. Used to set up Unhealthy starting states for recovery
     /// tests without simulating the full inbound transition path.
-    pub fn force_state_for_tests(&mut self, state: ProtoHealth) {
+    pub(crate) fn force_state_for_tests(&mut self, state: ProtoHealth) {
         self.state = state;
         self.condition_since = None;
     }
@@ -457,7 +458,7 @@ impl ProtocolStateMachine {
 
 #[cfg(test)]
 impl PathStateMachine {
-    pub fn force_state_for_tests(&mut self, state: PathHealthState) {
+    pub(crate) fn force_state_for_tests(&mut self, state: PathHealthState) {
         self.state = state;
         self.condition_since = None;
     }
@@ -731,11 +732,7 @@ mod tests {
         let t0 = Instant::now();
         let th = path_thresholds();
         for offset in [0u64, 60, 130, 200] {
-            let r = p.evaluate(
-                Some(&summary(10, 0)),
-                &th,
-                t0 + Duration::from_secs(offset),
-            );
+            let r = p.evaluate(Some(&summary(10, 0)), &th, t0 + Duration::from_secs(offset));
             assert_eq!(r, None);
         }
         assert_eq!(p.state(), PathHealthState::Normal);

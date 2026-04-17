@@ -201,17 +201,19 @@ impl AgentEnv {
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
     /// Raw proto response — downstream tasks extract what they need.
-    pub raw: meshmon_protocol::ConfigResponse,
+    pub(crate) raw: meshmon_protocol::ConfigResponse,
     /// Current UDP probe secret (exactly 8 bytes).
-    pub udp_probe_secret: [u8; 8],
+    pub(crate) udp_probe_secret: [u8; 8],
     /// Previous UDP probe secret during rotation; `None` when absent.
-    pub udp_probe_previous_secret: Option<[u8; 8]>,
+    pub(crate) udp_probe_previous_secret: Option<[u8; 8]>,
     /// Window size (seconds) used by `RollingStats` for the protocol
-    /// currently primary on a path. Spec 02 default: 300.
-    pub primary_window_sec: u32,
+    /// currently primary on a path. Spec 02 default: 300. Consumed by the
+    /// supervisor's primary-swing `set_window` call in a later T14 task.
+    #[allow(dead_code)]
+    pub(crate) primary_window_sec: u32,
     /// Window size (seconds) for non-primary (diversity) protocols.
     /// Spec 02 default: 900.
-    pub diversity_window_sec: u32,
+    pub(crate) diversity_window_sec: u32,
 }
 
 impl ProbeConfig {
@@ -694,7 +696,9 @@ mod tests {
             ..Default::default()
         };
         let cfg = ProbeConfig::from_proto(resp).unwrap();
-        assert!(cfg.rates_for(Protocol::Icmp, PbPathHealth::Normal).is_none());
+        assert!(cfg
+            .rates_for(Protocol::Icmp, PbPathHealth::Normal)
+            .is_none());
     }
 
     #[test]
