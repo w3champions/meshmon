@@ -373,6 +373,89 @@ describe("Report page", () => {
     expect(screen.getAllByText(/2026-04-13 10:00 UTC/).length).toBeGreaterThan(0);
   });
 
+  it("shows a destructive summary message when a snapshot fetch fails", async () => {
+    // When BEFORE or AFTER snapshot fetches error out, `summary` stays
+    // null — but so does the loading state, meaning the naive
+    // `summary ? <ul> : <p>Computing…</p>` branch leaves the UI stuck
+    // on "Computing…" forever. The Summary section must mirror the
+    // BEFORE/AFTER error handling and surface an explicit destructive
+    // message instead.
+    const afterSnap = {
+      id: 2,
+      source_id: "br",
+      target_id: "fr",
+      protocol: "icmp",
+      observed_at: "2026-04-13T13:30:00Z",
+      path_summary: null,
+      hops: [
+        {
+          position: 1,
+          avg_rtt_micros: 2000,
+          loss_pct: 0,
+          stddev_rtt_micros: 0,
+          observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
+        },
+      ],
+    };
+
+    installFetchMock([
+      {
+        url: /\/api\/web-config$/,
+        status: 200,
+        body: { username: "u", version: "v", grafana_dashboards: {} },
+      },
+      {
+        url: /\/api\/paths\/.*\/overview/,
+        status: 200,
+        body: {
+          source: {
+            id: "br",
+            display_name: "BR",
+            ip: "1.1.1.1",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          target: {
+            id: "fr",
+            display_name: "FR",
+            ip: "2.2.2.2",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          window: {
+            from: "2026-04-13T10:00:00Z",
+            to: "2026-04-13T14:00:00Z",
+          },
+          primary_protocol: "icmp",
+          latest_by_protocol: { icmp: afterSnap, tcp: null, udp: null },
+          recent_snapshots: [
+            { id: 2, observed_at: afterSnap.observed_at, protocol: "icmp", path_summary: null },
+            {
+              id: 1,
+              observed_at: "2026-04-13T10:00:00Z",
+              protocol: "icmp",
+              path_summary: null,
+            },
+          ],
+          recent_snapshots_truncated: false,
+          metrics: null,
+          step: "1m",
+        },
+      },
+      // BEFORE snapshot fetch fails.
+      { url: /\/api\/paths\/.*\/routes\/1$/, status: 500, body: { error: "boom" } },
+      { url: /\/api\/paths\/.*\/routes\/2$/, status: 200, body: afterSnap },
+    ]);
+
+    renderReport(defaultSearch);
+
+    // Wait for sections to mount.
+    await screen.findByText("1.1.1.1");
+    // Summary must surface the snapshot error, not a perpetual "Computing…".
+    await screen.findByText(/summary unavailable.*snapshot fetch failed/i);
+    expect(screen.queryByText(/^computing…$/i)).not.toBeInTheDocument();
+  });
+
   it("shows an explicit error when a route-snapshot fetch fails", async () => {
     const afterSnap = {
       id: 2,

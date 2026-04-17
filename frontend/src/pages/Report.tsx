@@ -207,6 +207,13 @@ export default function Report() {
                   </li>
                 )}
               </ul>
+            ) : beforeQ.isError || afterQ.isError ? (
+              // `summary` stays null on snapshot errors too, so without this
+              // branch the "Computing…" copy would linger forever. Mirror the
+              // destructive styling used by the BEFORE/AFTER sections.
+              <p className="text-sm text-destructive">
+                Summary unavailable — snapshot fetch failed.
+              </p>
             ) : (
               <p className="text-sm text-muted-foreground">Computing…</p>
             )}
