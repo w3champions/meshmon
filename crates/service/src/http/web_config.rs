@@ -12,6 +12,11 @@
 //! `[web.grafana_dashboards]` map. When `[web]` is omitted entirely the
 //! endpoint reports an unconfigured Grafana (omits the URL, empty map) so
 //! the frontend can fall back gracefully.
+//!
+//! `alertmanager_base_url` comes from `[upstream]` — the same URL the
+//! alerts-proxy uses upstream — and lets the frontend build deep links
+//! into the Alertmanager UI for individual alerts. Absent when
+//! Alertmanager is not configured.
 
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
@@ -43,6 +48,11 @@ pub struct WebConfigResponse {
     /// Map of logical dashboard name → Grafana dashboard UID. Empty
     /// when Grafana integration is not configured.
     pub grafana_dashboards: HashMap<String, String>,
+    /// Alertmanager base URL for constructing "view in Alertmanager"
+    /// deep links (e.g., `https://alertmanager.example/`). `None` when
+    /// Alertmanager is not configured — omitted from the JSON body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alertmanager_base_url: Option<String>,
 }
 
 /// `GET /api/web-config` — return the frontend runtime config.
@@ -80,5 +90,6 @@ pub async fn web_config(
         username,
         grafana_base_url: cfg.web.grafana_base_url.clone(),
         grafana_dashboards: cfg.web.grafana_dashboards.clone(),
+        alertmanager_base_url: cfg.upstream.alertmanager_url.clone(),
     })
 }
