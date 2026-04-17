@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema.gen";
 
@@ -79,37 +79,44 @@ export function useNearbySnapshots(opts: UseNearbySnapshotsOpts): NearbySnapshot
     }
   }, [query.data, snapshots, aroundTimeMs, halfWindowMs]);
 
-  const findClosest = (targetMs: number): RouteSnapshotSummary | undefined => {
-    if (snapshots.length === 0) return undefined;
-    let best = snapshots[0];
-    let bestDelta = Math.abs(Date.parse(best.observed_at) - targetMs);
-    for (const s of snapshots) {
-      const d = Math.abs(Date.parse(s.observed_at) - targetMs);
-      if (d < bestDelta) {
-        best = s;
-        bestDelta = d;
+  const findClosest = useCallback(
+    (targetMs: number): RouteSnapshotSummary | undefined => {
+      if (snapshots.length === 0) return undefined;
+      let best = snapshots[0];
+      let bestDelta = Math.abs(Date.parse(best.observed_at) - targetMs);
+      for (const s of snapshots) {
+        const d = Math.abs(Date.parse(s.observed_at) - targetMs);
+        if (d < bestDelta) {
+          best = s;
+          bestDelta = d;
+        }
       }
-    }
-    return best;
-  };
+      return best;
+    },
+    [snapshots],
+  );
 
-  const getNeighbors = (
-    currentId: number,
-  ): { prev?: RouteSnapshotSummary; next?: RouteSnapshotSummary } => {
-    const idx = snapshots.findIndex((s) => s.id === currentId);
-    if (idx < 0) return {};
-    return {
-      prev: idx > 0 ? snapshots[idx - 1] : undefined,
-      next: idx < snapshots.length - 1 ? snapshots[idx + 1] : undefined,
-    };
-  };
+  const getNeighbors = useCallback(
+    (currentId: number): { prev?: RouteSnapshotSummary; next?: RouteSnapshotSummary } => {
+      const idx = snapshots.findIndex((s) => s.id === currentId);
+      if (idx < 0) return {};
+      return {
+        prev: idx > 0 ? snapshots[idx - 1] : undefined,
+        next: idx < snapshots.length - 1 ? snapshots[idx + 1] : undefined,
+      };
+    },
+    [snapshots],
+  );
 
-  return {
-    snapshots,
-    halfWindowMs,
-    findClosest,
-    getNeighbors,
-    isLoading: query.isLoading,
-    isError: query.isError,
-  };
+  return useMemo(
+    () => ({
+      snapshots,
+      halfWindowMs,
+      findClosest,
+      getNeighbors,
+      isLoading: query.isLoading,
+      isError: query.isError,
+    }),
+    [snapshots, halfWindowMs, findClosest, getNeighbors, query.isLoading, query.isError],
+  );
 }
