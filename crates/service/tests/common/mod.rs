@@ -386,6 +386,35 @@ pub fn dummy_registry(
 /// exact bytes don't matter for these tests because no probing is exercised.
 pub const TEST_UDP_PROBE_SECRET_TOML: &str = "hex:0011223344556677";
 
+/// Construct an `AppState` with the minimum valid config (no auth users,
+/// no `[service]` section). Used by tests that exercise unauthenticated
+/// or transport-level routes (health, SPA static files) where user setup
+/// is irrelevant.
+pub async fn state_minimal(pool: PgPool) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@localhost/nope"
+
+[probing]
+udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let ingestion = dummy_ingestion(pool.clone());
+    let registry = dummy_registry(pool.clone());
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
+}
+
 /// Construct an `AppState` with a single `admin` user whose password is
 /// [`AUTH_TEST_PASSWORD`]. Uses `trust_forwarded_headers = true` so tests can
 /// set a stable client IP via `X-Forwarded-For` without needing to inject a

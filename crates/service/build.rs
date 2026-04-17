@@ -37,6 +37,11 @@ fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // Workspace root is two levels above the crate (`crates/service/`).
     let workspace_root = manifest_dir.join("../../");
+    prepare_frontend_dist(&workspace_root);
+    // Emits `cargo::rerun-if-changed=<canonical dist path>` and writes
+    // the manifest `OUT_DIR/memory_serve_assets.rs` consumed by the
+    // `memory_serve::load!()` macro inside the service crate.
+    memory_serve::load_directory(workspace_root.join("frontend/dist"));
     let workspace_git = workspace_root.join(".git");
     let git_resolvable = emit_git_rerun_hints(&workspace_git);
 
@@ -139,4 +144,75 @@ fn resolve_shared_refs_heads(admin_dir: &Path) -> PathBuf {
         }
     }
     admin_dir.join("refs/heads")
+}
+
+/// Ensure `frontend/dist/` is populated enough for `memory_serve::
+/// load_directory` to succeed.
+///
+/// `memory-serve` panics if the asset directory or the configured index
+/// file is missing. We therefore:
+///
+/// 1. Create the directory if absent.
+/// 2. Synthesize a minimal placeholder `index.html` when one doesn't
+///    already exist so backend-only dev flows (`cargo check`, `cargo
+///    test`) run without installing Node.js.
+/// 3. Always seed a tiny hashed-name fixture under `assets/`. The
+///    integration test in `tests/static_files.rs` relies on it to
+///    exercise the immutable-cache + ETag code path independently of
+///    whether `npm run build` has run. Harmless in release binaries
+///    (~40 bytes).
+///
+/// Real deployments run `cd frontend && npm ci && npm run build`
+/// before `cargo build --release`, which populates `frontend/dist/`
+/// with the Vite output; the placeholder then gets overwritten by the
+/// real `index.html`, and the fixture sits alongside Vite's own
+/// hashed files.
+fn prepare_frontend_dist(workspace_root: &Path) {
+    let dist = workspace_root.join("frontend/dist");
+
+    if let Err(err) = fs::create_dir_all(&dist) {
+        println!(
+            "cargo:warning=meshmon-service: failed to create {}: {err}",
+            dist.display()
+        );
+        return;
+    }
+
+    // Test fixture: stable contents → stable ETag across runs.
+    let fixture = dist.join("assets/meshmon-test-fixture-abcdef12.js");
+    if let Some(parent) = fixture.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if !fixture.is_file() {
+        if let Err(err) = fs::write(&fixture, b"// meshmon static-files test fixture\n") {
+            println!(
+                "cargo:warning=meshmon-service: failed to write fixture {}: {err}",
+                fixture.display()
+            );
+        }
+    }
+
+    // Only synthesize a placeholder index.html when one is missing; a
+    // real `npm run build` output must never be clobbered.
+    let index = dist.join("index.html");
+    if index.is_file() {
+        return;
+    }
+
+    let placeholder = "<!doctype html>\n\
+         <html lang=\"en\">\n\
+         <head><meta charset=\"utf-8\"><title>meshmon</title></head>\n\
+         <body><main style=\"font-family:system-ui;padding:2rem;max-width:40rem;margin:auto\">\n\
+         <h1>meshmon frontend not built</h1>\n\
+         <p>This service binary was compiled without a built frontend. \
+         Run <code>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</code> \
+         and rebuild the service with <code>cargo build --release</code>.</p>\n\
+         </main></body></html>\n";
+
+    if let Err(err) = fs::write(&index, placeholder) {
+        println!(
+            "cargo:warning=meshmon-service: failed to write placeholder {}: {err}",
+            index.display()
+        );
+    }
 }

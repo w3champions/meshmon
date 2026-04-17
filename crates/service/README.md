@@ -2,6 +2,49 @@
 
 The HTTP service half of meshmon. Receives agent pushes, persists them to VictoriaMetrics + Postgres, exposes operator-facing APIs, and serves the embedded React SPA.
 
+## Embedded frontend
+
+The release binary embeds `frontend/dist/` via the
+[`memory-serve`](https://crates.io/crates/memory-serve) crate:
+
+- `/`, `/index.html`, and any non-backend path serve the SPA's
+  `index.html` with `Cache-Control: no-cache, no-store, must-revalidate`
+  so deploys take effect on next navigation.
+- Hashed asset paths (e.g. `/assets/index-<hash>.js`) get
+  `Cache-Control: max-age=31536000, immutable`, an ETag, and — where the
+  client accepts it — a pre-compressed brotli or gzip body baked into the
+  binary at build time.
+- Any `/api/*` path that isn't a registered handler returns **404** via a
+  guard route, so the SPA fallback cannot shadow genuine backend misses.
+  `/healthz`, `/readyz`, and `/metrics` are exact routes and are likewise
+  safe.
+
+### Dev mode vs release mode
+
+In debug builds (`cargo run`, `cargo test`), `memory-serve` reads assets
+from disk at request time — edit the frontend, rerun `npm run build`,
+and the new assets are served without rebuilding the Rust binary.
+
+In release builds (`cargo build --release`), assets are embedded and
+pre-compressed into the binary.
+
+### Building a release binary with the real frontend
+
+```bash
+# One-shot helper:
+./scripts/build-release.sh
+
+# …or manually:
+cd frontend && npm ci && npm run build && cd ..
+cargo build --release -p meshmon-service
+```
+
+Without a prior `npm run build`, `crates/service/build.rs` seeds a
+minimal `frontend/dist/index.html` placeholder so `cargo check` /
+`cargo test` run without Node.js. CI's `release-binary` job runs the
+frontend build first, then the release `cargo build`, then uploads the
+resulting binary as an artifact.
+
 ## Layout
 
 - `src/main.rs` — binary entry: config load, DB connect, listener bind, ingestion spawn, graceful shutdown.
