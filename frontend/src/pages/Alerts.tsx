@@ -16,6 +16,7 @@ import {
   type AlertFilter,
   defaultAlertFilter,
   filterAlerts,
+  type ProtocolFilter,
   type Severity,
   uniqueCategories,
 } from "@/lib/alerts-filter";
@@ -82,6 +83,23 @@ export default function Alerts() {
                   {c}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="filter-protocol">Protocol</Label>
+          <Select
+            value={filter.protocol}
+            onValueChange={(v) => setFilter({ ...filter, protocol: v as ProtocolFilter })}
+          >
+            <SelectTrigger id="filter-protocol" aria-label="Protocol" className="w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="icmp">ICMP</SelectItem>
+              <SelectItem value="udp">UDP</SelectItem>
+              <SelectItem value="tcp">TCP</SelectItem>
             </SelectContent>
           </Select>
         </div>
