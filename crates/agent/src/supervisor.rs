@@ -3,15 +3,18 @@
 //! Each active target gets its own supervisor spawned as a tokio task. The
 //! supervisor owns:
 //!
-//! * An `mpsc` channel that prober tasks (T12) send [`ProbeObservation`]s into.
+//! * An `mpsc` channel that probers send [`ProbeObservation`]s into; observations
+//!   are routed by [`Protocol`] into the matching per-protocol `RollingStats` slot.
 //! * A `watch` receiver carrying the latest [`ProbeConfig`] from the service.
 //! * A [`CancellationToken`] derived from the parent token so that global
-//!   shutdown propagates automatically.
+//!   shutdown propagates automatically down to every prober.
 //! * Four `watch` senders (ICMP rate, TCP rate, UDP rate, Trippy rate) that
-//!   drive the four probers spawned once per target.
+//!   drive the four probers, which are spawned once per target and reconfigured
+//!   via the watch channels — never respawned.
 //!
-//! The eval tick (10 s) snapshots per-protocol stats, runs the state machine,
-//! publishes new rates, and resizes windows on primary swings.
+//! Every 10 s the eval tick snapshots per-protocol stats, runs
+//! [`TargetStateMachine::evaluate`], publishes new rates via the watch senders,
+//! and resizes the primary protocol's rolling window on primary swings.
 
 use std::sync::Arc;
 use std::time::Duration;
