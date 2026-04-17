@@ -160,13 +160,18 @@ pub fn router(state: AppState) -> Router {
         .fallback_status(axum::http::StatusCode::OK)
         .into_router();
 
-    // Unknown `/api/*` paths must return a clean 404 rather than falling
-    // through to the SPA; otherwise TanStack Query can't distinguish a
-    // real API error from an HTML error page. `/metrics`, `/healthz`,
-    // `/readyz` are exact-match routes already registered above, so they
-    // can't be hijacked by the SPA fallback either.
-    async fn backend_path_404() -> axum::http::StatusCode {
-        axum::http::StatusCode::NOT_FOUND
+    // Unknown `/api` and `/api/*` paths must return a clean JSON 404
+    // rather than falling through to the SPA; otherwise TanStack Query
+    // can't distinguish a real API error from an HTML error page. Both
+    // the bare `/api` and the wildcard are registered — matchit treats
+    // them as distinct paths. `/metrics`, `/healthz`, `/readyz` are
+    // exact-match routes already registered above, so they can't be
+    // hijacked by the SPA fallback either.
+    async fn backend_path_404() -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "not_found" })),
+        )
     }
 
     // Layer order (inside → out): auth_layer wraps the routes first so
@@ -180,6 +185,7 @@ pub fn router(state: AppState) -> Router {
         .merge(logout_router)
         .merge(grpc_router)
         .merge(api_protected)
+        .route("/api", axum::routing::any(backend_path_404))
         .route("/api/{*rest}", axum::routing::any(backend_path_404))
         .layer(auth_layer)
         .layer(prom_layer)

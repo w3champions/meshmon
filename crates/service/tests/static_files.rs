@@ -59,26 +59,32 @@ async fn unknown_api_route_returns_404_not_spa_html() {
     let state = common::state_minimal(pool).await;
     let app = meshmon_service::http::router(state);
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/this-endpoint-does-not-exist")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // Both the bare `/api` and nested `/api/<x>` must be guarded — a
+    // bare `/api` regressed to 200 HTML once during development when
+    // only the wildcard was registered.
+    for uri in ["/api", "/api/this-endpoint-does-not-exist"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let ct = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .map(|v| v.to_str().unwrap().to_owned())
-        .unwrap_or_default();
-    assert!(
-        !ct.starts_with("text/html"),
-        "SPA fallback hijacked /api path; content-type was {ct:?}"
-    );
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri={uri}");
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        assert!(
+            ct.starts_with("application/json"),
+            "uri={uri}: expected JSON 404, content-type was {ct:?}"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4 * 1024)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "not_found", "uri={uri} body={parsed}");
+    }
 }
 
 #[tokio::test]
