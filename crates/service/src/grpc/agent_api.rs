@@ -12,7 +12,61 @@ use meshmon_protocol::{
     DiffDetection as PbDiffDetection, PathHealthThresholds as PbPathHealthThresholds,
     ProtocolThresholds as PbProtocolThresholds, RateEntry as PbRateEntry, Windows as PbWindows,
 };
+use std::net::IpAddr;
 use tonic::{Request, Response, Status};
+
+/// Resolve the caller's client IP from a tonic request.
+///
+/// `tonic::Request::remote_addr()` only knows `TcpConnectInfo`. The
+/// in-process test harness inserts a bare `SocketAddr` directly (via
+/// the `Connected` impl on `StreamWithPeer`), and production inserts
+/// `axum::extract::ConnectInfo<SocketAddr>`. We try all three.
+///
+/// When `trust_forwarded` is `true`, an `X-Forwarded-For` or RFC 7239
+/// `Forwarded` metadata header takes precedence over the raw peer
+/// address — mirroring the behaviour of REST routes so that operators
+/// who terminate TLS at a trusted proxy see a consistent client IP
+/// across gRPC and HTTP. The caller is responsible for only enabling
+/// the flag when the proxy is actually trusted.
+fn resolve_peer_ip<T>(request: &Request<T>, trust_forwarded: bool) -> Option<IpAddr> {
+    let from_transport = || -> Option<IpAddr> {
+        // 1. tonic native (TcpConnectInfo — real TcpListener)
+        request
+            .remote_addr()
+            // 2. bare SocketAddr (in-process StreamWithPeer harness)
+            .or_else(|| request.extensions().get::<std::net::SocketAddr>().copied())
+            // 3. axum ConnectInfo (production hyper integration path)
+            .or_else(|| {
+                request
+                    .extensions()
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|ci| ci.0)
+            })
+            .map(|a| a.ip())
+    };
+
+    if trust_forwarded {
+        // Check metadata first (proxies inject XFF or RFC 7239
+        // `Forwarded`); fall back to the raw peer addr from the
+        // transport. Shared helpers keep gRPC and REST in sync on
+        // which header shapes they honor.
+        request
+            .metadata()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::http::auth::parse_xff_client_ip)
+            .or_else(|| {
+                request
+                    .metadata()
+                    .get("forwarded")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(crate::http::auth::parse_forwarded_client_ip)
+            })
+            .or_else(from_transport)
+    } else {
+        from_transport()
+    }
+}
 
 /// Concrete implementation of the `AgentApi` tonic service.
 ///
@@ -59,14 +113,44 @@ impl AgentApi for AgentApiImpl {
         }
         tracing::Span::current().record("source_id", tracing::field::display(&source_id));
 
-        // 2. Validate against the live registry — unknown agents are rejected.
-        // (Bearer auth already gated the RPC upstream; this header is
-        // identification, not authorization.)
-        if self.state.registry.snapshot().get(&source_id).is_none() {
-            return Err(Status::permission_denied("unknown source agent"));
+        // 2. Resolve the caller's peer IP. Bearer auth gated the RPC
+        // upstream, but the shared-token model means any authenticated
+        // agent could otherwise pass another agent's id in the
+        // `x-meshmon-source-id` header and hijack that agent's tunnel
+        // slot (`TunnelManager::accept` replaces the existing entry
+        // and cancels its driver, severing the legitimate connection).
+        // This handler binds the caller's peer IP to the IP registered
+        // for `source_id`, mirroring `register`. When
+        // `trust_forwarded_headers` is set, a proxy-supplied
+        // `X-Forwarded-For` or RFC 7239 `Forwarded` header overrides
+        // the raw transport peer — the operator is responsible for
+        // only enabling that flag in front of trusted proxies.
+        let trust_forwarded = self.state.config().service.trust_forwarded_headers;
+        let peer_ip = resolve_peer_ip(&request, trust_forwarded)
+            .ok_or_else(|| Status::invalid_argument("no client IP on request"))?;
+
+        // 3. Validate against the live registry — unknown agents are
+        // rejected, and the caller's peer IP must match the IP
+        // registered for `source_id` (loopback exempt, mirroring
+        // `register`'s loopback behaviour for developer-loop flows).
+        let registered_ip = {
+            let snap = self.state.registry.snapshot();
+            let agent = snap
+                .get(&source_id)
+                .ok_or_else(|| Status::permission_denied("unknown source agent"))?;
+            agent.ip.ip()
+        };
+        if !peer_ip.is_loopback() && peer_ip != registered_ip {
+            tracing::warn!(
+                %peer_ip, %registered_ip, source_id = %source_id,
+                "open_tunnel: source agent IP does not match connection IP",
+            );
+            return Err(Status::permission_denied(
+                "source agent IP does not match connection IP",
+            ));
         }
 
-        // 3. Hand the inbound stream off to the tunnel manager. Its detached
+        // 4. Hand the inbound stream off to the tunnel manager. Its detached
         // driver task calls `unregister` on session end. Tear-down is driven
         // by the manager's per-entry cancel token (fired by `close_all()` or
         // a same-source reconnect) — no outer cancel is needed here.
@@ -89,47 +173,12 @@ impl AgentApi for AgentApiImpl {
     ) -> Result<Response<RegisterResponse>, Status> {
         // Step 1: connection IP (preserved by grpc_harness::StreamWithPeer
         // in tests; preserved by main.rs `auto::Builder` loop in production).
-        //
-        // `tonic::Request::remote_addr()` only knows `TcpConnectInfo`. The
-        // in-process test harness inserts a bare `SocketAddr` directly (via
-        // the `Connected` impl on `StreamWithPeer`), and production inserts
-        // `axum::extract::ConnectInfo<SocketAddr>`. We try all three.
+        // The extractor handles the three transport shapes tonic / axum /
+        // the in-process harness each produce; see `resolve_peer_ip` for
+        // the precedence details.
         let trust_forwarded = self.state.config().service.trust_forwarded_headers;
-        let extract_peer_addr = |req: &Request<RegisterRequest>| {
-            // 1. tonic native (TcpConnectInfo — real TcpListener)
-            req.remote_addr()
-                // 2. bare SocketAddr (in-process StreamWithPeer harness)
-                .or_else(|| req.extensions().get::<std::net::SocketAddr>().copied())
-                // 3. axum ConnectInfo (production hyper integration path)
-                .or_else(|| {
-                    req.extensions()
-                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                        .map(|ci| ci.0)
-                })
-                .map(|a| a.ip())
-        };
-        let peer_ip = if trust_forwarded {
-            // Check metadata first (proxies inject XFF or RFC 7239
-            // `Forwarded`); fall back to the raw peer addr from the
-            // transport. Shared helpers keep gRPC and REST in sync on
-            // which header shapes they honor.
-            request
-                .metadata()
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(crate::http::auth::parse_xff_client_ip)
-                .or_else(|| {
-                    request
-                        .metadata()
-                        .get("forwarded")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(crate::http::auth::parse_forwarded_client_ip)
-                })
-                .or_else(|| extract_peer_addr(&request))
-        } else {
-            extract_peer_addr(&request)
-        }
-        .ok_or_else(|| Status::invalid_argument("no client IP on request"))?;
+        let peer_ip = resolve_peer_ip(&request, trust_forwarded)
+            .ok_or_else(|| Status::invalid_argument("no client IP on request"))?;
 
         let req = request.into_inner();
         tracing::Span::current().record("agent_id", tracing::field::display(&req.id));

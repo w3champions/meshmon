@@ -755,6 +755,22 @@ pub async fn insert_agent(pool: &PgPool, id: &str) {
     .unwrap_or_else(|e| panic!("insert_agent({id}) failed: {e}"));
 }
 
+/// Like [`insert_agent`] but lets the caller pick the stored IP. Use this
+/// when a test needs to exercise the peer-IP-vs-registered-IP match logic
+/// (e.g. reject-hijack tests for `open_tunnel`).
+pub async fn insert_agent_with_ip(pool: &PgPool, id: &str, ip: std::net::IpAddr) {
+    let ip_net = sqlx::types::ipnetwork::IpNetwork::from(ip);
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+         VALUES ($1, $1, $2, 3555, 3552) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(id)
+    .bind(ip_net)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("insert_agent_with_ip({id}, {ip}) failed: {e}"));
+}
+
 /// Drive a successful login as the default `admin` user on `app` and
 /// return the `Set-Cookie` value so the caller can attach it to follow-up
 /// requests. Panics if the login fails — callers use this as test setup,
