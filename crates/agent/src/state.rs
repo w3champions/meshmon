@@ -223,7 +223,15 @@ impl PathStateMachine {
                 }
             }
             (PathHealthState::Degraded, Some(stats)) => {
-                if stats.failure_rate > t.normal_recovery_pct {
+                // Symmetric evidence floor with the Normal → Degraded
+                // path above: when the primary's rolling window empties,
+                // `failure_rate` collapses to 0.0 and would otherwise
+                // satisfy the recovery predicate, flipping back to Normal
+                // with zero evidence of recovery. Require at least
+                // MIN_TRANSITION_SAMPLES before honouring the dwell timer.
+                if stats.sample_count < MIN_TRANSITION_SAMPLES
+                    || stats.failure_rate > t.normal_recovery_pct
+                {
                     self.condition_since = None;
                     PathHealthState::Degraded
                 } else {
@@ -820,6 +828,57 @@ mod tests {
         );
         assert_eq!(
             p.evaluate(Some(&stats), &th, t0 + Duration::from_secs(300)),
+            Some((PathHealthState::Degraded, PathHealthState::Normal)),
+        );
+    }
+
+    #[test]
+    fn path_does_not_recover_from_degraded_on_empty_window() {
+        // H1 regression: once the primary's window empties, FastSummary
+        // reports failure_rate = 0.0 and sample_count = 0. Without the
+        // evidence floor, `failure_rate <= normal_recovery_pct` would
+        // hold, the dwell timer would start, and after normal_recovery_sec
+        // the path would flip back to Normal with zero evidence of real
+        // recovery — exactly the oscillation MIN_TRANSITION_SAMPLES
+        // already prevents in the protocol SM.
+        let mut p = PathStateMachine::new();
+        p.force_state_for_tests(PathHealthState::Degraded);
+        let t0 = Instant::now();
+        let th = path_thresholds();
+        let empty = summary(0, 0);
+
+        // Feed the machine empty windows across 2× the recovery dwell.
+        for offset in [0u64, 100, 299, 300, 301, 600] {
+            let r = p.evaluate(Some(&empty), &th, t0 + Duration::from_secs(offset));
+            assert_eq!(
+                r, None,
+                "empty-window recovery must not fire at offset {offset}",
+            );
+        }
+        assert_eq!(p.state(), PathHealthState::Degraded);
+
+        // Partial evidence (just below the floor) must also be rejected.
+        let just_below = summary(MIN_TRANSITION_SAMPLES - 1, MIN_TRANSITION_SAMPLES - 1);
+        for offset in [900u64, 1200] {
+            let r = p.evaluate(Some(&just_below), &th, t0 + Duration::from_secs(offset));
+            assert_eq!(
+                r, None,
+                "below-floor recovery must not fire at offset {offset}",
+            );
+        }
+        assert_eq!(p.state(), PathHealthState::Degraded);
+
+        // Once real evidence returns, recovery proceeds normally through
+        // the dwell timer.
+        let healthy = summary(100, 100);
+        let t_real = t0 + Duration::from_secs(1500);
+        assert_eq!(p.evaluate(Some(&healthy), &th, t_real), None);
+        assert_eq!(
+            p.evaluate(
+                Some(&healthy),
+                &th,
+                t_real + Duration::from_secs(th.normal_recovery_sec as u64),
+            ),
             Some((PathHealthState::Degraded, PathHealthState::Normal)),
         );
     }
