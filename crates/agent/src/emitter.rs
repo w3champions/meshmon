@@ -686,7 +686,7 @@ async fn run_retry_worker<A: ServiceApi>(
 }
 
 // ---------------------------------------------------------------------------
-// Route snapshot builder (Task 8)
+// Route snapshot builder
 // ---------------------------------------------------------------------------
 
 fn build_route_snapshot_request(
@@ -971,8 +971,8 @@ mod tests {
         // Give the task one poll then cancel.
         tokio::task::yield_now().await;
         cancel.cancel();
-        // Shutdown now includes up to 5 s of drain (Task 12); allow 10 s
-        // of logical time for the handle to settle.
+        // The emitter drains for up to 5 s on shutdown; wrap the await in
+        // a 10 s outer timeout so a stuck drain doesn't hang the test.
         let res = tokio::time::timeout(Duration::from_secs(10), handle).await;
         assert!(res.is_ok(), "emitter task should exit within 10s of cancel");
     }
@@ -1078,8 +1078,9 @@ mod tests {
         // the failure with `next_retry_at = now + ~1s jitter` and parks in
         // `sleep(next_retry_at - now).await`; we then cancel before any further
         // advance, so the worker never wakes. Only the primary dispatch's single
-        // call is observable. Task 9's own tests (`retry_worker_drains_...`)
-        // cover the wake-and-drain path with explicit `advance` calls.
+        // call is observable. Dedicated retry-worker tests
+        // (`retry_worker_drains_...`) cover the wake-and-drain path with
+        // explicit `advance` calls.
         let calls = api.push_metrics_calls.lock().await;
         assert_eq!(calls.len(), 1, "primary loop attempted once before enqueue");
     }

@@ -314,7 +314,7 @@ async fn run(
     // Closed observation.
     let mut snapshot_channel_closed: bool = false;
 
-    // T16: independent 60 s metrics cadence. Emits one PathMetricsMsg per
+    // Independent 60 s metrics cadence. Emits one PathMetricsMsg per
     // (target, protocol) where the last-evaluated TargetSnapshot has
     // Some(health) — protocols with None health are skipped to avoid
     // sending ProtocolHealth::Unspecified (server rejects as INVALID_ARGUMENT).
@@ -1702,7 +1702,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Task 3: SupervisorHandle::snapshot_state accessor tests.
+    // SupervisorHandle::snapshot_state accessor tests.
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1812,7 +1812,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Task 5: 60 s metrics tick — emits PathMetricsMsg per protocol with
+    // 60 s metrics tick — emits PathMetricsMsg per protocol with
     // Some(health) and drops protocols without a classified health value.
     // -----------------------------------------------------------------------
 
