@@ -60,8 +60,15 @@ impl TunnelClient {
         //    worst-case buffering at ~1 MiB (16 × 64 KiB yamux frames).
         let (tx, rx) = mpsc::channel::<Result<TunnelFrame, tonic::Status>>(16);
         // Strip the Result wrapper — tonic client streams carry Ok items only.
-        let body = ReceiverStream::new(rx)
-            .filter_map(|r: Result<TunnelFrame, tonic::Status>| async move { r.ok() });
+        // `TunnelIo`'s `poll_write` and `poll_flush` only ever enqueue
+        // `Ok(TunnelFrame)` (see `crates/revtunnel/src/byte_adapter.rs`),
+        // so an `Err` here is an invariant violation rather than a recoverable
+        // condition. Panic loudly instead of silently dropping frames — a
+        // silent drop would corrupt the yamux framing and the resulting
+        // session error would make the real cause very hard to track down.
+        let body = ReceiverStream::new(rx).map(|r: Result<TunnelFrame, tonic::Status>| {
+            r.expect("TunnelIo outbound never produces Err by contract (see byte_adapter.rs)")
+        });
         let mut request = tonic::Request::new(body);
         request.metadata_mut().insert(
             "x-meshmon-source-id",
@@ -85,9 +92,22 @@ impl TunnelClient {
         request.metadata_mut().insert("authorization", bearer_value);
 
         // 2. Call OpenTunnel using the raw channel. Bearer auth is already
-        //    stamped above on the request metadata.
+        //    stamped above on the request metadata. Authentication failures
+        //    (wrong token or unknown source_id) are mapped to the dedicated
+        //    `TunnelError::AuthFailed` variant so the reconnect loop can log
+        //    them loudly without busy-spinning in silence.
         let mut client = AgentApiClient::new(channel);
-        let response = client.open_tunnel(request).await?;
+        let response = match client.open_tunnel(request).await {
+            Ok(r) => r,
+            Err(status) => {
+                return Err(match status.code() {
+                    tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+                        TunnelError::AuthFailed(status)
+                    }
+                    _ => TunnelError::from(status),
+                });
+            }
+        };
         let incoming = response.into_inner();
 
         // 3. Wrap (incoming, tx) as TunnelIo = AsyncRead + AsyncWrite, then

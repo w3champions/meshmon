@@ -63,6 +63,16 @@ async fn run(
                 duration_ms = session_duration.as_millis() as u64,
                 "tunnel ended cleanly; reconnecting"
             ),
+            // Auth failures stand out: they indicate a misconfigured
+            // source_id or bearer token, which would otherwise be
+            // indistinguishable from a transient network blip in ops logs.
+            // We keep retrying (operators can hot-fix the token) but make
+            // the cause obvious.
+            Err(meshmon_revtunnel::TunnelError::AuthFailed(status)) => warn!(
+                duration_ms = session_duration.as_millis() as u64,
+                status = %status,
+                "tunnel auth rejected; check source_id / agent token — reconnecting"
+            ),
             Err(e) => warn!(
                 duration_ms = session_duration.as_millis() as u64,
                 error = %e,
