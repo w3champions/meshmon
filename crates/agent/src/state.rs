@@ -318,6 +318,15 @@ pub struct TargetStateMachine {
     /// evaluation cadence × 50 targets would otherwise flood logs with
     /// the same WARN on any partial rate-table misconfig.
     warned_rate_keys: HashSet<(Protocol, PbPathHealth)>,
+    /// Primary selected on the previous `evaluate` call. Used to detect
+    /// swings that happen without a protocol-health transition in the
+    /// current tick (e.g., startup sample-count floor crossing, priority
+    /// config change between ticks). Starting value is `None` — at agent
+    /// startup we haven't picked anything yet. Recomputing `old_primary`
+    /// from current-tick inputs would silently miss those two cases
+    /// because the recomputation sees the post-eval stats and new
+    /// priority list, producing the same answer as `new_primary`.
+    last_primary: Option<Protocol>,
 }
 
 impl TargetStateMachine {
@@ -328,6 +337,7 @@ impl TargetStateMachine {
             udp: ProtocolStateMachine::new(Protocol::Udp),
             path: PathStateMachine::new(),
             warned_rate_keys: HashSet::new(),
+            last_primary: None,
         }
     }
 
@@ -355,8 +365,16 @@ impl TargetStateMachine {
         stats_by_protocol: [&FastSummary; 3],
         now: Instant,
     ) -> StateChange {
-        let priority = config.priority_list();
-        let old_primary = select_primary(&priority, &self.health_snapshot(), stats_by_protocol);
+        // `old_primary` must be the primary selected on the *previous*
+        // tick, not a recomputation from current-tick inputs. Recomputing
+        // sees the same priority list and (within this eval) the same
+        // stats as `new_primary` below, so it silently masks swings that
+        // happen without a protocol-health transition this tick —
+        // notably the startup None → Some(Icmp) crossing once the sample
+        // floor is met, and priority-config changes between ticks. Both
+        // cases must reset the path dwell (see
+        // `path_dwell_resets_on_primary_swing`).
+        let old_primary = self.last_primary;
 
         let mut protocol_transitions = Vec::with_capacity(3);
         if let Some(t) = self.icmp.evaluate(
@@ -381,6 +399,7 @@ impl TargetStateMachine {
             protocol_transitions.push(t);
         }
 
+        let priority = config.priority_list();
         let new_primary = select_primary(&priority, &self.health_snapshot(), stats_by_protocol);
         let primary_transition = if new_primary == old_primary {
             None
@@ -430,6 +449,11 @@ impl TargetStateMachine {
         let trippy_protocol = new_primary
             .unwrap_or_else(|| priority.first().copied().unwrap_or(Protocol::Unspecified));
         let trippy_pps = trippy_pps_for(trippy_protocol, rates);
+
+        // Remember the primary we elected this tick so the next
+        // `evaluate` can detect swings correctly (see `old_primary`
+        // above).
+        self.last_primary = new_primary;
 
         StateChange {
             protocol_transitions,
@@ -1077,7 +1101,15 @@ mod tests {
         assert_eq!(change.trippy_pps, 0.2);
         assert!(change.protocol_transitions.is_empty());
         assert_eq!(change.path_transition, None);
-        assert_eq!(change.primary_transition, None);
+        // First-tick swing: `last_primary` starts at `None` and the
+        // evidence floor is satisfied on this very tick, so the
+        // initial None → Some(Icmp) election surfaces as a real
+        // transition (and drives path.reset_condition — see the
+        // regression tests below).
+        assert_eq!(
+            change.primary_transition,
+            Some((None, Some(Protocol::Icmp))),
+        );
     }
 
     #[test]
@@ -1338,5 +1370,149 @@ mod tests {
             p.evaluate(Some(&three_samples), &th, t0 + Duration::from_secs(11)),
             Some((PathHealthState::Normal, PathHealthState::Degraded)),
         );
+    }
+
+    /// Codex P1 regression: the first time evidence crosses
+    /// `MIN_TRANSITION_SAMPLES` the primary election must surface as a
+    /// transition (`None → Some(p)`), not be masked by recomputing
+    /// `old_primary` from current-tick inputs. Without tracking
+    /// `last_primary` across ticks this case was silently invisible —
+    /// no transition log, no `path.reset_condition()`.
+    #[test]
+    fn primary_transition_fires_on_initial_health_establishment() {
+        let cfg = full_config();
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+
+        // Tick 1: only 2 ICMP samples — below the MIN_TRANSITION_SAMPLES=3
+        // floor. `select_primary` returns None, and since `last_primary`
+        // starts at None there is no transition to report.
+        let two_samples = summary(2, 2);
+        let empty = summary(0, 0);
+        let c = tsm.evaluate(&cfg, [&two_samples, &empty, &empty], t0);
+        assert_eq!(c.primary, None);
+        assert_eq!(c.primary_transition, None);
+
+        // Tick 2: 5 ICMP samples, all successful — ICMP is Healthy and
+        // above the floor, so `select_primary` elects it. The
+        // None → Some(Icmp) crossing must surface as a transition.
+        let five_samples = summary(5, 5);
+        let c = tsm.evaluate(
+            &cfg,
+            [&five_samples, &empty, &empty],
+            t0 + Duration::from_secs(10),
+        );
+        assert_eq!(c.primary, Some(Protocol::Icmp));
+        assert_eq!(c.primary_transition, Some((None, Some(Protocol::Icmp))),);
+    }
+
+    /// Codex P1 regression: a priority-list config change that swings
+    /// the primary without any protocol transitioning in the current
+    /// tick must still be detected and must still reset the path dwell
+    /// (LOW-1 invariant). Before tracking `last_primary` across ticks
+    /// both `old_primary` and `new_primary` were computed against the
+    /// post-change priority list in the same tick and silently agreed.
+    #[test]
+    fn primary_transition_fires_on_priority_config_change() {
+        use meshmon_protocol::PathHealth as H;
+        // Short path-degrade dwell (5s) so we can prove the dwell
+        // reset behavior within a handful of discrete ticks.
+        let rates = vec![
+            rate_row(Protocol::Icmp, H::Normal, 0.2, 0.05, 0.05),
+            rate_row(Protocol::Icmp, H::Degraded, 1.0, 0.05, 0.05),
+            rate_row(Protocol::Icmp, H::Unreachable, 1.0, 0.05, 0.05),
+            rate_row(Protocol::Tcp, H::Normal, 0.05, 0.2, 0.05),
+            rate_row(Protocol::Tcp, H::Degraded, 0.05, 1.0, 0.05),
+            rate_row(Protocol::Tcp, H::Unreachable, 0.05, 1.0, 0.05),
+            rate_row(Protocol::Udp, H::Normal, 0.05, 0.05, 0.2),
+            rate_row(Protocol::Udp, H::Degraded, 0.05, 0.05, 1.0),
+            rate_row(Protocol::Udp, H::Unreachable, 0.05, 0.05, 1.0),
+        ];
+        let build_cfg = |priority: Vec<i32>| {
+            ProbeConfig::from_proto(meshmon_protocol::ConfigResponse {
+                udp_probe_secret: vec![1u8; 8].into(),
+                priority,
+                rates: rates.clone(),
+                path_health_thresholds: Some(PathHealthThresholds {
+                    degraded_trigger_pct: 0.05,
+                    degraded_trigger_sec: 5,
+                    degraded_min_samples: 3,
+                    normal_recovery_pct: 0.02,
+                    normal_recovery_sec: 30,
+                }),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let cfg_icmp_first = build_cfg(vec![
+            Protocol::Icmp as i32,
+            Protocol::Tcp as i32,
+            Protocol::Udp as i32,
+        ]);
+        let cfg_tcp_first = build_cfg(vec![
+            Protocol::Tcp as i32,
+            Protocol::Icmp as i32,
+            Protocol::Udp as i32,
+        ]);
+
+        let mut tsm = TargetStateMachine::new();
+        let t0 = Instant::now();
+
+        // ICMP and TCP both Healthy with >= MIN_TRANSITION_SAMPLES. The
+        // partial path-degrade failure rate (0.1 > 0.05 trigger) will
+        // start accruing dwell so we can observe the post-swing reset.
+        let noisy_icmp = summary(30, 27); // failure_rate = 0.1
+        let noisy_tcp = summary(30, 27); // failure_rate = 0.1
+        let healthy_udp = summary(30, 30);
+
+        // Tick 1: priority [Icmp, Tcp, Udp] → ICMP primary elected from
+        // the initial `None`. Path dwell starts this tick.
+        let c = tsm.evaluate(&cfg_icmp_first, [&noisy_icmp, &noisy_tcp, &healthy_udp], t0);
+        assert_eq!(c.primary, Some(Protocol::Icmp));
+        assert_eq!(c.primary_transition, Some((None, Some(Protocol::Icmp))),);
+        assert_eq!(c.path, PathHealthState::Normal);
+
+        // Tick 2 (t0+2s): inside the 5s dwell, same config, same stats.
+        // No transition, path still Normal (dwell not yet elapsed).
+        let t1 = t0 + Duration::from_secs(2);
+        let c = tsm.evaluate(&cfg_icmp_first, [&noisy_icmp, &noisy_tcp, &healthy_udp], t1);
+        assert_eq!(c.primary, Some(Protocol::Icmp));
+        assert_eq!(c.primary_transition, None);
+        assert_eq!(c.path, PathHealthState::Normal);
+
+        // Tick 3 (t0+4s): still inside the original 5s dwell window.
+        // Swap priority → TCP first. No protocol transitioned this
+        // tick, so only `last_primary` tracking detects the swing.
+        // With the fix the path dwell resets, so the path stays Normal
+        // even though 4s have elapsed since t0.
+        let t2 = t0 + Duration::from_secs(4);
+        let c = tsm.evaluate(&cfg_tcp_first, [&noisy_icmp, &noisy_tcp, &healthy_udp], t2);
+        assert_eq!(c.primary, Some(Protocol::Tcp));
+        assert_eq!(
+            c.primary_transition,
+            Some((Some(Protocol::Icmp), Some(Protocol::Tcp))),
+        );
+        assert_eq!(c.path, PathHealthState::Normal);
+
+        // Tick 4 (t0+6s): 6s past the *original* dwell start — if the
+        // swing had NOT reset the path dwell, the path would already be
+        // Degraded by now. Must still be Normal.
+        let t3 = t0 + Duration::from_secs(6);
+        let c = tsm.evaluate(&cfg_tcp_first, [&noisy_icmp, &noisy_tcp, &healthy_udp], t3);
+        assert_eq!(c.primary, Some(Protocol::Tcp));
+        assert_eq!(c.primary_transition, None);
+        assert_eq!(
+            c.path,
+            PathHealthState::Normal,
+            "path must not degrade before TCP's post-swing dwell elapses",
+        );
+
+        // Tick 5 (t0+9s): TCP's post-swing dwell started at t2 = t0+4s
+        // and needs 5s to elapse, so t0+9s is the first tick at which
+        // the path may degrade under the new primary.
+        let t4 = t0 + Duration::from_secs(9);
+        let c = tsm.evaluate(&cfg_tcp_first, [&noisy_icmp, &noisy_tcp, &healthy_udp], t4);
+        assert_eq!(c.primary, Some(Protocol::Tcp));
+        assert_eq!(c.path, PathHealthState::Degraded);
     }
 }
