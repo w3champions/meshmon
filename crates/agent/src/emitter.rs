@@ -969,12 +969,15 @@ mod tests {
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
 
-        // The retry worker is still a stub (Task 9 implements it), so only the
-        // primary dispatch's one call is observable.
+        // Under `start_paused = true`, the only clock advance is the 61s we
+        // explicitly issued to fire the primary tick. The retry worker enqueues
+        // the failure with `next_retry_at = now + ~1s jitter` and parks in
+        // `sleep(next_retry_at - now).await`; we then cancel before any further
+        // advance, so the worker never wakes. Only the primary dispatch's single
+        // call is observable. Task 9's own tests (`retry_worker_drains_...`)
+        // cover the wake-and-drain path with explicit `advance` calls.
         let calls = api.push_metrics_calls.lock().await;
         assert_eq!(calls.len(), 1, "primary loop attempted once before enqueue");
-        // (Queue state is module-private and the retry worker stub never runs;
-        // don't assert on it here — Task 9's integration test exercises it.)
     }
 
     #[tokio::test(start_paused = true)]
