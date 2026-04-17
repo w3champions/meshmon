@@ -896,6 +896,8 @@ mod tests {
 
     #[test]
     fn degraded_min_samples_at_floor_accepted() {
+        // `udp_probe_secret` satisfies an unrelated required-field
+        // validation so the test actually reaches the path_health block.
         let raw: RawProbingSection = toml::from_str(
             r#"
             udp_probe_secret = "hex:6d73686d6e2d7631"
