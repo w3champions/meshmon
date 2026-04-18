@@ -28,6 +28,13 @@ shutdown_deadline_seconds = 5
 # the per-IP login rate limit by forging the header.
 # trust_forwarded_headers = false
 
+# Whether to set the `Secure` attribute on the session cookie. Default
+# `true` (safe for production — cookie is only sent over HTTPS). Flip
+# to `false` ONLY for lab / localhost deployments on plain HTTP:
+# browsers silently drop `Secure` cookies received over HTTP, so login
+# succeeds but every subsequent authenticated request returns 401.
+# session_cookie_secure = true
+
 # Optional: HTTP Basic auth for /metrics (defense-in-depth for the
 # Prometheus scrape). Unset → /metrics is unauthenticated (spec
 # default). When set, both username and one of {password_hash,

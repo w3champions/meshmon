@@ -400,7 +400,9 @@ pub(crate) const SESSION_COOKIE_NAME: &str = "meshmon_session";
 /// usage grows until process restart. Expected operator counts are small,
 /// so this is acceptable; revisit if switching to a persistent session
 /// store.
-pub fn session_layer() -> (
+pub fn session_layer(
+    secure: bool,
+) -> (
     tower_sessions::SessionManagerLayer<tower_sessions::MemoryStore>,
     tower_sessions::MemoryStore,
 ) {
@@ -411,7 +413,7 @@ pub fn session_layer() -> (
     let store = MemoryStore::default();
     let layer = SessionManagerLayer::new(store.clone())
         .with_name(SESSION_COOKIE_NAME)
-        .with_secure(true)
+        .with_secure(secure)
         .with_http_only(true)
         .with_same_site(SameSite::Lax)
         .with_expiry(Expiry::OnInactivity(Duration::days(30)));

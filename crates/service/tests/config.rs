@@ -210,6 +210,9 @@ fn shipped_example_parses() {
         "MESHMON_ADMIN_PASSWORD_HASH",
         "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY",
     );
+    // The shipped example now recommends udp_probe_secret_env for the
+    // quick-start path; provide a valid 8-byte hex payload here.
+    std::env::set_var("MESHMON_UDP_PROBE_SECRET", "hex:0011223344556677");
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -228,6 +231,7 @@ fn shipped_example_parses() {
     std::env::remove_var("MESHMON_POSTGRES_URL");
     std::env::remove_var("MESHMON_AGENT_TOKEN");
     std::env::remove_var("MESHMON_ADMIN_PASSWORD_HASH");
+    std::env::remove_var("MESHMON_UDP_PROBE_SECRET");
 }
 
 #[test]
@@ -335,6 +339,38 @@ udp_probe_secret = "hex:0011223344556677"
     )
     .expect("parse");
     assert!(cfg.service.trust_forwarded_headers);
+}
+
+#[test]
+fn session_cookie_secure_defaults_to_true() {
+    let cfg = Config::from_str(
+        r#"
+[database]
+url = "postgres://u@h/d"
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+"#,
+        "test.toml",
+    )
+    .expect("parse");
+    assert!(cfg.service.session_cookie_secure);
+}
+
+#[test]
+fn session_cookie_secure_honors_override() {
+    let cfg = Config::from_str(
+        r#"
+[database]
+url = "postgres://u@h/d"
+[service]
+session_cookie_secure = false
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+"#,
+        "test.toml",
+    )
+    .expect("parse");
+    assert!(!cfg.service.session_cookie_secure);
 }
 
 #[test]

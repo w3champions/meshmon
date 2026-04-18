@@ -103,7 +103,7 @@ pub fn router(state: AppState) -> Router {
     let (api_axum, api_schema) = openapi::api_router().split_for_parts();
 
     let backend = ConfigAuthBackend::new(state.config.clone());
-    let (session_mgr, _store) = session_layer();
+    let (session_mgr, _store) = session_layer(state.config().service.session_cookie_secure);
     let auth_layer = auth_manager_layer(backend, session_mgr);
 
     let login_limit = login_rate_limit_layer(state.config().service.trust_forwarded_headers);
