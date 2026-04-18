@@ -21,7 +21,8 @@
 //! tradeoff.
 
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use meshmon_protocol::{Protocol, Target};
@@ -35,6 +36,36 @@ use crate::probing::{HopObservation, ProbeObservation, ProbeOutcome, TrippyRate}
 
 /// Maximum TTL (hops) the tracer will emit probes for.
 const MAX_TTL: u8 = 30;
+
+/// Per-round ICMP trace identifier allocator.
+///
+/// trippy-core 0.13 uses the ICMP `identifier` field to match replies to
+/// the originating tracer (`strategy.rs::check_trace_id`). The default is
+/// `TraceId(0)`, which any tracer also accepts as a fallback — so two
+/// concurrent ICMP tracers both accept each other's replies, and foreign
+/// targets' hops leak into unrelated paths. We allocate a unique non-zero
+/// `u16` per round from this atomic.
+///
+/// The counter wraps naturally. We skip `0` on wrap because `TraceId(0)`
+/// is the wildcard-accept fallback. The initial value is randomized at
+/// first use so a restarted agent doesn't replay the same id sequence
+/// against any stale replies still in flight from the previous process.
+#[allow(dead_code)] // wired into Builder in Task 2
+static NEXT_ICMP_TRACE_ID: LazyLock<AtomicU16> = LazyLock::new(|| {
+    use rand::Rng;
+    let seed = rand::rng().random_range(1..=u16::MAX);
+    AtomicU16::new(seed)
+});
+
+#[allow(dead_code)] // wired into Builder in Task 2
+fn next_trace_id() -> u16 {
+    let mut id = NEXT_ICMP_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        // Counter wrapped to 0; consume one more slot to skip the wildcard value.
+        id = NEXT_ICMP_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+    }
+    id
+}
 
 /// Per-probe read timeout inside a round.
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
@@ -371,5 +402,41 @@ mod tests {
             obs.hops.as_ref().map(|h| !h.is_empty()).unwrap_or(false),
             "expected at least one hop: {obs:?}"
         );
+    }
+
+    #[test]
+    fn next_trace_id_is_nonzero() {
+        for _ in 0..100 {
+            assert_ne!(next_trace_id(), 0);
+        }
+    }
+
+    #[test]
+    fn next_trace_id_is_monotonically_distinct_for_1000_calls() {
+        use std::collections::HashSet;
+        let mut seen: HashSet<u16> = HashSet::new();
+        for _ in 0..1000 {
+            let id = next_trace_id();
+            assert!(
+                seen.insert(id),
+                "duplicate trace id {id} within 1000 calls (counter not advanced?)",
+            );
+        }
+    }
+
+    // NOTE: `NEXT_ICMP_TRACE_ID` is process-wide. This test mutates it directly,
+    // so the test binary must run with `--test-threads 1` to avoid racing with
+    // the other `next_trace_id_*` tests.
+    #[test]
+    fn next_trace_id_skips_zero_after_wrap() {
+        // Force LazyLock initialization by calling next_trace_id once.
+        let _ = next_trace_id();
+        // Seed the counter so the next fetch_add returns u16::MAX,
+        // the one after wraps to 0, which next_trace_id must skip.
+        NEXT_ICMP_TRACE_ID.store(u16::MAX, std::sync::atomic::Ordering::Relaxed);
+        let a = next_trace_id(); // returns u16::MAX, increments to 0
+        let b = next_trace_id(); // would return 0, must consume one more → 1
+        assert_eq!(a, u16::MAX);
+        assert_eq!(b, 1, "post-wrap id must skip 0");
     }
 }
