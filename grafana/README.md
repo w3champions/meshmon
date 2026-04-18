@@ -86,11 +86,49 @@ This mirrors the established Alertmanager-proxy pattern in
 edge to internal infra," and the upstream's own auth posture stays
 trivial because nothing else can reach it.
 
-The proxy code itself is **not yet implemented**; it is tracked separately
-and blocks the bundled-deployment task. Until it lands, the iframe path
-is non-functional in any environment that does not already terminate auth
-in front of Grafana, and the dev smoke harness intentionally does not
-ship Grafana — the SPA renders a "Grafana not configured" placeholder.
+The meshmon-service proxy is mounted at `/grafana/{*tail}` in
+`crates/service/src/http/grafana_proxy.rs`. Operators wire it via the
+`[upstream] grafana_url` field in `meshmon.toml`. The bundled compose
+sets it to `http://meshmon-grafana:3000/grafana` (note: Grafana is
+configured with `serve_from_sub_path = true`, so the upstream URL
+re-adds the `/grafana` suffix).
+
+The bundled Grafana ships with the `auth.proxy` configuration below.
+Copy it into any custom Grafana config when deviating from the bundled
+compose:
+
+```ini
+[server]
+serve_from_sub_path = true
+root_url = %(protocol)s://%(domain)s/grafana/
+
+[auth]
+disable_login_form = true
+disable_signout_menu = true
+
+[auth.anonymous]
+enabled = false
+
+[auth.proxy]
+enabled = true
+header_name = X-WEBAUTH-USER
+header_property = username
+auto_sign_up = true
+sync_ttl = 60
+# The only legitimate caller is meshmon-service on the docker bridge.
+# Widen `whitelist` only if the deployment topology requires it.
+whitelist = 127.0.0.1, ::1, <docker bridge CIDR>
+enable_login_token = false
+
+[security]
+allow_embedding = true
+cookie_samesite = lax
+```
+
+The `MeshmonPostgres` datasource uses the read-only `meshmon_grafana`
+role, not the service's full-privilege user. Set
+`MESHMON_PG_GRAFANA_PASSWORD` at deploy time; the service's migration
+bootstrap flips the role from NOLOGIN to LOGIN atomically.
 
 Meshmon iframes pass `theme=light` on the Report page so printed PDFs stay
 legible. Grafana honours that URL parameter regardless of the dashboard's

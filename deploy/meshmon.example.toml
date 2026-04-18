@@ -100,7 +100,23 @@ shared_token_env = "MESHMON_AGENT_TOKEN"
 # vm_url = "http://meshmon-vm:8428"
 
 # Alertmanager API base URL. Same reachability-is-advisory semantics.
-# alertmanager_url = "http://meshmon-alertmanager:9093"
+# Include the `/alertmanager` suffix when Alertmanager runs with
+# `--web.external-url=/alertmanager` (as the bundled compose does), so the
+# service's `/alerts/*` proxy hits the right route prefix upstream. Either
+# inline or indirected via `alertmanager_url_env`.
+# alertmanager_url = "http://meshmon-alertmanager:9093/alertmanager"
+# alertmanager_url_env = "MESHMON_ALERTMANAGER_URL"
+
+# Grafana base URL. Consumed by the transparent `/grafana/*` proxy
+# that fronts the bundled Grafana's `auth.proxy` endpoint. Unset →
+# `/grafana/*` returns 503 and dashboard iframes render a broken
+# state — acceptable for deployments that do not ship Grafana at all.
+# Include the `/grafana` suffix when Grafana is configured with
+# `serve_from_sub_path = true` (as in the bundled compose), since the
+# upstream itself serves from that subpath. Either inline or
+# indirected via `grafana_url_env`.
+# grafana_url = "http://meshmon-grafana:3000/grafana"
+# grafana_url_env = "MESHMON_GRAFANA_URL"
 
 [agents]
 # Minutes after last_seen_at before an agent is no longer counted as active.
@@ -192,27 +208,3 @@ udp_probe_secret = "hex:0011223344556677"
 # udp_pps   = 0.05
 #
 # # ... repeat for every (primary, health) combination in your priority list
-
-# ---------------------------------------------------------------------------
-# [web] — frontend Grafana integration.
-#
-# The SPA iframes Grafana panels to render time-series charts. When Grafana
-# is not configured, iframes fall back to a "Dashboard not configured"
-# placeholder and the rest of the page still works.
-#
-# Two knobs:
-#   1. `grafana_base_url` — externally-visible Grafana URL the browser loads
-#      iframes from. Must be browser-reachable (same-origin or CORS-
-#      permitting). Either inline or indirected via `grafana_base_url_env`.
-#   2. `[web.grafana_dashboards]` — logical-name → dashboard UID map. The
-#      meshmon repo ships three dashboards at `grafana/dashboards/`; their
-#      UIDs are the stable contract.
-
-# [web]
-# grafana_base_url = "https://grafana.example.com"
-# grafana_base_url_env = "MESHMON_GRAFANA_BASE_URL"
-#
-# [web.grafana_dashboards]
-# meshmon-path     = "meshmon-path"
-# meshmon-overview = "meshmon-overview"
-# meshmon-agent    = "meshmon-agent"
