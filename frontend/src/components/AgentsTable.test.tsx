@@ -211,23 +211,6 @@ describe("AgentsTable", () => {
       });
     });
 
-    test("pressing Space on a focused row navigates", async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<AgentsTable agents={AGENTS} />);
-
-      await screen.findByText("alpha");
-      navigate.mockClear();
-
-      const row = screen.getByRole("link", { name: /Open agent alpha/i });
-      row.focus();
-      await user.keyboard(" ");
-
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/agents/$id",
-        params: { id: "alpha" },
-      });
-    });
-
     test("rows expose link role, tabIndex, and aria-label for accessibility", async () => {
       renderWithProviders(<AgentsTable agents={AGENTS} />);
 

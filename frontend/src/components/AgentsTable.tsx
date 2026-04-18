@@ -121,9 +121,12 @@ export function AgentsTable({ agents, className }: AgentsTableProps) {
                 role="link"
                 tabIndex={0}
                 aria-label={`Open agent ${row.original.id}`}
+                // If a cell gains an interactive child (e.g. a copy button), that child's
+                // handler must call `e.stopPropagation()` so the row-level navigation
+                // doesn't swallow the click.
                 onClick={go}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
+                  if (e.key === "Enter") {
                     e.preventDefault();
                     go();
                   }
