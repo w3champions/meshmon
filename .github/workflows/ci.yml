@@ -9,13 +9,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust (check, clippy, test, fmt, openapi drift)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -48,6 +51,47 @@ jobs:
             exit 1
           fi
 
+  actionlint:
+    name: actionlint (workflow YAML)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # rhysd/actionlint publishes only patch tags — no floating v1.
+      - name: Run actionlint
+        uses: rhysd/actionlint@v1.7.12
+
+  yamllint:
+    name: YAML lint (deploy configs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: yamllint
+        # karancode/yamllint-github-action only ships patch tags — no floating v2/v3.
+        uses: karancode/yamllint-github-action@v3.0.0
+        with:
+          yamllint_file_or_dir: "deploy"
+          yamllint_strict: true
+          yamllint_config_filepath: .yamllint.yml
+
+  shellcheck:
+    name: Shellcheck (scripts/*.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          # scandir is non-recursive; scripts/ is flat today.
+          # Add additional_files if a nested script or root-level .sh lands.
+          scandir: ./scripts
+          severity: warning
+
   frontend:
     name: Frontend (biome, type-check, vitest, build, schema drift)
     runs-on: ubuntu-latest
@@ -56,7 +100,7 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -94,7 +138,7 @@ jobs:
     needs: [rust, frontend]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -154,15 +198,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: rust
     timeout-minutes: 25
-    # Runs on every PR and on pushes to main. Path-based gating would
-    # halve CI cost but `github.event.pull_request.files` is not a
-    # first-class context field — a proper filter requires
-    # `dorny/paths-filter@v3` or a top-level `on.pull_request.paths`.
-    # Deferred to a follow-up task once we see whether the job's
-    # runtime justifies the extra indirection.
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

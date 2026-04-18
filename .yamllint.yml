@@ -1,0 +1,23 @@
+# Shared yamllint config — consumed by CI (karancode/yamllint-github-action),
+# lefthook pre-commit, and developers running `yamllint` directly. Single
+# source of truth; do not duplicate into workflow or hook configs.
+#
+# Rule choices:
+# - `line-length: disable` — compose env blocks and AM route definitions
+#   have legitimate long strings we don't want to wrap.
+# - `truthy.check-keys: false` — docker-compose values like `restart: always`
+#   and `read_only: true` trigger yamllint's default truthy check.
+# - `document-start: disable` — deploy/ files don't lead with `---` and
+#   don't need to.
+extends: default
+
+rules:
+  line-length: disable
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  document-start: disable
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
