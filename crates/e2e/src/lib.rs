@@ -120,7 +120,36 @@ pub fn login_as_admin() -> Session {
 /// then hands out a shared reference — subsequent callers reuse the
 /// same session cookie. Prefer this over `login_as_admin` in tests
 /// that only need an authenticated client.
+///
+/// Also gates on the proxied upstreams (Grafana + Alertmanager)
+/// being ready — `docker compose up --wait` only checks container
+/// start, not application bind. Without this, tests that hit
+/// `/grafana/*` or `/alertmanager/*` immediately after preflight
+/// race the upstream listeners and flake with 502/503.
 pub fn shared_admin_session() -> &'static Session {
     static SHARED: OnceLock<Session> = OnceLock::new();
-    SHARED.get_or_init(login_as_admin)
+    SHARED.get_or_init(|| {
+        let session = login_as_admin();
+        wait_for_ok(&session, "/grafana/api/health");
+        wait_for_ok(&session, "/alertmanager/-/ready");
+        session
+    })
+}
+
+/// Poll an authenticated endpoint until it returns 2xx or 30s elapse.
+/// Used only to gate on proxied upstream readiness.
+fn wait_for_ok(session: &Session, path: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let last = loop {
+        let err = match session.get(path).send() {
+            Ok(r) if r.status().is_success() => return,
+            Ok(r) => format!("HTTP {}", r.status()),
+            Err(e) => e.to_string(),
+        };
+        if std::time::Instant::now() >= deadline {
+            break err;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    panic!("{path} did not become ready within 30s (last: {last})");
 }
