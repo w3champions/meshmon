@@ -240,8 +240,6 @@ export default function PathDetail() {
       <section>
         <h2 className="mb-2 text-lg font-semibold">Route change history</h2>
         <RouteHistoryTable
-          source={source}
-          target={target}
           snapshots={data.recent_snapshots}
           truncated={data.recent_snapshots_truncated}
           onCompare={({ a, b }) =>

@@ -480,14 +480,18 @@ export interface components {
              */
             primary_protocol?: string | null;
             /**
-             * @description Recent snapshots in the window in descending `observed_at` order.
-             *     Capped at [`RECENT_LIMIT`]; no hop detail.
+             * @description Recent snapshots in the window in descending `observed_at` order,
+             *     filtered to the resolved [`PathOverviewResponse::primary_protocol`].
+             *     Capped at [`RECENT_LIMIT`]; no hop detail. Empty when no primary
+             *     protocol could be resolved (no data for any protocol in the
+             *     window).
              */
             recent_snapshots: components["schemas"]["RouteSnapshotSummary"][];
             /**
-             * @description `true` when the `recent_snapshots` list was clamped at
-             *     [`RECENT_LIMIT`] — the frontend surfaces a "narrow the window"
-             *     hint so operators don't silently miss older entries.
+             * @description `true` when the per-primary-protocol `recent_snapshots` list was
+             *     clamped at [`RECENT_LIMIT`]. Since the list is protocol-scoped
+             *     from the start, this flag is always honest for the operator-visible
+             *     banner ("narrow the window for more").
              */
             recent_snapshots_truncated: boolean;
             /** @description Source agent metadata. */

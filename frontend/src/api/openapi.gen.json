@@ -1130,11 +1130,11 @@
             "items": {
               "$ref": "#/components/schemas/RouteSnapshotSummary"
             },
-            "description": "Recent snapshots in the window in descending `observed_at` order.\nCapped at [`RECENT_LIMIT`]; no hop detail."
+            "description": "Recent snapshots in the window in descending `observed_at` order,\nfiltered to the resolved [`PathOverviewResponse::primary_protocol`].\nCapped at [`RECENT_LIMIT`]; no hop detail. Empty when no primary\nprotocol could be resolved (no data for any protocol in the\nwindow)."
           },
           "recent_snapshots_truncated": {
             "type": "boolean",
-            "description": "`true` when the `recent_snapshots` list was clamped at\n[`RECENT_LIMIT`] — the frontend surfaces a \"narrow the window\"\nhint so operators don't silently miss older entries."
+            "description": "`true` when the per-primary-protocol `recent_snapshots` list was\nclamped at [`RECENT_LIMIT`]. Since the list is protocol-scoped\nfrom the start, this flag is always honest for the operator-visible\nbanner (\"narrow the window for more\")."
           },
           "source": {
             "$ref": "#/components/schemas/AgentSummary",
