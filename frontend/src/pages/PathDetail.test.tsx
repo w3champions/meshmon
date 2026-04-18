@@ -77,17 +77,6 @@ const overview = (opts?: { stale?: boolean }) => ({
 function mockEndpoints(body: unknown): void {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : (input as Request).url;
-    if (url.includes("/api/web-config")) {
-      return new Response(
-        JSON.stringify({
-          version: "0.1.0",
-          username: "u",
-          grafana_base_url: "https://grafana.example/",
-          grafana_dashboards: { "meshmon-path": "abc" },
-        }),
-        { status: 200 },
-      );
-    }
     if (url.includes("/api/paths/a/b/overview")) {
       return new Response(JSON.stringify(body), { status: 200 });
     }

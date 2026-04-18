@@ -1,13 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 
-export function useWebConfig() {
+export function useSession() {
   return useQuery({
-    queryKey: ["web-config"],
+    queryKey: ["session"],
     queryFn: async () => {
-      const { data, error } = await api.GET("/api/web-config");
+      const { data, error } = await api.GET("/api/session");
       if (error) {
-        throw new Error("failed to fetch web config");
+        throw new Error("failed to fetch session");
       }
       if (!data) {
         throw new Error("empty response");

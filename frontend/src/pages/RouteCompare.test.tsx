@@ -90,11 +90,6 @@ describe("RouteCompare (redesigned)", () => {
           ),
         );
       }
-      if (url.includes("/api/web-config")) {
-        return new Response(
-          JSON.stringify({ version: "0", username: "u", grafana_dashboards: {} }),
-        );
-      }
       return new Response("nf", { status: 404 });
     });
 

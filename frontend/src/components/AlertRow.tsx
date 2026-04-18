@@ -7,10 +7,6 @@ import { cn } from "@/lib/utils";
 
 interface AlertRowProps {
   alert: AlertSummary;
-  /** Alertmanager base URL (e.g., `https://am.example/`) or null if
-   *  Alertmanager is not configured — the "view in" link is hidden when
-   *  null. */
-  alertmanagerBaseUrl: string | null;
   className?: string;
 }
 
@@ -20,17 +16,15 @@ const SEVERITY_VARIANT: Record<string, "destructive" | "default" | "secondary"> 
   info: "secondary",
 };
 
-export function AlertRow({ alert, alertmanagerBaseUrl, className }: AlertRowProps) {
+export function AlertRow({ alert, className }: AlertRowProps) {
   const labels = alert.labels ?? {};
   const name = labels.alertname ?? "(unnamed alert)";
   const severity = labels.severity ?? "info";
-  const href = alertmanagerBaseUrl
-    ? buildAlertmanagerUrl(alertmanagerBaseUrl, {
-        alertname: labels.alertname,
-        source: labels.source,
-        target: labels.target,
-      })
-    : null;
+  const href = buildAlertmanagerUrl({
+    alertname: labels.alertname,
+    source: labels.source,
+    target: labels.target,
+  });
 
   return (
     <Card className={cn("", className)}>

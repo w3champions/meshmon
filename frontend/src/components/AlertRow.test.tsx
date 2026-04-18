@@ -24,7 +24,7 @@ function mkAlert(overrides: Partial<AlertSummary> = {}): AlertSummary {
 
 describe("AlertRow", () => {
   it("renders alert name, severity, started-at, and summary", () => {
-    render(<AlertRow alert={mkAlert()} alertmanagerBaseUrl={null} />);
+    render(<AlertRow alert={mkAlert()} />);
     expect(screen.getByRole("heading", { name: /PathPacketLoss/i })).toBeInTheDocument();
     expect(screen.getByText(/critical/i)).toBeInTheDocument();
     expect(screen.getByText(/5 minutes ago/i)).toBeInTheDocument();
@@ -32,28 +32,29 @@ describe("AlertRow", () => {
   });
 
   it("renders source & target chips when present", () => {
-    render(<AlertRow alert={mkAlert()} alertmanagerBaseUrl={null} />);
+    render(<AlertRow alert={mkAlert()} />);
     expect(screen.getByText("brazil-north")).toBeInTheDocument();
     expect(screen.getByText("paris-core")).toBeInTheDocument();
   });
 
-  it("hides the Alertmanager link when no base URL is configured", () => {
-    render(<AlertRow alert={mkAlert()} alertmanagerBaseUrl={null} />);
-    expect(screen.queryByRole("link", { name: /view in alertmanager/i })).toBeNull();
-  });
-
-  it("builds the Alertmanager link when a base URL is configured", () => {
-    render(<AlertRow alert={mkAlert()} alertmanagerBaseUrl="https://am.example/" />);
+  it("builds a same-origin Alertmanager link when labels are present", () => {
+    render(<AlertRow alert={mkAlert()} />);
     const link = screen.getByRole("link", { name: /view in alertmanager/i });
-    expect(link).toHaveAttribute("href", expect.stringContaining("/#/alerts?filter="));
+    expect(link).toHaveAttribute(
+      "href",
+      expect.stringMatching(/^\/alertmanager\/#\/alerts\?filter=/),
+    );
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
   });
 
+  it("hides the Alertmanager link when there are no useful labels", () => {
+    render(<AlertRow alert={mkAlert({ labels: {} })} />);
+    expect(screen.queryByRole("link", { name: /view in alertmanager/i })).toBeNull();
+  });
+
   it("falls back to '(unnamed alert)' when alertname is missing", () => {
-    render(
-      <AlertRow alert={mkAlert({ labels: { severity: "info" } })} alertmanagerBaseUrl={null} />,
-    );
+    render(<AlertRow alert={mkAlert({ labels: { severity: "info" } })} />);
     expect(screen.getByRole("heading", { name: /unnamed alert/i })).toBeInTheDocument();
   });
 });
