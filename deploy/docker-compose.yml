@@ -1,15 +1,148 @@
 # Default standalone deployment for meshmon.
 #
-# This file is a scaffolding placeholder. Downstream tasks (T24) fill in the
-# real service stack: meshmon-service, meshmon-vm (VictoriaMetrics),
-# meshmon-vmalert, meshmon-alertmanager, meshmon-db (Postgres+Timescale),
-# and meshmon-grafana. See design spec 07 for the target layout.
+# Launch from the deploy/ directory:
+#
+#   cp .env.example .env         # fill in secrets
+#   cp meshmon.example.toml meshmon.toml
+#   docker compose up -d         # pulls :latest
+#   docker compose up -d --build # builds service + grafana images locally
+#
+# Only meshmon-service maps a host port. Everything else is reachable
+# only via the meshmon-internal bridge; operators browse Grafana and
+# Alertmanager through meshmon-service's /grafana/* and /alertmanager/*
+# proxies (T34).
+#
+# Image tags are pinned literally — no --env-file flag needed. Bump in
+# this file; the scripts that share versions.env are independent.
 
 services:
   meshmon-service:
     image: ghcr.io/w3champions/meshmon-service:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
     container_name: meshmon-service
     restart: unless-stopped
-    env_file: .env
+    depends_on:
+      meshmon-db:
+        condition: service_healthy
+      meshmon-vm:
+        condition: service_started
+      meshmon-alertmanager:
+        condition: service_started
+      meshmon-grafana:
+        condition: service_started
+    environment:
+      - MESHMON_CONFIG=/etc/meshmon/meshmon.toml
+      - MESHMON_POSTGRES_URL=postgres://meshmon:${MESHMON_PG_PASSWORD}@meshmon-db:5432/meshmon?sslmode=disable
+      - MESHMON_AGENT_TOKEN=${MESHMON_AGENT_TOKEN}
+      - MESHMON_ADMIN_PASSWORD_HASH=${MESHMON_ADMIN_PASSWORD_HASH}
+      - MESHMON_PG_GRAFANA_PASSWORD=${MESHMON_PG_GRAFANA_PASSWORD}
+      # Enable when [service.metrics_auth] is populated in meshmon.toml:
+      # - MESHMON_METRICS_PASSWORD_HASH=${MESHMON_METRICS_PASSWORD_HASH}
+    volumes:
+      - ./meshmon.toml:/etc/meshmon/meshmon.toml:ro
     ports:
       - "8080:8080"
+    networks:
+      meshmon-internal:
+        ipv4_address: 172.30.0.10
+
+  meshmon-db:
+    image: timescale/timescaledb:2.26.3-pg16
+    container_name: meshmon-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=meshmon
+      - POSTGRES_USER=meshmon
+      - POSTGRES_PASSWORD=${MESHMON_PG_PASSWORD}
+    volumes:
+      - meshmon-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meshmon -d meshmon"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [meshmon-internal]
+
+  meshmon-vm:
+    image: victoriametrics/victoria-metrics:v1.140.0
+    container_name: meshmon-vm
+    restart: unless-stopped
+    command:
+      - "-retentionPeriod=2y"
+      - "-downsampling.period=60d:5m"
+    volumes:
+      - meshmon-vm-data:/victoria-metrics-data
+    networks: [meshmon-internal]
+
+  meshmon-vmalert:
+    image: victoriametrics/vmalert:v1.140.0
+    container_name: meshmon-vmalert
+    restart: unless-stopped
+    depends_on: [meshmon-vm, meshmon-alertmanager]
+    command:
+      - "-rule=/etc/vmalert/rules/rules.yaml"
+      - "-datasource.url=http://meshmon-vm:8428"
+      - "-notifier.url=http://meshmon-alertmanager:9093/alertmanager"
+      - "-evaluationInterval=30s"
+    volumes:
+      - ./alerts/rules.yaml:/etc/vmalert/rules/rules.yaml:ro
+    networks: [meshmon-internal]
+
+  meshmon-alertmanager:
+    image: prom/alertmanager:v0.32.0
+    container_name: meshmon-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--web.route-prefix=/alertmanager"
+      - "--web.external-url=${MESHMON_PUBLIC_URL:-http://localhost:8080}/alertmanager"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/templates:/etc/alertmanager/templates:ro
+      - meshmon-am-data:/alertmanager
+    secrets:
+      - source: discord_webhook
+        target: /etc/alertmanager/secrets/discord_webhook
+      - source: discord_webhook_critical
+        target: /etc/alertmanager/secrets/discord_webhook_critical
+      - source: discord_webhook_info
+        target: /etc/alertmanager/secrets/discord_webhook_info
+    networks: [meshmon-internal]
+
+  meshmon-grafana:
+    image: ghcr.io/w3champions/meshmon-grafana:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.grafana
+    container_name: meshmon-grafana
+    restart: unless-stopped
+    environment:
+      # Expanded inside the baked datasources/meshmon.yml at Grafana boot.
+      - MESHMON_PG_GRAFANA_PASSWORD=${MESHMON_PG_GRAFANA_PASSWORD}
+    volumes:
+      - meshmon-grafana-data:/var/lib/grafana
+    networks: [meshmon-internal]
+
+networks:
+  meshmon-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  meshmon-db-data:
+  meshmon-vm-data:
+  meshmon-am-data:
+  meshmon-grafana-data:
+
+secrets:
+  discord_webhook:
+    environment: MESHMON_DISCORD_WEBHOOK
+  discord_webhook_critical:
+    environment: MESHMON_DISCORD_WEBHOOK_CRITICAL
+  discord_webhook_info:
+    environment: MESHMON_DISCORD_WEBHOOK_INFO
