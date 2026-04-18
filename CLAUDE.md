@@ -16,11 +16,17 @@ a central service ingests, stores, and alerts on regressions and route changes.
 
 ## Build and test
 
-```bash
+```sh
 cargo build --workspace
-cargo test --workspace --all-targets
+cargo xtask test            # canonical test command — auto-provisions TimescaleDB and runs nextest
+cargo xtask test-e2e        # end-to-end: brings up deploy/docker-compose.yml and runs cargo e2e
+cargo xtask test-db down    # stop the shared test database when finished
 cargo clippy --workspace -- -D warnings
 ```
+
+`cargo test` still works as a zero-setup fallback (spawns a TimescaleDB container per integration-test binary via testcontainers). `cargo nextest run` directly is not supported — use `cargo xtask test`, which provisions a single shared Postgres and sets `DATABASE_URL` so every test connects to it. `cargo xtask test` excludes `xtask` and `meshmon-e2e` — run those via `cargo test -p xtask` and `cargo xtask test-e2e` respectively. See `crates/service/tests/common/mod.rs` for the three-tier isolation contract used by the test harness.
+
+`deploy/docker-compose.yml` is the local-dev-safe compose file; `deploy/docker-compose.ci-cache.yml` is a CI-only overlay that adds the GHA buildx cache backend (requires `ACTIONS_RUNTIME_TOKEN`) and is wired in via `MESHMON_E2E_CACHE_OVERLAY` in the workflow — do not pass it locally.
 
 Service integration tests require Docker (TimescaleDB via `testcontainers`).
 

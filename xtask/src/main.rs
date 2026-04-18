@@ -22,6 +22,23 @@
 //! Sort order: the emitted JSON is serialized with `serde_json::to_string_pretty`
 //! and ends with a trailing newline. Deterministic output keeps `git diff`
 //! clean across regenerations.
+//!
+//! ## `test-db <up|down|status>`
+//!
+//! Manage a shared TimescaleDB container for integration tests.
+//! See `src/test_db.rs` for details.
+//!
+//! ## `test [-- <nextest-args>]`
+//!
+//! Provision the shared DB and run the full workspace test suite via
+//! `cargo nextest`. Requires `cargo-nextest` to be installed.
+//!
+//! ## `test-e2e [-- <cargo-test-args>]`
+//!
+//! Bring up the compose stack and run the `meshmon-e2e` test package.
+
+mod test_cmd;
+mod test_db;
 
 use anyhow::{bail, Context, Result};
 use std::env;
@@ -38,11 +55,43 @@ fn main() -> Result<()> {
     };
     match cmd.as_str() {
         "openapi" => cmd_openapi(),
+        "test-db" => {
+            let subcmd = args.next().unwrap_or_default();
+            match subcmd.as_str() {
+                "up" => test_db::up(),
+                "down" => test_db::down(),
+                "status" => test_db::status(),
+                other => {
+                    eprintln!("usage: cargo xtask test-db <up|down|status>");
+                    bail!("unknown test-db subcommand: {other}");
+                }
+            }
+        }
+        "test" => {
+            // Collect everything after an optional `--` separator as extra
+            // args forwarded to nextest.
+            let extra: Vec<String> = args.collect();
+            let extra = strip_separator(extra);
+            test_cmd::test(extra)
+        }
+        "test-e2e" => {
+            let extra: Vec<String> = args.collect();
+            let extra = strip_separator(extra);
+            test_cmd::test_e2e(extra)
+        }
         other => {
             print_usage();
             bail!("unknown subcommand: {other}");
         }
     }
+}
+
+/// Strip a leading `--` separator from extra args, if present.
+fn strip_separator(mut args: Vec<String>) -> Vec<String> {
+    if args.first().map(|s| s.as_str()) == Some("--") {
+        args.remove(0);
+    }
+    args
 }
 
 fn cmd_openapi() -> Result<()> {
@@ -61,7 +110,11 @@ fn cmd_openapi() -> Result<()> {
 
 /// Resolve the workspace root by walking up from `CARGO_MANIFEST_DIR` until
 /// we find a `Cargo.toml` containing `[workspace]`.
-fn workspace_root() -> Result<PathBuf> {
+///
+/// Exposed `pub(crate)` so subcommand modules (e.g. `test_cmd`) can pin
+/// CWD to the workspace root before shelling out — lets `cargo xtask
+/// test-e2e` run from any subdirectory.
+pub(crate) fn workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut dir = start.clone();
     loop {
@@ -85,5 +138,10 @@ fn print_usage() {
     eprintln!("usage: cargo xtask <subcommand>");
     eprintln!();
     eprintln!("subcommands:");
-    eprintln!("  openapi    regenerate {OPENAPI_RELATIVE_PATH}");
+    eprintln!("  openapi              regenerate {OPENAPI_RELATIVE_PATH}");
+    eprintln!("  test-db up           start shared TimescaleDB container");
+    eprintln!("  test-db down         stop and remove shared TimescaleDB container");
+    eprintln!("  test-db status       report container state and DATABASE_URL");
+    eprintln!("  test [-- <args>]     provision DB + run workspace tests via nextest");
+    eprintln!("  test-e2e [-- <args>] bring up compose stack + run meshmon-e2e");
 }

@@ -112,7 +112,7 @@ file CI does — no duplication to maintain.
 |---|---|---|
 | Rust fmt | `cargo fmt --all -- --check` | `rust-toolchain.toml` |
 | Rust clippy | `cargo clippy --workspace --all-targets -- -D warnings` | `Cargo.toml` |
-| Rust tests | `cargo test --workspace --exclude meshmon-e2e --all-targets` | `Cargo.toml` |
+| Rust tests | `cargo xtask test` | `Cargo.toml` |
 | OpenAPI snapshot drift (Rust) | `cargo xtask openapi && git diff --exit-code frontend/src/api/openapi.gen.json` | — |
 | OpenAPI types drift (frontend) | `cd frontend && npm run openapi:types && git diff --exit-code src/api/schema.gen.ts` | `frontend/package.json` |
 | Frontend lint | `cd frontend && npx biome check ./src` | `frontend/biome.json` |
@@ -122,7 +122,7 @@ file CI does — no duplication to maintain.
 | yamllint | `yamllint -c .yamllint.yml deploy` | `.yamllint.yml` |
 | shellcheck | `shellcheck --severity=warning scripts/*.sh` | — |
 | actionlint | `actionlint .github/workflows/*.yml` | — |
-| Rust E2E | `cd deploy && docker compose up -d --build --wait && cd .. && cargo e2e && cd deploy && docker compose down -v` | `deploy/docker-compose.yml` |
+| Rust E2E | `cargo xtask test-e2e` (brings the compose stack up, waits for `/readyz`, runs `cargo test -p meshmon-e2e`; teardown: `docker compose -f deploy/docker-compose.yml down -v`) | `deploy/docker-compose.yml` |
 | Release binary (frontend-embedded) | `cd frontend && npm ci && npm run build && cd .. && cargo build --release -p meshmon-service` | `crates/service/build.rs` |
 
 > The `Release binary` CI job additionally uploads the compiled binary as a GitHub Actions artifact; that step has no local equivalent.
@@ -247,17 +247,28 @@ CI re-runs this and fails if the checked-in snapshot is stale.
 
 ## Running tests
 
-```bash
-cargo test --workspace --all-targets
+```sh
+cargo xtask test            # primary path (provisions TimescaleDB, runs nextest)
+cargo xtask test-e2e        # compose-stack end-to-end tests
+cargo xtask test-db down    # tear down the shared test database
 ```
 
-`meshmon-service`'s integration tests spin up one
-`timescale/timescaledb` container per test binary via
-[`testcontainers`](https://crates.io/crates/testcontainers) and share it
-across every test in that binary, so the Docker daemon must be running
-locally. A process-exit hook removes the container; if you kill a test
-run with Ctrl-C the container may survive — prune with
-`docker ps -a --filter ancestor=timescale/timescaledb | awk 'NR>1 {print $1}' | xargs -r docker rm -f`.
+`cargo xtask test` provisions a single shared `timescale/timescaledb`
+container, sets `DATABASE_URL`, and runs `cargo nextest` against it. This
+is the canonical path for local dev and CI.
+
+`cargo xtask test` excludes the `xtask` and `meshmon-e2e` packages —
+they run in separate invocations. Verify xtask's own lifecycle commands
+with `cargo test -p xtask` (does not need `DATABASE_URL`; the test
+drives its own `meshmon-test-pg` container). Run end-to-end tests with
+`cargo xtask test-e2e`.
+
+`cargo test --workspace --all-targets` still works as a zero-setup
+fallback — it spawns one container per test binary via
+[`testcontainers`](https://crates.io/crates/testcontainers) and tears
+each down at process exit. `cargo nextest run` without `DATABASE_URL`
+is not supported and will panic with a clear message directing you to
+`cargo xtask test`.
 
 To target an existing Postgres (e.g. a remote instance) instead of
 auto-spawning, set `DATABASE_URL`:

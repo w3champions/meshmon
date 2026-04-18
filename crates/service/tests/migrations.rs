@@ -255,20 +255,18 @@ async fn run_migrations_locked_with_env(
 
 #[tokio::test]
 async fn run_migrations_creates_grafana_role_nologin_by_default() {
-    let db = common::acquire(false).await;
+    // Uses own_container() because this test asserts on cluster-level role
+    // state (pg_roles). Other test binaries may call run_migrations on the
+    // shared cluster concurrently and flip meshmon_grafana's LOGIN attribute,
+    // breaking the assertion. An isolated container eliminates that race.
+    let db = common::own_container().await;
 
-    // Hold the guard across the assertions so a sibling test can't
-    // flip the cluster-level role between our `run_migrations` and our
+    // Hold the guard across the assertions so a sibling test within this
+    // binary can't flip the env var between our `run_migrations` and our
     // `rolcanlogin` query.
     let _guard = run_migrations_locked_with_env(&db.pool, None)
         .await
         .expect("run_migrations must succeed without the env var");
-
-    // `apply_grafana_role_password` now explicitly issues
-    // `ALTER ROLE ... NOLOGIN` when the env var is unset, so sibling
-    // tests that left the role in LOGIN state get converged by the
-    // first `run_migrations_locked_with_env(None)` call above. No
-    // manual reset needed.
 
     // Role exists.
     let role_exists: (bool,) =
@@ -294,7 +292,11 @@ async fn run_migrations_creates_grafana_role_nologin_by_default() {
 
 #[tokio::test]
 async fn run_migrations_flips_grafana_role_to_login_when_password_set() {
-    let db = common::acquire(false).await;
+    // Uses own_container() — this test asserts on cluster-level role state
+    // (pg_roles, pg_authid) and sets MESHMON_PG_GRAFANA_PASSWORD to LOGIN.
+    // An isolated container prevents the LOGIN state from racing with other
+    // binaries that assert NOLOGIN on the shared cluster.
+    let db = common::own_container().await;
 
     let _guard = run_migrations_locked_with_env(&db.pool, Some("s3cret$pw$value"))
         .await
@@ -322,13 +324,8 @@ async fn run_migrations_flips_grafana_role_to_login_when_password_set() {
     .unwrap();
     assert!(has_password.0, "meshmon_grafana must have a password set");
 
-    // Reset the role back to NOLOGIN so a sibling test that acquires
-    // the lock next doesn't observe the LOGIN flip from this test.
-    sqlx::query("ALTER ROLE meshmon_grafana WITH NOLOGIN")
-        .execute(&db.pool)
-        .await
-        .expect("reset role to NOLOGIN");
-
+    // No need to reset the role — this container is dedicated to this test
+    // and will be torn down by db.close().
     db.close().await;
 }
 
@@ -338,7 +335,12 @@ async fn run_migrations_revokes_grafana_login_when_env_var_removed() {
     // env var and restarting must actually disable DB login for the
     // Grafana role. Silently leaving it LOGIN + old-password would
     // defeat the documented operator knob.
-    let db = common::acquire(false).await;
+    //
+    // Uses own_container() because this test performs two sequential
+    // run_migrations calls with different env var states and asserts the role
+    // transitions correctly. Sharing the cluster with other binaries would
+    // allow a concurrent ALTER ROLE to interfere between the two runs.
+    let db = common::own_container().await;
 
     // Arrange: flip to LOGIN + password first …
     let _guard = run_migrations_locked_with_env(&db.pool, Some("rotate-me"))
@@ -374,7 +376,11 @@ async fn run_migrations_revokes_grafana_login_when_env_var_removed() {
 
 #[tokio::test]
 async fn grafana_role_has_select_but_not_insert() {
-    let db = common::acquire(false).await;
+    // Uses own_container() because this test asserts on cluster-level role
+    // privileges (has_table_privilege, pg_roles). An isolated container
+    // prevents concurrent role DDL from other test binaries from racing with
+    // the privilege assertions.
+    let db = common::own_container().await;
 
     let _guard = run_migrations_locked_with_env(&db.pool, None)
         .await
@@ -438,10 +444,12 @@ async fn grafana_role_has_select_but_not_insert() {
 /// isolation — the same pattern T04+ DML tests should follow by default.
 #[tokio::test]
 async fn schema_constraints_behave_correctly() {
-    // The first caller of `shared_migrated_pool` triggers its
+    // The first caller of `shared_migrated_pool` in this binary triggers its
     // internal `run_migrations`, which touches the cluster-level
-    // `meshmon_grafana` role. Take the lock to avoid racing with
-    // grafana-role tests that mutate `MESHMON_PG_GRAFANA_PASSWORD`.
+    // `meshmon_grafana` role. Take the lock to serialize against sibling
+    // tests in this binary (e.g. migrations_apply_on_*) that also call
+    // run_migrations with remove_var(GRAFANA_PASSWORD_ENV). The grafana-role
+    // assertion tests now use own_container() so they don't contend here.
     let pool = {
         let _guard = GRAFANA_TEST_LOCK.lock().await;
         std::env::remove_var(GRAFANA_PASSWORD_ENV);
