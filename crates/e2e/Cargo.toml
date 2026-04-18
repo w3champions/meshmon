@@ -1,0 +1,19 @@
+[package]
+name = "meshmon-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# `cookies` is required for `Client::builder().cookie_store(true)`.
+# `blocking` keeps the tests synchronous (no tokio runtime to thread
+# through every helper).
+reqwest = { workspace = true, features = ["blocking", "cookies"] }
+serde_json = { workspace = true }
