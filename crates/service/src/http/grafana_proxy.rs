@@ -67,11 +67,7 @@ async fn inject_grafana_headers(
         // `login_required!` should have intercepted this; return 401
         // defensively so a router-wiring mistake degrades gracefully
         // rather than panicking in the middleware.
-        return (
-            axum::http::StatusCode::UNAUTHORIZED,
-            "not authenticated",
-        )
-            .into_response();
+        return (axum::http::StatusCode::UNAUTHORIZED, "not authenticated").into_response();
     };
     let user = principal.username.clone();
 
