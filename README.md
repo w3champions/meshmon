@@ -122,7 +122,7 @@ file CI does — no duplication to maintain.
 | yamllint | `yamllint -c .yamllint.yml deploy` | `.yamllint.yml` |
 | shellcheck | `shellcheck --severity=warning scripts/*.sh` | — |
 | actionlint | `actionlint .github/workflows/*.yml` | — |
-| Rust E2E | `cd deploy && docker compose up -d --build --wait && cd .. && cargo e2e && cd deploy && docker compose down -v` | `deploy/docker-compose.yml` |
+| Rust E2E | `cargo xtask test-e2e` (brings the compose stack up, waits for `/readyz`, runs `cargo test -p meshmon-e2e`; teardown: `docker compose -f deploy/docker-compose.yml down -v`) | `deploy/docker-compose.yml` |
 | Release binary (frontend-embedded) | `cd frontend && npm ci && npm run build && cd .. && cargo build --release -p meshmon-service` | `crates/service/build.rs` |
 
 > The `Release binary` CI job additionally uploads the compiled binary as a GitHub Actions artifact; that step has no local equivalent.
