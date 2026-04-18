@@ -72,15 +72,25 @@ export default function PathDetail() {
     return undefined;
   }, [overview.data]);
 
-  if (overview.isLoading) {
+  // `isPending && !data` is the genuine "never resolved yet" state in TanStack
+  // Query v5 — when `placeholderData: keepPreviousData` is set, subsequent
+  // refetches flip `isFetching` but keep `data` defined, so we must not gate
+  // on `isLoading` / `isPending` alone or every protocol/range toggle would
+  // blank the page.
+  if (overview.isPending && !overview.data) {
     return <Skeleton className="h-64 w-full" data-testid="path-detail-skeleton" />;
   }
-  if (overview.isError || !overview.data) {
+  // A transient error during a background refetch must not replace the page
+  // either — only surface the error view when we have nothing to show.
+  if (overview.isError && !overview.data) {
     return (
       <p role="alert" className="p-6 text-sm text-destructive">
         Failed to load path overview
       </p>
     );
+  }
+  if (!overview.data) {
+    return <Skeleton className="h-64 w-full" data-testid="path-detail-skeleton" />;
   }
 
   const data = overview.data;
@@ -143,6 +153,9 @@ export default function PathDetail() {
                 : "n/a"}
             </span>
           </span>
+          {overview.isFetching && (
+            <span className="text-xs text-muted-foreground">refreshing…</span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <ProtocolToggle
@@ -219,7 +232,7 @@ export default function PathDetail() {
         viewport when the hop card appears. `minmax(0,1fr)` lets the column
         shrink freely; the card keeps its natural width via `w-80 shrink-0`.
       */}
-      <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] items-start">
         <div className="min-w-0">
           <h2 className="mb-2 text-lg font-semibold">Current route</h2>
           <RouteTopology

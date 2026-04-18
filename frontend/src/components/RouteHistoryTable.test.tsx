@@ -63,4 +63,13 @@ describe("RouteHistoryTable", () => {
     render(<RouteHistoryTable snapshots={rows} onCompare={() => {}} />);
     expect(screen.queryByText(/showing latest 100/i)).toBeNull();
   });
+
+  test("renders accessible A/B radios with button semantics", () => {
+    render(<RouteHistoryTable snapshots={rows} onCompare={() => {}} />);
+    const radios = screen.getAllByRole("radio");
+    expect(radios).toHaveLength(4); // 2 rows × 2 groups (A, B)
+    for (const r of radios) {
+      expect(r.tagName).toBe("BUTTON");
+    }
+  });
 });

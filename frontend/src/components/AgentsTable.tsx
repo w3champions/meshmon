@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import {
   type ColumnDef,
   flexRender,
@@ -53,6 +53,7 @@ const columns: ColumnDef<AgentSummary>[] = [
 export function AgentsTable({ agents, className }: AgentsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
+  const navigate = useNavigate();
 
   const table = useReactTable({
     data: agents,
@@ -112,25 +113,34 @@ export function AgentsTable({ agents, className }: AgentsTableProps) {
           ))}
         </TableHeader>
         <TableBody>
-          {table.getRowModel().rows.map((row) => (
-            <TableRow key={row.id} className="cursor-pointer hover:bg-muted/50">
-              {row.getVisibleCells().map((cell, idx) => (
-                <TableCell key={cell.id} className={idx === 0 ? "font-mono text-xs" : ""}>
-                  {idx === 0 ? (
-                    <Link
-                      to={"/agents/$id"}
-                      params={{ id: row.original.id }}
-                      className="block w-full"
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext()) ?? row.original.id}
-                    </Link>
-                  ) : (
-                    flexRender(cell.column.columnDef.cell, cell.getContext())
-                  )}
-                </TableCell>
-              ))}
-            </TableRow>
-          ))}
+          {table.getRowModel().rows.map((row) => {
+            const go = () => navigate({ to: "/agents/$id", params: { id: row.original.id } });
+            return (
+              <TableRow
+                key={row.id}
+                role="link"
+                tabIndex={0}
+                aria-label={`Open agent ${row.original.id}`}
+                // If a cell gains an interactive child (e.g. a copy button), that child's
+                // handler must call `e.stopPropagation()` so the row-level navigation
+                // doesn't swallow the click.
+                onClick={go}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    go();
+                  }
+                }}
+                className="cursor-pointer hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+              >
+                {row.getVisibleCells().map((cell, idx) => (
+                  <TableCell key={cell.id} className={idx === 0 ? "font-mono text-xs" : ""}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </TableCell>
+                ))}
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </div>

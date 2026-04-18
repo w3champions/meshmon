@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>meshmon</title>
+    <script>
+      // Apply persisted theme BEFORE first paint to prevent a dark-to-light
+      // flash when the user picked light. Dark is the default palette, so we
+      // only need to set `.light` here. Zustand's persist middleware stores
+      // under the `meshmon-ui` key (see frontend/src/stores/ui.ts).
+      try {
+        var s = JSON.parse(localStorage.getItem("meshmon-ui") || "{}");
+        if (s.state && s.state.theme === "light") {
+          document.documentElement.classList.add("light");
+        }
+      } catch (e) {
+        /* Ignore corrupt localStorage — fall through to default dark. */
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

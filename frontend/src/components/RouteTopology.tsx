@@ -1,6 +1,6 @@
 import cytoscape, { type LayoutOptions } from "cytoscape";
 import dagre from "cytoscape-dagre";
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { components } from "@/api/schema.gen";
 import type { RouteDiff } from "@/lib/route-diff";
 import { cn } from "@/lib/utils";
@@ -102,8 +102,8 @@ export function RouteTopology({
       layout: {
         name: "dagre",
         rankDir: "LR",
-        nodeSep: 40,
-        rankSep: 60,
+        nodeSep: 28,
+        rankSep: 120,
       } satisfies DagreLayoutOptions as unknown as LayoutOptions,
       style: [
         {
@@ -112,11 +112,15 @@ export function RouteTopology({
             shape: "round-rectangle",
             label: "data(label)",
             "text-wrap": "wrap",
+            "text-max-width": "120px",
             "text-valign": "center",
             "text-halign": "center",
-            padding: "6px",
+            width: "label",
+            height: "label",
+            padding: "8px",
             "font-family": "monospace",
             "font-size": 11,
+            color: "#0f172a",
           },
         },
         { selector: "node.state-normal", style: { "background-color": "#22c55e" } },
@@ -156,42 +160,37 @@ export function RouteTopology({
     return () => cy.destroy();
   }, [hops, highlightChanges, onNodeClick, colorBy]);
 
+  const reactId = useId();
+
   if (hops.length === 0) {
     return <p className={cn("text-sm text-muted-foreground", className)}>No route data yet.</p>;
   }
+
+  // The graph is rendered into this div by cytoscape as a <canvas>. Expose it
+  // as role="img" with an accessible name and a paragraph description linked
+  // via aria-describedby — previously we used an sr-only <table> with a
+  // <caption>, but Tailwind v4's `.sr-only` clip doesn't cover `<caption>` in
+  // all browsers, so the caption leaked as floating text below the topology.
+  const descId = `route-topology-desc-${reactId}`;
+  const descText = hops
+    .map(
+      (h) =>
+        `Hop ${h.position}: ${dominantIp(h)}, RTT ${(h.avg_rtt_micros / 1000).toFixed(1)} ms, loss ${(h.loss_pct * 100).toFixed(1)}%.`,
+    )
+    .join(" ");
 
   return (
     <>
       <div
         ref={ref}
-        // The graph is rendered into this div by cytoscape as a <canvas>. Expose it
-        // as role="img" with an accessible name; the sr-only <table> below mirrors
-        // the hop data for screen-reader users.
         role="img"
         aria-label={ariaLabel}
+        aria-describedby={descId}
         className={cn("h-[360px] md:h-[480px] w-full rounded border", className)}
       />
-      <table className="sr-only">
-        <caption>Route hops</caption>
-        <thead>
-          <tr>
-            <th scope="col">Position</th>
-            <th scope="col">IP</th>
-            <th scope="col">RTT (µs)</th>
-            <th scope="col">Loss</th>
-          </tr>
-        </thead>
-        <tbody>
-          {hops.map((h) => (
-            <tr key={h.position}>
-              <th scope="row">{h.position}</th>
-              <td>{dominantIp(h)}</td>
-              <td>{h.avg_rtt_micros}</td>
-              <td>{(h.loss_pct * 100).toFixed(1)}%</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <p id={descId} className="sr-only">
+        {descText}
+      </p>
     </>
   );
 }

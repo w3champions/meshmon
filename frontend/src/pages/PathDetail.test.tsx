@@ -8,7 +8,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import "@/test/cytoscape-mock";
 import PathDetail from "@/pages/PathDetail";
@@ -89,7 +89,10 @@ function renderPage(initialUrl = "/paths/a/b?range=24h"): {
   // TanStack Router's return type carries deep route generics that are
   // hard to restate here; `unknown` plus a narrow cast at use sites keeps
   // the test helper agnostic of the routeTree shape.
-  router: { state: { location: { search: Record<string, unknown> } } };
+  router: {
+    state: { location: { search: Record<string, unknown> } };
+    history: { push: (path: string) => void };
+  };
 } {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const rootRoute = createRootRoute({ component: Outlet });
@@ -187,6 +190,62 @@ describe("PathDetail", () => {
     expect(label.textContent).toMatch(/—/);
     // Report link is hidden (protocol-specific, and we have no protocol).
     expect(screen.queryByRole("link", { name: /generate report/i })).toBeNull();
+  });
+
+  test("keeps previous data visible across protocol change (no full-page skeleton flash)", async () => {
+    // Simulate a protocol toggle by navigating to the same page with a
+    // different `protocol` query param. The query key changes, so TanStack
+    // Query refetches — but with `placeholderData: keepPreviousData` the old
+    // data remains rendered while the new fetch is in flight, and PathDetail
+    // must NOT fall back to its top-level skeleton.
+    let resolveSecondFetch: ((body: unknown) => void) | null = null;
+    let callCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.includes("/api/paths/a/b/overview")) {
+        callCount += 1;
+        if (callCount === 1) {
+          return new Response(JSON.stringify(overview()), { status: 200 });
+        }
+        // Hold the second fetch open so we can observe the "refetch in flight
+        // with previous data visible" state.
+        const body = await new Promise<unknown>((resolve) => {
+          resolveSecondFetch = resolve;
+        });
+        return new Response(JSON.stringify(body), { status: 200 });
+      }
+      return new Response("nf", { status: 404 });
+    });
+
+    const { router } = renderPage("/paths/a/b?range=24h&protocol=icmp");
+    // First render finishes with real content on screen.
+    expect(await screen.findByText("Agent A")).toBeInTheDocument();
+    expect(screen.queryByTestId("path-detail-skeleton")).toBeNull();
+
+    // Navigate to a different protocol to change the TanStack Query key.
+    // Going through history.push (a plain string) avoids TanStack Router's
+    // deeply-generic `navigate()` signature, which is a nightmare to satisfy
+    // from test helpers.
+    await act(async () => {
+      router.history.push("/paths/a/b?range=24h&protocol=udp");
+    });
+
+    // While the second fetch is pending, the previous data is still on screen
+    // and the page skeleton must NOT come back — that was the visual "full
+    // page refresh" the user complained about.
+    expect(screen.queryByTestId("path-detail-skeleton")).toBeNull();
+    expect(screen.getByText("Agent A")).toBeInTheDocument();
+    expect(await screen.findByText(/refreshing/i)).toBeInTheDocument();
+
+    // Let the second fetch complete; the page simply swaps in fresh data
+    // without ever showing the skeleton.
+    await act(async () => {
+      resolveSecondFetch?.(overview());
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(/refreshing/i)).toBeNull();
+    });
+    expect(screen.queryByTestId("path-detail-skeleton")).toBeNull();
   });
 
   test("drops intermediate custom-range edits with empty from/to", async () => {

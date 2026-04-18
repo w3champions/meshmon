@@ -57,6 +57,21 @@ export function usePathOverview(opts: UsePathOverviewOpts) {
       if (!data) throw new Error("empty response");
       return data;
     },
+    // Keep the prior result rendered while a new key fetches — but only when
+    // the underlying (source, target) pair is unchanged. Protocol/range changes
+    // on the same path should not flash a skeleton, while navigating to a
+    // different pair must fall back to a loading state rather than briefly
+    // rendering the previous path's data against the new URL.
+    placeholderData: (previous, previousQuery) => {
+      if (!previous || !previousQuery) return undefined;
+      const [, prevSource, prevTarget] = previousQuery.queryKey as [
+        string,
+        string,
+        string,
+        ...unknown[],
+      ];
+      return prevSource === source && prevTarget === target ? previous : undefined;
+    },
     refetchInterval: 60_000,
   });
 }

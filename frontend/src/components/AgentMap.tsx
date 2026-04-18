@@ -1,11 +1,25 @@
 import { Link } from "@tanstack/react-router";
-import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
+import L from "leaflet";
+import iconUrl from "leaflet/dist/images/marker-icon.png";
+import iconRetinaUrl from "leaflet/dist/images/marker-icon-2x.png";
+import shadowUrl from "leaflet/dist/images/marker-shadow.png";
+import { useEffect } from "react";
+import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { HealthMatrix } from "@/api/hooks/health-matrix";
 import { AgentCard } from "@/components/AgentCard";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { HealthState } from "@/lib/health";
 import { cn } from "@/lib/utils";
+
+// react-leaflet uses Leaflet's Default icon. Vite bundles PNGs as URLs when
+// imported; without this override Leaflet tries to load them from the HTML
+// document root and 404s on every marker.
+L.Icon.Default.mergeOptions({
+  iconUrl,
+  iconRetinaUrl,
+  shadowUrl,
+});
 
 interface AgentMapProps {
   agents: AgentSummary[];
@@ -30,11 +44,28 @@ function worstOutgoingState(matrix: HealthMatrix, source: string): HealthState {
   return worst;
 }
 
+function FitToAgents({ points }: { points: Array<[number, number]> }) {
+  const map = useMap();
+  // Fingerprint the coordinates so the effect only re-fits when the
+  // actual set of agent positions changes. Without this the 30 s agents
+  // refetch produces a new array reference every poll and the map snaps
+  // back, yanking any manual pan/zoom.
+  const key = points.map(([la, lo]) => `${la},${lo}`).join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key fingerprints points
+  useEffect(() => {
+    if (points.length === 0) return;
+    const bounds = L.latLngBounds(points);
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 5 });
+  }, [map, key]);
+  return null;
+}
+
 export function AgentMap({ agents, matrix, className, onMarkerClick }: AgentMapProps) {
   const withCoords = agents.filter(
     (a): a is AgentSummary & { lat: number; lon: number } =>
       typeof a.lat === "number" && typeof a.lon === "number",
   );
+  const points: Array<[number, number]> = withCoords.map((a) => [a.lat, a.lon]);
 
   return (
     <div
@@ -44,11 +75,19 @@ export function AgentMap({ agents, matrix, className, onMarkerClick }: AgentMapP
       )}
       data-testid="agent-map-shell"
     >
-      <MapContainer center={[20, 0]} zoom={2} scrollWheelZoom={false} className="h-full w-full">
+      <MapContainer
+        center={[20, 0]}
+        zoom={2}
+        minZoom={1}
+        worldCopyJump
+        scrollWheelZoom={false}
+        className="h-full w-full"
+      >
         <TileLayer
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution="© OpenStreetMap contributors"
         />
+        <FitToAgents points={points} />
         {withCoords.map((agent) => {
           const state = worstOutgoingState(matrix, agent.id);
           return (

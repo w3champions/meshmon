@@ -14,6 +14,38 @@ import { cn } from "@/lib/utils";
 
 type RouteSnapshotSummary = components["schemas"]["RouteSnapshotSummary"];
 
+interface RadioDotProps {
+  checked: boolean;
+  onChange: () => void;
+  label: string;
+}
+
+function RadioDot({ checked, onChange, label }: RadioDotProps) {
+  return (
+    /* biome-ignore lint/a11y/useSemanticElements: a 32x32 themed click target that needs button styling; native <input type="radio"> cannot be sized/themed consistently */
+    <button
+      type="button"
+      role="radio"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onChange}
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-full border border-border",
+        "transition-colors hover:bg-muted",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "block h-3 w-3 rounded-full transition-colors",
+          checked ? "bg-primary" : "bg-transparent",
+        )}
+      />
+    </button>
+  );
+}
+
 interface RouteHistoryTableProps {
   snapshots: RouteSnapshotSummary[];
   /**
@@ -71,21 +103,17 @@ export function RouteHistoryTable({
                 {s.path_summary ? `${(s.path_summary.loss_pct * 100).toFixed(1)}%` : "—"}
               </TableCell>
               <TableCell>
-                <input
-                  type="radio"
-                  name="compare-a"
-                  aria-label={`Pick as A (id ${s.id})`}
+                <RadioDot
                   checked={a === s.id}
                   onChange={() => setA(s.id)}
+                  label={`Pick as A (id ${s.id})`}
                 />
               </TableCell>
               <TableCell>
-                <input
-                  type="radio"
-                  name="compare-b"
-                  aria-label={`Pick as B (id ${s.id})`}
+                <RadioDot
                   checked={b === s.id}
                   onChange={() => setB(s.id)}
+                  label={`Pick as B (id ${s.id})`}
                 />
               </TableCell>
             </TableRow>

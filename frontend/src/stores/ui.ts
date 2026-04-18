@@ -13,8 +13,9 @@ export const useUiStore = create<UiState>()(
     (set) => ({
       theme: "dark",
       sidebarCollapsed: false,
-      // Callers must also sync document.documentElement.classList ('dark');
-      // see ThemeToggle / main.tsx.
+      // Callers must also sync document.documentElement.classList ('light');
+      // @theme defaults to dark, so `.light` is the override class.
+      // See ThemeToggle / main.tsx.
       setTheme: (theme) => set({ theme }),
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
     }),

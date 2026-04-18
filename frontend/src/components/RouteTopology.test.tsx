@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 // Mock cytoscape BEFORE importing RouteTopology so the component picks up the
 // stub instead of the real library (which needs a browser layout engine).
 import "@/test/cytoscape-mock";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { components } from "@/api/schema.gen";
 import { RouteTopology } from "@/components/RouteTopology";
@@ -106,10 +106,28 @@ describe("RouteTopology", () => {
     expect(instances).toHaveLength(0);
   });
 
-  test("sr-only table reflects hops for screen readers", () => {
+  test("sr-only description reflects hops for screen readers", () => {
     const { container } = render(<RouteTopology hops={HOPS} ariaLabel="Route" />);
     const sr = container.querySelector(".sr-only");
     expect(sr?.textContent).toContain("10.0.0.1");
     expect(sr?.textContent).toContain("10.0.0.2");
+  });
+});
+
+describe("RouteTopology accessibility", () => {
+  test("does not render a visible 'Route hops' caption", () => {
+    render(<RouteTopology hops={HOPS} ariaLabel="x" />);
+    expect(screen.queryByText("Route hops", { selector: "caption" })).toBeNull();
+  });
+
+  test("exposes hop list via aria-describedby on the graph", () => {
+    render(<RouteTopology hops={[HOPS[0]]} ariaLabel="topology" />);
+    const graph = screen.getByRole("img", { name: "topology" });
+    const describedBy = graph.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    if (!describedBy) throw new Error("unreachable");
+    const desc = document.getElementById(describedBy);
+    expect(desc).not.toBeNull();
+    expect(desc?.textContent ?? "").toContain("10.0.0.1");
   });
 });

@@ -1,4 +1,5 @@
 import { screen } from "@testing-library/react";
+import L from "leaflet";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { HealthMatrix } from "@/api/hooks/health-matrix";
@@ -68,5 +69,25 @@ describe("AgentMap", () => {
     expect(popups[0].textContent).toContain("Unreachable");
     // Agent "b" has no outgoing entries → falls back to stale
     expect(popups[1].textContent).toContain("b");
+  });
+});
+
+describe("AgentMap Leaflet icon setup", () => {
+  test("patches L.Icon.Default with a bundled iconUrl", () => {
+    const defaults = (
+      L.Icon.Default.prototype as unknown as {
+        options: { iconUrl?: string; iconRetinaUrl?: string; shadowUrl?: string };
+      }
+    ).options;
+
+    // Must not be Leaflet's broken bare defaults (relative to document root).
+    expect(defaults.iconUrl).not.toBe("marker-icon.png");
+    expect(defaults.iconRetinaUrl).not.toBe("marker-icon-2x.png");
+    expect(defaults.shadowUrl).not.toBe("marker-shadow.png");
+
+    // Must still point at the expected file (guards against wrong assets).
+    expect(defaults.iconUrl).toMatch(/marker-icon\.png$/);
+    expect(defaults.iconRetinaUrl).toMatch(/marker-icon-2x\.png$/);
+    expect(defaults.shadowUrl).toMatch(/marker-shadow\.png$/);
   });
 });

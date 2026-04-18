@@ -5,6 +5,12 @@ import type { AgentSummary } from "@/api/hooks/agents";
 import { AgentsTable } from "@/components/AgentsTable";
 import { renderWithProviders } from "@/test/query-wrapper";
 
+const navigate = vi.fn();
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  return { ...actual, useNavigate: () => navigate };
+});
+
 // Mock date-fns so tests are deterministic regardless of wall-clock time.
 vi.mock("date-fns", async (importOriginal) => {
   const actual = await importOriginal<typeof import("date-fns")>();
@@ -102,18 +108,18 @@ describe("AgentsTable", () => {
       // Click to sort ascending
       await user.click(nameHeader);
 
-      // After ascending sort: Alpha before Zeta
-      const rows = screen.getAllByRole("row");
-      // rows[0] = header row, rows[1] = first data row, rows[2] = second data row
-      expect(rows[1]).toHaveTextContent("alpha");
-      expect(rows[2]).toHaveTextContent("zeta");
+      // After ascending sort: Alpha before Zeta.
+      // Data rows expose role="link" (full-row navigation); header row keeps implicit role="row".
+      const dataRows = screen.getAllByRole("link");
+      expect(dataRows[0]).toHaveTextContent("alpha");
+      expect(dataRows[1]).toHaveTextContent("zeta");
 
       // Click again to sort descending
       await user.click(nameHeader);
 
-      const rowsDesc = screen.getAllByRole("row");
-      expect(rowsDesc[1]).toHaveTextContent("zeta");
-      expect(rowsDesc[2]).toHaveTextContent("alpha");
+      const dataRowsDesc = screen.getAllByRole("link");
+      expect(dataRowsDesc[0]).toHaveTextContent("zeta");
+      expect(dataRowsDesc[1]).toHaveTextContent("alpha");
     });
   });
 
@@ -158,17 +164,63 @@ describe("AgentsTable", () => {
   });
 
   describe("row navigation", () => {
-    test("ID cell renders a Link with href /agents/$id", async () => {
+    test("clicking the ID cell navigates to /agents/$id", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<AgentsTable agents={AGENTS} />);
+
+      await screen.findByText("zeta");
+      navigate.mockClear();
+
+      await user.click(screen.getByText("zeta"));
+
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/agents/$id",
+        params: { id: "zeta" },
+      });
+    });
+
+    test("clicking a non-ID cell (Name) also navigates", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<AgentsTable agents={AGENTS} />);
+
+      await screen.findByText("Alpha");
+      navigate.mockClear();
+
+      await user.click(screen.getByText("Alpha"));
+
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/agents/$id",
+        params: { id: "alpha" },
+      });
+    });
+
+    test("pressing Enter on a focused row navigates", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<AgentsTable agents={AGENTS} />);
+
+      await screen.findByText("zeta");
+      navigate.mockClear();
+
+      const row = screen.getByRole("link", { name: /Open agent zeta/i });
+      row.focus();
+      await user.keyboard("{Enter}");
+
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/agents/$id",
+        params: { id: "zeta" },
+      });
+    });
+
+    test("rows expose link role, tabIndex, and aria-label for accessibility", async () => {
       renderWithProviders(<AgentsTable agents={AGENTS} />);
 
       await screen.findByText("zeta");
 
-      // The id cell contains an anchor pointing to /agents/zeta
-      const zetaLink = screen.getByRole("link", { name: "zeta" });
-      expect(zetaLink).toHaveAttribute("href", "/agents/zeta");
+      const zetaRow = screen.getByRole("link", { name: /Open agent zeta/i });
+      expect(zetaRow).toHaveAttribute("tabindex", "0");
 
-      const alphaLink = screen.getByRole("link", { name: "alpha" });
-      expect(alphaLink).toHaveAttribute("href", "/agents/alpha");
+      const alphaRow = screen.getByRole("link", { name: /Open agent alpha/i });
+      expect(alphaRow).toHaveAttribute("tabindex", "0");
     });
   });
 });
