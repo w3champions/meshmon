@@ -264,19 +264,11 @@ async fn run_migrations_creates_grafana_role_nologin_by_default() {
         .await
         .expect("run_migrations must succeed without the env var");
 
-    // Reset the role to NOLOGIN: the migration's CREATE ROLE NOLOGIN
-    // only fires on first creation; a prior sibling test may have
-    // flipped it to LOGIN before releasing the lock. The assertion we
-    // actually care about is "apply_grafana_role_password with the env
-    // var unset does not move the role toward LOGIN". Reset, then
-    // re-run, then assert.
-    sqlx::query("ALTER ROLE meshmon_grafana WITH NOLOGIN")
-        .execute(&db.pool)
-        .await
-        .expect("reset role to NOLOGIN");
-    run_migrations(&db.pool)
-        .await
-        .expect("second run_migrations (still env-unset) must succeed");
+    // `apply_grafana_role_password` now explicitly issues
+    // `ALTER ROLE ... NOLOGIN` when the env var is unset, so sibling
+    // tests that left the role in LOGIN state get converged by the
+    // first `run_migrations_locked_with_env(None)` call above. No
+    // manual reset needed.
 
     // Role exists.
     let role_exists: (bool,) =
@@ -336,6 +328,46 @@ async fn run_migrations_flips_grafana_role_to_login_when_password_set() {
         .execute(&db.pool)
         .await
         .expect("reset role to NOLOGIN");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn run_migrations_revokes_grafana_login_when_env_var_removed() {
+    // Security-regression test: rotating the secret by removing the
+    // env var and restarting must actually disable DB login for the
+    // Grafana role. Silently leaving it LOGIN + old-password would
+    // defeat the documented operator knob.
+    let db = common::acquire(false).await;
+
+    // Arrange: flip to LOGIN + password first …
+    let _guard = run_migrations_locked_with_env(&db.pool, Some("rotate-me"))
+        .await
+        .expect("first run (password set) must succeed");
+    let logged_in: (bool,) =
+        sqlx::query_as("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(logged_in.0, "precondition: role should be LOGIN after set");
+    // Release the guard so the next call can reacquire + mutate env.
+    drop(_guard);
+
+    // Act: restart-equivalent with the env var removed.
+    let _guard = run_migrations_locked_with_env(&db.pool, None)
+        .await
+        .expect("second run (password unset) must succeed");
+
+    // Assert: role is back to NOLOGIN.
+    let can_login: (bool,) =
+        sqlx::query_as("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !can_login.0,
+        "removing MESHMON_PG_GRAFANA_PASSWORD must revoke LOGIN on meshmon_grafana"
+    );
 
     db.close().await;
 }

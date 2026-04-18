@@ -141,58 +141,89 @@ async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
 ///
 /// The migration creates the role NOLOGIN so there is no window during
 /// which the role is authenticatable without a credential. This helper
-/// applies the LOGIN grant and the password in one statement.
+/// applies the LOGIN grant and the password, OR revokes LOGIN, in a
+/// single atomic ALTER ROLE each time the service boots.
 ///
 /// Behaviour:
-/// - `MESHMON_PG_GRAFANA_PASSWORD` unset → role stays NOLOGIN; log at
+/// - `MESHMON_PG_GRAFANA_PASSWORD` unset → explicit `ALTER ROLE ...
+///   NOLOGIN` (clears any LOGIN state left by a previous run); log at
 ///   info. Grafana datasource calls fail loudly with "role ... is not
 ///   permitted to log in" if the operator later wires up Grafana
 ///   without setting the env var.
-/// - `MESHMON_PG_GRAFANA_PASSWORD` set but empty → warn and leave
-///   NOLOGIN.
+/// - `MESHMON_PG_GRAFANA_PASSWORD` set but empty → same explicit
+///   NOLOGIN flip; warn (treat empty as "disable intentionally").
 /// - Set and non-empty → single atomic `ALTER ROLE ... WITH LOGIN
 ///   PASSWORD '...'`. Re-running rotates the password (idempotent).
+///
+/// All three branches take the same advisory lock so an operator who
+/// rotates `unset` → `set` → `unset` across restarts sees the role
+/// state converge deterministically, even when multiple databases
+/// share a cluster and run concurrent migrations.
 async fn apply_grafana_role_password(pool: &PgPool) -> Result<(), sqlx::Error> {
-    match std::env::var("MESHMON_PG_GRAFANA_PASSWORD") {
-        Err(_) => {
-            tracing::info!("MESHMON_PG_GRAFANA_PASSWORD not set; meshmon_grafana stays NOLOGIN");
-            Ok(())
-        }
-        Ok(pw) if pw.is_empty() => {
-            tracing::warn!(
-                "MESHMON_PG_GRAFANA_PASSWORD is set but empty; \
-                 meshmon_grafana stays NOLOGIN"
-            );
-            Ok(())
-        }
-        Ok(pw) => {
-            // Safe dollar-quoting: ALTER ROLE ... WITH PASSWORD does
-            // not accept parameter bindings, so inline quoting is the
-            // only path.
-            let quoted = pg_quote_dollar(&pw);
+    // Desired LOGIN state is fully determined by the env var: set + non-empty
+    // means LOGIN, everything else means NOLOGIN.
+    let pw = std::env::var("MESHMON_PG_GRAFANA_PASSWORD").ok();
+    let want_login = pw.as_deref().is_some_and(|v| !v.is_empty());
 
-            // Roles are cluster-global. In integration-test scenarios
-            // (shared Postgres container, many parallel `run_migrations`
-            // calls against different databases) concurrent ALTER ROLE
-            // statements on the same role race on `pg_authid` rows and
-            // surface as `XX000: tuple concurrently updated`. Wrap the
-            // ALTER in a transaction-scoped advisory lock keyed to the
-            // same constant the up-migration uses, so every code path
-            // that mutates this role serializes on the cluster.
-            let mut tx = pool.begin().await?;
-            sqlx::query("SELECT pg_advisory_xact_lock(4851623871)")
-                .execute(&mut *tx)
-                .await?;
+    // Wrap the whole read-then-ALTER in the same transaction-scoped
+    // advisory lock the up-migration uses so parallel `run_migrations`
+    // calls against a shared cluster serialize cleanly. The lock is
+    // cluster-wide, so it blocks cross-database callers too.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(4851623871)")
+        .execute(&mut *tx)
+        .await?;
+
+    // Short-circuit when the role is already in the desired LOGIN
+    // state. Avoids bumping `pg_authid.xmin` on every service restart,
+    // and — importantly — prevents "tuple concurrently updated"
+    // surfacing in parallel integration tests where many callers race
+    // to set the same state. When we DO need to flip, the advisory
+    // lock guarantees no concurrent catalog updater is in flight.
+    let (current_login,): (bool,) =
+        sqlx::query_as("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
+            .fetch_one(&mut *tx)
+            .await?;
+
+    match (want_login, pw.as_deref()) {
+        (false, None) => {
+            if current_login {
+                tracing::info!(
+                    "MESHMON_PG_GRAFANA_PASSWORD not set; revoking LOGIN on meshmon_grafana"
+                );
+                sqlx::query("ALTER ROLE meshmon_grafana WITH NOLOGIN PASSWORD NULL")
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        (false, Some(_)) => {
+            if current_login {
+                tracing::warn!(
+                    "MESHMON_PG_GRAFANA_PASSWORD is set but empty; \
+                     revoking LOGIN on meshmon_grafana"
+                );
+                sqlx::query("ALTER ROLE meshmon_grafana WITH NOLOGIN PASSWORD NULL")
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        (true, Some(pw)) => {
+            // Always re-apply when a password is provided so a secret
+            // rotation actually changes `pg_authid`. Under the advisory
+            // lock this is safe against concurrent callers.
+            let quoted = pg_quote_dollar(pw);
+            tracing::info!("meshmon_grafana role is LOGIN + password-protected");
             sqlx::query(&format!(
                 "ALTER ROLE meshmon_grafana WITH LOGIN PASSWORD {quoted}"
             ))
             .execute(&mut *tx)
             .await?;
-            tx.commit().await?;
-            tracing::info!("meshmon_grafana role is LOGIN + password-protected");
-            Ok(())
         }
+        (true, None) => unreachable!("want_login=true implies env var Some"),
     }
+
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Dollar-quote a string as a Postgres string literal. Picks a
