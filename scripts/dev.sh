@@ -57,6 +57,12 @@ MESHMON_ADMIN_PASSWORD_HASH=$ADMIN_HASH_ESCAPED
 MESHMON_AGENT_TOKEN=$AGENT_TOKEN
 MESHMON_PG_PASSWORD=$PG_PASSWORD
 MESHMON_PG_GRAFANA_PASSWORD=$PG_GRAFANA_PASSWORD
+# Compose rejects stacks when a secret's source env var is unset; empty
+# values produce empty secret files inside Alertmanager (loud delivery
+# errors rather than silent drops).
+MESHMON_DISCORD_WEBHOOK=
+MESHMON_DISCORD_WEBHOOK_CRITICAL=
+MESHMON_DISCORD_WEBHOOK_INFO=
 EOF
 
 # Write a throwaway meshmon.toml from scratch (do NOT copy from
