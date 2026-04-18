@@ -39,21 +39,22 @@ pub fn up() -> anyhow::Result<()> {
 }
 
 pub fn down() -> anyhow::Result<()> {
-    // `docker rm -f` succeeds when the container exists and is removed.
-    // When the container is absent, exit codes vary across Docker
-    // versions (Docker >= 25 started returning non-zero for missing
-    // names), so this command is NOT universally idempotent at the
-    // exit-code level. The business-level contract is still idempotent:
-    // callers expect `down` to leave no container behind and the next
-    // `up` to succeed. On a noisy-missing exit we bail; any truly
-    // leftover container would then fail the next `up` visibly.
+    // Idempotent at both the business and exit-code level: on Docker >=
+    // 25, `docker rm -f <name>` returns non-zero when the container is
+    // absent. Pre-check via `container_state()` so that repeated calls
+    // (e.g. a CI teardown with `if: always()` plus a developer running
+    // `down` twice) all exit 0.
+    if matches!(container_state()?, ContainerState::Absent) {
+        println!("{CONTAINER_NAME} already absent");
+        return Ok(());
+    }
     let status = Command::new("docker")
         .args(["rm", "-f", CONTAINER_NAME])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;
     if status.success() {
-        println!("removed {CONTAINER_NAME} (or it was already absent)");
+        println!("removed {CONTAINER_NAME}");
         Ok(())
     } else {
         anyhow::bail!("docker rm -f {CONTAINER_NAME} failed ({status})")
