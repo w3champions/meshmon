@@ -1,0 +1,46 @@
+# lefthook.yml — developer pre-commit hooks. Opt-in: install with
+# `lefthook install` once per clone. CI is the authoritative backstop;
+# these hooks catch fast-feedback issues (formatting, obvious lint)
+# without running the full test suite on every commit.
+#
+# Config sources mirror CI (see .github/workflows/ci.yml):
+#   cargo fmt        → rustfmt defaults (no project rustfmt.toml)
+#   biome check      → frontend/biome.json
+#   yamllint         → .yamllint.yml
+#   shellcheck       → CLI flags only (no .shellcheckrc today)
+#   actionlint       → no config
+#
+# Nothing here duplicates a CI config file; every tool reads the same
+# source both locally and on GitHub.
+
+pre-commit:
+  parallel: true
+  commands:
+    rustfmt:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+      stage_fixed: false
+
+    biome:
+      root: "frontend/"
+      glob: "src/**/*.{ts,tsx,js,jsx,json}"
+      run: npx biome check --no-errors-on-unmatched {staged_files}
+
+    yamllint:
+      glob: "deploy/**/*.{yml,yaml}"
+      run: yamllint -c .yamllint.yml {staged_files}
+
+    shellcheck:
+      glob: "scripts/*.sh"
+      run: shellcheck --severity=warning {staged_files}
+
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: actionlint {staged_files}
+
+pre-push:
+  commands:
+    cargo-check:
+      run: cargo check --workspace --all-targets
+      # Last-line defense before pushing. Skipped automatically if not
+      # running inside the Rust workspace (no-op fallback).
