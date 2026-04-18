@@ -128,6 +128,30 @@ Signals:
 - `SIGINT`, `SIGTERM` — graceful shutdown.
 - `SIGHUP` — re-read `meshmon.toml` (hot-reload for `probing`, `logging`, `upstream`; restart required for `service.listen_addr`, `auth`, `database`).
 
+## Bundled Grafana + Alertmanager
+
+meshmon-service is the only public HTTP face in the bundled OSS
+deployment. Grafana and Alertmanager sit on the internal docker
+bridge with no host port mapping; operators reach them via
+meshmon-service's authenticated reverse proxies:
+
+- `/grafana/*` → bundled Grafana in `auth.proxy` mode. The proxy
+  injects `X-WEBAUTH-USER` from the operator's meshmon session,
+  so there is no second login. Configure the upstream via
+  `[upstream] grafana_url` in `meshmon.toml` (or
+  `grafana_url_env`). The SPA hardcodes the `/grafana` prefix — no
+  client-side Grafana URL configuration.
+- `/alertmanager/*` → bundled Alertmanager. No auth-proxy header;
+  AM has no `auth.proxy` equivalent and relies on bridge isolation
+  + meshmon's edge session check.
+- `meshmon_grafana` Postgres role — created `NOLOGIN` by the
+  service's migrations. Set `MESHMON_PG_GRAFANA_PASSWORD` before
+  starting the service and it flips the role to `LOGIN` with that
+  password atomically. Without the env var, the role stays
+  `NOLOGIN` and the bundled Grafana's `MeshmonPostgres` datasource
+  fails with "role is not permitted to log in" — which is the
+  correct failure mode (loud, unambiguous).
+
 ## Regenerating the OpenAPI snapshot
 
 The frontend consumes `frontend/src/api/openapi.json` for TypeScript type generation. Whenever a handler's `#[utoipa::path]` annotation changes, or a new handler lands, run:
