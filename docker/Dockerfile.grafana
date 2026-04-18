@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.7
+#
+# Bundled meshmon-Grafana image. Mirrors the w3c prometheus-and-grafana
+# pattern: bake grafana.ini + provisioning YAMLs + dashboards into the
+# image so operators need only docker-compose.yml + .env + meshmon.toml
+# on disk (no repo checkout).
+
+ARG GRAFANA_TAG=13.0.1
+FROM grafana/grafana-oss:${GRAFANA_TAG}
+
+COPY deploy/grafana/grafana.ini                      /etc/grafana/grafana.ini
+COPY deploy/grafana/provisioning/datasources         /etc/grafana/provisioning/datasources
+COPY deploy/grafana/provisioning/dashboards          /etc/grafana/provisioning/dashboards
+COPY grafana/dashboards                              /var/lib/grafana/dashboards
