@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   rust-lint:
@@ -255,29 +256,29 @@ jobs:
             .env
           cp meshmon.example.toml meshmon.toml
 
-      - name: Bring up bundled compose (--build)
-        working-directory: deploy
-        run: docker compose up -d --build --wait
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-      - name: Wait for meshmon-service to be ready
-        # `docker compose up --wait` only waits for container start, not
-        # for meshmon-service to finish migrations and bind its listener.
-        # Poll /readyz until the service reports green before handing
-        # off to cargo e2e.
+      - name: Log in to GHCR (read-only; enables registry cache-from)
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify docker compose supports bake
         run: |
-          for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null --max-time 2 http://localhost:8080/readyz; then
-              echo "meshmon-service ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "meshmon-service not ready after 30s" >&2
-          docker compose -f deploy/docker-compose.yml logs --no-color --tail=200 meshmon-service >&2 || true
-          exit 1
+          ver=$(docker compose version --short)
+          echo "compose version: $ver"
+          printf '%s\n' "$ver" "2.34.0" | sort -V | head -1 | grep -qx "2.34.0" || {
+            echo "::error ::compose $ver < 2.34.0; COMPOSE_BAKE unsupported"
+            exit 1
+          }
 
-      - name: Run e2e tests
-        run: cargo e2e
+      - name: cargo xtask test-e2e
+        env:
+          COMPOSE_BAKE: "true"
+        run: cargo xtask test-e2e
 
       - name: Dump compose logs on failure
         if: failure()
