@@ -1,0 +1,23 @@
+# Developer overlay for deploy/docker-compose.yml. Excludes
+# meshmon-service (developer runs cargo run locally) and exposes infra
+# ports on 127.0.0.1 so local tooling can reach them.
+#
+# Use via scripts/dev.sh (recommended) or directly:
+#
+#   cd deploy && docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+services:
+  meshmon-service:
+    # Skip under dev: the profile below isn't activated by default, so
+    # this service is not started. Other services (with no profile) are.
+    profiles: ["skip"]
+  meshmon-db:
+    ports: ["127.0.0.1:5432:5432"]
+  meshmon-vm:
+    ports: ["127.0.0.1:8428:8428"]
+  meshmon-grafana:
+    ports: ["127.0.0.1:3000:3000"]
+  meshmon-alertmanager:
+    ports: ["127.0.0.1:9093:9093"]
+  meshmon-vmalert:
+    ports: ["127.0.0.1:8880:8880"]
