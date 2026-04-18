@@ -283,7 +283,10 @@ impl TestDb {
 /// daemon and takes minutes longer than `cargo test`.
 ///
 /// Called from the top of [`shared_migrated_pool`] and [`acquire`].
-fn guard_nextest_requires_shared_db() {
+/// Exposed as `pub` so the dedicated
+/// `crates/service/tests/nextest_guard_smoke.rs` binary can assert the
+/// panic contract without having to re-import private test helpers.
+pub fn guard_nextest_requires_shared_db() {
     if std::env::var("NEXTEST").is_ok() && std::env::var("DATABASE_URL").is_err() {
         panic!(
             "running under nextest without DATABASE_URL is unsupported. \
@@ -405,7 +408,16 @@ pub async fn shared_migrated_pool() -> PgPool {
 /// slots, tablespaces, or cluster-wide GUCs. For every other DDL test,
 /// [`acquire`] (fresh DB inside the shared server) is correct and faster.
 ///
-/// The container is owned by the returned value and torn down on drop.
+/// **Cleanup contract:** callers MUST `.close().await` at the end of the
+/// test for deterministic teardown. On panic paths before `close()`, the
+/// container is left running and must be reaped by the developer
+/// (`docker rm -f <id>`) or CI cleanup. There is no `Drop` impl on
+/// [`TestDb`] for the owned-container variant — `ContainerAsync`'s async
+/// teardown is unreliable from a synchronous `Drop`, and the
+/// [`cleanup_shared_container`] `#[ctor::dtor]` only reaps the shared
+/// container (not owned ones). This is why `own_container()` should be
+/// used sparingly — panic-leak risk is the cost of cluster-state
+/// isolation.
 pub async fn own_container() -> TestDb {
     let container = GenericImage::new(TIMESCALEDB_IMAGE, TIMESCALEDB_TAG)
         .with_exposed_port(ContainerPort::Tcp(5432))
@@ -888,42 +900,4 @@ pub async fn login_as_admin(app: &axum::Router, client_ip: &str) -> String {
         .to_str()
         .expect("session cookie is valid utf-8")
         .to_string()
-}
-
-#[cfg(test)]
-#[test]
-fn nextest_without_database_url_panics_clearly() {
-    // Run the guard inline — in practice it's called from the
-    // shared_migrated_pool() / acquire() entry points.
-    let saved_nextest = std::env::var("NEXTEST").ok();
-    let saved_db_url = std::env::var("DATABASE_URL").ok();
-
-    std::env::set_var("NEXTEST", "1");
-    std::env::remove_var("DATABASE_URL");
-
-    let result = std::panic::catch_unwind(guard_nextest_requires_shared_db);
-
-    match saved_nextest {
-        Some(v) => std::env::set_var("NEXTEST", v),
-        None => std::env::remove_var("NEXTEST"),
-    };
-    match saved_db_url {
-        Some(v) => std::env::set_var("DATABASE_URL", v),
-        None => std::env::remove_var("DATABASE_URL"),
-    };
-
-    let err = result.expect_err("must panic");
-    let msg = err
-        .downcast_ref::<String>()
-        .map(|s| s.as_str())
-        .or_else(|| err.downcast_ref::<&'static str>().copied())
-        .unwrap_or("<non-string panic>");
-    assert!(
-        msg.contains("DATABASE_URL"),
-        "message must mention DATABASE_URL; got: {msg}"
-    );
-    assert!(
-        msg.contains("cargo xtask test"),
-        "message must point at xtask; got: {msg}"
-    );
 }

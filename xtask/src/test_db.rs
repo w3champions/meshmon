@@ -31,8 +31,14 @@ pub fn up() -> anyhow::Result<()> {
 }
 
 pub fn down() -> anyhow::Result<()> {
-    // `docker rm -f` is a no-op if the container doesn't exist (prints
-    // the name on stderr then exits 0 via the --force flag).
+    // `docker rm -f` succeeds when the container exists and is removed.
+    // When the container is absent, exit codes vary across Docker
+    // versions (Docker >= 25 started returning non-zero for missing
+    // names), so this command is NOT universally idempotent at the
+    // exit-code level. The business-level contract is still idempotent:
+    // callers expect `down` to leave no container behind and the next
+    // `up` to succeed. On a noisy-missing exit we bail; any truly
+    // leftover container would then fail the next `up` visibly.
     let status = Command::new("docker")
         .args(["rm", "-f", CONTAINER_NAME])
         .stdout(Stdio::null())
