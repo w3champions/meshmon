@@ -28,19 +28,29 @@ pub fn admin_password() -> String {
 }
 
 /// Preflight: assert the stack is reachable. Every e2e test calls this
-/// as its first line. Clear failure mode with a pointer at how to
-/// recover.
+/// as its first line. Retries for up to 30s because `docker compose up
+/// --wait` only waits for container start, not for meshmon-service to
+/// finish migrations and bind its HTTP listener.
 pub fn preflight() {
     let url = base_url();
-    let ok = Client::new()
-        .get(format!("{url}/healthz"))
+    let client = Client::builder()
         .timeout(Duration::from_secs(2))
-        .send()
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
-    assert!(
-        ok,
-        "meshmon stack not reachable at {url}/healthz.\n\
+        .build()
+        .expect("build reqwest client");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let last_err = loop {
+        let err = match client.get(format!("{url}/healthz")).send() {
+            Ok(r) if r.status().is_success() => return,
+            Ok(r) => format!("HTTP {}", r.status()),
+            Err(e) => e.to_string(),
+        };
+        if std::time::Instant::now() >= deadline {
+            break err;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    panic!(
+        "meshmon stack not reachable at {url}/healthz after 30s (last error: {last_err}).\n\
          Start it first:\n\
          \n    cd deploy && docker compose up -d --build --wait\n\
          \nthen re-run `cargo e2e`. Override the URL via MESHMON_E2E_URL \
