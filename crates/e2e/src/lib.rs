@@ -54,6 +54,12 @@ pub struct Session {
     client: Client,
 }
 
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Session {
     pub fn new() -> Self {
         let client = Client::builder()
