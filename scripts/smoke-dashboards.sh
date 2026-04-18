@@ -71,9 +71,12 @@ echo "==> bringing up VM + Grafana (tags: VM=${VM_TAG}, Grafana=${GRAFANA_TAG})"
 "${COMPOSE[@]}" up -d
 
 echo "==> waiting for Grafana healthcheck"
+# Grafana in the harness runs in auth.proxy mode under /grafana/ (mirrors
+# production). /api/health stays reachable unauthenticated, but the sub-path
+# rewrite means the real URL is /grafana/api/health.
 ok=false
 for i in {1..60}; do
-  body=$(curl -fsS http://127.0.0.1:3000/api/health 2>/dev/null || true)
+  body=$(curl -fsS http://127.0.0.1:3000/grafana/api/health 2>/dev/null || true)
   if [[ -n "$body" ]] && node -e "const h=JSON.parse(process.argv[1]); if (h.database!=='ok') process.exit(1);" "$body" 2>/dev/null; then
     ok=true
     break
@@ -127,7 +130,12 @@ TO=$(( NOW * 1000 ))
 assert_200() {
   local url=$1 label=$2
   local code
-  code=$(curl -fsS -o /dev/null -w '%{http_code}' -u admin:admin "$url" || true)
+  # Harness Grafana runs in auth.proxy mode, so every request must carry
+  # an X-WEBAUTH-USER header (injected by meshmon-service in production).
+  # Bypass the meshmon proxy here and impersonate it directly.
+  code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+    -H 'X-WEBAUTH-USER: smoke' \
+    "$url" || true)
   if [[ "$code" != "200" ]]; then
     echo "::error ::$label returned HTTP $code (expected 200)" >&2
     echo "   URL: $url" >&2
@@ -138,25 +146,27 @@ assert_200() {
 
 # Lookup is UID-only; the slug segment after /d-solo/<uid>/ is cosmetic.
 # Pass a stable no-op slug so URL shape matches the frontend's builder.
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-path/path?panelId=1&var-source=agent-a&var-target=agent-b&var-protocol=icmp&from=${FROM}&to=${TO}&theme=light&kiosk" \
+# URLs are prefixed with /grafana/ to match serve_from_sub_path in the
+# harness grafana.ini (production-consistent).
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-path/path?panelId=1&var-source=agent-a&var-target=agent-b&var-protocol=icmp&from=${FROM}&to=${TO}&theme=light&kiosk" \
   "path: RTT"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-path/path?panelId=2&var-source=agent-a&var-target=agent-b&var-protocol=icmp&from=${FROM}&to=${TO}&theme=light&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-path/path?panelId=2&var-source=agent-a&var-target=agent-b&var-protocol=icmp&from=${FROM}&to=${TO}&theme=light&kiosk" \
   "path: Loss"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-path/path?panelId=3&var-source=agent-a&var-target=agent-b&var-protocol=icmp&from=${FROM}&to=${TO}&theme=light&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-path/path?panelId=3&var-source=agent-a&var-target=agent-b&var-protocol=icmp&from=${FROM}&to=${TO}&theme=light&kiosk" \
   "path: Stddev"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-overview/overview?panelId=1&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-overview/overview?panelId=1&from=${FROM}&to=${TO}&kiosk" \
   "overview: heatmap"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-overview/overview?panelId=2&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-overview/overview?panelId=2&from=${FROM}&to=${TO}&kiosk" \
   "overview: degraded-paths stat"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-overview/overview?panelId=3&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-overview/overview?panelId=3&from=${FROM}&to=${TO}&kiosk" \
   "overview: route-changes table"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=1&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-agent/agent?panelId=1&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
   "agent: outgoing RTT"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=2&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-agent/agent?panelId=2&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
   "agent: outgoing loss"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=3&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-agent/agent?panelId=3&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
   "agent: incoming RTT"
-assert_200 "http://127.0.0.1:3000/d-solo/meshmon-agent/agent?panelId=4&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
+assert_200 "http://127.0.0.1:3000/grafana/d-solo/meshmon-agent/agent?panelId=4&var-source=agent-a&from=${FROM}&to=${TO}&kiosk" \
   "agent: incoming loss"
 
 echo ""
