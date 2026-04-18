@@ -11,4 +11,7 @@ FROM grafana/grafana-oss:${GRAFANA_TAG}
 COPY deploy/grafana/grafana.ini                      /etc/grafana/grafana.ini
 COPY deploy/grafana/provisioning/datasources         /etc/grafana/provisioning/datasources
 COPY deploy/grafana/provisioning/dashboards          /etc/grafana/provisioning/dashboards
-COPY grafana/dashboards                              /var/lib/grafana/dashboards
+# /etc/grafana/dashboards is outside the /var/lib/grafana persistent
+# volume so image updates always refresh dashboards; the volume would
+# otherwise shadow baked-in files after first boot.
+COPY grafana/dashboards                              /etc/grafana/dashboards

@@ -1,7 +1,9 @@
-# File provider pointing at /var/lib/grafana/dashboards — the directory
+# File provider pointing at /etc/grafana/dashboards — the directory
 # where docker/Dockerfile.grafana COPY's the three JSON files from
-# grafana/dashboards/. `allowUiUpdates: false` keeps the repo the
-# source of truth (any UI edit is discarded on container restart).
+# grafana/dashboards/. Deliberately outside /var/lib/grafana so the
+# persistent volume does not shadow updated dashboards across image
+# bumps. `allowUiUpdates: false` keeps the repo the source of truth
+# (any UI edit is discarded on container restart).
 apiVersion: 1
 
 providers:
@@ -13,5 +15,5 @@ providers:
     allowUiUpdates: false
     updateIntervalSeconds: 30
     options:
-      path: /var/lib/grafana/dashboards
+      path: /etc/grafana/dashboards
       foldersFromFilesStructure: false

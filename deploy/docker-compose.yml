@@ -116,6 +116,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.grafana
+      args:
+        GRAFANA_TAG: "13.0.1"
     container_name: meshmon-grafana
     restart: unless-stopped
     environment:
