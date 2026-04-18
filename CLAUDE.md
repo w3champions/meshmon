@@ -26,6 +26,8 @@ cargo clippy --workspace -- -D warnings
 
 `cargo test` still works as a zero-setup fallback (spawns a TimescaleDB container per integration-test binary via testcontainers). `cargo nextest run` directly is not supported — use `cargo xtask test`, which provisions a single shared Postgres and sets `DATABASE_URL` so every test connects to it. See `crates/service/tests/common/mod.rs` for the three-tier isolation contract used by the test harness.
 
+`deploy/docker-compose.yml` is the local-dev-safe compose file; `deploy/docker-compose.ci-cache.yml` is a CI-only overlay that adds the GHA buildx cache backend (requires `ACTIONS_RUNTIME_TOKEN`) and is wired in via `MESHMON_E2E_CACHE_OVERLAY` in the workflow — do not pass it locally.
+
 Service integration tests require Docker (TimescaleDB via `testcontainers`).
 
 The release service binary embeds the React SPA via `memory-serve`.

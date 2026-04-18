@@ -1,0 +1,22 @@
+# CI-only cache overlay.
+#
+# Added via COMPOSE_FILE / `-f` by `cargo xtask test-e2e` when
+# MESHMON_E2E_CACHE_OVERLAY=deploy/docker-compose.ci-cache.yml is set
+# (i.e., in GitHub Actions). Do NOT include this file in local
+# `docker compose up` invocations — it writes to the GHA cache
+# backend which requires ACTIONS_RUNTIME_TOKEN and will fail
+# without it.
+services:
+  meshmon-service:
+    build:
+      cache_from:
+        - type=gha,scope=meshmon-service-linux-amd64
+      cache_to:
+        - type=gha,scope=meshmon-service-linux-amd64,mode=max
+
+  meshmon-grafana:
+    build:
+      cache_from:
+        - type=gha,scope=meshmon-grafana-linux-amd64
+      cache_to:
+        - type=gha,scope=meshmon-grafana-linux-amd64,mode=max

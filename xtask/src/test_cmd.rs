@@ -59,13 +59,23 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
 }
 
 pub fn test_e2e(extra: Vec<String>) -> anyhow::Result<()> {
-    let compose_file = "deploy/docker-compose.yml";
-    let compose_args = ["-f", compose_file];
+    // Base compose file is the local-dev-safe default. CI sets
+    // `MESHMON_E2E_CACHE_OVERLAY=deploy/docker-compose.ci-cache.yml`
+    // to layer GHA cache backends on top — that overlay requires
+    // ACTIONS_RUNTIME_TOKEN and must not be included locally.
+    let base = "deploy/docker-compose.yml";
+    let overlay = std::env::var("MESHMON_E2E_CACHE_OVERLAY").ok();
+
+    let mut compose_args: Vec<String> = vec!["-f".into(), base.into()];
+    if let Some(path) = overlay.as_deref() {
+        compose_args.push("-f".into());
+        compose_args.push(path.into());
+    }
 
     // Bring stack up (idempotent: `up` reuses running services).
     let status = Command::new("docker")
         .arg("compose")
-        .args(compose_args)
+        .args(&compose_args)
         .args(["up", "-d", "--build", "--wait"])
         .env("COMPOSE_BAKE", "true")
         .status()?;

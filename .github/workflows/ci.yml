@@ -278,6 +278,10 @@ jobs:
       - name: cargo xtask test-e2e
         env:
           COMPOSE_BAKE: "true"
+          # Layer the GHA buildx cache backend on top of the base
+          # compose file. The overlay must not be used locally (needs
+          # ACTIONS_RUNTIME_TOKEN) — see deploy/docker-compose.ci-cache.yml.
+          MESHMON_E2E_CACHE_OVERLAY: deploy/docker-compose.ci-cache.yml
         run: cargo xtask test-e2e
 
       - name: Dump compose logs on failure

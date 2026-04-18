@@ -23,9 +23,6 @@ services:
       dockerfile: docker/Dockerfile.service
       cache_from:
         - type=registry,ref=ghcr.io/w3champions/meshmon-service:buildcache-linux-amd64
-        - type=gha,scope=meshmon-service-linux-amd64
-      cache_to:
-        - type=gha,scope=meshmon-service-linux-amd64,mode=max
     container_name: meshmon-service
     restart: unless-stopped
     depends_on:
@@ -127,9 +124,6 @@ services:
         GRAFANA_TAG: "13.0.1"
       cache_from:
         - type=registry,ref=ghcr.io/w3champions/meshmon-grafana:buildcache-linux-amd64
-        - type=gha,scope=meshmon-grafana-linux-amd64
-      cache_to:
-        - type=gha,scope=meshmon-grafana-linux-amd64,mode=max
     container_name: meshmon-grafana
     restart: unless-stopped
     environment:
