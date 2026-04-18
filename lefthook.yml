@@ -18,7 +18,7 @@ pre-commit:
   commands:
     rustfmt:
       # Runs on any .rs diff; cargo fmt --all checks the whole workspace (fast, no per-file pre-filter needed).
-      glob: "*.rs"
+      glob: "**/*.rs"
       run: cargo fmt --all -- --check
       stage_fixed: false
 
@@ -47,7 +47,7 @@ pre-commit:
 pre-push:
   commands:
     cargo-check:
-      glob: "*.rs"
+      glob: "**/*.rs"
       run: cargo check --workspace --all-targets
       # Last-line defense before pushing. Only fires when a .rs file
       # is in the pushed diff; frontend-only pushes skip this entirely.
