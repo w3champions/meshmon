@@ -282,8 +282,14 @@ struct RawAuth {
 
 #[derive(Debug, Deserialize)]
 struct RawUser {
-    username: String,
-    password_hash: String,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    username_env: Option<String>,
+    #[serde(default)]
+    password_hash: Option<String>,
+    #[serde(default)]
+    password_hash_env: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -414,19 +420,15 @@ impl Config {
         // --- auth section (PHC validation) ---
         let mut users = Vec::with_capacity(raw.auth.users.len());
         for (idx, u) in raw.auth.users.into_iter().enumerate() {
-            if u.username.trim().is_empty() {
-                return Err(BootError::ConfigInvalid {
-                    path: path.to_string(),
-                    reason: format!("auth.users[{idx}].username is empty"),
-                });
-            }
+            let username =
+                resolve_auth_user_field("username", idx, u.username, u.username_env, path)?;
             // Usernames are inserted into `X-WEBAUTH-USER` by the Grafana
             // proxy via `HeaderValue::try_from`, which accepts only
             // visible ASCII (0x20–0x7E) plus tab. Reject everything else
             // at load so a control byte (`"alice\nevil"`) or a non-ASCII
             // codepoint (`"mário"`) fails fast instead of panicking on
             // the first authenticated Grafana request.
-            if u.username
+            if username
                 .bytes()
                 .any(|b| b >= 0x80 || b == 0x7F || (b < 0x20 && b != 0x09))
             {
@@ -439,13 +441,20 @@ impl Config {
                     ),
                 });
             }
-            PasswordHash::new(&u.password_hash).map_err(|e| BootError::ConfigInvalid {
+            let password_hash = resolve_auth_user_field(
+                "password_hash",
+                idx,
+                u.password_hash,
+                u.password_hash_env,
+                path,
+            )?;
+            PasswordHash::new(&password_hash).map_err(|e| BootError::ConfigInvalid {
                 path: path.to_string(),
                 reason: format!("auth.users[{idx}].password_hash is not a valid PHC string: {e}"),
             })?;
             users.push(AuthUser {
-                username: u.username,
-                password_hash: u.password_hash,
+                username,
+                password_hash,
             });
         }
         let auth = AuthSection { users };
@@ -593,6 +602,50 @@ fn resolve_secret(
         path: path.to_string(),
         reason: format!("neither {key} nor {key}_env is set"),
     })
+}
+
+/// Resolve a required `[[auth.users]]` field that accepts either an
+/// inline value or an `_env` indirection. Mutually exclusive; both-set
+/// is rejected; neither-set is rejected.
+///
+/// Unlike [`resolve_secret`], whitespace-only values are rejected
+/// (either inline or via env). `username` and `password_hash` are
+/// never legitimately whitespace, so catching it at parse time gives
+/// a specific error message instead of a cryptic PHC-validation or
+/// `X-WEBAUTH-USER`-forwarding failure downstream.
+fn resolve_auth_user_field(
+    field: &str,
+    idx: usize,
+    inline: Option<String>,
+    env_name: Option<String>,
+    path: &str,
+) -> Result<String, BootError> {
+    match (inline, env_name) {
+        (Some(v), None) if !v.trim().is_empty() => Ok(v),
+        (Some(_), None) => Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: format!("auth.users[{idx}].{field} is set to an empty string"),
+        }),
+        (None, Some(env)) => match std::env::var(&env) {
+            Ok(v) if !v.trim().is_empty() => Ok(v),
+            Ok(_) => Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: format!("auth.users[{idx}].{field}_env={env} resolved to an empty string"),
+            }),
+            Err(_) => Err(BootError::EnvMissing {
+                name: env,
+                key: format!("auth.users[{idx}].{field}_env"),
+            }),
+        },
+        (Some(_), Some(_)) => Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: format!("auth.users[{idx}] set both {field} and {field}_env"),
+        }),
+        (None, None) => Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: format!("auth.users[{idx}] requires {field} or {field}_env"),
+        }),
+    }
 }
 
 /// Resolve an optional secret: absent keys yield `None`; present-but-unset
@@ -1157,6 +1210,84 @@ alertmanager_url = "http://0.0.0.0:8080/alertmanager"
                 assert!(
                     reason.contains("visible ASCII"),
                     "expected visible-ASCII message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    const VALID_PHC: &str =
+        "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+
+    #[test]
+    fn auth_user_password_hash_resolves_from_env_indirection() {
+        std::env::set_var("MESHMON_TEST_ADMIN_HASH_XYZ", VALID_PHC);
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername = \"admin\"\npassword_hash_env = \"MESHMON_TEST_ADMIN_HASH_XYZ\"\n"
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        std::env::remove_var("MESHMON_TEST_ADMIN_HASH_XYZ");
+        assert_eq!(cfg.auth.users.len(), 1);
+        assert_eq!(cfg.auth.users[0].username, "admin");
+        assert_eq!(cfg.auth.users[0].password_hash, VALID_PHC);
+    }
+
+    #[test]
+    fn auth_user_username_resolves_from_env_indirection() {
+        std::env::set_var("MESHMON_TEST_ADMIN_NAME_XYZ", "alice");
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername_env = \"MESHMON_TEST_ADMIN_NAME_XYZ\"\npassword_hash = \"{VALID_PHC}\"\n"
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        std::env::remove_var("MESHMON_TEST_ADMIN_NAME_XYZ");
+        assert_eq!(cfg.auth.users[0].username, "alice");
+    }
+
+    #[test]
+    fn auth_user_rejects_both_inline_and_env_hash() {
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername = \"admin\"\npassword_hash = \"{VALID_PHC}\"\npassword_hash_env = \"MESHMON_UNSET_XYZ\"\n"
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("auth.users[0]") && reason.contains("both"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_user_rejects_neither_inline_nor_env_hash() {
+        let toml = format!("{MIN_TOML}\n[[auth.users]]\nusername = \"admin\"\n");
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("auth.users[0]") && reason.contains("password_hash"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_user_rejects_empty_username_env() {
+        std::env::set_var("MESHMON_TEST_EMPTY_USERNAME", "");
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername_env = \"MESHMON_TEST_EMPTY_USERNAME\"\npassword_hash = \"{VALID_PHC}\"\n"
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        std::env::remove_var("MESHMON_TEST_EMPTY_USERNAME");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("auth.users[0]") && reason.contains("username"),
+                    "unexpected reason: {reason}"
                 );
             }
             other => panic!("unexpected error: {other:?}"),
