@@ -73,6 +73,19 @@ jobs:
           yamllint_strict: true
           yamllint_config_filepath: .yamllint.yml
 
+  shellcheck:
+    name: Shellcheck (scripts/*.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: ./scripts
+          severity: warning
+
   frontend:
     name: Frontend (biome, type-check, vitest, build, schema drift)
     runs-on: ubuntu-latest
