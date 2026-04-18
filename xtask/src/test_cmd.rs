@@ -34,7 +34,11 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
         "--all-targets",
     ])
     .args(&extra)
-    .env("DATABASE_URL", test_db::DATABASE_URL);
+    .env("DATABASE_URL", test_db::DATABASE_URL)
+    // Use the committed .sqlx/ offline cache so sqlx::query! macros do
+    // not try to verify queries against the just-provisioned (un-migrated)
+    // DB during compilation.
+    .env("SQLX_OFFLINE", "true");
     let status = cmd.status()?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
@@ -45,6 +49,7 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
     let status = Command::new("cargo")
         .args(["test", "--doc", "--workspace", "--exclude", "meshmon-e2e"])
         .env("DATABASE_URL", test_db::DATABASE_URL)
+        .env("SQLX_OFFLINE", "true")
         .status()?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
