@@ -45,6 +45,7 @@
 //!   genuine backend miss. `/healthz`, `/readyz`, and `/metrics` are
 //!   exact-match routes and therefore cannot be hijacked.
 
+pub mod alertmanager_proxy;
 pub mod alerts_proxy;
 pub mod auth;
 pub mod grafana_proxy;
