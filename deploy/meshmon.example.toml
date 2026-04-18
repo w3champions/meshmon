@@ -28,6 +28,13 @@ shutdown_deadline_seconds = 5
 # the per-IP login rate limit by forging the header.
 # trust_forwarded_headers = false
 
+# Whether to set the `Secure` attribute on the session cookie. Default
+# `true` (safe for production — cookie is only sent over HTTPS). Flip
+# to `false` ONLY for lab / localhost deployments on plain HTTP:
+# browsers silently drop `Secure` cookies received over HTTP, so login
+# succeeds but every subsequent authenticated request returns 401.
+# session_cookie_secure = true
+
 # Optional: HTTP Basic auth for /metrics (defense-in-depth for the
 # Prometheus scrape). Unset → /metrics is unauthenticated (spec
 # default). When set, both username and one of {password_hash,
@@ -156,10 +163,17 @@ grafana_url = "http://meshmon-grafana:3000/grafana"
 [probing]
 # Shared 8-byte secret embedded in UDP probe packets. Peers drop traffic
 # that does not match. Encoded as hex: or base64: with an 8-byte payload.
-# Rotate by moving the outgoing value to `udp_probe_previous_secret` and
-# setting a new `udp_probe_secret`; listeners accept either during the
-# rotation window.
-udp_probe_secret = "hex:0011223344556677"
+# Rotate by moving the outgoing value to `udp_probe_previous_secret` (or
+# `_env`) and setting a new `udp_probe_secret`; listeners accept either
+# during the rotation window.
+#
+# Provide inline OR via env indirection (mutually exclusive). The env
+# form keeps the secret out of the committed config and is the
+# quick-start default — compose injects MESHMON_UDP_PROBE_SECRET from
+# deploy/.env.
+udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
+# udp_probe_secret = "hex:0011223344556677"
+# udp_probe_previous_secret_env = "MESHMON_UDP_PROBE_PREVIOUS_SECRET"
 # udp_probe_previous_secret = "hex:ffeeddccbbaa9988"
 
 # Protocols agents are permitted to use. Any protocol omitted here is

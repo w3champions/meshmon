@@ -64,6 +64,11 @@ pub struct ServiceSection {
     /// misconfigured `true` lets attackers bypass per-IP rate limiting by
     /// forging the header.
     pub trust_forwarded_headers: bool,
+    /// Whether to set the `Secure` attribute on the session cookie.
+    /// Defaults to `true` (the safe default for production). Flip to
+    /// `false` only when serving over plain HTTP — browsers silently
+    /// drop `Secure` cookies received over HTTP, which breaks login.
+    pub session_cookie_secure: bool,
     /// Optional HTTP Basic auth for `/metrics`. Unset → `/metrics` is
     /// unauthenticated (spec default). Set → the Basic auth middleware
     /// enforces credentials on scrape.
@@ -208,6 +213,7 @@ impl Default for ServiceSection {
             public_base_url: None,
             shutdown_deadline: std::time::Duration::from_secs(5),
             trust_forwarded_headers: false,
+            session_cookie_secure: true,
             metrics_auth: None,
         }
     }
@@ -249,6 +255,7 @@ struct RawService {
     public_base_url: Option<String>,
     shutdown_deadline_seconds: Option<u64>,
     trust_forwarded_headers: Option<bool>,
+    session_cookie_secure: Option<bool>,
     #[serde(default)]
     metrics_auth: Option<RawMetricsAuthSection>,
 }
@@ -392,6 +399,7 @@ impl Config {
             public_base_url: raw.service.public_base_url,
             shutdown_deadline,
             trust_forwarded_headers: raw.service.trust_forwarded_headers.unwrap_or(false),
+            session_cookie_secure: raw.service.session_cookie_secure.unwrap_or(true),
             metrics_auth,
         };
 
