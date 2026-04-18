@@ -420,19 +420,22 @@ impl Config {
                     reason: format!("auth.users[{idx}].username is empty"),
                 });
             }
-            // Usernames are inserted into `X-WEBAUTH-USER` by the Grafana proxy.
-            // Reject any byte `HeaderValue::try_from` would reject so a
-            // CR/LF/NUL/DEL in a TOML basic string (e.g. `"alice\nevil"`)
-            // fails at config load instead of panicking on the first
-            // authenticated Grafana request.
+            // Usernames are inserted into `X-WEBAUTH-USER` by the Grafana
+            // proxy via `HeaderValue::try_from`, which accepts only
+            // visible ASCII (0x20–0x7E) plus tab. Reject everything else
+            // at load so a control byte (`"alice\nevil"`) or a non-ASCII
+            // codepoint (`"mário"`) fails fast instead of panicking on
+            // the first authenticated Grafana request.
             if u.username
                 .bytes()
-                .any(|b| (b < 0x20 && b != 0x09) || b == 0x7F)
+                .any(|b| b >= 0x80 || b == 0x7F || (b < 0x20 && b != 0x09))
             {
                 return Err(BootError::ConfigInvalid {
                     path: path.to_string(),
                     reason: format!(
-                        "auth.users[{idx}].username contains control bytes invalid in HTTP header values"
+                        "auth.users[{idx}].username must be visible ASCII \
+                         (printable 0x20-0x7E, optionally tab) so it can \
+                         be forwarded as `X-WEBAUTH-USER` to Grafana"
                     ),
                 });
             }
@@ -1015,8 +1018,31 @@ alertmanager_url = "http://0.0.0.0:8080/alertmanager"
         match err {
             BootError::ConfigInvalid { reason, .. } => {
                 assert!(
-                    reason.contains("control bytes"),
-                    "expected control-bytes message, got: {reason}"
+                    reason.contains("visible ASCII"),
+                    "expected visible-ASCII message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn username_with_non_ascii_is_rejected() {
+        // `HeaderValue::try_from(&str)` rejects bytes >= 0x80, so a
+        // username like "mário" would pass the control-byte filter
+        // but then panic on the first Grafana request when the proxy
+        // tries to build `X-WEBAUTH-USER`. Reject at load.
+        let valid_hash =
+            "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername = \"mário\"\npassword_hash = \"{valid_hash}\"\n"
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("visible ASCII"),
+                    "expected visible-ASCII message, got: {reason}"
                 );
             }
             other => panic!("unexpected error: {other:?}"),
