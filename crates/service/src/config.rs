@@ -630,8 +630,11 @@ fn resolve_optional_secret(
 /// URL) instead of the internal address would recurse forever.
 ///
 /// Checks two independent routes to the same listener:
-///  1. URL scheme+host+port match the internal listen address (or
-///     the loopback/localhost aliases that resolve to it).
+///  1. URL scheme+host+port match the internal listen address. This
+///     covers (a) exact matches against the bound IP; (b) the loopback
+///     / `localhost` aliases that resolve to it; and (c) when bound to
+///     a wildcard (`0.0.0.0` / `[::]`), every local interface IP
+///     enumerated via [`host_matches_any_local_interface`].
 ///  2. URL host + scheme-normalized port match
 ///     `service.public_base_url`, which identifies the externally
 ///     advertised URL — the one that resolves back through the edge
@@ -677,7 +680,17 @@ fn reject_self_referential_upstream(
                 _ => &[],
             };
             let own_ip = listen_addr.ip().to_string();
-            if host == own_ip || listen_hosts.contains(&host) {
+            let mut matched = host == own_ip || listen_hosts.contains(&host);
+
+            // Wildcard binds (`0.0.0.0` / `[::]`) also accept traffic
+            // on every local interface IP. Reject an upstream URL
+            // that targets any of them on the same port — a common
+            // footgun when an operator inlines the machine's LAN IP.
+            if !matched && listen_addr.ip().is_unspecified() {
+                matched = host_matches_any_local_interface(host);
+            }
+
+            if matched {
                 return Err(BootError::ConfigInvalid {
                     path: path.to_string(),
                     reason: format!(
@@ -719,6 +732,25 @@ fn reject_self_referential_upstream(
     }
 
     Ok(())
+}
+
+/// Return `true` if `host` parses as a literal IP address that belongs
+/// to one of this machine's local network interfaces. Used by the
+/// self-referential upstream guard to catch the "wildcard bind +
+/// inline interface IP" shape (`0.0.0.0` listener with
+/// `grafana_url = "http://<LAN-IP>:<port>/..."`).
+///
+/// Returns `false` when `host` is not an IP literal (DNS names aren't
+/// resolved), when `if_addrs::get_if_addrs` fails, or when there's no
+/// match — callers should then fall through to the subsequent checks.
+fn host_matches_any_local_interface(host: &str) -> bool {
+    let Ok(target) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces.into_iter().any(|i| i.ip() == target),
+        Err(_) => false,
+    }
 }
 
 /// Resolve the optional `[service.metrics_auth]` block.
@@ -1022,6 +1054,52 @@ grafana_url = "https://meshmon.example.com:3000/grafana"
             cfg.upstream.grafana_url.as_deref(),
             Some("https://meshmon.example.com:3000/grafana"),
         );
+    }
+
+    #[test]
+    fn upstream_on_local_interface_ip_is_rejected_for_wildcard_bind() {
+        // `0.0.0.0:<port>` accepts on every interface, so an upstream
+        // URL that targets a specific local interface IP at the same
+        // port still recurses. Find any non-loopback interface IP on
+        // this host and assert the guard rejects it.
+        // Pick the first non-loopback *IPv4* interface IP. IPv6
+        // link-locals (`fe80::.../%iface`) carry zone identifiers
+        // that don't survive URL round-tripping, so they're awkward
+        // to build a test URL from — IPv4 is enough to exercise the
+        // enumeration path.
+        let Some(interface_ip) = if_addrs::get_if_addrs()
+            .ok()
+            .into_iter()
+            .flatten()
+            .map(|i| i.ip())
+            .find(|ip| matches!(ip, std::net::IpAddr::V4(v4) if !v4.is_loopback()))
+            .map(|ip| ip.to_string())
+        else {
+            // No suitable interface (e.g. sandboxed CI env); skip
+            // rather than false-negative.
+            eprintln!("skipping: no non-loopback IPv4 interface available");
+            return;
+        };
+
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "0.0.0.0:8080"
+
+[upstream]
+grafana_url = "http://{interface_ip}:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

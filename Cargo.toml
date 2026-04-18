@@ -56,6 +56,9 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
 tower-sessions = { version = "0.14", default-features = false, features = ["memory-store"] }
 tower_governor = "0.8"
+# Enumerates local network interface IPs (POSIX + Windows); used by the
+# upstream self-referential guard to detect wildcard-bind recursion.
+if-addrs = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 trippy-core = "0.13"
