@@ -1,0 +1,14 @@
+# File-based dashboard provisioning for the smoke harness.
+apiVersion: 1
+
+providers:
+  - name: meshmon
+    orgId: 1
+    folder: Meshmon
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,225 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Per-agent view. Row 1 = this agent probing out. Row 2 = other agents probing this agent. Parameterized by $source. Panel IDs frozen — see grafana/panels.json.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 10,
+      "title": "Outgoing (this agent as source)",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "title": "Outgoing RTT avg — $source → *",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 1 },
+      "description": "Average RTT (ms) for each outgoing path from $source. One series per target+protocol.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "axisLabel": "RTT (ms)",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_avg_micros{source=\"$source\"} / 1000",
+          "legendFormat": "→ {{target}} ({{protocol}})"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Outgoing loss — $source → *",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 1 },
+      "description": "Failure rate (%) for each outgoing path from $source. One series per target+protocol.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "axisLabel": "Loss (%)"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_failure_rate{source=\"$source\"} * 100",
+          "legendFormat": "→ {{target}} ({{protocol}})"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Incoming (this agent as target)",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 3,
+      "title": "Incoming RTT avg — * → $source",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "description": "Average RTT (ms) as observed by every other agent probing $source. One series per (remote source, protocol).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "axisLabel": "RTT (ms)",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_rtt_avg_micros{target=\"$source\"} / 1000",
+          "legendFormat": "{{source}} → ({{protocol}})"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Incoming loss — * → $source",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 11 },
+      "description": "Failure rate (%) as observed by every other agent probing $source. One series per (remote source, protocol).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": 60000,
+            "showPoints": "never",
+            "axisLabel": "Loss (%)"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+          "expr": "meshmon_path_failure_rate{target=\"$source\"} * 100",
+          "legendFormat": "{{source}} → ({{protocol}})"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["meshmon", "agent"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "", "value": "" },
+        "datasource": { "type": "prometheus", "uid": "MeshmonVM" },
+        "definition": "label_values(meshmon_agent_info, source)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Agent",
+        "multi": false,
+        "name": "source",
+        "options": [],
+        "query": { "query": "label_values(meshmon_agent_info, source)", "refId": "source-values" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
+    "hidden": false
+  },
+  "timezone": "",
+  "title": "meshmon — Agent",
+  "uid": "meshmon-agent",
+  "version": 1,
+  "weekStart": ""
+}

@@ -160,3 +160,15 @@ jobs:
         # The script sources deploy/versions.env itself; no tag
         # literals live in this workflow.
         run: ./scripts/validate-alerts.sh
+
+  dashboards:
+    name: Grafana dashboards (syntax + panels contract)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run validate-dashboards.sh
+        # The script is hermetic — JSON syntax via node (pre-installed on
+        # ubuntu-latest) + verify-panels.mjs. No docker.
+        run: ./scripts/validate-dashboards.sh

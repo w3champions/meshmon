@@ -20,6 +20,7 @@ meshmon/
 │   ├── revtunnel/          # Reverse-tunnel transport (yamux over a tonic bidi stream)
 │   └── common/             # Shared utilities
 ├── frontend/               # React 19 + Tailwind SPA, embedded into service
+├── grafana/                # Grafana dashboards, provisioning template, contract guard
 ├── docker/                 # Multi-stage Dockerfiles for service and agent
 ├── deploy/                 # docker-compose + example config for standalone
 └── .github/workflows/      # CI
@@ -29,6 +30,21 @@ Subsystems:
 
 - **Alerting:** VMAlert rules + Alertmanager Discord routing; see
   [`deploy/alerts/README.md`](deploy/alerts/README.md).
+
+## Dashboards
+
+Meshmon ships three Grafana dashboards under `grafana/` (per-path,
+fleet-overview, per-agent) plus a datasources provisioning template for
+VictoriaMetrics and Postgres.
+
+Validate:
+
+```bash
+./scripts/validate-dashboards.sh     # CI-safe: JSON + contract
+./scripts/smoke-dashboards.sh        # local: VM + Grafana + /d-solo assert
+```
+
+See `grafana/README.md` for the operator guide.
 
 ## Quick start (development)
 

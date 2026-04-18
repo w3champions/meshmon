@@ -110,6 +110,23 @@ Validate on every change:
 
 See `deploy/alerts/README.md` for the label contract and editing workflow.
 
+## Dashboards
+
+Grafana dashboards live under `grafana/`: three JSON files (`meshmon-path`,
+`meshmon-overview`, `meshmon-agent`), a datasources provisioning template,
+and a contract-drift guard (`verify-panels.mjs`).
+
+Validate on every change:
+
+```bash
+./scripts/validate-dashboards.sh   # JSON + panels.json contract (CI-safe)
+./scripts/smoke-dashboards.sh      # optional: VM + Grafana smoke harness
+```
+
+See `grafana/README.md` for the dashboard contract, the auth posture
+(meshmon proxies an internal Grafana in `auth.proxy` mode — anonymous
+access is forbidden), and the editing workflow.
+
 ## Conventions
 
 - Squash-merge only (no merge commits, no rebase)
