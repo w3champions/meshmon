@@ -259,6 +259,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
             let handle = supervisor::spawn(
                 target,
                 config_rx.clone(),
+                allowlist_tx.subscribe(),
                 Arc::clone(&udp_pool),
                 Arc::clone(&trippy_prober),
                 child.clone(),
@@ -484,6 +485,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
             let handle = supervisor::spawn(
                 target,
                 self.config_rx.clone(),
+                self.allowlist_tx.subscribe(),
                 Arc::clone(&self.udp_pool),
                 Arc::clone(&self.trippy_prober),
                 self.cancel.clone(),

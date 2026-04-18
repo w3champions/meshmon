@@ -41,6 +41,8 @@
 //! captured from `SystemTime::now()` at tick fire time, never derived from
 //! monotonic probe timestamps.
 
+use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -166,9 +168,11 @@ impl SupervisorHandle {
 /// `RollingStats`, runs `purge_old` on each stats slot every 10s, evaluates
 /// the state machine, publishes rates to the 4 prober watch senders, and
 /// reacts to [`ProbeConfig`] updates.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     target: Target,
     config_rx: watch::Receiver<ProbeConfig>,
+    allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
     parent_cancel: CancellationToken,
@@ -233,6 +237,7 @@ pub fn spawn(
         target_for_trippy,
         trippy_rate_rx,
         observation_tx.clone(),
+        allowlist_rx,
         cancel.clone(),
     );
 
@@ -850,6 +855,22 @@ mod tests {
         (pool, trippy)
     }
 
+    /// Return both halves of an empty allowlist watch channel.
+    ///
+    /// Callers MUST bind the sender to a variable (e.g. `_allow_tx`) so it
+    /// lives for the duration of the spawned supervisor — dropping the sender
+    /// closes the channel, which would let future tests observe a spurious
+    /// "closed" state on the receiver side. The `empty_` prefix signals that
+    /// no allowlist entries are seeded; tests that need to update the
+    /// allowlist mid-run can do so via the returned sender.
+    #[allow(clippy::type_complexity)]
+    fn empty_allowlist_channel() -> (
+        watch::Sender<Arc<HashSet<IpAddr>>>,
+        watch::Receiver<Arc<HashSet<IpAddr>>>,
+    ) {
+        watch::channel(Arc::new(HashSet::new()))
+    }
+
     #[tokio::test]
     async fn supervisor_starts_and_cancels() {
         let parent_cancel = CancellationToken::new();
@@ -857,10 +878,12 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("test-1"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1028,9 +1051,11 @@ mod tests {
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("test-2"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1081,9 +1106,11 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("routed"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1135,9 +1162,11 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("refused"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1312,9 +1341,11 @@ mod tests {
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("swing-test"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1441,10 +1472,12 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("first-snap"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1522,10 +1555,12 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("steady"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1641,10 +1676,12 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RouteSnapshotEnvelope>(1);
         drop(snapshot_rx);
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("closed-snap"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1712,10 +1749,12 @@ mod tests {
         let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("snapshot-state-test"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1824,10 +1863,12 @@ mod tests {
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, mut metrics_rx) =
             tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("metrics-tick-test"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),
@@ -1899,10 +1940,12 @@ mod tests {
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, mut metrics_rx) =
             tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
 
         let handle = spawn(
             test_target("window-label-test"),
             config_rx,
+            allowlist_rx,
             pool,
             trippy,
             parent_cancel.clone(),

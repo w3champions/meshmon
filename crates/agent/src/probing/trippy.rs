@@ -20,6 +20,7 @@
 //! on every platform; keeping the code structure simple here is the better
 //! tradeoff.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -103,6 +104,7 @@ impl TrippyProber {
         target: Target,
         config_rx: watch::Receiver<TrippyRate>,
         obs_tx: mpsc::Sender<ProbeObservation>,
+        allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let ip = match meshmon_protocol::ip::to_ipaddr(&target.ip) {
@@ -123,7 +125,15 @@ impl TrippyProber {
         let target_id = target.id.clone();
         tokio::spawn(async move {
             run(
-                pool, target_id, ip, tcp_port, udp_port, config_rx, obs_tx, cancel,
+                pool,
+                target_id,
+                ip,
+                tcp_port,
+                udp_port,
+                config_rx,
+                obs_tx,
+                allowlist_rx,
+                cancel,
             )
             .await;
         })
@@ -139,8 +149,11 @@ async fn run(
     udp_port: Option<u16>,
     mut config_rx: watch::Receiver<TrippyRate>,
     obs_tx: mpsc::Sender<ProbeObservation>,
+    allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
 ) {
+    // consumed in Task 4 (cross-contamination detection)
+    let _ = &allowlist_rx;
     // `ThreadRng` is not `Send`; seed a Send-safe SmallRng once. Used only
     // for probe-interval jitter — no cryptographic requirement.
     let mut rng = SmallRng::from_rng(&mut rand::rng());
@@ -499,5 +512,37 @@ mod tests {
         let ip: IpAddr = "1.1.1.1".parse().unwrap();
         let cfg = build_config_for(ip, Protocol::Udp, None, Some(33434)).expect("config");
         assert_eq!(cfg.trace_identifier, None, "UDP does not set trace id");
+    }
+
+    #[tokio::test]
+    async fn trippy_prober_spawn_target_accepts_allowlist_rx() {
+        // Compile-level assertion: the new 5-arg spawn_target signature
+        // is accepted. No runtime behavior is exercised (spawn_target
+        // immediately sees a cancelled token and returns).
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let cancel = CancellationToken::new();
+        let prober = TrippyProber::new(1, cancel.clone());
+        let (_config_tx, config_rx) = tokio::sync::watch::channel(TrippyRate::idle());
+        let (obs_tx, _obs_rx) = tokio::sync::mpsc::channel(8);
+        let (_allow_tx, allowlist_rx) =
+            tokio::sync::watch::channel::<Arc<HashSet<std::net::IpAddr>>>(Arc::new(HashSet::new()));
+
+        let target = meshmon_protocol::Target {
+            id: "peer".into(),
+            ip: vec![127, 0, 0, 1].into(),
+            display_name: "Peer".into(),
+            location: "Test".into(),
+            lat: 0.0,
+            lon: 0.0,
+            tcp_probe_port: 0,
+            udp_probe_port: 0,
+        };
+
+        let handle = prober.spawn_target(target, config_rx, obs_tx, allowlist_rx, cancel.clone());
+        cancel.cancel();
+        let _ = handle.await;
     }
 }
