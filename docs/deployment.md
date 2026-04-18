@@ -41,6 +41,12 @@ plaintext password whose hash you set in `.env`. The SPA serves the
 overview page; Grafana iframes render inline via the `/grafana/*`
 proxy (no second login).
 
+> ⚠️ **Escape `$` in `.env`.** Compose interpolates `$VAR` / `${VAR}` in
+> `.env` values. Every literal `$` must be doubled to `$$`. Argon2 PHC
+> hashes contain `$` separators, so an un-escaped hash becomes a blank
+> string after interpolation. Generate with the snippet from
+> `deploy/.env.example` (pipes through `sed 's/\$/$$/g'`).
+
 ## Published images
 
 CI publishes three images to `ghcr.io/w3champions/` automatically from

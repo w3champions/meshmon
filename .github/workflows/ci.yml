@@ -183,8 +183,11 @@ jobs:
           cp .env.example .env
           # Deterministic test credentials — match crates/e2e/src/lib.rs defaults.
           ADMIN_HASH=$(printf 'e2e-password' | argon2 "$(openssl rand -base64 16)" -id -t 2 -m 19 -p 1 -e)
+          # Compose interpolates '$' in .env values, so Argon2's '$'
+          # separators need to be doubled before they land in the file.
+          ADMIN_HASH_ESCAPED=${ADMIN_HASH//\$/\$\$}
           sed -i \
-            -e "s|^MESHMON_ADMIN_PASSWORD_HASH=.*|MESHMON_ADMIN_PASSWORD_HASH=${ADMIN_HASH}|" \
+            -e "s|^MESHMON_ADMIN_PASSWORD_HASH=.*|MESHMON_ADMIN_PASSWORD_HASH=${ADMIN_HASH_ESCAPED}|" \
             -e 's|^MESHMON_AGENT_TOKEN=.*|MESHMON_AGENT_TOKEN=e2e-token-0123456789abcdef|' \
             -e 's|^MESHMON_PG_PASSWORD=.*|MESHMON_PG_PASSWORD=e2e-pg|' \
             -e 's|^MESHMON_PG_GRAFANA_PASSWORD=.*|MESHMON_PG_GRAFANA_PASSWORD=e2e-pg-grafana|' \

@@ -46,9 +46,14 @@ trap cleanup EXIT INT TERM
 
 echo "[dev.sh] staging deploy/.env + meshmon.toml"
 ADMIN_HASH=$(echo -n "$ADMIN_PASSWORD" | argon2 "$(openssl rand -base64 16)" -id -t 2 -m 19 -p 1 -e)
+# Compose interpolates '$' in .env values, so Argon2's '$' separators
+# need to be doubled before they land in the file. We keep the
+# un-escaped hash in ADMIN_HASH for use when we export the env var
+# directly to `cargo run` below.
+ADMIN_HASH_ESCAPED=${ADMIN_HASH//\$/\$\$}
 
 cat > "$DEPLOY_DIR/.env" <<EOF
-MESHMON_ADMIN_PASSWORD_HASH=$ADMIN_HASH
+MESHMON_ADMIN_PASSWORD_HASH=$ADMIN_HASH_ESCAPED
 MESHMON_AGENT_TOKEN=$AGENT_TOKEN
 MESHMON_PG_PASSWORD=$PG_PASSWORD
 MESHMON_PG_GRAFANA_PASSWORD=$PG_GRAFANA_PASSWORD

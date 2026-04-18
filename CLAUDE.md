@@ -98,8 +98,9 @@ Alert rules and Alertmanager config live under `deploy/`:
   consumed by the frontend alerts filter.
 - `deploy/alertmanager/alertmanager.yml` — default routing with
   per-severity Discord receivers and an unreachable→loss inhibit rule.
-- `deploy/alertmanager/secrets/` — operator-provided Discord webhook
-  URL files (gitignored).
+- Discord webhook URLs are injected at container start via
+  docker-compose's `secrets:` stanza with `environment:` source; see
+  `deploy/docker-compose.yml`. Nothing touches the host filesystem.
 
 Validate on every change:
 

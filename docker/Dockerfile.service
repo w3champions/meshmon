@@ -16,6 +16,10 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
+# Vite + tsconfig alias `@grafana/*` resolves to ../grafana/, so the
+# frontend build needs grafana/panels.json at /app/grafana alongside
+# /app/frontend.
+COPY grafana /app/grafana
 RUN npm run build
 
 # ----- Stage 4: builder — compile service binary --------------------------
