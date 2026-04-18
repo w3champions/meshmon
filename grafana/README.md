@@ -141,13 +141,25 @@ Grafana datasource won't work until an operator with `CREATEROLE`
 provisions the role out-of-band:
 
 ```sql
-CREATE ROLE meshmon_grafana NOLOGIN;
+DO $$
+BEGIN
+    CREATE ROLE meshmon_grafana NOLOGIN;
+EXCEPTION
+    WHEN duplicate_object OR unique_violation THEN NULL;
+END$$;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM meshmon_grafana;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM meshmon_grafana;
 GRANT USAGE ON SCHEMA public TO meshmon_grafana;
 GRANT SELECT ON agents TO meshmon_grafana;
 GRANT SELECT ON route_snapshots TO meshmon_grafana;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   REVOKE ALL ON TABLES FROM meshmon_grafana;
 ```
+
+(Re-running the block is safe: the DO wrapper swallows the
+`duplicate_object` if the role already exists, and the REVOKEs +
+GRANTs are idempotent.)
 
 Once the role exists, the service's startup `apply_grafana_role_password`
 takes over: it flips NOLOGIN → LOGIN + sets the password whenever
