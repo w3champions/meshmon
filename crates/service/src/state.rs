@@ -16,7 +16,7 @@ use std::time::Instant;
 use tokio::sync::watch;
 
 /// Build info populated at compile time. Used by `/metrics` and
-/// `/api/web-config` to expose version/commit to operators and the UI.
+/// `/api/session` to expose version/commit to operators and the UI.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildInfo {
     /// Crate version from `CARGO_PKG_VERSION`.
@@ -53,8 +53,8 @@ pub struct AppState {
     /// `true` after startup completes (migrations ran, listeners bound).
     /// Set back to `false` when shutdown begins so `/readyz` drains.
     ready: Arc<AtomicBool>,
-    /// Build-time metadata; surfaced through `/metrics` and future
-    /// `/api/web-config`.
+    /// Build-time metadata; surfaced through `/metrics` and
+    /// `/api/session`.
     pub build: BuildInfo,
     /// Ingestion pipeline handle. Handlers call
     /// [`IngestionPipeline::push_metrics`] / [`IngestionPipeline::push_snapshot`]

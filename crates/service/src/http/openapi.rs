@@ -60,7 +60,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::ingestion::json_shapes::HopJson,
         crate::ingestion::json_shapes::HopIpJson,
         crate::ingestion::json_shapes::PathSummaryJson,
-        crate::http::web_config::WebConfigResponse,
+        crate::http::session::SessionResponse,
     )),
 )]
 struct ApiDoc;
@@ -92,7 +92,7 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(
             crate::http::user_api::list_recent_routes
         ))
-        .routes(utoipa_axum::routes!(crate::http::web_config::web_config))
+        .routes(utoipa_axum::routes!(crate::http::session::session))
         .routes(utoipa_axum::routes!(crate::http::alerts_proxy::list_alerts))
         .routes(utoipa_axum::routes!(crate::http::alerts_proxy::get_alert))
         .routes(utoipa_axum::routes!(
