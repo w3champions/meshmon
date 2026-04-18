@@ -219,7 +219,7 @@ export default function PathDetail() {
         viewport when the hop card appears. `minmax(0,1fr)` lets the column
         shrink freely; the card keeps its natural width via `w-80 shrink-0`.
       */}
-      <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] items-start">
         <div className="min-w-0">
           <h2 className="mb-2 text-lg font-semibold">Current route</h2>
           <RouteTopology
