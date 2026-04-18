@@ -334,7 +334,9 @@ pub struct RawProbingSection {
     #[serde(default)]
     path_health_thresholds: RawPathHealthThresholds,
     udp_probe_secret: Option<String>,
+    udp_probe_secret_env: Option<String>,
     udp_probe_previous_secret: Option<String>,
+    udp_probe_previous_secret_env: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -643,11 +645,23 @@ impl TryFrom<RawProbingSection> for ProbingSection {
         };
 
         // --- udp_probe_secret (required) ---
+        let udp_probe_secret_str = resolve_probing_secret_required(
+            "udp_probe_secret",
+            raw.udp_probe_secret.as_deref(),
+            raw.udp_probe_secret_env.as_deref(),
+        )?;
         let udp_probe_secret =
-            parse_secret_required("udp_probe_secret", raw.udp_probe_secret.as_deref())?;
-        let udp_probe_previous_secret = match raw.udp_probe_previous_secret.as_deref() {
+            parse_secret_required("udp_probe_secret", Some(&udp_probe_secret_str))?;
+        let udp_probe_previous_secret = match resolve_probing_secret_optional(
+            "udp_probe_previous_secret",
+            raw.udp_probe_previous_secret.as_deref(),
+            raw.udp_probe_previous_secret_env.as_deref(),
+        )? {
+            Some(s) => Some(parse_secret_required(
+                "udp_probe_previous_secret",
+                Some(&s),
+            )?),
             None => None,
-            Some(s) => Some(parse_secret_required("udp_probe_previous_secret", Some(s))?),
         };
 
         Ok(ProbingSection {
@@ -664,6 +678,56 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             udp_probe_previous_secret,
         })
     }
+}
+
+/// Resolve a probing secret from either inline TOML (`<key>`) or env-var
+/// indirection (`<key>_env`). Mutually exclusive; both-set is rejected.
+///
+/// Empty values — whether inline or resolved from env — are treated as
+/// "not set" and rejected, matching the posture used for other secrets
+/// in `config.rs::resolve_secret`. An env var declared via `_env` but
+/// absent from the process environment is a configuration error
+/// (opt-in to env indirection + typo).
+fn resolve_probing_secret(
+    key: &str,
+    inline: Option<&str>,
+    env_name: Option<&str>,
+) -> Result<Option<String>, String> {
+    match (inline, env_name) {
+        (Some(_), Some(_)) => Err(format!("`{key}` and `{key}_env` are mutually exclusive")),
+        (Some(v), None) => {
+            if v.is_empty() {
+                Err(format!("`{key}` is set to an empty string"))
+            } else {
+                Ok(Some(v.to_string()))
+            }
+        }
+        (None, Some(name)) => match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Ok(Some(v)),
+            Ok(_) => Err(format!(
+                "env var `{name}` (for `{key}_env`) is set but empty"
+            )),
+            Err(_) => Err(format!("env var `{name}` (for `{key}_env`) is not set")),
+        },
+        (None, None) => Ok(None),
+    }
+}
+
+fn resolve_probing_secret_required(
+    key: &str,
+    inline: Option<&str>,
+    env_name: Option<&str>,
+) -> Result<String, String> {
+    resolve_probing_secret(key, inline, env_name)?
+        .ok_or_else(|| format!("`{key}` or `{key}_env` is required"))
+}
+
+fn resolve_probing_secret_optional(
+    key: &str,
+    inline: Option<&str>,
+    env_name: Option<&str>,
+) -> Result<Option<String>, String> {
+    resolve_probing_secret(key, inline, env_name)
 }
 
 /// Parse an 8-byte secret from a `hex:...` or `base64:...` prefixed string.
@@ -1051,6 +1115,72 @@ mod tests {
         let raw: RawProbingSection = toml::from_str("").unwrap();
         let err = ProbingSection::try_from(raw).unwrap_err();
         assert!(err.contains("udp_probe_secret"), "{err}");
+    }
+
+    #[test]
+    fn resolves_secret_from_env_var() {
+        let var = "MESHMON_TEST_UDP_PROBE_SECRET_RESOLVES";
+        std::env::set_var(var, "hex:0011223344556677");
+        let toml_src = format!(r#"udp_probe_secret_env = "{var}""#);
+        let raw: RawProbingSection = toml::from_str(&toml_src).unwrap();
+        let parsed = ProbingSection::try_from(raw).unwrap();
+        std::env::remove_var(var);
+        assert_eq!(
+            parsed.udp_probe_secret,
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]
+        );
+    }
+
+    #[test]
+    fn rejects_both_inline_and_env_for_secret() {
+        let toml_src = r#"
+            udp_probe_secret = "hex:0011223344556677"
+            udp_probe_secret_env = "MESHMON_TEST_UDP_PROBE_SECRET_BOTH"
+        "#;
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(
+            err.contains("mutually exclusive"),
+            "expected mutually-exclusive error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn rejects_unset_env_var_for_secret() {
+        let toml_src = r#"udp_probe_secret_env = "MESHMON_TEST_UDP_PROBE_SECRET_UNSET_XYZ""#;
+        let raw: RawProbingSection = toml::from_str(toml_src).unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        assert!(err.contains("not set"), "{err}");
+    }
+
+    #[test]
+    fn rejects_empty_env_var_for_secret() {
+        let var = "MESHMON_TEST_UDP_PROBE_SECRET_EMPTY";
+        std::env::set_var(var, "");
+        let toml_src = format!(r#"udp_probe_secret_env = "{var}""#);
+        let raw: RawProbingSection = toml::from_str(&toml_src).unwrap();
+        let err = ProbingSection::try_from(raw).unwrap_err();
+        std::env::remove_var(var);
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn resolves_previous_secret_from_env_var() {
+        let var = "MESHMON_TEST_UDP_PROBE_PREV_RESOLVES";
+        std::env::set_var(var, "hex:7766554433221100");
+        let toml_src = format!(
+            r#"
+                udp_probe_secret = "hex:0011223344556677"
+                udp_probe_previous_secret_env = "{var}"
+            "#
+        );
+        let raw: RawProbingSection = toml::from_str(&toml_src).unwrap();
+        let parsed = ProbingSection::try_from(raw).unwrap();
+        std::env::remove_var(var);
+        assert_eq!(
+            parsed.udp_probe_previous_secret,
+            Some([0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00]),
+        );
     }
 
     #[test]

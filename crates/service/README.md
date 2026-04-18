@@ -214,17 +214,25 @@ See `meshmon.toml` (canonical form lives in the deploy/ example). Secrets go thr
 
 ### `[probing]` — UDP probe secret
 
-The `[probing]` section requires a `udp_probe_secret` — exactly 8 bytes,
-encoded as `hex:` or `base64:`. Agents embed this secret in their UDP
-probe packets; the UDP echo listener drops traffic that does not match
-it. Rotate by setting `udp_probe_previous_secret` to the outgoing value;
-listeners accept either during the rotation window.
+The `[probing]` section requires a UDP probe secret — exactly 8 bytes,
+encoded as `hex:` or `base64:`. Agents embed it in their UDP probe
+packets; the UDP echo listener drops traffic that does not match.
+Rotate by setting `udp_probe_previous_secret` (or `_env`) to the
+outgoing value; listeners accept either during the rotation window.
+
+Provide inline *or* via env indirection — mutually exclusive. The env
+form keeps the secret out of the committed config and is the
+quick-start default; compose injects `MESHMON_UDP_PROBE_SECRET` from
+`deploy/.env`.
 
 ```toml
 [probing]
-# Exactly 8 bytes, hex: or base64: prefix. Required.
-udp_probe_secret = "hex:0011223344556677"
-# Optional rotation companion — listeners accept either.
+# Env form (quick-start default):
+udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
+# udp_probe_previous_secret_env = "MESHMON_UDP_PROBE_PREVIOUS_SECRET"
+
+# Inline form (alternative — exactly 8 bytes, hex: or base64: prefix):
+# udp_probe_secret = "hex:0011223344556677"
 # udp_probe_previous_secret = "hex:ffeeddccbbaa9988"
 ```
 
