@@ -70,7 +70,8 @@ jobs:
         uses: actions/checkout@v6
 
       - name: yamllint
-        uses: karancode/yamllint-github-action@v2
+        # karancode/yamllint-github-action only ships patch tags — no floating v2/v3.
+        uses: karancode/yamllint-github-action@v3.0.0
         with:
           yamllint_file_or_dir: "deploy"
           yamllint_strict: true
