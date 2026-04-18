@@ -15,30 +15,177 @@ permissions:
   packages: write
 
 jobs:
-  publish:
-    name: Build & publish meshmon images
-    runs-on: ubuntu-latest
+  # Per-arch builds on native runners — no QEMU. Each build pushes a
+  # digest-only image (no tags) so the Trivy gate can scan the exact
+  # bytes before any tag is created by the merge job below.
+  build:
+    name: Build ${{ matrix.image.name }} (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: meshmon-service
+        image:
+          - name: meshmon-service
             dockerfile: docker/Dockerfile.service
             context: .
-          - image: meshmon-agent
+          - name: meshmon-agent
             dockerfile: docker/Dockerfile.agent
             context: .
-          - image: meshmon-grafana
+          - name: meshmon-grafana
             dockerfile: docker/Dockerfile.grafana
             context: .
+        platform:
+          - linux/amd64
+          - linux/arm64
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    env:
+      REGISTRY_IMAGE: ghcr.io/w3champions/${{ matrix.image.name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up QEMU (arm64 emulation)
-        uses: docker/setup-qemu-action@v4
+      - name: Derive platform-pair slug
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
         with:
-          platforms: arm64
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }}
+          cache-to: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max,image-manifest=true
+          provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Scan the amd64 digest produced by `build` before any tag is created.
+  # Arch-invariant for our base images, so a single-arch scan is enough.
+  # workflow_dispatch runs produce dispatch-<sha> tags that are not
+  # production-promoted; Trivy scanning is deliberately skipped there
+  # (the merge job treats a skipped scan as non-blocking).
+  scan:
+    name: Trivy scan ${{ matrix.image }}
+    needs: build
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [meshmon-service, meshmon-agent, meshmon-grafana]
+    steps:
+      - name: Download amd64 digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digests-${{ matrix.image }}-linux-amd64
+          path: /tmp/digest
+
+      - name: Resolve digest ref
+        id: ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(/tmp/digest/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no digest artifact present for ${{ matrix.image }}"
+            exit 1
+          fi
+          digest=$(basename "${files[0]}")
+          echo "image=ghcr.io/w3champions/${{ matrix.image }}@sha256:${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Trivy scan (amd64 only — arch-invariant for our base images)
+        uses: aquasecurity/trivy-action@v0.35.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Trivy scan (SARIF forensics)
+        uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif-${{ matrix.image }}
+          path: trivy-${{ matrix.image }}.sarif
+          retention-days: 90
+
+  # Stitch the per-arch digests into a multi-arch manifest list and
+  # attach the production tags. Runs only after `scan` succeeds (or is
+  # skipped for workflow_dispatch) so CRITICAL findings block tag
+  # promotion instead of chasing already-live tags.
+  merge:
+    name: Merge manifest ${{ matrix.image }}
+    needs: [build, scan]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.scan.result == 'success' || needs.scan.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [meshmon-service, meshmon-agent, meshmon-grafana]
+    env:
+      REGISTRY_IMAGE: ghcr.io/w3champions/${{ matrix.image }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -54,95 +201,38 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/w3champions/${{ matrix.image }}
+          images: ${{ env.REGISTRY_IMAGE }}
+          # The `:latest` and `:main-<sha>` raw tags are gated on push
+          # events to `main` (not just `is_default_branch`) so that a
+          # workflow_dispatch run from main cannot bypass the scan gate
+          # and overwrite production tags — scan is skipped for
+          # workflow_dispatch by design. Dispatch runs still emit
+          # `dispatch-<short-sha>` as the non-production fallback.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main-${{ github.sha }},enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main-${{ github.sha }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=semver,pattern=v{{version}}
-            # workflow_dispatch fallback: emits dispatch-<short-sha> so
-            # manual runs from any branch still produce at least one tag.
             type=sha,prefix=dispatch-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push (multi-arch)
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: |
-            type=registry,ref=ghcr.io/w3champions/${{ matrix.image }}:buildcache-amd64
-            type=registry,ref=ghcr.io/w3champions/${{ matrix.image }}:buildcache-arm64
-          cache-to: |
-            type=registry,ref=ghcr.io/w3champions/${{ matrix.image }}:buildcache-amd64,mode=max,image-manifest=true
-            type=registry,ref=ghcr.io/w3champions/${{ matrix.image }}:buildcache-arm64,mode=max,image-manifest=true
-          provenance: false
+      - name: Create manifest list and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s failglob
 
-  # scan runs after publish; :latest + :main-<sha> and :v<ver> are
-  # already live in GHCR by the time this gate fires. Failures block
-  # promotion decisions, not the push itself.
-  scan:
-    name: Trivy image scan
-    needs: publish
-    permissions:
-      contents: read
-      packages: read
-    # workflow_dispatch runs produce `dispatch-<sha>` tags that are not
-    # production-promoted; Trivy scanning is deliberately skipped for those.
-    if: >-
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [meshmon-service, meshmon-agent, meshmon-grafana]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          tag_args=()
+          for t in "${tags[@]}"; do
+            tag_args+=(-t "$t")
+          done
 
-      - name: Run Trivy scan (amd64 only — arch-invariant for our base images)
-        uses: aquasecurity/trivy-action@v0.35.0
-        env:
-          TRIVY_PLATFORM: linux/amd64
-        with:
-          # On main push: scan the :main-<sha> immutable tag just published.
-          # On v* tag push: scan the :v<ver> tag just published.
-          image-ref: >-
-            ghcr.io/w3champions/${{ matrix.image }}:${{
-              github.ref_type == 'tag' && github.ref_name ||
-              format('main-{0}', github.sha)
-            }}
-          format: table
-          exit-code: '1'
-          severity: CRITICAL
-          ignore-unfixed: true
-          vuln-type: os,library
+          source_args=()
+          for f in /tmp/digests/*; do
+            digest=$(basename "$f")
+            source_args+=("${REGISTRY_IMAGE}@sha256:${digest}")
+          done
 
-      - name: Trivy scan (SARIF forensics)
-        uses: aquasecurity/trivy-action@v0.35.0
-        if: always()
-        env:
-          TRIVY_PLATFORM: linux/amd64
-        with:
-          image-ref: >-
-            ghcr.io/w3champions/${{ matrix.image }}:${{
-              github.ref_type == 'tag' && github.ref_name ||
-              format('main-{0}', github.sha)
-            }}
-          format: sarif
-          output: trivy-${{ matrix.image }}.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          vuln-type: os,library
-          exit-code: '0'
+          docker buildx imagetools create "${tag_args[@]}" "${source_args[@]}"
 
-      - name: Upload Trivy SARIF artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-sarif-${{ matrix.image }}
-          path: trivy-${{ matrix.image }}.sarif
-          retention-days: 90
+      - name: Inspect manifest
+        run: docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
