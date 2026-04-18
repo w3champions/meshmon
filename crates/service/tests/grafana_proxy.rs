@@ -147,6 +147,58 @@ async fn grafana_proxy_strips_client_webauth_header() {
 }
 
 #[tokio::test]
+async fn grafana_proxy_root_reaches_grafana() {
+    // Regression guard: axum 0.8's `Router::nest` does not match the bare
+    // trailing-slash `/grafana/` unless we register it explicitly
+    // alongside the `ReverseProxy::into::<Router>` mount (see
+    // `grafana_proxy::build_router`). Without that route, the request
+    // falls through to the embedded meshmon SPA fallback. Grafana redirects
+    // the bare base path to its login page via a `Location` header, which
+    // is the canonical proof that traffic actually reached Grafana. (A
+    // `/login` 302 would be ambiguous because meshmon's SPA also owns
+    // `/login`, so we probe the proxy-only prefix.)
+    let (_grafana, base) = spawn_grafana().await;
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_admin_and_grafana(pool, &base).await;
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.114").await;
+
+    let resp = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method("GET")
+                .uri("/grafana/")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+            [203, 0, 113, 114],
+        ))
+        .await
+        .unwrap();
+
+    // Grafana responds with either a 302 to /login or a 200 HTML SPA
+    // depending on the auth posture; both are signed as coming from
+    // Grafana (never the meshmon SPA fallback). Accept any non-503,
+    // non-SPA response and assert the body, when present, is not the
+    // meshmon shell.
+    assert_ne!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "`/grafana/` must reach the configured upstream, not the 503 shim"
+    );
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .expect("read Grafana response body");
+    let body = std::str::from_utf8(&bytes).unwrap_or("");
+    assert!(
+        !body.contains("<title>meshmon</title>"),
+        "`/grafana/` must be proxied to Grafana, not caught by the meshmon SPA fallback; status = {status}"
+    );
+}
+
+#[tokio::test]
 async fn grafana_proxy_returns_503_when_upstream_unset() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_admin(pool).await;

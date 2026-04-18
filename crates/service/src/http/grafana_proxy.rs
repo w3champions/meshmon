@@ -55,7 +55,19 @@ pub fn build_router(state: AppState) -> Router<AppState> {
         return unconfigured_router(state);
     };
 
-    let inner: Router<AppState> = ReverseProxy::new(MOUNT_PREFIX, &upstream).into();
+    // `ReverseProxy::into::<Router>` uses `Router::nest`, whose
+    // nested-fallback mechanism only registers `/grafana` and
+    // `/grafana/{*rest}`. The bare trailing-slash path `/grafana/`
+    // is NOT matched and falls through to the embedded-SPA fallback
+    // in `http::router`. We register `/grafana/` explicitly with
+    // `route_service` against a clone of the same proxy so the
+    // Grafana SPA entry point is reachable. `ReverseProxy` is
+    // `Clone` (its internals are `Arc`-shared), so the extra
+    // registration is effectively free. Symmetric with
+    // `alertmanager_proxy::build_router`.
+    let proxy = ReverseProxy::new(MOUNT_PREFIX, &upstream);
+    let from_into: Router<AppState> = proxy.clone().into();
+    let inner = from_into.route_service(&format!("{MOUNT_PREFIX}/"), proxy);
 
     inner.layer(
         ServiceBuilder::new()
@@ -67,10 +79,13 @@ pub fn build_router(state: AppState) -> Router<AppState> {
 /// Router that short-circuits every `/grafana/*` hit with the canonical
 /// 503 body. Used when `upstream.grafana_url` is unset at startup.
 /// Keeps the parent `login_required!` layer in play (unauthenticated
-/// callers still see a 401 first).
+/// callers still see a 401 first). Same bare-trailing-slash treatment
+/// as `build_router` so an unconfigured deployment returns a
+/// consistent 503 on every `/grafana/*` path.
 fn unconfigured_router(state: AppState) -> Router<AppState> {
-    let inner: Router<AppState> =
-        ReverseProxy::new(MOUNT_PREFIX, "http://grafana-unconfigured.invalid").into();
+    let proxy = ReverseProxy::new(MOUNT_PREFIX, "http://grafana-unconfigured.invalid");
+    let from_into: Router<AppState> = proxy.clone().into();
+    let inner = from_into.route_service(&format!("{MOUNT_PREFIX}/"), proxy);
     inner.layer(from_fn_with_state(state, force_upstream_missing))
 }
 

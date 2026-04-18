@@ -52,7 +52,18 @@ pub fn build_router(state: AppState) -> Router<AppState> {
         return unconfigured_router(state);
     };
 
-    let inner: Router<AppState> = ReverseProxy::new(MOUNT_PREFIX, &upstream).into();
+    // `ReverseProxy::into::<Router>` uses `Router::nest`, whose
+    // nested-fallback mechanism only registers `/alertmanager` and
+    // `/alertmanager/{*rest}`. The bare trailing-slash path
+    // `/alertmanager/` is NOT matched and falls through to the
+    // embedded-SPA fallback in `http::router`, so users clicking
+    // "View in Alertmanager" land on meshmon's 404 page. We register
+    // `/alertmanager/` explicitly with `route_service` against a clone
+    // of the same proxy. `ReverseProxy` is `Clone` (its internals are
+    // `Arc`-shared), so the extra registration is effectively free.
+    let proxy = ReverseProxy::new(MOUNT_PREFIX, &upstream);
+    let from_into: Router<AppState> = proxy.clone().into();
+    let inner = from_into.route_service(&format!("{MOUNT_PREFIX}/"), proxy);
 
     inner.layer(
         ServiceBuilder::new()
@@ -63,10 +74,13 @@ pub fn build_router(state: AppState) -> Router<AppState> {
 
 /// Router that short-circuits every `/alertmanager/*` hit with the
 /// canonical 503 body. Used when `upstream.alertmanager_url` is unset
-/// at startup.
+/// at startup. Same bare-trailing-slash treatment as `build_router`
+/// so an unconfigured deployment returns a consistent 503 on every
+/// `/alertmanager/*` path.
 fn unconfigured_router(state: AppState) -> Router<AppState> {
-    let inner: Router<AppState> =
-        ReverseProxy::new(MOUNT_PREFIX, "http://alertmanager-unconfigured.invalid").into();
+    let proxy = ReverseProxy::new(MOUNT_PREFIX, "http://alertmanager-unconfigured.invalid");
+    let from_into: Router<AppState> = proxy.clone().into();
+    let inner = from_into.route_service(&format!("{MOUNT_PREFIX}/"), proxy);
     inner.layer(from_fn_with_state(state, force_upstream_missing))
 }
 

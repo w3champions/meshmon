@@ -151,6 +151,27 @@ async fn alertmanager_proxy_root_serves_spa() {
         content_type.contains("html"),
         "AM SPA root must be served as HTML; content-type = {content_type}"
     );
+
+    // Regression guard: axum 0.8's `Router::nest` does not match the bare
+    // trailing-slash `/alertmanager/` unless we register it explicitly
+    // alongside the `ReverseProxy::into::<Router>` mount (see
+    // `alertmanager_proxy::build_router`). Without that route, the
+    // request falls through to the embedded meshmon SPA fallback and
+    // returns `<title>meshmon</title>` — the frontend "View in
+    // Alertmanager" link ends up rendering meshmon's 404 page. Assert on
+    // AM-specific body content to detect that regression.
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("read AM SPA body");
+    let body = std::str::from_utf8(&bytes).expect("AM SPA body is utf-8");
+    assert!(
+        !body.contains("<title>meshmon</title>"),
+        "`/alertmanager/` must be proxied to Alertmanager, not caught by the meshmon SPA fallback"
+    );
+    assert!(
+        body.contains("Alertmanager"),
+        "AM SPA index must reference Alertmanager; body = {body}"
+    );
 }
 
 #[tokio::test]
