@@ -106,11 +106,11 @@ done
 echo "[dev.sh] seeding agents + route snapshots"
 docker exec -e PGPASSWORD="$PG_PASSWORD" meshmon-db \
     psql -U meshmon -d meshmon -c "$(cat <<'SQL'
-INSERT INTO agents (agent_id, display_name, location, ip_address, lat, lon, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
+INSERT INTO agents (id, display_name, location, ip, lat, lon, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
 VALUES
     ('dev-a', 'Dev A', 'Local', '10.0.0.1', 0, 0, now(), 'dev', 3555, 3552),
     ('dev-b', 'Dev B', 'Local', '10.0.0.2', 0, 0, now(), 'dev', 3555, 3552)
-ON CONFLICT (agent_id) DO UPDATE SET last_seen_at = now();
+ON CONFLICT (id) DO UPDATE SET last_seen_at = now();
 SQL
 )"
 
