@@ -29,6 +29,7 @@ frontend/*.local
 # Deployment local state
 deploy/.env
 deploy/meshmon.toml
+deploy/agent.env
 
 # Editor / OS
 .DS_Store

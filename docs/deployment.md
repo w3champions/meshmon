@@ -93,31 +93,36 @@ Leave `[agent_api.tls]` commented out.
 
 ## Running agents
 
-On each monitored node:
+On each host you want to probe from, drop in the bundled agent compose.
+Copy just the two files from `deploy/` — no repo checkout required:
 
 ```bash
-docker run -d --name meshmon-agent \
-  --network=host \
-  --cap-add=NET_RAW --cap-add=NET_ADMIN \
-  -e MESHMON_SERVICE_URL=https://meshmon.example.com \
-  -e MESHMON_AGENT_TOKEN=<token from deploy/.env> \
-  -e AGENT_ID=my-node-1 \
-  -e AGENT_DISPLAY_NAME="My Node 1" \
-  -e AGENT_LOCATION="City, Country" \
-  -e AGENT_IP=1.2.3.4 \
-  -e AGENT_LAT=40.7 -e AGENT_LON=-74.0 \
-  -e MESHMON_TCP_PROBE_PORT=3555 \
-  -e MESHMON_UDP_PROBE_PORT=3552 \
-  ghcr.io/w3champions/meshmon-agent:latest
+curl -LO https://raw.githubusercontent.com/w3champions/meshmon/main/deploy/docker-compose.agent.yml
+curl -LO https://raw.githubusercontent.com/w3champions/meshmon/main/deploy/agent.env.example
+cp agent.env.example agent.env
+$EDITOR agent.env                               # per-host identity + token
+docker compose -f docker-compose.agent.yml --env-file agent.env up -d
 ```
+
+`agent.env` carries `MESHMON_AGENT_TOKEN` (must match the central
+service's `deploy/.env`), `MESHMON_SERVICE_URL`, and per-host identity
+(`AGENT_ID`, `AGENT_IP`, `AGENT_LAT`, `AGENT_LON`, etc.). The example
+file is self-documented.
+
+The compose service runs with `network_mode: host` and
+`cap_add: [NET_RAW, NET_ADMIN]` — required for ICMP/trippy raw sockets
+and to bind the probe ports on real host interfaces without bridge
+NAT rewriting peer addresses. **Run agents on Linux**; Docker
+Desktop's host-network emulation on macOS/Windows is incomplete.
 
 The agent opens an outbound gRPC stream to the service. **No inbound
 ports required on agent hosts** beyond the peer-to-peer probe ports
-(`MESHMON_TCP_PROBE_PORT`, `MESHMON_UDP_PROBE_PORT`), which must be
-reachable from every other agent.
+(`MESHMON_TCP_PROBE_PORT`, default 3555/TCP; `MESHMON_UDP_PROBE_PORT`,
+default 3552/UDP), which must be reachable on `AGENT_IP` from every
+other agent.
 
-See the README `## Running the agent` section for the full env var
-table.
+For bare-metal (no Docker) deployments, or the full env-var table, see
+the README `## Running the agent` section.
 
 ## Discord alert notifications
 
