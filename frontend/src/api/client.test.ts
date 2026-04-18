@@ -45,7 +45,7 @@ describe("api middleware", () => {
   it("401 on protected path clears session and redirects", async () => {
     useAuthStore.getState().setSession({ username: "admin" });
     vi.spyOn(global, "fetch").mockResolvedValue(new Response(null, { status: 401 }));
-    await api.GET("/api/web-config");
+    await api.GET("/api/session");
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
     expect(window.location.assign).toHaveBeenCalledWith("/login?returnTo=%2Fagents");
   });
@@ -67,7 +67,7 @@ describe("api middleware", () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(null, { status: 429, headers: { "retry-after": "42" } }),
     );
-    await api.GET("/api/web-config");
+    await api.GET("/api/session");
     expect(pushToast).toHaveBeenCalledWith({
       kind: "error",
       message: "Too many requests",
@@ -77,7 +77,7 @@ describe("api middleware", () => {
 
   it("5xx pushes a service-error toast", async () => {
     vi.spyOn(global, "fetch").mockResolvedValue(new Response(null, { status: 503 }));
-    await api.GET("/api/web-config");
+    await api.GET("/api/session");
     expect(pushToast).toHaveBeenCalledWith({
       kind: "error",
       message: "Service error",

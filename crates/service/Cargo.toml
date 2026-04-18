@@ -21,6 +21,7 @@ argon2 = { workspace = true }
 axum = { workspace = true }
 axum-login = { workspace = true }
 axum-prometheus = { workspace = true }
+axum-reverse-proxy = { workspace = true }
 base64 = { workspace = true }
 memory-serve = { workspace = true }
 metrics = { workspace = true }
@@ -62,6 +63,8 @@ tower-sessions = { workspace = true }
 tower_governor = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = { workspace = true }
+if-addrs = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 utoipa-swagger-ui = { workspace = true }

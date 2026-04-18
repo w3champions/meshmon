@@ -45,16 +45,19 @@
 //!   genuine backend miss. `/healthz`, `/readyz`, and `/metrics` are
 //!   exact-match routes and therefore cannot be hijacked.
 
+pub mod alertmanager_proxy;
 pub mod alerts_proxy;
 pub mod auth;
+pub mod grafana_proxy;
 pub mod health;
 pub mod http_client;
 pub mod metrics_auth;
 pub mod metrics_proxy;
 pub mod openapi;
 pub mod path_overview;
+pub mod proxy_common;
+pub mod session;
 pub mod user_api;
-pub mod web_config;
 
 use crate::state::AppState;
 use axum::Router;
@@ -73,10 +76,15 @@ use tower_http::trace::TraceLayer;
 /// - `/api/auth/logout` lives on a second standalone sub-router —
 ///   unauthenticated and unrate-limited so it remains idempotent for
 ///   anonymous callers.
-/// - Everything else under `/api/*` (including [`web_config::web_config`])
+/// - Everything else under `/api/*` (including [`session::session`])
 ///   is collected via `utoipa_axum::routes!` and guarded by the
 ///   `login_required!` layer, which returns 401 when no session is
 ///   present.
+/// - `/grafana/*` and `/alertmanager/*` (transparent reverse proxies
+///   for the bundled dashboards) sit on a dedicated sub-router that
+///   wears the same `login_required!` layer, so every upstream hop
+///   goes through the session gate before the per-proxy header
+///   middleware runs.
 /// - Health, metrics, OpenAPI JSON and Swagger UI stay outside the
 ///   authenticated surface.
 ///
@@ -113,6 +121,33 @@ pub fn router(state: AppState) -> Router {
     // `login_url`) keeps this API-friendly: SPAs decide their own
     // redirect target rather than following a server-issued 307.
     let api_protected = api_axum.route_layer(login_required!(ConfigAuthBackend));
+
+    // Transparent proxies for the bundled Grafana + Alertmanager. Both
+    // sub-routers are built from `axum-reverse-proxy` with per-proxy
+    // header-injection middleware (see grafana_proxy.rs /
+    // alertmanager_proxy.rs). `login_required!` is applied at this
+    // wiring layer so every request hits the session gate before the
+    // proxy middleware runs — identical posture to the `/api/*`
+    // surface.
+    //
+    // Router shape: `ReverseProxy::new(prefix, upstream).into()` with a
+    // non-empty prefix expands to `Router::new().nest(prefix,
+    // Router::new().fallback_service(proxy))` (see the crate's
+    // `impl From<ReverseProxy<_>> for Router<_>`). The outer router
+    // therefore has an explicit nested route at the prefix — NOT a
+    // fallback — which is why `.merge(grafana_proxy).merge(alertmanager_proxy)`
+    // composes cleanly (two custom-fallback routers would panic). The
+    // inner nested sub-router IS fallback-only, but nesting isolates
+    // its fallback from `merge`'s "two fallbacks" check.
+    //
+    // We use `.layer(...)` rather than `.route_layer(...)` so the
+    // session gate covers the nested fallback service too —
+    // `.route_layer` only applies to explicit routes and the nested
+    // mount's internal fallback would slip past it.
+    let proxies = Router::<AppState>::new()
+        .merge(grafana_proxy::build_router(state.clone()))
+        .merge(alertmanager_proxy::build_router(state.clone()))
+        .layer(login_required!(ConfigAuthBackend));
 
     let grpc_router = crate::grpc::routes(state.clone());
 
@@ -191,6 +226,7 @@ pub fn router(state: AppState) -> Router {
         .merge(logout_router)
         .merge(grpc_router)
         .merge(api_protected)
+        .merge(proxies)
         .route("/api", axum::routing::any(backend_path_404))
         .route("/api/{*rest}", axum::routing::any(backend_path_404))
         .fallback_service(memory_router)

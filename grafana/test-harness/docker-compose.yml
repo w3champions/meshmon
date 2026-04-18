@@ -23,10 +23,7 @@ services:
     depends_on:
       - meshmon-vm
     environment:
-      GF_SECURITY_ADMIN_USER: "admin"
-      GF_SECURITY_ADMIN_PASSWORD: "admin"
       GF_SECURITY_ALLOW_EMBEDDING: "true"
-      GF_USERS_ALLOW_SIGN_UP: "false"
       GF_LOG_LEVEL: "warn"
     volumes:
       - ./grafana.ini:/etc/grafana/grafana.ini:ro

@@ -29,16 +29,6 @@ describe("Alerts page", () => {
   it("renders rows and filters by severity", async () => {
     mockFetchSequence([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: {
-          username: "u",
-          version: "v",
-          grafana_dashboards: {},
-          alertmanager_base_url: "https://am.example/",
-        },
-      },
-      {
         url: /\/api\/alerts/,
         status: 200,
         body: [
@@ -90,11 +80,6 @@ describe("Alerts page", () => {
   it("filters by free-text search across alertname/summary", async () => {
     mockFetchSequence([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      {
         url: /\/api\/alerts/,
         status: 200,
         body: [
@@ -134,38 +119,19 @@ describe("Alerts page", () => {
   });
 
   it("shows empty state when there are no active alerts", async () => {
-    mockFetchSequence([
-      {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      { url: /\/api\/alerts/, status: 200, body: [] },
-    ]);
+    mockFetchSequence([{ url: /\/api\/alerts/, status: 200, body: [] }]);
     renderWithProviders(<Alerts />);
     await screen.findByText(/no active alerts/i);
   });
 
   it("treats 503 from alerts proxy as empty list (alertmanager unreachable)", async () => {
-    mockFetchSequence([
-      {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      { url: /\/api\/alerts/, status: 503, body: "" },
-    ]);
+    mockFetchSequence([{ url: /\/api\/alerts/, status: 503, body: "" }]);
     renderWithProviders(<Alerts />);
     await screen.findByText(/no active alerts/i);
   });
 
   it("filters by protocol via dropdown", async () => {
     mockFetchSequence([
-      {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
       {
         url: /\/api\/alerts/,
         status: 200,

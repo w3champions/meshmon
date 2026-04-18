@@ -529,6 +529,43 @@ alertmanager_url = "{alertmanager_url}"
     )
 }
 
+/// Same as [`state_with_admin`] but with `upstream.grafana_url` set.
+/// Use this for Grafana-proxy tests that need the upstream URL configured.
+pub async fn state_with_admin_and_grafana(pool: PgPool, grafana_url: &str) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
+[service]
+trust_forwarded_headers = true
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+
+[upstream]
+grafana_url = "{grafana_url}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let ingestion = dummy_ingestion(pool.clone());
+    let registry = dummy_registry(pool.clone());
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
+}
+
 /// Same as [`state_with_admin`] but with `upstream.vm_url` set.
 /// Use this for metrics-proxy tests that need the VM URL configured.
 pub async fn state_with_admin_and_vm(pool: PgPool, vm_url: &str) -> AppState {
@@ -549,62 +586,6 @@ password_hash = "{AUTH_TEST_HASH}"
 
 [upstream]
 vm_url = "{vm_url}"
-"#
-    );
-    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
-    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
-    let (_tx, rx) = watch::channel(cfg);
-    let ingestion = dummy_ingestion(pool.clone());
-    let registry = dummy_registry(pool.clone());
-    AppState::new(
-        swap,
-        rx,
-        pool,
-        ingestion,
-        registry,
-        test_prometheus_handle().await,
-    )
-}
-
-/// `AppState` with the standard test operator plus `[web]` config for
-/// Grafana fields.
-pub async fn state_with_admin_and_web(
-    pool: PgPool,
-    grafana_base_url: Option<&str>,
-    dashboards: &[(&str, &str)],
-) -> AppState {
-    let grafana_line = match grafana_base_url {
-        Some(url) => format!("grafana_base_url = \"{url}\""),
-        None => String::new(),
-    };
-    let dashboards_lines: Vec<String> = dashboards
-        .iter()
-        .map(|(k, v)| format!("{k} = \"{v}\""))
-        .collect();
-    let dashboards_section = if dashboards_lines.is_empty() {
-        String::new()
-    } else {
-        format!("[web.grafana_dashboards]\n{}", dashboards_lines.join("\n"))
-    };
-    let toml = format!(
-        r#"
-[database]
-url = "postgres://ignored@h/d"
-
-[probing]
-udp_probe_secret = "hex:0011223344556677"
-
-[service]
-trust_forwarded_headers = true
-
-[[auth.users]]
-username = "admin"
-password_hash = "{AUTH_TEST_HASH}"
-
-[web]
-{grafana_line}
-
-{dashboards_section}
 "#
     );
     let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
@@ -715,8 +696,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
 // | `.60`  | `auth::rate_limit_does_not_leak_between_ips` (burn IP)    |
 // | `.61`  | `auth::rate_limit_does_not_leak_between_ips` (fresh IP)   |
 // | `.80`  | `auth::peer_addr_extractor_reads_connect_info_…`          |
-// | `.100` | `web_config::web_config_returns_body_with_session`        |
-// | `.101` | `web_config::web_config_populates_grafana_fields_from_…`  |
+// | `.100` | `session::session_returns_version_and_username`           |
 //
 // Pick a fresh octet when adding a new test that hits the login endpoint.
 // ---------------------------------------------------------------------------

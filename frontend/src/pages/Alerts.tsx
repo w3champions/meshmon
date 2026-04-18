@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { type AlertSummary, useAlerts } from "@/api/hooks/alerts";
-import { useWebConfig } from "@/api/hooks/web-config";
 import { AlertRow } from "@/components/AlertRow";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,14 +22,13 @@ import {
 
 export default function Alerts() {
   const alertsQ = useAlerts();
-  const cfgQ = useWebConfig();
   const [filter, setFilter] = useState<AlertFilter>(defaultAlertFilter());
 
   const alerts = alertsQ.data ?? [];
   const categories = useMemo(() => uniqueCategories(alerts), [alerts]);
   const visible = useMemo(() => filterAlerts(alerts, filter), [alerts, filter]);
 
-  if (alertsQ.isLoading || cfgQ.isLoading) {
+  if (alertsQ.isLoading) {
     return (
       <div className="p-6">
         <Skeleton className="h-64 w-full" data-testid="alerts-skeleton" />
@@ -44,8 +42,6 @@ export default function Alerts() {
       </p>
     );
   }
-
-  const amBase = cfgQ.data?.alertmanager_base_url ?? null;
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -142,7 +138,7 @@ export default function Alerts() {
       ) : (
         <div className="grid gap-3">
           {visible.map((a: AlertSummary) => (
-            <AlertRow key={a.fingerprint} alert={a} alertmanagerBaseUrl={amBase} />
+            <AlertRow key={a.fingerprint} alert={a} />
           ))}
         </div>
       )}

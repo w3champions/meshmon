@@ -46,16 +46,16 @@ const authRoute = createRoute({
 
     try {
       const data = await context.queryClient.fetchQuery({
-        queryKey: ["web-config"],
+        queryKey: ["session"],
         queryFn: async () => {
-          const { data, error, response } = await api.GET("/api/web-config");
+          const { data, error, response } = await api.GET("/api/session");
           // Only treat 401 as "needs login". Network failures / 5xx fall
           // through to the router's error boundary or the toast middleware.
           if (response?.status === 401) {
             throw redirect({ to: "/login", search: { returnTo } });
           }
           if (error || !data) {
-            throw error ?? new Error("web-config: no data");
+            throw error ?? new Error("session: no data");
           }
           return data;
         },
@@ -66,7 +66,7 @@ const authRoute = createRoute({
       // know who's signed in (sessionStorage is wiped on hard refresh but
       // the cookie isn't).
       useAuthStore.getState().setSession({ username: data.username });
-      return { webConfig: data };
+      return { session: data };
     } catch (err) {
       // Re-throw redirect objects so TanStack Router can handle navigation.
       if (isRedirect(err)) {

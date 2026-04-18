@@ -70,15 +70,6 @@ describe("Report page", () => {
   it("shows empty state when primary_protocol is null", async () => {
     installFetchMock([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: {
-          username: "u",
-          version: "v",
-          grafana_dashboards: {},
-        },
-      },
-      {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
         body: {
@@ -155,15 +146,6 @@ describe("Report page", () => {
     };
 
     installFetchMock([
-      {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: {
-          username: "u",
-          version: "v",
-          grafana_dashboards: {},
-        },
-      },
       {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
@@ -259,11 +241,6 @@ describe("Report page", () => {
     };
     installFetchMock([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
         body: {
@@ -343,11 +320,6 @@ describe("Report page", () => {
 
     installFetchMock([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
         body: {
@@ -423,11 +395,6 @@ describe("Report page", () => {
 
     installFetchMock([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
         body: {
@@ -499,11 +466,6 @@ describe("Report page", () => {
     };
 
     installFetchMock([
-      {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
       {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
@@ -610,11 +572,6 @@ describe("Report page", () => {
 
     installFetchMock([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
         body: {
@@ -692,11 +649,6 @@ describe("Report page", () => {
 
     installFetchMock([
       {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
-      {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,
         body: {
@@ -759,11 +711,6 @@ describe("Report page", () => {
       ],
     };
     installFetchMock([
-      {
-        url: /\/api\/web-config$/,
-        status: 200,
-        body: { username: "u", version: "v", grafana_dashboards: {} },
-      },
       {
         url: /\/api\/paths\/.*\/overview/,
         status: 200,

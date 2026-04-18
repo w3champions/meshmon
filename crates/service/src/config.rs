@@ -45,8 +45,6 @@ pub struct Config {
     pub agents: AgentsSection,
     /// Probing configuration broadcast to agents via `GetConfig`.
     pub probing: crate::probing::ProbingSection,
-    /// Frontend / web-config runtime settings (Grafana embed, dashboards).
-    pub web: WebSection,
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -178,18 +176,10 @@ pub struct UpstreamSection {
     pub vm_url: Option<String>,
     /// Alertmanager base URL, e.g. `http://meshmon-alertmanager:9093`.
     pub alertmanager_url: Option<String>,
-}
-
-/// Frontend / web-config runtime settings.
-#[derive(Debug, Clone, Default)]
-pub struct WebSection {
-    /// Base URL for embedding Grafana panels. `None` if Grafana is not
-    /// configured; resolved from `[web].grafana_base_url` or the
-    /// `grafana_base_url_env` indirection.
-    pub grafana_base_url: Option<String>,
-    /// Map of logical dashboard name → Grafana dashboard UID, read from
-    /// `[web.grafana_dashboards]` in `meshmon.toml`.
-    pub grafana_dashboards: std::collections::HashMap<String, String>,
+    /// Grafana base URL, e.g. `http://meshmon-grafana:3000`. Consumed by
+    /// the transparent `/grafana/*` proxy. When unset, `/grafana/*`
+    /// returns 503 and the SPA's iframe renders the broken-iframe state.
+    pub grafana_url: Option<String>,
 }
 
 /// Agent registry knobs: how long a `last_seen_at` still counts as active,
@@ -251,8 +241,6 @@ struct RawConfig {
     agents: RawAgentsSection,
     #[serde(default)]
     probing: crate::probing::RawProbingSection,
-    #[serde(default)]
-    web: RawWeb,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -317,14 +305,9 @@ struct RawAgentApiTls {
 struct RawUpstream {
     vm_url: Option<String>,
     alertmanager_url: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawWeb {
-    grafana_base_url: Option<String>,
-    grafana_base_url_env: Option<String>,
-    #[serde(default)]
-    grafana_dashboards: std::collections::HashMap<String, String>,
+    alertmanager_url_env: Option<String>,
+    grafana_url: Option<String>,
+    grafana_url_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,6 +420,25 @@ impl Config {
                     reason: format!("auth.users[{idx}].username is empty"),
                 });
             }
+            // Usernames are inserted into `X-WEBAUTH-USER` by the Grafana
+            // proxy via `HeaderValue::try_from`, which accepts only
+            // visible ASCII (0x20–0x7E) plus tab. Reject everything else
+            // at load so a control byte (`"alice\nevil"`) or a non-ASCII
+            // codepoint (`"mário"`) fails fast instead of panicking on
+            // the first authenticated Grafana request.
+            if u.username
+                .bytes()
+                .any(|b| b >= 0x80 || b == 0x7F || (b < 0x20 && b != 0x09))
+            {
+                return Err(BootError::ConfigInvalid {
+                    path: path.to_string(),
+                    reason: format!(
+                        "auth.users[{idx}].username must be visible ASCII \
+                         (printable 0x20-0x7E, optionally tab) so it can \
+                         be forwarded as `X-WEBAUTH-USER` to Grafana"
+                    ),
+                });
+            }
             PasswordHash::new(&u.password_hash).map_err(|e| BootError::ConfigInvalid {
                 path: path.to_string(),
                 reason: format!("auth.users[{idx}].password_hash is not a valid PHC string: {e}"),
@@ -488,9 +490,36 @@ impl Config {
         };
 
         // --- upstream section ---
+        let alertmanager_url = resolve_optional_secret(
+            raw.upstream.alertmanager_url,
+            raw.upstream.alertmanager_url_env,
+            "upstream.alertmanager_url",
+            path,
+        )?;
+        let grafana_url = resolve_optional_secret(
+            raw.upstream.grafana_url,
+            raw.upstream.grafana_url_env,
+            "upstream.grafana_url",
+            path,
+        )?;
+        for (url, key) in [
+            (alertmanager_url.as_deref(), "upstream.alertmanager_url"),
+            (grafana_url.as_deref(), "upstream.grafana_url"),
+        ] {
+            if let Some(u) = url {
+                reject_self_referential_upstream(
+                    u,
+                    &service.listen_addr,
+                    service.public_base_url.as_deref(),
+                    key,
+                    path,
+                )?;
+            }
+        }
         let upstream = UpstreamSection {
             vm_url: raw.upstream.vm_url,
-            alertmanager_url: raw.upstream.alertmanager_url,
+            alertmanager_url,
+            grafana_url,
         };
 
         // --- agents section ---
@@ -519,18 +548,6 @@ impl Config {
             }
         })?;
 
-        // --- web section ---
-        let grafana_base_url = resolve_optional_secret(
-            raw.web.grafana_base_url,
-            raw.web.grafana_base_url_env,
-            "web.grafana_base_url",
-            path,
-        )?;
-        let web = WebSection {
-            grafana_base_url,
-            grafana_dashboards: raw.web.grafana_dashboards,
-        };
-
         Ok(Config {
             service,
             database,
@@ -540,7 +557,6 @@ impl Config {
             upstream,
             agents,
             probing,
-            web,
         })
     }
 }
@@ -606,6 +622,135 @@ fn resolve_optional_secret(
         };
     }
     Ok(None)
+}
+
+/// Reject an upstream URL that would cause the proxy handler to loop
+/// back into its own listen socket. A misconfigured operator who sets
+/// `grafana_url = "https://meshmon.example.com/grafana"` (the public
+/// URL) instead of the internal address would recurse forever.
+///
+/// Checks two independent routes to the same listener:
+///  1. URL scheme+host+port match the internal listen address. This
+///     covers (a) exact matches against the bound IP; (b) the loopback
+///     / `localhost` aliases that resolve to it; and (c) when bound to
+///     a wildcard (`0.0.0.0` / `[::]`), every local interface IP
+///     enumerated via [`host_matches_any_local_interface`].
+///  2. URL host + scheme-normalized port match
+///     `service.public_base_url`, which identifies the externally
+///     advertised URL — the one that resolves back through the edge
+///     proxy onto this listener. Port normalization (via
+///     `port_or_known_default`) covers the typical nginx case where
+///     both the public URL and the upstream URL elide the default
+///     `:443`; a truly-different port on the same host (e.g. a
+///     side-channel Grafana on `:3000` while meshmon runs on `:443`)
+///     is accepted since no recursion is possible.
+fn reject_self_referential_upstream(
+    raw_url: &str,
+    listen_addr: &std::net::SocketAddr,
+    public_base_url: Option<&str>,
+    key: &str,
+    path: &str,
+) -> Result<(), BootError> {
+    let url = url::Url::parse(raw_url).map_err(|e| BootError::ConfigInvalid {
+        path: path.to_string(),
+        reason: format!("{key} `{raw_url}` is not a valid URL: {e}"),
+    })?;
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
+
+    // Check 1: same host + same internal port → direct recursion.
+    if let Some(port) = url.port_or_known_default() {
+        if port == listen_addr.port() {
+            let listen_hosts: &[&str] = match listen_addr.ip() {
+                std::net::IpAddr::V4(v4) if v4.is_unspecified() => &["127.0.0.1", "localhost"],
+                // IPv6 unspecified (`[::]`) is dual-stack on most OSes:
+                // an IPv4 client connecting to `127.0.0.1:<port>` lands
+                // on the same listener via v4-mapped-v6. Treat the v4
+                // loopback as self too.
+                std::net::IpAddr::V6(v6) if v6.is_unspecified() => {
+                    &["::1", "127.0.0.1", "localhost"]
+                }
+                // Explicit loopback binds still recurse when the
+                // operator writes the other loopback family alias or
+                // `localhost` — the resolver translates them all to
+                // the same local listener.
+                std::net::IpAddr::V4(v4) if v4.is_loopback() => &["::1", "localhost"],
+                std::net::IpAddr::V6(v6) if v6.is_loopback() => &["127.0.0.1", "localhost"],
+                _ => &[],
+            };
+            let own_ip = listen_addr.ip().to_string();
+            let mut matched = host == own_ip || listen_hosts.contains(&host);
+
+            // Wildcard binds (`0.0.0.0` / `[::]`) also accept traffic
+            // on every local interface IP. Reject an upstream URL
+            // that targets any of them on the same port — a common
+            // footgun when an operator inlines the machine's LAN IP.
+            if !matched && listen_addr.ip().is_unspecified() {
+                matched = host_matches_any_local_interface(host);
+            }
+
+            if matched {
+                return Err(BootError::ConfigInvalid {
+                    path: path.to_string(),
+                    reason: format!(
+                        "{key} `{raw_url}` recurses into meshmon's own listen address \
+                         ({listen_addr}); set it to the upstream's internal address instead"
+                    ),
+                });
+            }
+        }
+    }
+
+    // Check 2: upstream URL points at meshmon's own public endpoint.
+    // Behind nginx, public 443 + internal 8080 slips past check 1 but
+    // still recurses (client → nginx → meshmon → /grafana/* → nginx
+    // → meshmon → ...). Match on scheme-default-normalized
+    // `host:port` rather than host alone so an operator legitimately
+    // running a different service on the same hostname at a different
+    // port (e.g. a side-channel Grafana on :3000 while meshmon is on
+    // :443) is not rejected.
+    if let Some(public) = public_base_url {
+        if let Ok(pub_url) = url::Url::parse(public) {
+            if let (Some(pub_host), Some(pub_port), Some(up_port)) = (
+                pub_url.host_str(),
+                pub_url.port_or_known_default(),
+                url.port_or_known_default(),
+            ) {
+                if host == pub_host && up_port == pub_port {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: format!(
+                            "{key} `{raw_url}` resolves to meshmon's public URL \
+                             (`{public}`) and would recurse through the edge proxy; \
+                             set it to the upstream's internal address instead"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Return `true` if `host` parses as a literal IP address that belongs
+/// to one of this machine's local network interfaces. Used by the
+/// self-referential upstream guard to catch the "wildcard bind +
+/// inline interface IP" shape (`0.0.0.0` listener with
+/// `grafana_url = "http://<LAN-IP>:<port>/..."`).
+///
+/// Returns `false` when `host` is not an IP literal (DNS names aren't
+/// resolved), when `if_addrs::get_if_addrs` fails, or when there's no
+/// match — callers should then fall through to the subsequent checks.
+fn host_matches_any_local_interface(host: &str) -> bool {
+    let Ok(target) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces.into_iter().any(|i| i.ip() == target),
+        Err(_) => false,
+    }
 }
 
 /// Resolve the optional `[service.metrics_auth]` block.
@@ -733,4 +878,288 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
         registry,
         crate::metrics::test_install(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIN_TOML: &str = r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+"#;
+
+    #[test]
+    fn upstream_grafana_url_parses_from_inline_value() {
+        let toml =
+            format!("{MIN_TOML}\n[upstream]\ngrafana_url = \"http://meshmon-grafana:3000\"\n");
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert_eq!(
+            cfg.upstream.grafana_url.as_deref(),
+            Some("http://meshmon-grafana:3000")
+        );
+    }
+
+    #[test]
+    fn upstream_grafana_url_resolves_from_env_indirection() {
+        std::env::set_var(
+            "MESHMON_TEST_GRAFANA_URL_XYZ",
+            "http://grafana.internal:3000",
+        );
+        let toml =
+            format!("{MIN_TOML}\n[upstream]\ngrafana_url_env = \"MESHMON_TEST_GRAFANA_URL_XYZ\"\n");
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert_eq!(
+            cfg.upstream.grafana_url.as_deref(),
+            Some("http://grafana.internal:3000")
+        );
+        std::env::remove_var("MESHMON_TEST_GRAFANA_URL_XYZ");
+    }
+
+    #[test]
+    fn upstream_url_pointing_at_self_listen_addr_is_rejected() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+
+[upstream]
+grafana_url = "http://127.0.0.1:8080"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_localhost_on_loopback_listen_is_rejected() {
+        // Common operator footgun: bind to 127.0.0.1 and point the
+        // upstream at `http://localhost:<same-port>/...`. The names
+        // are different strings but resolve to the same socket, so
+        // the proxy still recurses into itself.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+
+[upstream]
+grafana_url = "http://localhost:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_alt_loopback_family_on_loopback_listen_is_rejected() {
+        // Binding to ::1 while setting the upstream to 127.0.0.1
+        // (or vice-versa) is the same recursion by a different name.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "[::1]:8080"
+
+[upstream]
+grafana_url = "http://127.0.0.1:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn upstream_v4_loopback_on_ipv6_unspecified_listen_is_rejected() {
+        // Dual-stack `[::]` listeners accept IPv4 traffic via
+        // v4-mapped-v6, so `http://127.0.0.1:<same-port>` still
+        // recurses into meshmon.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "[::]:8080"
+
+[upstream]
+grafana_url = "http://127.0.0.1:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn upstream_pointing_at_public_url_is_rejected_even_on_different_port() {
+        // Common nginx deployment: internal listener on 8080, public
+        // URL on 443. An operator who pastes the public URL into
+        // `grafana_url` still recurses (through nginx back into
+        // meshmon), but check-1 (exact port equality) would miss it.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+public_base_url = "https://meshmon.example.com"
+
+[upstream]
+grafana_url = "https://meshmon.example.com/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("public URL") || reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_on_public_host_but_different_port_is_accepted() {
+        // Valid deployment: meshmon is on :443 via the edge proxy, and
+        // a side-channel Grafana is exposed on :3000 at the same
+        // hostname (it doesn't come back through meshmon). The guard
+        // should accept this — rejecting would block legitimate
+        // multi-service-on-one-hostname topologies.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+public_base_url = "https://meshmon.example.com"
+
+[upstream]
+grafana_url = "https://meshmon.example.com:3000/grafana"
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("must accept");
+        assert_eq!(
+            cfg.upstream.grafana_url.as_deref(),
+            Some("https://meshmon.example.com:3000/grafana"),
+        );
+    }
+
+    #[test]
+    fn upstream_on_local_interface_ip_is_rejected_for_wildcard_bind() {
+        // `0.0.0.0:<port>` accepts on every interface, so an upstream
+        // URL that targets a specific local interface IP at the same
+        // port still recurses. Find any non-loopback interface IP on
+        // this host and assert the guard rejects it.
+        // Pick the first non-loopback *IPv4* interface IP. IPv6
+        // link-locals (`fe80::.../%iface`) carry zone identifiers
+        // that don't survive URL round-tripping, so they're awkward
+        // to build a test URL from — IPv4 is enough to exercise the
+        // enumeration path.
+        let Some(interface_ip) = if_addrs::get_if_addrs()
+            .ok()
+            .into_iter()
+            .flatten()
+            .map(|i| i.ip())
+            .find(|ip| matches!(ip, std::net::IpAddr::V4(v4) if !v4.is_loopback()))
+            .map(|ip| ip.to_string())
+        else {
+            // No suitable interface (e.g. sandboxed CI env); skip
+            // rather than false-negative.
+            eprintln!("skipping: no non-loopback IPv4 interface available");
+            return;
+        };
+
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "0.0.0.0:8080"
+
+[upstream]
+grafana_url = "http://{interface_ip}:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alertmanager_upstream_pointing_at_self_is_rejected() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "0.0.0.0:8080"
+
+[upstream]
+alertmanager_url = "http://0.0.0.0:8080/alertmanager"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn username_with_control_chars_is_rejected() {
+        // A TOML basic string with `\n` produces a literal LF byte in the
+        // parsed username. Without the header-value validation at load,
+        // this slips through and panics later when the Grafana proxy
+        // builds `X-WEBAUTH-USER`.
+        let valid_hash =
+            "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername = \"alice\\nevil\"\npassword_hash = \"{valid_hash}\"\n"
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("visible ASCII"),
+                    "expected visible-ASCII message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn username_with_non_ascii_is_rejected() {
+        // `HeaderValue::try_from(&str)` rejects bytes >= 0x80, so a
+        // username like "mário" would pass the control-byte filter
+        // but then panic on the first Grafana request when the proxy
+        // tries to build `X-WEBAUTH-USER`. Reject at load.
+        let valid_hash =
+            "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername = \"mário\"\npassword_hash = \"{valid_hash}\"\n"
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("visible ASCII"),
+                    "expected visible-ASCII message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

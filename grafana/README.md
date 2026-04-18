@@ -86,11 +86,84 @@ This mirrors the established Alertmanager-proxy pattern in
 edge to internal infra," and the upstream's own auth posture stays
 trivial because nothing else can reach it.
 
-The proxy code itself is **not yet implemented**; it is tracked separately
-and blocks the bundled-deployment task. Until it lands, the iframe path
-is non-functional in any environment that does not already terminate auth
-in front of Grafana, and the dev smoke harness intentionally does not
-ship Grafana — the SPA renders a "Grafana not configured" placeholder.
+The meshmon-service proxy is mounted at `/grafana/{*tail}` in
+`crates/service/src/http/grafana_proxy.rs`. Operators wire it via the
+`[upstream] grafana_url` field in `meshmon.toml`. The bundled compose
+sets it to `http://meshmon-grafana:3000/grafana` (note: Grafana is
+configured with `serve_from_sub_path = true`, so the upstream URL
+re-adds the `/grafana` suffix).
+
+The bundled Grafana ships with the `auth.proxy` configuration below.
+Copy it into any custom Grafana config when deviating from the bundled
+compose:
+
+```ini
+[server]
+serve_from_sub_path = true
+root_url = %(protocol)s://%(domain)s/grafana/
+
+[auth]
+disable_login_form = true
+disable_signout_menu = true
+
+[auth.anonymous]
+enabled = false
+
+[auth.proxy]
+enabled = true
+header_name = X-WEBAUTH-USER
+header_property = username
+auto_sign_up = true
+sync_ttl = 60
+# The only legitimate caller is meshmon-service on the docker bridge.
+# Widen `whitelist` only if the deployment topology requires it.
+whitelist = 127.0.0.1, ::1, <docker bridge CIDR>
+enable_login_token = false
+
+[security]
+allow_embedding = true
+cookie_samesite = lax
+```
+
+The `MeshmonPostgres` datasource uses the read-only `meshmon_grafana`
+role, not the service's full-privilege user. Set
+`MESHMON_PG_GRAFANA_PASSWORD` at deploy time; the service's migration
+bootstrap flips the role from NOLOGIN to LOGIN atomically.
+
+### Restricted-privilege Postgres (AWS RDS, Cloud SQL, Supabase, …)
+
+The bootstrap migration creates `meshmon_grafana` via `CREATE ROLE`,
+which needs the cluster-level `CREATEROLE` privilege. When meshmon
+runs against a managed Postgres instance that grants only
+database-scoped privileges, the migration falls back to a
+`RAISE WARNING` and the service boots without the role. The bundled
+Grafana datasource won't work until an operator with `CREATEROLE`
+provisions the role out-of-band:
+
+```sql
+DO $$
+BEGIN
+    CREATE ROLE meshmon_grafana NOLOGIN;
+EXCEPTION
+    WHEN duplicate_object OR unique_violation THEN NULL;
+END$$;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM meshmon_grafana;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM meshmon_grafana;
+GRANT USAGE ON SCHEMA public TO meshmon_grafana;
+GRANT SELECT ON agents TO meshmon_grafana;
+GRANT SELECT ON route_snapshots TO meshmon_grafana;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  REVOKE ALL ON TABLES FROM meshmon_grafana;
+```
+
+(Re-running the block is safe: the DO wrapper swallows the
+`duplicate_object` if the role already exists, and the REVOKEs +
+GRANTs are idempotent.)
+
+Once the role exists, the service's startup `apply_grafana_role_password`
+takes over: it flips NOLOGIN → LOGIN + sets the password whenever
+`MESHMON_PG_GRAFANA_PASSWORD` is set.
 
 Meshmon iframes pass `theme=light` on the Report page so printed PDFs stay
 legible. Grafana honours that URL parameter regardless of the dashboard's

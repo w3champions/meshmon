@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   buildGrafanaSoloUrl,
+  GRAFANA_BASE,
   MESHMON_PATH_DASHBOARD,
   PANEL_LOSS,
   PANEL_RTT,
@@ -17,10 +18,13 @@ describe("grafana panel constants", () => {
     expect(PANEL_LOSS).toBe(2);
     expect(PANEL_STDDEV).toBe(3);
   });
+
+  test("grafana base is the same-origin proxy mount", () => {
+    expect(GRAFANA_BASE).toBe("/grafana");
+  });
 });
 
 describe("buildGrafanaSoloUrl", () => {
-  const base = "https://grafana.example.com";
   const common = {
     uid: MESHMON_PATH_DASHBOARD,
     panelId: PANEL_RTT,
@@ -29,9 +33,9 @@ describe("buildGrafanaSoloUrl", () => {
     to: "now",
   };
 
-  test("builds d-solo URL with panelId + var-* + kiosk", () => {
-    const url = buildGrafanaSoloUrl({ base, ...common });
-    expect(url).toContain("/d-solo/meshmon-path?");
+  test("builds a same-origin d-solo URL with panelId + var-* + kiosk", () => {
+    const url = buildGrafanaSoloUrl(common);
+    expect(url.startsWith("/grafana/d-solo/meshmon-path?")).toBe(true);
     expect(url).toContain("panelId=1");
     expect(url).toContain("var-source=src-1");
     expect(url).toContain("var-target=tgt-1");
@@ -43,24 +47,17 @@ describe("buildGrafanaSoloUrl", () => {
   });
 
   test("defaults to light theme when omitted", () => {
-    const url = buildGrafanaSoloUrl({ base, ...common });
+    const url = buildGrafanaSoloUrl(common);
     expect(url).toContain("theme=light");
   });
 
   test("accepts dark theme override", () => {
-    const url = buildGrafanaSoloUrl({ base, ...common, theme: "dark" });
+    const url = buildGrafanaSoloUrl({ ...common, theme: "dark" });
     expect(url).toContain("theme=dark");
-  });
-
-  test("normalizes trailing slash on base URL", () => {
-    const withSlash = buildGrafanaSoloUrl({ base: `${base}/`, ...common });
-    const withoutSlash = buildGrafanaSoloUrl({ base, ...common });
-    expect(withSlash).toBe(withoutSlash);
   });
 
   test("URL-encodes variable values with special chars", () => {
     const url = buildGrafanaSoloUrl({
-      base,
       ...common,
       vars: { source: "a b", target: "x&y", protocol: "icmp" },
     });

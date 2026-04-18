@@ -21,7 +21,7 @@ const queryClient = new QueryClient({
 });
 
 // Pass queryClient as router context so beforeLoad guards can dedup
-// auth probes with component-level reads via the same ["web-config"] cache key.
+// auth probes with component-level reads via the same ["session"] cache key.
 const router = createAppRouter(queryClient);
 
 const rootEl = document.getElementById("app");

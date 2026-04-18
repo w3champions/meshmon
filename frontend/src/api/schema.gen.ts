@@ -289,7 +289,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/web-config": {
+    "/api/session": {
         parameters: {
             query?: never;
             header?: never;
@@ -297,13 +297,14 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/web-config` — return the frontend runtime config.
-         * @description This handler is registered behind the `login_required!` layer, so
-         *     unauthenticated requests never reach it — they are short-circuited by
-         *     the middleware with a plain 401. The 401 response is documented here so
-         *     the generated OpenAPI schema tells SPA clients exactly what to expect.
+         * `GET /api/session` — return the session probe body.
+         * @description Wired behind the `login_required!` layer in [`crate::http::router`],
+         *     so unauthenticated requests are short-circuited with a bare 401
+         *     before reaching this handler. The 401 response is documented here
+         *     so the generated OpenAPI schema tells SPA clients exactly what to
+         *     expect.
          */
-        get: operations["web_config"];
+        get: operations["session"];
         put?: never;
         post?: never;
         delete?: never;
@@ -593,40 +594,21 @@ export interface components {
             offset: number;
         };
         /**
-         * @description Runtime config the frontend needs before it can render dashboards.
-         *
-         *     Returned from `GET /api/web-config`; doubles as the SPA's session probe
-         *     (401 when the caller has no valid session cookie).
+         * @description Minimal session probe response.
          *
          *     Write-only on the server — we only ever construct and serialize this
          *     type, never parse one back in — so only `Serialize` is derived.
-         *     Matches the pattern used by [`crate::http::auth::LoginResponse`].
          */
-        WebConfigResponse: {
+        SessionResponse: {
             /**
-             * @description Alertmanager base URL for constructing "view in Alertmanager"
-             *     deep links (e.g., `https://alertmanager.example/`). `None` when
-             *     Alertmanager is not configured — omitted from the JSON body.
-             */
-            alertmanager_base_url?: string | null;
-            /**
-             * @description Base URL for embedding Grafana panels (e.g., `https://grafana.example/`).
-             *     `None` if Grafana is not configured — omitted from the JSON body.
-             */
-            grafana_base_url?: string | null;
-            /**
-             * @description Map of logical dashboard name → Grafana dashboard UID. Empty
-             *     when Grafana integration is not configured.
-             */
-            grafana_dashboards: {
-                [key: string]: string;
-            };
-            /**
-             * @description Signed-in username. The SPA hydrates its auth store from this so the
-             *     user menu shows the right handle after a hard refresh.
+             * @description Signed-in username. The SPA hydrates its auth store from this
+             *     so a hard-refresh tab still knows who's signed in.
              */
             username: string;
-            /** @description `CARGO_PKG_VERSION` of the running service. */
+            /**
+             * @description `CARGO_PKG_VERSION` of the running service — surfaced so the SPA
+             *     can warn when the user's loaded bundle is older than the server.
+             */
             version: string;
         };
         /** @description Inclusive time window bounds echoed back to the caller. */
@@ -1218,7 +1200,7 @@ export interface operations {
             };
         };
     };
-    web_config: {
+    session: {
         parameters: {
             query?: never;
             header?: never;
@@ -1227,13 +1209,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Frontend runtime config */
+            /** @description Active session */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebConfigResponse"];
+                    "application/json": components["schemas"]["SessionResponse"];
                 };
             };
             /** @description No active session */
