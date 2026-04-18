@@ -9,6 +9,17 @@
 //!     `auth.proxy` identity anchor).
 //!   - Applies `X-Forwarded-For` / `X-Real-IP` honouring the service's
 //!     `trust_forwarded_headers` policy (see `auth::client_ip`).
+//!
+//! # Reload behaviour
+//!
+//! The upstream target is captured when [`build_router`] runs and
+//! baked into the `axum-reverse-proxy` instance (the crate binds its
+//! URL at construction time). Changing `upstream.grafana_url` via
+//! `meshmon.toml` + SIGHUP is therefore a no-op for routing — traffic
+//! continues to the startup target until the service restarts. The
+//! reload closure in `main.rs` emits a warn log on change so operators
+//! know a restart is required. Same pattern already governs
+//! `upstream.vm_url` (see `main.rs`).
 
 use crate::http::auth::{self, AuthSession};
 use crate::http::proxy_common::{

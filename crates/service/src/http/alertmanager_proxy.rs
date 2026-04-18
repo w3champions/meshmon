@@ -13,6 +13,12 @@
 //! `alerts_proxy.rs` (the JSON-normalising `/api/alerts` gateway)
 //! stays independent; both surfaces point at the same upstream via
 //! `upstream.alertmanager_url`.
+//!
+//! # Reload behaviour
+//!
+//! Like [`crate::http::grafana_proxy`], the upstream URL is captured
+//! at construction; a SIGHUP change to `upstream.alertmanager_url`
+//! logs a warn from `main.rs` and takes effect only after restart.
 
 use crate::http::auth;
 use crate::http::proxy_common::{

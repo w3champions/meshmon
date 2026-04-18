@@ -143,12 +143,23 @@ async fn run() -> anyhow::Result<()> {
     let reload_tx = config_tx.clone();
     let reload_lock = Arc::new(tokio::sync::Mutex::new(()));
     let reload_tls_swap = tls_swap.clone();
+    // Snapshot startup-captured URLs for change detection on reload.
+    // See the module-level comment in `http/grafana_proxy.rs` —
+    // `axum-reverse-proxy` binds the target URL at construction and a
+    // rebuild-on-reload would mean swapping the live `Router`, which
+    // isn't supported by the current server plumbing. Instead, warn
+    // loudly when the URL changes so operators know a restart is
+    // required for the new value to take effect.
+    let boot_grafana_url = initial_config.upstream.grafana_url.clone();
+    let boot_alertmanager_url = initial_config.upstream.alertmanager_url.clone();
     let shutdown_token = shutdown::spawn(move || {
         let reload_path = reload_path.clone();
         let reload_handle = reload_handle.clone();
         let reload_tx = reload_tx.clone();
         let reload_lock = reload_lock.clone();
         let reload_tls_swap = reload_tls_swap.clone();
+        let boot_grafana_url = boot_grafana_url.clone();
+        let boot_alertmanager_url = boot_alertmanager_url.clone();
         async move {
             let _guard = reload_lock.lock().await;
             let new_cfg = match Config::from_file(&reload_path) {
@@ -174,6 +185,20 @@ async fn run() -> anyhow::Result<()> {
                     return;
                 }
             };
+            if new_cfg.upstream.grafana_url != boot_grafana_url {
+                warn!(
+                    "upstream.grafana_url changed on SIGHUP reload; \
+                     /grafana/* continues routing to the startup target \
+                     until the service restarts"
+                );
+            }
+            if new_cfg.upstream.alertmanager_url != boot_alertmanager_url {
+                warn!(
+                    "upstream.alertmanager_url changed on SIGHUP reload; \
+                     /alertmanager/* continues routing to the startup target \
+                     until the service restarts"
+                );
+            }
             reload_tls_swap.store(Arc::new(new_acceptor));
             reload_handle.store(new_cfg.clone());
             let _ = reload_tx.send(new_cfg);
