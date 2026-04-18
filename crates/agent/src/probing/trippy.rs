@@ -370,14 +370,97 @@ pub(crate) fn cross_contamination_total() -> u64 {
     CROSS_CONTAMINATION_TOTAL.load(Ordering::Relaxed)
 }
 
+/// Monotonic nanos timestamp of the last contamination warn emission.
+/// `u64::MAX` is the "never fired" sentinel; any other value is a real
+/// nanos-since-epoch stamp.
+///
+/// `u64::MAX` is safe as a sentinel because `now_nanos_since_epoch()`
+/// caps its output at `u64::MAX`, and ~584 years of continuous runtime
+/// would be required to reach that value naturally — at which point the
+/// warn would have fired countless times and the slot would carry a
+/// smaller stamp.
+///
+/// Rationale for not using `0`: under `#[tokio::test(start_paused = true)]`
+/// a sustained burst can observe `now_nanos == 0` for every call before
+/// the first `tokio::time::advance`, which would trip a `prev != 0` gate
+/// every time and defeat the throttle.
+static LAST_CONTAMINATION_WARN_NANOS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Minimum interval between consecutive contamination warn emissions.
+const CONTAMINATION_WARN_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Epoch captured once at first use. Measuring `duration_since` this epoch
+/// gives a monotonically increasing nanos value suitable for comparison
+/// against `LAST_CONTAMINATION_WARN_NANOS`.
+///
+/// Under `#[tokio::test(start_paused = true)]` this uses the paused clock,
+/// so `tokio::time::advance()` moves the epoch-relative value forward and
+/// the cooldown gate responds correctly in tests.
+static CONTAMINATION_WARN_EPOCH: LazyLock<tokio::time::Instant> =
+    LazyLock::new(tokio::time::Instant::now);
+
+/// Test-only counter incremented each time the cooldown gate opens and a
+/// warn is about to be emitted. Allows tests to assert exact warn counts
+/// without scraping log output.
+#[cfg(test)]
+static WARN_EMITTED_FOR_TEST: AtomicU64 = AtomicU64::new(0);
+
+fn now_nanos_since_epoch() -> u64 {
+    tokio::time::Instant::now()
+        .duration_since(*CONTAMINATION_WARN_EPOCH)
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
+/// Returns `true` at most once every [`CONTAMINATION_WARN_COOLDOWN`].
+///
+/// Uses a compare-exchange on a monotonic nanos counter. The first call after
+/// process start (or `reset_contamination_state_for_test`) always returns
+/// `true` because `LAST_CONTAMINATION_WARN_NANOS` starts at `u64::MAX`
+/// (the "never fired" sentinel). Callers that lose the CAS race suppress
+/// their own warn while counter fidelity is unaffected.
+///
+/// Scope is **process-wide**, not per-target: concurrent contamination
+/// across multiple targets within the same 60 s window produces at most
+/// one warn. This is a deliberate deviation from the plan's §3 wording
+/// — a single operator doesn't need `60 s × N-targets` worth of warn
+/// volume, and [`cross_contamination_total`] still reflects every hit for
+/// metrics/alerting purposes.
+fn warn_cooldown_elapsed() -> bool {
+    let now_nanos = now_nanos_since_epoch();
+    loop {
+        let prev = LAST_CONTAMINATION_WARN_NANOS.load(Ordering::Relaxed);
+        // prev == u64::MAX → never fired; gate is open.
+        // prev != u64::MAX and elapsed < cooldown → gate is closed.
+        if prev != u64::MAX
+            && now_nanos.saturating_sub(prev) < CONTAMINATION_WARN_COOLDOWN.as_nanos() as u64
+        {
+            return false;
+        }
+        // Atomically capture the slot. If another caller beat us, retry —
+        // their write is also `now_nanos`-ish, so the next loop iteration
+        // will fail the elapsed check and return false.
+        if LAST_CONTAMINATION_WARN_NANOS
+            .compare_exchange(prev, now_nanos, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
 fn warn_contamination_if_due(target_id: &str, hit: &ContaminationHit) {
-    // Task 5 wires the 60s cooldown. For Task 4 we always warn so
-    // tests can observe every contamination event.
+    if !warn_cooldown_elapsed() {
+        return;
+    }
+    #[cfg(test)]
+    WARN_EMITTED_FOR_TEST.fetch_add(1, Ordering::Relaxed);
     tracing::warn!(
         target_id = %target_id,
         foreign_ip = %hit.foreign_ip,
         position = hit.position,
         contamination_total = cross_contamination_total(),
+        cooldown_sec = CONTAMINATION_WARN_COOLDOWN.as_secs(),
         "trippy round cross-contamination detected; discarding observation",
     );
 }
@@ -448,6 +531,16 @@ fn ms_to_micros(ms: f64) -> u32 {
     } else {
         micros as u32
     }
+}
+
+#[cfg(test)]
+pub(super) fn reset_contamination_state_for_test() {
+    CROSS_CONTAMINATION_TOTAL.store(0, Ordering::Relaxed);
+    LAST_CONTAMINATION_WARN_NANOS.store(u64::MAX, Ordering::Relaxed);
+    WARN_EMITTED_FOR_TEST.store(0, Ordering::Relaxed);
+    // Force LazyLock initialization so that subsequent `tokio::time::advance`
+    // calls have a fixed epoch to measure against (the paused clock's origin).
+    let _ = *CONTAMINATION_WARN_EPOCH;
 }
 
 #[cfg(test)]
@@ -703,5 +796,83 @@ mod tests {
         let hit = detect_contamination(me, &hops, &allowlist).expect("hit");
         assert_eq!(hit.foreign_ip, b);
         assert_eq!(hit.position, 2);
+    }
+
+    // --- Task 5: warn rate-limiting tests ---
+    //
+    // All three tests use `#[tokio::test(start_paused = true)]` so the
+    // process-wide `CONTAMINATION_WARN_EPOCH: LazyLock<Instant>` is captured
+    // against the paused tokio clock regardless of execution order. Mixing
+    // a plain `#[test]` would risk pinning the epoch to the real clock if
+    // it ran first, which would break the paused-clock tests that follow.
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn warn_emitted_at_first_contamination() {
+        reset_contamination_state_for_test();
+        let hit = ContaminationHit {
+            position: 3,
+            foreign_ip: "10.0.0.2".parse().unwrap(),
+        };
+        CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+        warn_contamination_if_due("peer-id", &hit);
+        assert_eq!(
+            WARN_EMITTED_FOR_TEST.load(Ordering::Relaxed),
+            1,
+            "first contamination must emit a warn"
+        );
+        assert_eq!(cross_contamination_total(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn warn_throttled_under_sustained_contamination() {
+        reset_contamination_state_for_test();
+        let hit = ContaminationHit {
+            position: 3,
+            foreign_ip: "10.0.0.2".parse().unwrap(),
+        };
+
+        for _ in 0..10 {
+            CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+            warn_contamination_if_due("peer-id", &hit);
+            // No time advance — all calls are within the cooldown window.
+        }
+
+        assert_eq!(
+            WARN_EMITTED_FOR_TEST.load(Ordering::Relaxed),
+            1,
+            "expected exactly 1 warn within cooldown window across 10 hits"
+        );
+        assert_eq!(
+            cross_contamination_total(),
+            10,
+            "counter must reflect every hit regardless of warn throttle"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn warn_re_emits_after_cooldown() {
+        reset_contamination_state_for_test();
+        let hit = ContaminationHit {
+            position: 3,
+            foreign_ip: "10.0.0.2".parse().unwrap(),
+        };
+
+        CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+        warn_contamination_if_due("peer-id", &hit);
+        assert_eq!(WARN_EMITTED_FOR_TEST.load(Ordering::Relaxed), 1);
+
+        // Advance past the 60s cooldown.
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+
+        CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+        warn_contamination_if_due("peer-id", &hit);
+        assert_eq!(
+            WARN_EMITTED_FOR_TEST.load(Ordering::Relaxed),
+            2,
+            "expected 2 warns: one before and one after the cooldown expires"
+        );
     }
 }
