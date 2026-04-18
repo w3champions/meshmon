@@ -35,6 +35,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 proptest = { workspace = true }
+serial_test = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # `net` feature is required for `TcpListenerStream` used by the integration
 # test's mock gRPC server. Currently pulled in transitively via `tonic`, but

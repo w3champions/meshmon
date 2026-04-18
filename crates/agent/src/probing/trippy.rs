@@ -50,14 +50,12 @@ const MAX_TTL: u8 = 30;
 /// is the wildcard-accept fallback. The initial value is randomized at
 /// first use so a restarted agent doesn't replay the same id sequence
 /// against any stale replies still in flight from the previous process.
-#[allow(dead_code)] // wired into Builder in Task 2
 static NEXT_ICMP_TRACE_ID: LazyLock<AtomicU16> = LazyLock::new(|| {
     use rand::Rng;
     let seed = rand::rng().random_range(1..=u16::MAX);
     AtomicU16::new(seed)
 });
 
-#[allow(dead_code)] // wired into Builder in Task 2
 fn next_trace_id() -> u16 {
     let mut id = NEXT_ICMP_TRACE_ID.fetch_add(1, Ordering::Relaxed);
     if id == 0 {
@@ -248,16 +246,26 @@ async fn maybe_sleep(interval: Option<Duration>) {
     }
 }
 
-/// Run one trippy round synchronously. Callers must wrap this in
-/// `spawn_blocking` — trippy-core 0.13 performs raw-socket I/O on the
-/// calling thread.
-fn run_one_round(
-    target_id: &str,
+/// Per-protocol `trippy_core::Builder` configuration summary. `pub(super)`
+/// so unit tests can assert what `run_one_round` hands to trippy without
+/// running a raw-socket probe.
+#[cfg_attr(test, derive(Debug))]
+pub(super) struct TrippyBuildConfig {
+    /// `None` for TCP/UDP (trippy-core matches replies on ports/address);
+    /// `Some(id)` for ICMP (matched against the echoed identifier).
+    ///
+    /// Read by unit tests; the non-test build writes but does not read it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub trace_identifier: Option<u16>,
+    pub builder: Builder,
+}
+
+pub(super) fn build_config_for(
     target_ip: IpAddr,
     protocol: Protocol,
     tcp_port: Option<u16>,
     udp_port: Option<u16>,
-) -> Result<ProbeObservation, anyhow::Error> {
+) -> Result<TrippyBuildConfig, anyhow::Error> {
     let trippy_proto = match protocol {
         Protocol::Icmp => trippy_core::Protocol::Icmp,
         Protocol::Tcp => trippy_core::Protocol::Tcp,
@@ -271,6 +279,13 @@ fn run_one_round(
         .read_timeout(READ_TIMEOUT)
         .grace_duration(GRACE_DURATION)
         .max_rounds(Some(1));
+
+    let mut trace_identifier: Option<u16> = None;
+    if matches!(protocol, Protocol::Icmp) {
+        let id = next_trace_id();
+        builder = builder.trace_identifier(id);
+        trace_identifier = Some(id);
+    }
 
     // TCP/UDP tracing requires a concrete destination port (via
     // PortDirection::FixedDest — trippy-core 0.13 does not accept
@@ -287,10 +302,29 @@ fn run_one_round(
                 .ok_or_else(|| anyhow::anyhow!("trippy: udp protocol without udp_probe_port"))?;
             builder.port_direction(PortDirection::FixedDest(Port(port)))
         }
-        _ => builder,
+        // `Unspecified` already bailed above; `Icmp` needs no port direction.
+        Protocol::Icmp | Protocol::Unspecified => builder,
     };
 
-    let tracer = builder
+    Ok(TrippyBuildConfig {
+        trace_identifier,
+        builder,
+    })
+}
+
+/// Run one trippy round synchronously. Callers must wrap this in
+/// `spawn_blocking` — trippy-core 0.13 performs raw-socket I/O on the
+/// calling thread.
+fn run_one_round(
+    target_id: &str,
+    target_ip: IpAddr,
+    protocol: Protocol,
+    tcp_port: Option<u16>,
+    udp_port: Option<u16>,
+) -> Result<ProbeObservation, anyhow::Error> {
+    let cfg = build_config_for(target_ip, protocol, tcp_port, udp_port)?;
+    let tracer = cfg
+        .builder
         .build()
         .map_err(|e| anyhow::anyhow!("trippy build: {e}"))?;
     tracer
@@ -349,6 +383,7 @@ fn ms_to_micros(ms: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn jittered_interval_is_bounded() {
@@ -405,6 +440,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn next_trace_id_is_nonzero() {
         for _ in 0..100 {
             assert_ne!(next_trace_id(), 0);
@@ -412,6 +448,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn next_trace_id_is_monotonically_distinct_for_1000_calls() {
         use std::collections::HashSet;
         let mut seen: HashSet<u16> = HashSet::new();
@@ -424,10 +461,11 @@ mod tests {
         }
     }
 
-    // NOTE: `NEXT_ICMP_TRACE_ID` is process-wide. This test mutates it directly,
-    // so the test binary must run with `--test-threads 1` to avoid racing with
-    // the other `next_trace_id_*` tests.
+    // NOTE: `NEXT_ICMP_TRACE_ID` is process-wide. This test mutates it
+    // directly, so it must serialize with any other test that calls
+    // `next_trace_id()`. Enforced via the `#[serial]` annotations above.
     #[test]
+    #[serial]
     fn next_trace_id_skips_zero_after_wrap() {
         // Force LazyLock initialization by calling next_trace_id once.
         let _ = next_trace_id();
@@ -438,5 +476,28 @@ mod tests {
         let b = next_trace_id(); // would return 0, must consume one more → 1
         assert_eq!(a, u16::MAX);
         assert_eq!(b, 1, "post-wrap id must skip 0");
+    }
+
+    #[test]
+    #[serial]
+    fn icmp_build_config_uses_nonzero_trace_identifier() {
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        let cfg = build_config_for(ip, Protocol::Icmp, None, None).expect("config");
+        assert!(cfg.trace_identifier.is_some(), "ICMP must set a trace id");
+        assert_ne!(cfg.trace_identifier, Some(0), "must be non-zero");
+    }
+
+    #[test]
+    fn tcp_build_config_does_not_set_trace_identifier() {
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        let cfg = build_config_for(ip, Protocol::Tcp, Some(443), None).expect("config");
+        assert_eq!(cfg.trace_identifier, None, "TCP does not set trace id");
+    }
+
+    #[test]
+    fn udp_build_config_does_not_set_trace_identifier() {
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        let cfg = build_config_for(ip, Protocol::Udp, None, Some(33434)).expect("config");
+        assert_eq!(cfg.trace_identifier, None, "UDP does not set trace id");
     }
 }
