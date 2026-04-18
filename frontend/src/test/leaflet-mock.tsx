@@ -4,6 +4,8 @@ interface MapContainerProps {
   children?: ReactNode;
   center?: [number, number];
   zoom?: number;
+  minZoom?: number;
+  worldCopyJump?: boolean;
   scrollWheelZoom?: boolean;
   className?: string;
 }
@@ -43,4 +45,10 @@ export const LeafletMock = {
     </div>
   ),
   Popup: ({ children }: PopupProps) => <div data-testid="popup">{children}</div>,
+  // Stub react-leaflet's useMap so components calling fitBounds don't crash
+  // under jsdom. The map is never rendered in unit tests.
+  useMap: () => ({
+    fitBounds: () => {},
+    setView: () => {},
+  }),
 };
