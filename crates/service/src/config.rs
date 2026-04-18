@@ -645,7 +645,11 @@ fn reject_self_referential_upstream(
 
     let listen_hosts: &[&str] = match listen_addr.ip() {
         std::net::IpAddr::V4(v4) if v4.is_unspecified() => &["127.0.0.1", "localhost"],
-        std::net::IpAddr::V6(v6) if v6.is_unspecified() => &["::1", "localhost"],
+        // IPv6 unspecified (`[::]`) is dual-stack on most OSes: an
+        // IPv4 client connecting to `127.0.0.1:<port>` lands on the
+        // same listener via v4-mapped-v6. Treat the v4 loopback as
+        // self too.
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() => &["::1", "127.0.0.1", "localhost"],
         // Explicit loopback binds still recurse when the operator
         // writes `localhost` (or the other-family loopback alias) in
         // the upstream URL — resolver translates both to the same
@@ -891,6 +895,24 @@ grafana_url = "http://localhost:8080/grafana"
             r#"{MIN_TOML}
 [service]
 listen_addr = "[::1]:8080"
+
+[upstream]
+grafana_url = "http://127.0.0.1:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn upstream_v4_loopback_on_ipv6_unspecified_listen_is_rejected() {
+        // Dual-stack `[::]` listeners accept IPv4 traffic via
+        // v4-mapped-v6, so `http://127.0.0.1:<same-port>` still
+        // recurses into meshmon.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "[::]:8080"
 
 [upstream]
 grafana_url = "http://127.0.0.1:8080/grafana"
