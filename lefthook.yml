@@ -24,6 +24,7 @@ pre-commit:
 
     biome:
       # Scoped to frontend/src/** because biome.json lives under frontend/ and only covers frontend TS/JS/JSON.
+      # Requires `npm ci` to have run in frontend/.
       root: "frontend/"
       glob: "src/**/*.{ts,tsx,js,jsx,json}"
       run: npx biome check --no-errors-on-unmatched {staged_files}
