@@ -23,7 +23,7 @@ PG_PASSWORD=${MESHMON_DEV_PG_PASSWORD:-meshmon}
 PG_GRAFANA_PASSWORD=${MESHMON_DEV_PG_GRAFANA_PASSWORD:-grafana}
 AGENT_TOKEN=${MESHMON_DEV_AGENT_TOKEN:-dev-token-0123456789}
 # Non-standard default port to avoid clashing with Docker Desktop's
-# common :8080 binding (matches the prior smoke.sh default).
+# common :8080 binding.
 SERVICE_PORT=${MESHMON_DEV_SERVICE_PORT:-18080}
 
 cleanup() {
@@ -103,6 +103,12 @@ until docker exec meshmon-db pg_isready -U meshmon -d meshmon >/dev/null 2>&1; d
     sleep 1
 done
 
+# Apply migrations before seeding; the dev overlay skips meshmon-service
+# (profiles: ["skip"]) so no other process has created the schema yet.
+echo "[dev.sh] applying migrations"
+DATABASE_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable" \
+    sqlx migrate run --source crates/service/migrations >/dev/null
+
 echo "[dev.sh] seeding agents + route snapshots"
 docker exec -e PGPASSWORD="$PG_PASSWORD" meshmon-db \
     psql -U meshmon -d meshmon -c "$(cat <<'SQL'
@@ -139,4 +145,4 @@ echo "[dev.sh] service PID $SERVICE_PID; login as admin / $ADMIN_PASSWORD"
 echo "[dev.sh] starting Vite dev server (Ctrl-C tears down everything)"
 cd frontend
 npm install
-VITE_API_BASE="http://127.0.0.1:$SERVICE_PORT" npm run dev
+MESHMON_API_PROXY_TARGET="http://127.0.0.1:$SERVICE_PORT" npm run dev
