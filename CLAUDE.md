@@ -104,8 +104,9 @@ Alert rules and Alertmanager config live under `deploy/`:
 Validate on every change:
 
 ```bash
-./scripts/validate-alerts.sh   # syntax + vmalert-tool unit tests + amtool
-./scripts/smoke-alerts.sh      # optional: full VM → AM → webhook dispatch smoke
+cargo test -p meshmon-service --test alert_metrics_contract   # hermetic metric cross-check
+cargo test -p meshmon-service --test alerts_validation        # integration (requires Docker)
+cargo e2e                                                     # optional: end-to-end delivery smoke
 ```
 
 See `deploy/alerts/README.md` for the label contract and editing workflow.
@@ -114,13 +115,13 @@ See `deploy/alerts/README.md` for the label contract and editing workflow.
 
 Grafana dashboards live under `grafana/`: three JSON files (`meshmon-path`,
 `meshmon-overview`, `meshmon-agent`), a datasources provisioning template,
-and a contract-drift guard (`verify-panels.mjs`).
+and a Rust-based contract-drift guard.
 
 Validate on every change:
 
 ```bash
-./scripts/validate-dashboards.sh   # JSON + panels.json contract (CI-safe)
-./scripts/smoke-dashboards.sh      # optional: VM + Grafana smoke harness
+cargo test -p meshmon-service --test grafana_contract   # JSON + panels.json contract (hermetic)
+cargo e2e                                               # optional: end-to-end dashboards-provisioned smoke
 ```
 
 See `grafana/README.md` for the dashboard contract, the auth posture

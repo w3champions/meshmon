@@ -13,8 +13,6 @@ deploy/alerts/
   README.md              — this file
   *.yaml                 — alert rule groups (one file per category)
   tests/                 — vmalert-tool unit-test files (*.yaml)
-  test-harness/          — docker-compose smoke harness (Task 8)
-    webhook-sink/        — simple HTTP sink that records received alerts
 ```
 
 ---
@@ -67,32 +65,7 @@ this contract.  Do not remove labels; additions are allowed.
 
 ## Validation
 
-### Fast (hermetic, ~10 s)
-
-```bash
-./scripts/validate-alerts.sh
-```
-
-Runs four checks in sequence, sourcing image tags from `deploy/versions.env`:
-
-1. `scripts/check-rule-metrics.sh` — every `meshmon_*` name in `rules.yaml`
-   is present as a quoted string literal under `crates/service/src/`.
-2. `vmalert -dryRun -rule=rules.yaml` — rule-file syntax.
-3. `vmalert-tool unittest` — runs every `tests/*_test.yaml`.
-4. `amtool check-config` — Alertmanager config syntax.
-
-Exits non-zero on the first failure.
-
-### Smoke / end-to-end harness
-
-```bash
-./scripts/smoke-alerts.sh
-```
-
-Spins up VictoriaMetrics, vmalert, and Alertmanager via the
-`deploy/alerts/test-harness/docker-compose.yml`, injects synthetic metrics,
-and asserts that expected alerts arrive at the webhook sink.  Tears down
-containers when finished.  Requires Docker with Compose v2.
+**Validation:** `cargo test -p meshmon-service --test alerts_validation` (integration — requires Docker running). Hermetic rule-metric cross-check: `cargo test -p meshmon-service --test alert_metrics_contract`. End-to-end delivery smoke: `cargo e2e` (requires the bundled compose stack to be running).
 
 ---
 
@@ -106,7 +79,8 @@ Follow these steps whenever you add or modify an alert rule:
    at least one edge case (e.g., exactly at threshold).
 3. **Run the validator** to catch syntax errors before committing:
    ```bash
-   ./scripts/validate-alerts.sh
+   cargo test -p meshmon-service --test alerts_validation
+   cargo test -p meshmon-service --test alert_metrics_contract
    ```
 4. **If you changed a category** (the `category` label value):
    - Update the taxonomy table in this README.
