@@ -41,13 +41,16 @@ pub const MOUNT_PREFIX: &str = "/alertmanager";
 /// Assemble the `/alertmanager` sub-router. `login_required!` is applied
 /// by the caller in `http::router` so this function stays framework-
 /// agnostic and unit-testable.
+///
+/// The startup value of `upstream.alertmanager_url` fully determines
+/// whether this proxy is active. If the URL is `None` at startup,
+/// every request returns a canonical 503 regardless of later reloads
+/// — matching the crate's "upstream is bound at router construction"
+/// constraint.
 pub fn build_router(state: AppState) -> Router<AppState> {
-    let upstream = state
-        .config()
-        .upstream
-        .alertmanager_url
-        .clone()
-        .unwrap_or_else(|| "http://alertmanager-unconfigured.invalid".to_string());
+    let Some(upstream) = state.config().upstream.alertmanager_url.clone() else {
+        return unconfigured_router(state);
+    };
 
     let inner: Router<AppState> = ReverseProxy::new(MOUNT_PREFIX, &upstream).into();
 
@@ -58,19 +61,35 @@ pub fn build_router(state: AppState) -> Router<AppState> {
     )
 }
 
+/// Router that short-circuits every `/alertmanager/*` hit with the
+/// canonical 503 body. Used when `upstream.alertmanager_url` is unset
+/// at startup.
+fn unconfigured_router(state: AppState) -> Router<AppState> {
+    let inner: Router<AppState> =
+        ReverseProxy::new(MOUNT_PREFIX, "http://alertmanager-unconfigured.invalid").into();
+    inner.layer(from_fn_with_state(state, force_upstream_missing))
+}
+
+/// Fallback middleware for the unconfigured branch: returns 503 on
+/// every request without ever forwarding.
+async fn force_upstream_missing(
+    _state: State<AppState>,
+    _req: Request<axum::body::Body>,
+    _next: Next,
+) -> Response {
+    upstream_missing_response()
+}
+
 /// Middleware: strip client-supplied `X-WEBAUTH-*` (symmetry with the
 /// Grafana proxy — AM ignores these but they're noise in access logs),
-/// then apply forwarded-IP headers.
+/// then apply forwarded-IP headers. Reached only when
+/// [`build_router`] found a configured upstream at startup.
 async fn inject_am_headers(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if state.config().upstream.alertmanager_url.is_none() {
-        return upstream_missing_response();
-    }
-
     let trust = state.config().service.trust_forwarded_headers;
     let (mut parts, body) = req.into_parts();
     let real_ip = auth::client_ip(&parts, trust).unwrap_or_else(|| peer.ip());

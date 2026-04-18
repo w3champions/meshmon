@@ -45,13 +45,15 @@ pub const MOUNT_PREFIX: &str = "/grafana";
 /// Assemble the `/grafana` sub-router. `login_required!` is applied by
 /// the caller in `http::router` so this function stays framework-agnostic
 /// and unit-testable.
+///
+/// The startup value of `upstream.grafana_url` fully determines whether
+/// this proxy is active. If the URL is `None` at startup, every request
+/// returns a canonical 503 regardless of later reloads — matching the
+/// crate's "upstream is bound at router construction" constraint.
 pub fn build_router(state: AppState) -> Router<AppState> {
-    let upstream = state
-        .config()
-        .upstream
-        .grafana_url
-        .clone()
-        .unwrap_or_else(|| "http://grafana-unconfigured.invalid".to_string());
+    let Some(upstream) = state.config().upstream.grafana_url.clone() else {
+        return unconfigured_router(state);
+    };
 
     let inner: Router<AppState> = ReverseProxy::new(MOUNT_PREFIX, &upstream).into();
 
@@ -62,8 +64,33 @@ pub fn build_router(state: AppState) -> Router<AppState> {
     )
 }
 
+/// Router that short-circuits every `/grafana/*` hit with the canonical
+/// 503 body. Used when `upstream.grafana_url` is unset at startup.
+/// Keeps the parent `login_required!` layer in play (unauthenticated
+/// callers still see a 401 first).
+fn unconfigured_router(state: AppState) -> Router<AppState> {
+    let inner: Router<AppState> =
+        ReverseProxy::new(MOUNT_PREFIX, "http://grafana-unconfigured.invalid").into();
+    inner.layer(from_fn_with_state(state, force_upstream_missing))
+}
+
+/// Fallback middleware for the unconfigured branch: returns 503 on
+/// every request without ever forwarding.
+async fn force_upstream_missing(
+    _state: State<AppState>,
+    _req: Request<axum::body::Body>,
+    _next: Next,
+) -> Response {
+    upstream_missing_response()
+}
+
 /// Middleware: strip client-supplied `X-WEBAUTH-*`, inject
 /// `X-WEBAUTH-USER` from the session, apply forwarded-IP headers.
+///
+/// Reached only when [`build_router`] found a configured upstream at
+/// startup; the 503 branch short-circuits via [`force_upstream_missing`]
+/// before this middleware mounts. SIGHUP can't re-route back through
+/// here because the router shape is frozen at construction.
 async fn inject_grafana_headers(
     State(state): State<AppState>,
     auth_session: AuthSession,
@@ -71,10 +98,6 @@ async fn inject_grafana_headers(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if state.config().upstream.grafana_url.is_none() {
-        return upstream_missing_response();
-    }
-
     let Some(principal) = auth_session.user.as_ref() else {
         // `login_required!` should have intercepted this; return 401
         // defensively so a router-wiring mistake degrades gracefully
