@@ -83,6 +83,8 @@ jobs:
       - name: shellcheck
         uses: ludeeus/action-shellcheck@2.0.0
         with:
+          # scandir is non-recursive; scripts/ is flat today.
+          # Add additional_files if a nested script or root-level .sh lands.
           scandir: ./scripts
           severity: warning
 
