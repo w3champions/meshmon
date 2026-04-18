@@ -5,8 +5,10 @@
 apiVersion: 1
 
 deleteDatasources:
-  - { name: MeshmonVM,       orgId: 1 }
-  - { name: MeshmonPostgres, orgId: 1 }
+  - name: MeshmonVM
+    orgId: 1
+  - name: MeshmonPostgres
+    orgId: 1
 
 datasources:
   - name: MeshmonVM

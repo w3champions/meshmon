@@ -1,0 +1,15 @@
+# Config for karancode/yamllint-github-action. Keeps line-length and
+# truthy-value checks off — compose/AM configs legitimately use `on`,
+# `off`, and long literal strings.
+extends: default
+
+rules:
+  line-length: disable
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  document-start: disable
+  indentation:
+    spaces: 2
+    indent-sequences: consistent

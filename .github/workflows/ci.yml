@@ -59,6 +59,20 @@ jobs:
       - name: Run actionlint
         uses: rhysd/actionlint@v1.7.12
 
+  yamllint:
+    name: YAML lint (deploy configs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: yamllint
+        uses: karancode/yamllint-github-action@v2
+        with:
+          yamllint_file_or_dir: "deploy"
+          yamllint_strict: true
+          yamllint_config_filepath: .yamllint.yml
+
   frontend:
     name: Frontend (biome, type-check, vitest, build, schema drift)
     runs-on: ubuntu-latest
