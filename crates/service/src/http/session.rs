@@ -13,6 +13,8 @@
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -47,23 +49,18 @@ pub struct SessionResponse {
         (status = 401, description = "No active session"),
     ),
 )]
-pub async fn session(
-    State(state): State<AppState>,
-    auth_session: AuthSession,
-) -> Json<SessionResponse> {
+pub async fn session(State(state): State<AppState>, auth_session: AuthSession) -> Response {
     // `login_required!` on this router guarantees an authenticated user
-    // before the handler runs. If `user` is `None` here, the layer
-    // config is broken — expect-panic is the right response because a
-    // 200 with no identity would silently leak build info to anonymous
-    // callers.
-    let username = auth_session
-        .user
-        .as_ref()
-        .expect("login_required guarantees an authenticated user")
-        .username
-        .clone();
+    // before the handler runs. If `user` is `None` here, a router-wiring
+    // regression has bypassed that layer — degrade with a 401 instead
+    // of panicking so the error surface stays HTTP-shaped. Mirrors the
+    // defensive pattern in `grafana_proxy::inject_grafana_headers`.
+    let Some(principal) = auth_session.user.as_ref() else {
+        return (StatusCode::UNAUTHORIZED, "not authenticated").into_response();
+    };
     Json(SessionResponse {
         version: state.build.version.to_string(),
-        username,
+        username: principal.username.clone(),
     })
+    .into_response()
 }
