@@ -48,6 +48,17 @@ jobs:
             exit 1
           fi
 
+  actionlint:
+    name: actionlint (workflow YAML)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run actionlint
+        uses: rhysd/actionlint@v1.7.12
+        with:
+          fail_on_error: true
+
   frontend:
     name: Frontend (biome, type-check, vitest, build, schema drift)
     runs-on: ubuntu-latest
