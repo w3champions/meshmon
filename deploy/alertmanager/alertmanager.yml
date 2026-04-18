@@ -4,7 +4,12 @@
 # deployments can either:
 #   (a) mount their own alertmanager.yml in place of this one, or
 #   (b) keep this file and override only the Discord webhook files under
-#       /etc/alertmanager/secrets/ (see deploy/alertmanager/secrets/README.md).
+#       /etc/alertmanager/secrets/. Webhook URLs are injected at container
+#       start via docker-compose's `secrets:` stanza (compose-native
+#       `environment:` source); see `deploy/docker-compose.yml` `secrets:`
+#       and `meshmon-alertmanager.secrets:` for the wiring. Unset env vars
+#       produce empty files here, so Alertmanager logs a loud delivery
+#       error rather than silently dropping alerts.
 #
 # Requires Alertmanager 0.26+ for discord_configs. Pin via
 # deploy/versions.env.
