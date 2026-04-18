@@ -19,12 +19,6 @@
 //! explicitly. Keep it layered once at the proxy boundary, not
 //! reimplemented here.
 
-// Callers land in the follow-up tasks that wire the grafana/alertmanager
-// proxy handlers through these helpers; until then the fns appear unused
-// inside the crate under `pub(crate)` visibility. The `#[cfg(test)]` tests
-// below still exercise them.
-#![allow(dead_code)]
-
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -143,7 +137,10 @@ mod tests {
     #[test]
     fn forwarded_trust_true_appends_to_existing_chain() {
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.1, 10.0.0.1"));
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.1, 10.0.0.1"),
+        );
         apply_forwarded_headers(&mut h, "192.0.2.50".parse().unwrap(), true);
         assert_eq!(
             h.get("x-forwarded-for").unwrap(),
@@ -162,7 +159,10 @@ mod tests {
     #[test]
     fn forwarded_trust_false_drops_inbound_and_writes_fresh() {
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.1, 10.0.0.1"));
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.1, 10.0.0.1"),
+        );
         h.insert("forwarded", HeaderValue::from_static("for=198.51.100.1"));
         apply_forwarded_headers(&mut h, "10.1.2.3".parse().unwrap(), false);
         assert_eq!(h.get("x-forwarded-for").unwrap(), "10.1.2.3");

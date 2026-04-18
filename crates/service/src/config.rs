@@ -420,6 +420,22 @@ impl Config {
                     reason: format!("auth.users[{idx}].username is empty"),
                 });
             }
+            // Usernames are inserted into `X-WEBAUTH-USER` by the Grafana proxy.
+            // Reject any byte `HeaderValue::try_from` would reject so a
+            // CR/LF/NUL/DEL in a TOML basic string (e.g. `"alice\nevil"`)
+            // fails at config load instead of panicking on the first
+            // authenticated Grafana request.
+            if u.username
+                .bytes()
+                .any(|b| (b < 0x20 && b != 0x09) || b == 0x7F)
+            {
+                return Err(BootError::ConfigInvalid {
+                    path: path.to_string(),
+                    reason: format!(
+                        "auth.users[{idx}].username contains control bytes invalid in HTTP header values"
+                    ),
+                });
+            }
             PasswordHash::new(&u.password_hash).map_err(|e| BootError::ConfigInvalid {
                 path: path.to_string(),
                 reason: format!("auth.users[{idx}].password_hash is not a valid PHC string: {e}"),
@@ -847,5 +863,28 @@ alertmanager_url = "http://0.0.0.0:8080/alertmanager"
         );
         let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
         assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn username_with_control_chars_is_rejected() {
+        // A TOML basic string with `\n` produces a literal LF byte in the
+        // parsed username. Without the header-value validation at load,
+        // this slips through and panics later when the Grafana proxy
+        // builds `X-WEBAUTH-USER`.
+        let valid_hash =
+            "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY";
+        let toml = format!(
+            "{MIN_TOML}\n[[auth.users]]\nusername = \"alice\\nevil\"\npassword_hash = \"{valid_hash}\"\n"
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("control bytes"),
+                    "expected control-bytes message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

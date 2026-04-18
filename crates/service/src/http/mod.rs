@@ -47,6 +47,7 @@
 
 pub mod alerts_proxy;
 pub mod auth;
+pub mod grafana_proxy;
 pub mod health;
 pub mod http_client;
 pub mod metrics_auth;
