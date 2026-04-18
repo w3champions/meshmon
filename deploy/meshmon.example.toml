@@ -71,9 +71,19 @@ format = "json"
 # cookie (Secure, HttpOnly, SameSite=Lax, 30-day rolling expiry). Editing
 # this list requires a full service restart — SIGHUP does NOT rotate
 # session material.
+# At least one [[auth.users]] entry is required for login. Each entry
+# accepts either inline `username` / `password_hash` or env indirection
+# via `username_env` / `password_hash_env`. Mix and match per entry.
+# The env form is the quick-start default because it keeps the hash out
+# of the committed config file.
+[[auth.users]]
+username = "admin"
+password_hash_env = "MESHMON_ADMIN_PASSWORD_HASH"
+
+# Additional users (operator-chosen env-var names):
 # [[auth.users]]
-# username = "admin"
-# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+# username = "alice"
+# password_hash_env = "MESHMON_ALICE_PASSWORD_HASH"
 
 [agent_api]
 # Single shared bearer token for agent authentication. Either inline or via
@@ -86,37 +96,47 @@ shared_token_env = "MESHMON_AGENT_TOKEN"
 # rate_limit_per_minute = 60
 # rate_limit_burst = 30
 
-# Standalone TLS (no proxy in front). Leave this block commented when the
-# service runs behind nginx-proxy — the proxy terminates TLS and forwards
-# plaintext gRPC via `grpc_pass`.
+# ---------------------------------------------------------------------------
+# TLS — REQUIRED ON PUBLIC INTERNET
+# ---------------------------------------------------------------------------
+#
+# The default compose ships plain HTTP on :8080 so the quick-start works
+# without cert files. That is NOT safe on the public internet:
+#
+#   - The agent token is a bearer secret on every gRPC call; cleartext
+#     HTTP exposes it to any on-path observer.
+#   - The meshmon_session cookie is harvested the same way.
+#   - Login passwords travel on the same channel.
+#
+# Two supported TLS paths:
+#
+# (a) In-process rustls (no external proxy). Populate the block below;
+#     the service terminates TLS on :8080 with ALPN so REST and gRPC
+#     share the socket. Rotate certs in place with SIGHUP.
+#
+# (b) External reverse proxy (nginx-proxy / Caddy / Traefik). The proxy
+#     terminates TLS and forwards HTTP/2 to meshmon-service:8080. Keep
+#     this block commented out. The proxy MUST speak HTTP/2 upstream or
+#     gRPC paths break (nginx: `grpc_pass`; Caddy: native).
+#
 # [agent_api.tls]
 # cert_path = "/etc/meshmon/tls/fullchain.pem"
 # key_path  = "/etc/meshmon/tls/privkey.pem"
 
 [upstream]
-# VictoriaMetrics remote-write target and query endpoint. Unreachability at
-# startup logs a warning — the service still boots so operators can inspect
-# state and repair the upstream.
-# vm_url = "http://meshmon-vm:8428"
+# VictoriaMetrics remote-write target + query endpoint. Unreachability
+# at boot logs a warning; the service still starts.
+vm_url = "http://meshmon-vm:8428"
 
-# Alertmanager API base URL. Same reachability-is-advisory semantics.
-# Include the `/alertmanager` suffix when Alertmanager runs with
-# `--web.external-url=/alertmanager` (as the bundled compose does), so the
-# service's `/alerts/*` proxy hits the right route prefix upstream. Either
-# inline or indirected via `alertmanager_url_env`.
-# alertmanager_url = "http://meshmon-alertmanager:9093/alertmanager"
-# alertmanager_url_env = "MESHMON_ALERTMANAGER_URL"
+# Alertmanager API base URL. Includes /alertmanager because AM runs
+# with --web.route-prefix=/alertmanager in the bundled compose; every
+# AM endpoint lives under that prefix.
+alertmanager_url = "http://meshmon-alertmanager:9093/alertmanager"
 
-# Grafana base URL. Consumed by the transparent `/grafana/*` proxy
-# that fronts the bundled Grafana's `auth.proxy` endpoint. Unset →
-# `/grafana/*` returns 503 and dashboard iframes render a broken
-# state — acceptable for deployments that do not ship Grafana at all.
-# Include the `/grafana` suffix when Grafana is configured with
-# `serve_from_sub_path = true` (as in the bundled compose), since the
-# upstream itself serves from that subpath. Either inline or
-# indirected via `grafana_url_env`.
-# grafana_url = "http://meshmon-grafana:3000/grafana"
-# grafana_url_env = "MESHMON_GRAFANA_URL"
+# Grafana base URL. Includes /grafana because Grafana is configured
+# with `serve_from_sub_path = true` + `root_url = .../grafana/`; every
+# route lives under that prefix.
+grafana_url = "http://meshmon-grafana:3000/grafana"
 
 [agents]
 # Minutes after last_seen_at before an agent is no longer counted as active.
