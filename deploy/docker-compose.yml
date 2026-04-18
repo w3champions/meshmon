@@ -71,7 +71,6 @@ services:
     restart: unless-stopped
     command:
       - "-retentionPeriod=2y"
-      - "-downsampling.period=60d:5m"
     volumes:
       - meshmon-vm-data:/victoria-metrics-data
     networks: [meshmon-internal]
