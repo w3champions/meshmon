@@ -20,6 +20,15 @@ pub(crate) const DATABASE_URL: &str = "postgres://postgres:postgres@localhost:54
 pub fn up() -> anyhow::Result<()> {
     match container_state()? {
         ContainerState::Running => {
+            // Docker "Running" state means the container process is alive,
+            // NOT that Postgres is accepting connections. After a Docker
+            // daemon restart or an OS reboot, the container can surface in
+            // Running state a few seconds before Postgres finishes
+            // crash-recovery startup. `wait_ready` is cheap when the DB is
+            // already healthy (first `pg_isready` returns success
+            // immediately) and prevents `cargo xtask test` from racing
+            // past a not-yet-ready server.
+            wait_ready(Duration::from_secs(30))?;
             println!("test DB already running on port {HOST_PORT}");
         }
         ContainerState::Stopped => {
