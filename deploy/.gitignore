@@ -1,6 +1,5 @@
-# Alertmanager webhook secrets — never commit credentials to version control.
-# Only the placeholder is tracked. The ** pattern ensures nested
-# subdirectories (e.g. alertmanager/secrets/prod/webhook) are also ignored
-# recursively.
-alertmanager/secrets/**
-!alertmanager/secrets/.gitkeep
+# Operator-generated files should never be committed. `.env` is also
+# ignored at repo root; duplicating here so local tooling doesn't
+# surface it as untracked under deploy/.
+.env
+meshmon.toml

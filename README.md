@@ -35,16 +35,9 @@ Subsystems:
 
 Meshmon ships three Grafana dashboards under `grafana/` (per-path,
 fleet-overview, per-agent) plus a datasources provisioning template for
-VictoriaMetrics and Postgres.
-
-Validate:
-
-```bash
-./scripts/validate-dashboards.sh     # CI-safe: JSON + contract
-./scripts/smoke-dashboards.sh        # local: VM + Grafana + /d-solo assert
-```
-
-See `grafana/README.md` for the operator guide.
+VictoriaMetrics and Postgres. The bundled compose bakes them into
+`ghcr.io/w3champions/meshmon-grafana`; operators pointing at their own
+Grafana use the template. See `grafana/README.md` for the operator guide.
 
 ## Quick start (development)
 
@@ -123,20 +116,22 @@ The service binds on `service.listen_addr` (default `0.0.0.0:8080`). Useful endp
 - `GET /api/docs` — Swagger UI for the operator API.
 - `GET /api/openapi.json` — OpenAPI 3.1 schema (also checked in at `frontend/src/api/openapi.json`).
 
-### One-command smoke harness
+### One-command dev loop
 
-`scripts/smoke.sh` brings up Postgres + VictoriaMetrics in Docker, writes a
-throwaway config, seeds a few agents and route snapshots, starts the service
-in the background, and runs the Vite dev server in the foreground (which
-proxies `/api` to the service). Ctrl-C tears everything down.
+`scripts/dev.sh` brings up the bundled infra (Postgres + VictoriaMetrics
++ Grafana + Alertmanager + vmalert) via the dev compose overlay, seeds a
+couple of agents and route snapshots, starts `cargo run -p meshmon-service`
+in the background, and runs the Vite dev server in the foreground
+(HMR, `/api` proxied to the service). Ctrl-C tears everything down.
 
 ```bash
-./scripts/smoke.sh
+./scripts/dev.sh
 # Open http://127.0.0.1:5173/  —  login: admin / smoketest
 ```
 
-Intended for local UI smoke-testing only — see `deploy/docker-compose.yml`
-for the full production stack.
+Intended for local UI iteration only — for the full production stack
+(including the service container from `docker/Dockerfile.service`), see
+the Quick start (Docker) block above and `docs/deployment.md`.
 
 Requires `docker`, `cargo`, `argon2`, `openssl`, `psql`, `sqlx`, and `npm`
 on `$PATH`.
