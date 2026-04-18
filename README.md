@@ -113,7 +113,8 @@ file CI does — no duplication to maintain.
 | Rust fmt | `cargo fmt --all -- --check` | `rust-toolchain.toml` |
 | Rust clippy | `cargo clippy --workspace --all-targets -- -D warnings` | `Cargo.toml` |
 | Rust tests | `cargo test --workspace --exclude meshmon-e2e --all-targets` | `Cargo.toml` |
-| OpenAPI drift | `cargo xtask openapi && git diff --exit-code frontend/src/api/openapi.gen.json` | — |
+| OpenAPI snapshot drift (Rust) | `cargo xtask openapi && git diff --exit-code frontend/src/api/openapi.gen.json` | — |
+| OpenAPI types drift (frontend) | `cd frontend && npm run openapi:types && git diff --exit-code src/api/schema.gen.ts` | `frontend/package.json` |
 | Frontend lint | `cd frontend && npx biome check ./src` | `frontend/biome.json` |
 | Frontend type-check | `cd frontend && npm run type-check` | `frontend/tsconfig.json` |
 | Frontend tests | `cd frontend && npm test` | `frontend/vitest.config.ts` |
@@ -122,6 +123,9 @@ file CI does — no duplication to maintain.
 | shellcheck | `shellcheck --severity=warning scripts/*.sh` | — |
 | actionlint | `actionlint .github/workflows/*.yml` | — |
 | Rust E2E | `cd deploy && docker compose up -d --build --wait && cd .. && cargo e2e && cd deploy && docker compose down -v` | `deploy/docker-compose.yml` |
+| Release binary (frontend-embedded) | `cd frontend && npm ci && npm run build && cd .. && cargo build --release -p meshmon-service` | `crates/service/build.rs` |
+
+> The `Release binary` CI job additionally uploads the compiled binary as a GitHub Actions artifact; that step has no local equivalent.
 
 Install the non-cargo tools with your package manager (macOS:
 `brew install yamllint shellcheck actionlint`). See **Pre-commit hooks
@@ -134,8 +138,10 @@ This repo ships a `lefthook.yml` that runs the same formatters and linters
 used in CI, scoped to staged files. To opt in:
 
 ```bash
-# Install lefthook once (macOS example; see https://lefthook.dev/ for others)
-brew install lefthook
+# Install lefthook once:
+#   macOS:  brew install lefthook
+#   Linux:  curl -1sLf 'https://raw.githubusercontent.com/evilmartians/lefthook/master/install.sh' | sh
+#   Other:  see https://lefthook.dev/installation/
 
 # Inside the cloned repo:
 lefthook install

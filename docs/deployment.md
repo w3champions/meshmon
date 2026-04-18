@@ -75,6 +75,7 @@ Pinning example (edit `deploy/docker-compose.yml`):
 ```yaml
 services:
   meshmon-service:
+    # Replace with an actual commit SHA from ghcr.io/w3champions/meshmon-service.
     image: ghcr.io/w3champions/meshmon-service:main-deadbeef1234
 ```
 
