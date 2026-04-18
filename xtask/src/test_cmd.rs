@@ -79,13 +79,22 @@ pub fn test_e2e(extra: Vec<String>) -> anyhow::Result<()> {
     }
 
     // Bring stack up (idempotent: `up` reuses running services).
-    let status = Command::new("docker")
-        .current_dir(&root)
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(&root)
         .arg("compose")
         .args(&compose_args)
-        .args(["up", "-d", "--build", "--wait"])
-        .env("COMPOSE_BAKE", "true")
-        .status()?;
+        .args(["up", "-d", "--build", "--wait"]);
+
+    // `COMPOSE_BAKE=true` is required by the CI cache overlay
+    // (`cache_to: type=gha`) but forces a minimum Compose v2.34. Turning
+    // it on unconditionally breaks local dev on older Compose even when
+    // the overlay isn't loaded — so only enable it when the overlay is
+    // actually in use (i.e. in CI via MESHMON_E2E_CACHE_OVERLAY).
+    if overlay.is_some() {
+        cmd.env("COMPOSE_BAKE", "true");
+    }
+
+    let status = cmd.status()?;
     if !status.success() {
         anyhow::bail!("docker compose up failed; check deploy/.env is staged");
     }
