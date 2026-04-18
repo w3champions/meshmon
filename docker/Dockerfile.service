@@ -8,6 +8,7 @@ WORKDIR /app
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY xtask ./xtask
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ----- Stage 3: frontend — build SPA --------------------------------------
@@ -28,6 +29,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --bin meshmon-service
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY xtask ./xtask
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 RUN cargo build --release --bin meshmon-service
 
