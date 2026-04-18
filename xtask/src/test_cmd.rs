@@ -59,6 +59,12 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
 }
 
 pub fn test_e2e(extra: Vec<String>) -> anyhow::Result<()> {
+    // Pin CWD to the workspace root so relative compose paths resolve
+    // regardless of where the user invoked `cargo xtask test-e2e`. A
+    // developer iterating inside `crates/service` would otherwise see
+    // docker compose fail on "no such file or directory".
+    let root = crate::workspace_root()?;
+
     // Base compose file is the local-dev-safe default. CI sets
     // `MESHMON_E2E_CACHE_OVERLAY=deploy/docker-compose.ci-cache.yml`
     // to layer GHA cache backends on top — that overlay requires
@@ -74,6 +80,7 @@ pub fn test_e2e(extra: Vec<String>) -> anyhow::Result<()> {
 
     // Bring stack up (idempotent: `up` reuses running services).
     let status = Command::new("docker")
+        .current_dir(&root)
         .arg("compose")
         .args(&compose_args)
         .args(["up", "-d", "--build", "--wait"])
@@ -86,6 +93,7 @@ pub fn test_e2e(extra: Vec<String>) -> anyhow::Result<()> {
     wait_for_readyz(std::time::Duration::from_secs(30))?;
 
     let status = Command::new("cargo")
+        .current_dir(&root)
         .args(["test", "-p", "meshmon-e2e"])
         .args(&extra)
         .status()?;

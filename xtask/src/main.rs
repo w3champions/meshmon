@@ -110,7 +110,11 @@ fn cmd_openapi() -> Result<()> {
 
 /// Resolve the workspace root by walking up from `CARGO_MANIFEST_DIR` until
 /// we find a `Cargo.toml` containing `[workspace]`.
-fn workspace_root() -> Result<PathBuf> {
+///
+/// Exposed `pub(crate)` so subcommand modules (e.g. `test_cmd`) can pin
+/// CWD to the workspace root before shelling out — lets `cargo xtask
+/// test-e2e` run from any subdirectory.
+pub(crate) fn workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut dir = start.clone();
     loop {
