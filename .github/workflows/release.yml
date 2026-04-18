@@ -89,6 +89,8 @@ jobs:
     permissions:
       contents: read
       packages: read
+    # workflow_dispatch runs produce `dispatch-<sha>` tags that are not
+    # production-promoted; Trivy scanning is deliberately skipped for those.
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
