@@ -59,6 +59,9 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main-${{ github.sha }},enable={{is_default_branch}}
             type=semver,pattern=v{{version}}
+            # workflow_dispatch fallback: emits dispatch-<short-sha> so
+            # manual runs from any branch still produce at least one tag.
+            type=sha,prefix=dispatch-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push (multi-arch)
         uses: docker/build-push-action@v7
