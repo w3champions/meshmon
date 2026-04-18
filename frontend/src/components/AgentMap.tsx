@@ -46,11 +46,17 @@ function worstOutgoingState(matrix: HealthMatrix, source: string): HealthState {
 
 function FitToAgents({ points }: { points: Array<[number, number]> }) {
   const map = useMap();
+  // Fingerprint the coordinates so the effect only re-fits when the
+  // actual set of agent positions changes. Without this the 30 s agents
+  // refetch produces a new array reference every poll and the map snaps
+  // back, yanking any manual pan/zoom.
+  const key = points.map(([la, lo]) => `${la},${lo}`).join("|");
   useEffect(() => {
     if (points.length === 0) return;
     const bounds = L.latLngBounds(points);
     map.fitBounds(bounds, { padding: [40, 40], maxZoom: 5 });
-  }, [map, points]);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: key fingerprints points
+  }, [map, key]);
   return null;
 }
 
