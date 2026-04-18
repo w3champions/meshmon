@@ -174,16 +174,24 @@ async fn apply_grafana_role_password(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(&mut *tx)
         .await?;
 
-    // Short-circuit when the role is already in the desired LOGIN
-    // state. Avoids bumping `pg_authid.xmin` on every service restart,
-    // and — importantly — prevents "tuple concurrently updated"
-    // surfacing in parallel integration tests where many callers race
-    // to set the same state. When we DO need to flip, the advisory
-    // lock guarantees no concurrent catalog updater is in flight.
-    let (current_login,): (bool,) =
-        sqlx::query_as("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
-            .fetch_one(&mut *tx)
+    // The up-migration creates the role with a graceful
+    // insufficient_privilege fallback for managed Postgres: if the
+    // migration user lacks CREATEROLE, the role won't exist. In that
+    // case, the bundled Grafana datasource is simply disabled until
+    // the operator provisions the role out-of-band — don't fail
+    // startup here.
+    let current_login: Option<bool> =
+        sqlx::query_scalar("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
+            .fetch_optional(&mut *tx)
             .await?;
+    let Some(current_login) = current_login else {
+        tracing::info!(
+            "meshmon_grafana role not present (migration fell back to warn-only for \
+             restricted DB user); skipping LOGIN state management"
+        );
+        tx.commit().await?;
+        return Ok(());
+    };
 
     match (want_login, pw.as_deref()) {
         (false, None) => {

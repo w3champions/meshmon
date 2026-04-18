@@ -130,6 +130,29 @@ role, not the service's full-privilege user. Set
 `MESHMON_PG_GRAFANA_PASSWORD` at deploy time; the service's migration
 bootstrap flips the role from NOLOGIN to LOGIN atomically.
 
+### Restricted-privilege Postgres (AWS RDS, Cloud SQL, Supabase, …)
+
+The bootstrap migration creates `meshmon_grafana` via `CREATE ROLE`,
+which needs the cluster-level `CREATEROLE` privilege. When meshmon
+runs against a managed Postgres instance that grants only
+database-scoped privileges, the migration falls back to a
+`RAISE WARNING` and the service boots without the role. The bundled
+Grafana datasource won't work until an operator with `CREATEROLE`
+provisions the role out-of-band:
+
+```sql
+CREATE ROLE meshmon_grafana NOLOGIN;
+GRANT USAGE ON SCHEMA public TO meshmon_grafana;
+GRANT SELECT ON agents TO meshmon_grafana;
+GRANT SELECT ON route_snapshots TO meshmon_grafana;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  REVOKE ALL ON TABLES FROM meshmon_grafana;
+```
+
+Once the role exists, the service's startup `apply_grafana_role_password`
+takes over: it flips NOLOGIN → LOGIN + sets the password whenever
+`MESHMON_PG_GRAFANA_PASSWORD` is set.
+
 Meshmon iframes pass `theme=light` on the Report page so printed PDFs stay
 legible. Grafana honours that URL parameter regardless of the dashboard's
 own `style` field — no per-dashboard config needed.
