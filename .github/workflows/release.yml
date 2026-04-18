@@ -77,11 +77,17 @@ jobs:
             type=registry,ref=ghcr.io/w3champions/${{ matrix.image }}:buildcache-arm64,mode=max,image-manifest=true
           provenance: false
 
+  # scan runs after publish; :latest + :main-<sha> are already live in GHCR
+  # by the time this gate fires. Failures block promotion decisions, not
+  # the push itself.
   scan:
     name: Trivy image scan
-    runs-on: ubuntu-latest
     needs: publish
+    permissions:
+      contents: read
+      packages: read
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
