@@ -482,9 +482,9 @@ export interface components {
             /**
              * @description Recent snapshots in the window in descending `observed_at` order,
              *     filtered to the resolved [`PathOverviewResponse::primary_protocol`].
-             *     Capped at [`RECENT_LIMIT`]; no hop detail. `null`/empty when no
-             *     primary protocol could be resolved (no data for any protocol in
-             *     the window).
+             *     Capped at [`RECENT_LIMIT`]; no hop detail. Empty when no primary
+             *     protocol could be resolved (no data for any protocol in the
+             *     window).
              */
             recent_snapshots: components["schemas"]["RouteSnapshotSummary"][];
             /**

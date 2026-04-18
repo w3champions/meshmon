@@ -30,7 +30,7 @@ afterEach(cleanup);
 
 describe("RouteHistoryTable", () => {
   test("renders one row per snapshot in descending order", () => {
-    render(<RouteHistoryTable source="a" target="b" snapshots={rows} onCompare={() => {}} />);
+    render(<RouteHistoryTable snapshots={rows} onCompare={() => {}} />);
     const bodyRows = screen.getAllByRole("row").slice(1);
     expect(bodyRows).toHaveLength(2);
     expect(bodyRows[0]).toHaveTextContent(/5 hops/i);
@@ -39,7 +39,7 @@ describe("RouteHistoryTable", () => {
 
   test("picking A then B enables the Compare button and fires onCompare", async () => {
     const onCompare = vi.fn();
-    render(<RouteHistoryTable source="a" target="b" snapshots={rows} onCompare={onCompare} />);
+    render(<RouteHistoryTable snapshots={rows} onCompare={onCompare} />);
     const user = userEvent.setup();
     await user.click(screen.getAllByRole("radio", { name: /pick as a/i })[0]);
     await user.click(screen.getAllByRole("radio", { name: /pick as b/i })[1]);
@@ -50,19 +50,17 @@ describe("RouteHistoryTable", () => {
   });
 
   test("empty snapshots renders a placeholder", () => {
-    render(<RouteHistoryTable source="a" target="b" snapshots={[]} onCompare={() => {}} />);
+    render(<RouteHistoryTable snapshots={[]} onCompare={() => {}} />);
     expect(screen.getByText(/no route snapshots/i)).toBeInTheDocument();
   });
 
   test("renders a truncation footnote when `truncated` is true", () => {
-    render(
-      <RouteHistoryTable source="a" target="b" snapshots={rows} truncated onCompare={() => {}} />,
-    );
+    render(<RouteHistoryTable snapshots={rows} truncated onCompare={() => {}} />);
     expect(screen.getByText(/showing latest 100/i)).toBeInTheDocument();
   });
 
   test("omits the truncation footnote when `truncated` is false or missing", () => {
-    render(<RouteHistoryTable source="a" target="b" snapshots={rows} onCompare={() => {}} />);
+    render(<RouteHistoryTable snapshots={rows} onCompare={() => {}} />);
     expect(screen.queryByText(/showing latest 100/i)).toBeNull();
   });
 });

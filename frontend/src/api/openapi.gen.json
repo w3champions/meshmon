@@ -1130,7 +1130,7 @@
             "items": {
               "$ref": "#/components/schemas/RouteSnapshotSummary"
             },
-            "description": "Recent snapshots in the window in descending `observed_at` order,\nfiltered to the resolved [`PathOverviewResponse::primary_protocol`].\nCapped at [`RECENT_LIMIT`]; no hop detail. `null`/empty when no\nprimary protocol could be resolved (no data for any protocol in\nthe window)."
+            "description": "Recent snapshots in the window in descending `observed_at` order,\nfiltered to the resolved [`PathOverviewResponse::primary_protocol`].\nCapped at [`RECENT_LIMIT`]; no hop detail. Empty when no primary\nprotocol could be resolved (no data for any protocol in the\nwindow)."
           },
           "recent_snapshots_truncated": {
             "type": "boolean",

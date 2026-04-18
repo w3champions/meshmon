@@ -64,9 +64,9 @@ pub struct PathOverviewResponse {
     pub latest_by_protocol: LatestByProtocol,
     /// Recent snapshots in the window in descending `observed_at` order,
     /// filtered to the resolved [`PathOverviewResponse::primary_protocol`].
-    /// Capped at [`RECENT_LIMIT`]; no hop detail. `null`/empty when no
-    /// primary protocol could be resolved (no data for any protocol in
-    /// the window).
+    /// Capped at [`RECENT_LIMIT`]; no hop detail. Empty when no primary
+    /// protocol could be resolved (no data for any protocol in the
+    /// window).
     pub recent_snapshots: Vec<RouteSnapshotSummary>,
     /// `true` when the per-primary-protocol `recent_snapshots` list was
     /// clamped at [`RECENT_LIMIT`]. Since the list is protocol-scoped
@@ -620,16 +620,19 @@ pub async fn path_overview(
         Some(p) => {
             let recent_fut =
                 fetch_recent_snapshots(&state.pool, &src, &tgt, from, to, p, RECENT_LIMIT + 1);
-            let metrics_fut = fetch_metrics(&state, &src, &tgt, p, from, to, step);
-            let (recent_res, metrics) = tokio::join!(recent_fut, metrics_fut);
-            let recent = match recent_res {
-                Ok(r) => r,
+            // `fetch_metrics` is infallible; wrap it so `try_join!` can
+            // drop the VM future the moment the DB query fails instead of
+            // stalling the 500 response behind VM timeouts.
+            let metrics_fut = async {
+                Ok::<_, sqlx::Error>(fetch_metrics(&state, &src, &tgt, p, from, to, step).await)
+            };
+            match tokio::try_join!(recent_fut, metrics_fut) {
+                Ok(pair) => pair,
                 Err(e) => {
                     tracing::error!(error = %e, %src, %tgt, "path_overview: recent fetch failed");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
-            };
-            (recent, metrics)
+            }
         }
         None => (Vec::new(), None),
     };

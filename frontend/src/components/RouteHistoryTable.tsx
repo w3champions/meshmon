@@ -15,8 +15,6 @@ import { cn } from "@/lib/utils";
 type RouteSnapshotSummary = components["schemas"]["RouteSnapshotSummary"];
 
 interface RouteHistoryTableProps {
-  source: string;
-  target: string;
   snapshots: RouteSnapshotSummary[];
   /**
    * `true` when the server clamped the list at its cap (100). Rendered as a

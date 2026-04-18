@@ -67,7 +67,13 @@ export default function Report() {
   // the summary flags `singleSnapshot` so operators see there's no diff
   // to compare.
   const afterId = snapshots[0]?.id;
-  const beforeId = [...snapshots].reverse().find((s) => s.id !== afterId)?.id ?? afterId;
+  let beforeId = afterId;
+  for (let i = snapshots.length - 1; i >= 0; i--) {
+    if (snapshots[i].id !== afterId) {
+      beforeId = snapshots[i].id;
+      break;
+    }
+  }
 
   const beforeQ = useRouteSnapshot({
     source: source_id,
