@@ -95,20 +95,41 @@ enum ContainerState {
 }
 
 fn container_state() -> anyhow::Result<ContainerState> {
+    // Capture stderr (don't `Stdio::null` it) so we can distinguish
+    // "container missing" from "daemon unreachable / not installed /
+    // permission denied" — the former is a normal Absent state, the
+    // latter are operational errors the user needs to see.
     let out = Command::new("docker")
         .args(["inspect", "-f", "{{.State.Running}}", CONTAINER_NAME])
-        .stderr(Stdio::null())
-        .output()?;
-    if !out.status.success() {
-        // `docker inspect` exits non-zero when the container doesn't exist.
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!("failed to spawn docker: {e}. Is Docker installed and on PATH?")
+        })?;
+
+    if out.status.success() {
+        let running = String::from_utf8_lossy(&out.stdout).trim() == "true";
+        return Ok(if running {
+            ContainerState::Running
+        } else {
+            ContainerState::Stopped
+        });
+    }
+
+    // `docker inspect`'s not-found message varies across versions
+    // ("No such object", "No such container", etc.) but always contains
+    // "no such" (case-insensitive). Anything else — daemon unreachable,
+    // socket permission denied, network error talking to a remote
+    // daemon — is an operational failure we must surface.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.to_ascii_lowercase().contains("no such") {
         return Ok(ContainerState::Absent);
     }
-    let running = String::from_utf8_lossy(&out.stdout).trim() == "true";
-    Ok(if running {
-        ContainerState::Running
-    } else {
-        ContainerState::Stopped
-    })
+
+    anyhow::bail!(
+        "docker inspect for {CONTAINER_NAME} failed ({status}): {msg}",
+        status = out.status,
+        msg = stderr.trim(),
+    )
 }
 
 fn docker_start() -> anyhow::Result<()> {
