@@ -45,8 +45,6 @@ pub struct Config {
     pub agents: AgentsSection,
     /// Probing configuration broadcast to agents via `GetConfig`.
     pub probing: crate::probing::ProbingSection,
-    /// Frontend / web-config runtime settings (Grafana embed, dashboards).
-    pub web: WebSection,
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -178,18 +176,10 @@ pub struct UpstreamSection {
     pub vm_url: Option<String>,
     /// Alertmanager base URL, e.g. `http://meshmon-alertmanager:9093`.
     pub alertmanager_url: Option<String>,
-}
-
-/// Frontend / web-config runtime settings.
-#[derive(Debug, Clone, Default)]
-pub struct WebSection {
-    /// Base URL for embedding Grafana panels. `None` if Grafana is not
-    /// configured; resolved from `[web].grafana_base_url` or the
-    /// `grafana_base_url_env` indirection.
-    pub grafana_base_url: Option<String>,
-    /// Map of logical dashboard name → Grafana dashboard UID, read from
-    /// `[web.grafana_dashboards]` in `meshmon.toml`.
-    pub grafana_dashboards: std::collections::HashMap<String, String>,
+    /// Grafana base URL, e.g. `http://meshmon-grafana:3000`. Consumed by
+    /// the transparent `/grafana/*` proxy. When unset, `/grafana/*`
+    /// returns 503 and the SPA's iframe renders the broken-iframe state.
+    pub grafana_url: Option<String>,
 }
 
 /// Agent registry knobs: how long a `last_seen_at` still counts as active,
@@ -251,8 +241,6 @@ struct RawConfig {
     agents: RawAgentsSection,
     #[serde(default)]
     probing: crate::probing::RawProbingSection,
-    #[serde(default)]
-    web: RawWeb,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -317,14 +305,9 @@ struct RawAgentApiTls {
 struct RawUpstream {
     vm_url: Option<String>,
     alertmanager_url: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawWeb {
-    grafana_base_url: Option<String>,
-    grafana_base_url_env: Option<String>,
-    #[serde(default)]
-    grafana_dashboards: std::collections::HashMap<String, String>,
+    alertmanager_url_env: Option<String>,
+    grafana_url: Option<String>,
+    grafana_url_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,9 +471,30 @@ impl Config {
         };
 
         // --- upstream section ---
+        let alertmanager_url = resolve_optional_secret(
+            raw.upstream.alertmanager_url,
+            raw.upstream.alertmanager_url_env,
+            "upstream.alertmanager_url",
+            path,
+        )?;
+        let grafana_url = resolve_optional_secret(
+            raw.upstream.grafana_url,
+            raw.upstream.grafana_url_env,
+            "upstream.grafana_url",
+            path,
+        )?;
+        for (url, key) in [
+            (alertmanager_url.as_deref(), "upstream.alertmanager_url"),
+            (grafana_url.as_deref(), "upstream.grafana_url"),
+        ] {
+            if let Some(u) = url {
+                reject_self_referential_upstream(u, &service.listen_addr, key, path)?;
+            }
+        }
         let upstream = UpstreamSection {
             vm_url: raw.upstream.vm_url,
-            alertmanager_url: raw.upstream.alertmanager_url,
+            alertmanager_url,
+            grafana_url,
         };
 
         // --- agents section ---
@@ -519,18 +523,6 @@ impl Config {
             }
         })?;
 
-        // --- web section ---
-        let grafana_base_url = resolve_optional_secret(
-            raw.web.grafana_base_url,
-            raw.web.grafana_base_url_env,
-            "web.grafana_base_url",
-            path,
-        )?;
-        let web = WebSection {
-            grafana_base_url,
-            grafana_dashboards: raw.web.grafana_dashboards,
-        };
-
         Ok(Config {
             service,
             database,
@@ -540,7 +532,6 @@ impl Config {
             upstream,
             agents,
             probing,
-            web,
         })
     }
 }
@@ -606,6 +597,52 @@ fn resolve_optional_secret(
         };
     }
     Ok(None)
+}
+
+/// Reject an upstream URL that would cause the proxy handler to loop
+/// back into its own listen socket. A misconfigured operator who sets
+/// `grafana_url = "http://meshmon.example.com/grafana"` (the public
+/// URL) instead of the internal address would recurse forever.
+///
+/// Only rejects when scheme+host+port exactly match the service's own
+/// listen address (or `0.0.0.0` / `[::]` expanded to `127.0.0.1` /
+/// `[::1]` for bind-all cases).
+fn reject_self_referential_upstream(
+    raw_url: &str,
+    listen_addr: &std::net::SocketAddr,
+    key: &str,
+    path: &str,
+) -> Result<(), BootError> {
+    let url = url::Url::parse(raw_url).map_err(|e| BootError::ConfigInvalid {
+        path: path.to_string(),
+        reason: format!("{key} `{raw_url}` is not a valid URL: {e}"),
+    })?;
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
+    let port = url.port_or_known_default();
+    let Some(port) = port else { return Ok(()) };
+
+    if port != listen_addr.port() {
+        return Ok(());
+    }
+
+    let listen_hosts: &[&str] = match listen_addr.ip() {
+        std::net::IpAddr::V4(v4) if v4.is_unspecified() => &["127.0.0.1", "localhost"],
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() => &["::1", "localhost"],
+        _ => &[],
+    };
+    let own_ip = listen_addr.ip().to_string();
+    if host == own_ip || listen_hosts.contains(&host) {
+        return Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: format!(
+                "{key} `{raw_url}` recurses into meshmon's own listen address \
+                 ({listen_addr}); set it to the upstream's internal address instead"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Resolve the optional `[service.metrics_auth]` block.
@@ -733,4 +770,82 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
         registry,
         crate::metrics::test_install(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIN_TOML: &str = r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+"#;
+
+    #[test]
+    fn upstream_grafana_url_parses_from_inline_value() {
+        let toml =
+            format!("{MIN_TOML}\n[upstream]\ngrafana_url = \"http://meshmon-grafana:3000\"\n");
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert_eq!(
+            cfg.upstream.grafana_url.as_deref(),
+            Some("http://meshmon-grafana:3000")
+        );
+    }
+
+    #[test]
+    fn upstream_grafana_url_resolves_from_env_indirection() {
+        std::env::set_var(
+            "MESHMON_TEST_GRAFANA_URL_XYZ",
+            "http://grafana.internal:3000",
+        );
+        let toml =
+            format!("{MIN_TOML}\n[upstream]\ngrafana_url_env = \"MESHMON_TEST_GRAFANA_URL_XYZ\"\n");
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert_eq!(
+            cfg.upstream.grafana_url.as_deref(),
+            Some("http://grafana.internal:3000")
+        );
+        std::env::remove_var("MESHMON_TEST_GRAFANA_URL_XYZ");
+    }
+
+    #[test]
+    fn upstream_url_pointing_at_self_listen_addr_is_rejected() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+
+[upstream]
+grafana_url = "http://127.0.0.1:8080"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alertmanager_upstream_pointing_at_self_is_rejected() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "0.0.0.0:8080"
+
+[upstream]
+alertmanager_url = "http://0.0.0.0:8080/alertmanager"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
 }

@@ -2071,6 +2071,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "utoipa-axum",
  "utoipa-swagger-ui",

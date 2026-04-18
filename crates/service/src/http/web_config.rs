@@ -1,22 +1,4 @@
-//! `GET /api/web-config` — session-gated runtime config for the frontend.
-//!
-//! The frontend calls this endpoint before rendering any authenticated
-//! UI:
-//! - 401 means "bounce to the login page" (the `login_required!` layer
-//!   returns that status directly; there is no hand-written 401 branch
-//!   here).
-//! - 200 returns the JSON body described by [`WebConfigResponse`].
-//!
-//! The Grafana fields come from the `[web]` section of `meshmon.toml`:
-//! `grafana_base_url` (or `grafana_base_url_env`) and the
-//! `[web.grafana_dashboards]` map. When `[web]` is omitted entirely the
-//! endpoint reports an unconfigured Grafana (omits the URL, empty map) so
-//! the frontend can fall back gracefully.
-//!
-//! `alertmanager_base_url` comes from `[upstream]` — the same URL the
-//! alerts-proxy uses upstream — and lets the frontend build deep links
-//! into the Alertmanager UI for individual alerts. Absent when
-//! Alertmanager is not configured.
+//! Stub — replaced by `session.rs` in T34 Task 7.
 
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
@@ -85,11 +67,17 @@ pub async fn web_config(
         .username
         .clone();
     let cfg = state.config();
+    // NOTE: The `[web]` TOML section was removed in T34 Task 2; the
+    // Grafana embed surface moves to the transparent `/grafana/*` proxy
+    // in later T34 tasks, which replace this handler with a session
+    // endpoint. Until then, keep the field in the response shape but
+    // populate with empty/None so the SPA's iframe renders its
+    // broken-iframe fallback state.
     Json(WebConfigResponse {
         version: state.build.version.to_string(),
         username,
-        grafana_base_url: cfg.web.grafana_base_url.clone(),
-        grafana_dashboards: cfg.web.grafana_dashboards.clone(),
+        grafana_base_url: None,
+        grafana_dashboards: HashMap::new(),
         alertmanager_base_url: cfg.upstream.alertmanager_url.clone(),
     })
 }
