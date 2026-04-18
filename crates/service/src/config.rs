@@ -632,11 +632,15 @@ fn resolve_optional_secret(
 /// Checks two independent routes to the same listener:
 ///  1. URL scheme+host+port match the internal listen address (or
 ///     the loopback/localhost aliases that resolve to it).
-///  2. URL host (port-independent) matches the host from
+///  2. URL host + scheme-normalized port match
 ///     `service.public_base_url`, which identifies the externally
 ///     advertised URL — the one that resolves back through the edge
-///     proxy onto this listener. Port remapping (e.g. 443 → 8080
-///     behind nginx) means an exact port match would miss this case.
+///     proxy onto this listener. Port normalization (via
+///     `port_or_known_default`) covers the typical nginx case where
+///     both the public URL and the upstream URL elide the default
+///     `:443`; a truly-different port on the same host (e.g. a
+///     side-channel Grafana on `:3000` while meshmon runs on `:443`)
+///     is accepted since no recursion is possible.
 fn reject_self_referential_upstream(
     raw_url: &str,
     listen_addr: &std::net::SocketAddr,
@@ -685,14 +689,22 @@ fn reject_self_referential_upstream(
         }
     }
 
-    // Check 2: upstream host matches the public-facing host, even on a
-    // different port. Behind nginx, public 443 + internal 8080 would
-    // slip past check 1 but still recurse (client → nginx → meshmon →
-    // /grafana/* → nginx → meshmon → ...).
+    // Check 2: upstream URL points at meshmon's own public endpoint.
+    // Behind nginx, public 443 + internal 8080 slips past check 1 but
+    // still recurses (client → nginx → meshmon → /grafana/* → nginx
+    // → meshmon → ...). Match on scheme-default-normalized
+    // `host:port` rather than host alone so an operator legitimately
+    // running a different service on the same hostname at a different
+    // port (e.g. a side-channel Grafana on :3000 while meshmon is on
+    // :443) is not rejected.
     if let Some(public) = public_base_url {
         if let Ok(pub_url) = url::Url::parse(public) {
-            if let Some(pub_host) = pub_url.host_str() {
-                if host == pub_host {
+            if let (Some(pub_host), Some(pub_port), Some(up_port)) = (
+                pub_url.host_str(),
+                pub_url.port_or_known_default(),
+                url.port_or_known_default(),
+            ) {
+                if host == pub_host && up_port == pub_port {
                     return Err(BootError::ConfigInvalid {
                         path: path.to_string(),
                         reason: format!(
@@ -986,6 +998,30 @@ grafana_url = "https://meshmon.example.com/grafana"
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn upstream_on_public_host_but_different_port_is_accepted() {
+        // Valid deployment: meshmon is on :443 via the edge proxy, and
+        // a side-channel Grafana is exposed on :3000 at the same
+        // hostname (it doesn't come back through meshmon). The guard
+        // should accept this — rejecting would block legitimate
+        // multi-service-on-one-hostname topologies.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+public_base_url = "https://meshmon.example.com"
+
+[upstream]
+grafana_url = "https://meshmon.example.com:3000/grafana"
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("must accept");
+        assert_eq!(
+            cfg.upstream.grafana_url.as_deref(),
+            Some("https://meshmon.example.com:3000/grafana"),
+        );
     }
 
     #[test]
