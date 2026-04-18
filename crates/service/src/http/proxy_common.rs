@@ -1,12 +1,12 @@
 //! Bespoke glue that wraps `axum-reverse-proxy`:
 //!
-//! - **`forwarded_headers`** — honour the existing
+//! - **`apply_forwarded_headers`** — honour the existing
 //!   `service.trust_forwarded_headers` policy when setting
 //!   `X-Forwarded-For` + `X-Real-IP` on the upstream-bound request.
-//!   `trust=true` appends the resolved real client to the existing
-//!   XFF chain (behind nginx — preserve the chain). `trust=false`
-//!   replaces any inbound XFF/Forwarded with a fresh single-hop value
-//!   (direct exposure — inbound chain is untrusted).
+//!   `trust=true` preserves the inbound XFF chain unchanged (the edge
+//!   proxy already built the canonical chain). `trust=false` replaces
+//!   any inbound XFF/Forwarded with a fresh single-hop value (direct
+//!   exposure — inbound chain is untrusted).
 //! - **`strip_client_webauth_headers`** — defence-in-depth for the
 //!   Grafana proxy. Runs BEFORE the `X-WEBAUTH-USER` injection so an
 //!   attacker with a session cannot also supply their own identity
@@ -83,24 +83,30 @@ pub(crate) fn strip_session_cookie(headers: &mut HeaderMap) {
     }
 }
 
-/// Append the resolved real client IP to `X-Forwarded-For` and set
-/// `X-Real-IP`.
+/// Normalize `X-Forwarded-For` / `X-Real-IP` for the upstream-bound
+/// request.
 ///
 /// * `trust_forwarded = true` — we are behind nginx-proxy and the
-///   inbound XFF chain is meaningful; append `real_ip` as the last
-///   element so the upstream audit log still shows the whole path.
-///   (`real_ip` in this mode is already the *leftmost* XFF entry
-///   extracted by `auth::client_ip`, so we're echoing the value that
-///   made its way through.)
+///   inbound XFF chain is meaningful. Pass it through unchanged; the
+///   edge proxy already assembled the canonical chain, and appending
+///   `real_ip` (which is the leftmost entry of that same chain) would
+///   duplicate the client and corrupt upstream provenance/audit logs.
+///   Also collapse multiple `X-Forwarded-For` headers into the
+///   RFC-preferred single comma-separated header so the upstream sees
+///   one canonical representation.
 /// * `trust_forwarded = false` — we are directly exposed; any inbound
 ///   XFF is attacker-controlled. Remove the inbound header entirely,
 ///   then write a fresh XFF containing only `real_ip` (which equals
 ///   the TCP peer in this mode).
 ///
-/// `Forwarded` (RFC 7239) gets the same treatment: dropped in the
-/// not-trusted case, otherwise left alone — we don't build a new
-/// `Forwarded` element because upstream (Grafana / Alertmanager) don't
-/// parse it and our nginx deploy doesn't emit it today.
+/// `Forwarded` (RFC 7239) is dropped in the not-trusted case and left
+/// alone otherwise — we don't construct a new `Forwarded` element
+/// because neither Grafana nor Alertmanager parse it, and our nginx
+/// deploy doesn't emit it today.
+///
+/// `X-Real-IP` always reflects the resolved real client, in both
+/// modes, so upstream audit logic has one canonical "who is this"
+/// answer regardless of chain length.
 pub(crate) fn apply_forwarded_headers(
     headers: &mut HeaderMap,
     real_ip: IpAddr,
@@ -108,36 +114,30 @@ pub(crate) fn apply_forwarded_headers(
 ) {
     let real_ip_v = HeaderValue::try_from(real_ip.to_string())
         .expect("a parsed IpAddr always renders to a valid header value");
+    let xff = HeaderName::from_static("x-forwarded-for");
 
     if trust_forwarded {
-        let existing: Option<String> = {
-            let parts: Vec<String> = headers
-                .get_all(HeaderName::from_static("x-forwarded-for"))
-                .iter()
-                .filter_map(|v| v.to_str().ok())
-                .map(|s| s.to_owned())
-                .collect();
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join(", "))
+        // Collapse any split `X-Forwarded-For` headers into a single
+        // canonical `client, proxy1, proxy2` string. Do not append
+        // anything: the inbound chain is already authoritative.
+        let inbound: Vec<String> = headers
+            .get_all(&xff)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !inbound.is_empty() {
+            let combined = inbound.join(", ");
+            headers.remove(&xff);
+            if let Ok(v) = HeaderValue::try_from(combined) {
+                headers.insert(xff, v);
             }
-        };
-        let combined = match existing {
-            Some(chain) if !chain.is_empty() => format!("{chain}, {real_ip}"),
-            _ => real_ip.to_string(),
-        };
-        headers.insert(
-            HeaderName::from_static("x-forwarded-for"),
-            HeaderValue::try_from(combined).expect("joined IPs form a valid header value"),
-        );
+        }
     } else {
-        headers.remove(HeaderName::from_static("x-forwarded-for"));
+        headers.remove(&xff);
         headers.remove(HeaderName::from_static("forwarded"));
-        headers.insert(
-            HeaderName::from_static("x-forwarded-for"),
-            real_ip_v.clone(),
-        );
+        headers.insert(xff, real_ip_v.clone());
     }
 
     headers.insert(HeaderName::from_static("x-real-ip"), real_ip_v);
@@ -224,25 +224,46 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_trust_true_appends_to_existing_chain() {
+    fn forwarded_trust_true_passes_inbound_chain_unchanged() {
+        // `real_ip` in this mode is already the leftmost entry of the
+        // inbound chain (auth::client_ip returns XFF[0]); appending it
+        // would produce `client, ..., client`. Leave the authoritative
+        // chain alone.
         let mut h = HeaderMap::new();
         h.insert(
             "x-forwarded-for",
             HeaderValue::from_static("198.51.100.1, 10.0.0.1"),
         );
-        apply_forwarded_headers(&mut h, "192.0.2.50".parse().unwrap(), true);
-        assert_eq!(
-            h.get("x-forwarded-for").unwrap(),
-            "198.51.100.1, 10.0.0.1, 192.0.2.50"
-        );
-        assert_eq!(h.get("x-real-ip").unwrap(), "192.0.2.50");
+        apply_forwarded_headers(&mut h, "198.51.100.1".parse().unwrap(), true);
+        assert_eq!(h.get("x-forwarded-for").unwrap(), "198.51.100.1, 10.0.0.1");
+        assert_eq!(h.get("x-real-ip").unwrap(), "198.51.100.1");
     }
 
     #[test]
-    fn forwarded_trust_true_creates_chain_when_empty() {
+    fn forwarded_trust_true_collapses_split_xff_headers() {
+        // RFC 9110 §5.3 recommends a single comma-separated value;
+        // axum/hyper accept multiple XFF headers though. Fold them
+        // into one canonical representation for the upstream.
+        let mut h = HeaderMap::new();
+        h.append("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        h.append("x-forwarded-for", HeaderValue::from_static("10.0.0.1"));
+        apply_forwarded_headers(&mut h, "198.51.100.1".parse().unwrap(), true);
+        let all: Vec<_> = h.get_all("x-forwarded-for").iter().collect();
+        assert_eq!(all.len(), 1, "split XFF must be collapsed");
+        assert_eq!(all[0], "198.51.100.1, 10.0.0.1");
+    }
+
+    #[test]
+    fn forwarded_trust_true_noop_when_no_inbound_xff() {
+        // No inbound chain → don't fabricate one. Upstream will see
+        // no XFF (fine — X-Real-IP still identifies the caller).
         let mut h = HeaderMap::new();
         apply_forwarded_headers(&mut h, "192.0.2.50".parse().unwrap(), true);
-        assert_eq!(h.get("x-forwarded-for").unwrap(), "192.0.2.50");
+        assert!(
+            h.get("x-forwarded-for").is_none(),
+            "trust=true must not synthesize XFF from real_ip alone"
+        );
+        assert_eq!(h.get("x-real-ip").unwrap(), "192.0.2.50");
     }
 
     #[test]
