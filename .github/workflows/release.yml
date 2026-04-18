@@ -110,6 +110,17 @@ jobs:
           name: digests-${{ matrix.image }}-linux-amd64
           path: /tmp/digest
 
+      # Digest-only images pushed by `build` land in a private GHCR
+      # package until `merge` attaches public tags. Trivy must
+      # authenticate to pull them; without this step the pull fails
+      # with `UNAUTHORIZED` and the gate never runs.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Resolve digest ref
         id: ref
         shell: bash
