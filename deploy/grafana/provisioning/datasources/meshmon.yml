@@ -1,0 +1,44 @@
+# Baked into ghcr.io/w3champions/meshmon-grafana. ${MESHMON_PG_GRAFANA_PASSWORD}
+# is expanded by Grafana at container boot from its env, so secrets never
+# enter the image. External Grafanas must NOT use this file; they use
+# grafana/provisioning/datasources.yml.template in the repo root instead.
+apiVersion: 1
+
+deleteDatasources:
+  - { name: MeshmonVM,       orgId: 1 }
+  - { name: MeshmonPostgres, orgId: 1 }
+
+datasources:
+  - name: MeshmonVM
+    uid: MeshmonVM
+    type: prometheus
+    access: proxy
+    orgId: 1
+    url: http://meshmon-vm:8428
+    isDefault: false
+    editable: false
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      prometheusVersion: 2.50.0
+      timeInterval: 30s
+
+  - name: MeshmonPostgres
+    uid: MeshmonPostgres
+    type: postgres
+    access: proxy
+    orgId: 1
+    url: meshmon-db:5432
+    user: meshmon_grafana
+    database: meshmon
+    isDefault: false
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true
+      maxOpenConns: 10
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: ${MESHMON_PG_GRAFANA_PASSWORD}
