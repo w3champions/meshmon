@@ -66,13 +66,32 @@ async fn grafana_proxy_requires_session() {
     let (_grafana, base) = spawn_grafana().await;
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_admin_and_grafana(pool, &base).await;
-    let app = meshmon_service::http::router(state);
 
+    // Nested path must be session-gated.
+    let app = meshmon_service::http::router(state.clone());
     let resp = app
         .oneshot(with_peer(
             Request::builder()
                 .method("GET")
                 .uri("/grafana/api/user")
+                .body(Body::empty())
+                .unwrap(),
+            [203, 0, 113, 113],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Regression guard: the bare-root `/grafana/` registration must
+    // also sit behind `login_required!`. If the explicit `route_service`
+    // ever ends up outside the auth layer, unauthenticated probes would
+    // leak the Grafana landing page.
+    let app = meshmon_service::http::router(state);
+    let resp = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method("GET")
+                .uri("/grafana/")
                 .body(Body::empty())
                 .unwrap(),
             [203, 0, 113, 113],

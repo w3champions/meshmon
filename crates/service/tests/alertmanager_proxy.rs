@@ -69,13 +69,32 @@ async fn alertmanager_proxy_requires_session() {
     let (_am, base) = spawn_am().await;
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_admin_and_alertmanager(pool, &base).await;
-    let app = meshmon_service::http::router(state);
 
+    // Nested path must be session-gated.
+    let app = meshmon_service::http::router(state.clone());
     let resp = app
         .oneshot(with_peer(
             Request::builder()
                 .method("GET")
                 .uri("/alertmanager/api/v2/status")
+                .body(Body::empty())
+                .unwrap(),
+            [203, 0, 113, 120],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Regression guard: the bare-root `/alertmanager/` registration must
+    // also sit behind `login_required!`. If the explicit `route_service`
+    // ever ends up outside the auth layer, unauthenticated probes would
+    // leak the AM SPA root.
+    let app = meshmon_service::http::router(state);
+    let resp = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method("GET")
+                .uri("/alertmanager/")
                 .body(Body::empty())
                 .unwrap(),
             [203, 0, 113, 120],
