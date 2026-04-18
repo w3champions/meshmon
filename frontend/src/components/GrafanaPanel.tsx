@@ -1,3 +1,4 @@
+import { memo, useEffect, useRef } from "react";
 import { buildGrafanaSoloUrl } from "@/lib/grafana-panels";
 import { cn } from "@/lib/utils";
 
@@ -14,7 +15,25 @@ interface GrafanaPanelProps {
   theme?: "light" | "dark";
 }
 
-export function GrafanaPanel({
+/**
+ * Shallow-compare two `vars` records. Two objects are equal when they have
+ * the same keys and each key holds the same primitive string value. This is
+ * the only meaningful equality for a `Record<string, string>` and avoids
+ * treating every parent re-render (which allocates a fresh object literal)
+ * as a prop change.
+ */
+function shallowEqVars(a: Record<string, string>, b: Record<string, string>): boolean {
+  if (a === b) return true;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const k of aKeys) {
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
+function GrafanaPanelImpl({
   dashboard,
   panelId,
   vars,
@@ -25,9 +44,31 @@ export function GrafanaPanel({
   theme = "light",
 }: GrafanaPanelProps) {
   const src = buildGrafanaSoloUrl({ uid: dashboard, panelId, vars, from, to, theme });
+  const ref = useRef<HTMLIFrameElement | null>(null);
+
+  // Update the iframe's `src` imperatively instead of letting React replace
+  // the `<iframe>` DOM node. Changing the `src` attribute on a rendered
+  // iframe swaps its document in place (preserving scroll / history), while
+  // remounting the element triggers a fresh network round-trip + visible
+  // flicker — exactly what users perceived as a "full page refresh" on
+  // protocol/range toggles.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Compare against the resolved absolute URL the browser exposes on
+    // `HTMLIFrameElement.src`; the input `src` is typically relative.
+    const resolved = new URL(src, window.location.href).href;
+    if (el.src !== resolved) {
+      el.src = src;
+    }
+  }, [src]);
+
   return (
     <iframe
+      ref={ref}
       title={title}
+      // Initial mount only; subsequent `src` changes flow through the effect
+      // above so the DOM node itself is preserved across prop updates.
       src={src}
       className={cn("h-56 w-full rounded border", className)}
       loading="lazy"
@@ -43,3 +84,21 @@ export function GrafanaPanel({
     />
   );
 }
+
+export const GrafanaPanel = memo(GrafanaPanelImpl, (prev, next) => {
+  // Shallow-compare each prop so the panel only re-renders when something
+  // that actually affects the rendered iframe changes. `vars` is a nested
+  // `Record<string, string>` — compare its entries, not its identity, so a
+  // fresh object literal from the parent doesn't force an unnecessary
+  // render.
+  return (
+    prev.dashboard === next.dashboard &&
+    prev.panelId === next.panelId &&
+    prev.from === next.from &&
+    prev.to === next.to &&
+    prev.theme === next.theme &&
+    prev.title === next.title &&
+    prev.className === next.className &&
+    shallowEqVars(prev.vars, next.vars)
+  );
+});
