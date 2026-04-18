@@ -504,7 +504,13 @@ impl Config {
             (grafana_url.as_deref(), "upstream.grafana_url"),
         ] {
             if let Some(u) = url {
-                reject_self_referential_upstream(u, &service.listen_addr, key, path)?;
+                reject_self_referential_upstream(
+                    u,
+                    &service.listen_addr,
+                    service.public_base_url.as_deref(),
+                    key,
+                    path,
+                )?;
             }
         }
         let upstream = UpstreamSection {
@@ -617,15 +623,21 @@ fn resolve_optional_secret(
 
 /// Reject an upstream URL that would cause the proxy handler to loop
 /// back into its own listen socket. A misconfigured operator who sets
-/// `grafana_url = "http://meshmon.example.com/grafana"` (the public
+/// `grafana_url = "https://meshmon.example.com/grafana"` (the public
 /// URL) instead of the internal address would recurse forever.
 ///
-/// Only rejects when scheme+host+port exactly match the service's own
-/// listen address (or `0.0.0.0` / `[::]` expanded to `127.0.0.1` /
-/// `[::1]` for bind-all cases).
+/// Checks two independent routes to the same listener:
+///  1. URL scheme+host+port match the internal listen address (or
+///     the loopback/localhost aliases that resolve to it).
+///  2. URL host (port-independent) matches the host from
+///     `service.public_base_url`, which identifies the externally
+///     advertised URL — the one that resolves back through the edge
+///     proxy onto this listener. Port remapping (e.g. 443 → 8080
+///     behind nginx) means an exact port match would miss this case.
 fn reject_self_referential_upstream(
     raw_url: &str,
     listen_addr: &std::net::SocketAddr,
+    public_base_url: Option<&str>,
     key: &str,
     path: &str,
 ) -> Result<(), BootError> {
@@ -636,38 +648,61 @@ fn reject_self_referential_upstream(
     let Some(host) = url.host_str() else {
         return Ok(());
     };
-    let port = url.port_or_known_default();
-    let Some(port) = port else { return Ok(()) };
 
-    if port != listen_addr.port() {
-        return Ok(());
+    // Check 1: same host + same internal port → direct recursion.
+    if let Some(port) = url.port_or_known_default() {
+        if port == listen_addr.port() {
+            let listen_hosts: &[&str] = match listen_addr.ip() {
+                std::net::IpAddr::V4(v4) if v4.is_unspecified() => &["127.0.0.1", "localhost"],
+                // IPv6 unspecified (`[::]`) is dual-stack on most OSes:
+                // an IPv4 client connecting to `127.0.0.1:<port>` lands
+                // on the same listener via v4-mapped-v6. Treat the v4
+                // loopback as self too.
+                std::net::IpAddr::V6(v6) if v6.is_unspecified() => {
+                    &["::1", "127.0.0.1", "localhost"]
+                }
+                // Explicit loopback binds still recurse when the
+                // operator writes the other loopback family alias or
+                // `localhost` — the resolver translates them all to
+                // the same local listener.
+                std::net::IpAddr::V4(v4) if v4.is_loopback() => &["::1", "localhost"],
+                std::net::IpAddr::V6(v6) if v6.is_loopback() => &["127.0.0.1", "localhost"],
+                _ => &[],
+            };
+            let own_ip = listen_addr.ip().to_string();
+            if host == own_ip || listen_hosts.contains(&host) {
+                return Err(BootError::ConfigInvalid {
+                    path: path.to_string(),
+                    reason: format!(
+                        "{key} `{raw_url}` recurses into meshmon's own listen address \
+                         ({listen_addr}); set it to the upstream's internal address instead"
+                    ),
+                });
+            }
+        }
     }
 
-    let listen_hosts: &[&str] = match listen_addr.ip() {
-        std::net::IpAddr::V4(v4) if v4.is_unspecified() => &["127.0.0.1", "localhost"],
-        // IPv6 unspecified (`[::]`) is dual-stack on most OSes: an
-        // IPv4 client connecting to `127.0.0.1:<port>` lands on the
-        // same listener via v4-mapped-v6. Treat the v4 loopback as
-        // self too.
-        std::net::IpAddr::V6(v6) if v6.is_unspecified() => &["::1", "127.0.0.1", "localhost"],
-        // Explicit loopback binds still recurse when the operator
-        // writes `localhost` (or the other-family loopback alias) in
-        // the upstream URL — resolver translates both to the same
-        // local listener.
-        std::net::IpAddr::V4(v4) if v4.is_loopback() => &["::1", "localhost"],
-        std::net::IpAddr::V6(v6) if v6.is_loopback() => &["127.0.0.1", "localhost"],
-        _ => &[],
-    };
-    let own_ip = listen_addr.ip().to_string();
-    if host == own_ip || listen_hosts.contains(&host) {
-        return Err(BootError::ConfigInvalid {
-            path: path.to_string(),
-            reason: format!(
-                "{key} `{raw_url}` recurses into meshmon's own listen address \
-                 ({listen_addr}); set it to the upstream's internal address instead"
-            ),
-        });
+    // Check 2: upstream host matches the public-facing host, even on a
+    // different port. Behind nginx, public 443 + internal 8080 would
+    // slip past check 1 but still recurse (client → nginx → meshmon →
+    // /grafana/* → nginx → meshmon → ...).
+    if let Some(public) = public_base_url {
+        if let Ok(pub_url) = url::Url::parse(public) {
+            if let Some(pub_host) = pub_url.host_str() {
+                if host == pub_host {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: format!(
+                            "{key} `{raw_url}` resolves to meshmon's public URL \
+                             (`{public}`) and would recurse through the edge proxy; \
+                             set it to the upstream's internal address instead"
+                        ),
+                    });
+                }
+            }
+        }
     }
+
     Ok(())
 }
 
@@ -920,6 +955,34 @@ grafana_url = "http://127.0.0.1:8080/grafana"
         );
         let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
         assert!(matches!(err, BootError::ConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn upstream_pointing_at_public_url_is_rejected_even_on_different_port() {
+        // Common nginx deployment: internal listener on 8080, public
+        // URL on 443. An operator who pastes the public URL into
+        // `grafana_url` still recurses (through nginx back into
+        // meshmon), but check-1 (exact port equality) would miss it.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+public_base_url = "https://meshmon.example.com"
+
+[upstream]
+grafana_url = "https://meshmon.example.com/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("public URL") || reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
