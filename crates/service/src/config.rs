@@ -646,6 +646,12 @@ fn reject_self_referential_upstream(
     let listen_hosts: &[&str] = match listen_addr.ip() {
         std::net::IpAddr::V4(v4) if v4.is_unspecified() => &["127.0.0.1", "localhost"],
         std::net::IpAddr::V6(v6) if v6.is_unspecified() => &["::1", "localhost"],
+        // Explicit loopback binds still recurse when the operator
+        // writes `localhost` (or the other-family loopback alias) in
+        // the upstream URL — resolver translates both to the same
+        // local listener.
+        std::net::IpAddr::V4(v4) if v4.is_loopback() => &["::1", "localhost"],
+        std::net::IpAddr::V6(v6) if v6.is_loopback() => &["127.0.0.1", "localhost"],
         _ => &[],
     };
     let own_ip = listen_addr.ip().to_string();
@@ -848,6 +854,50 @@ grafana_url = "http://127.0.0.1:8080"
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn upstream_localhost_on_loopback_listen_is_rejected() {
+        // Common operator footgun: bind to 127.0.0.1 and point the
+        // upstream at `http://localhost:<same-port>/...`. The names
+        // are different strings but resolve to the same socket, so
+        // the proxy still recurses into itself.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "127.0.0.1:8080"
+
+[upstream]
+grafana_url = "http://localhost:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("recurs"),
+                    "expected recursion-guard message, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_alt_loopback_family_on_loopback_listen_is_rejected() {
+        // Binding to ::1 while setting the upstream to 127.0.0.1
+        // (or vice-versa) is the same recursion by a different name.
+        let toml = format!(
+            r#"{MIN_TOML}
+[service]
+listen_addr = "[::1]:8080"
+
+[upstream]
+grafana_url = "http://127.0.0.1:8080/grafana"
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(matches!(err, BootError::ConfigInvalid { .. }));
     }
 
     #[test]
