@@ -18,10 +18,9 @@ interface RadioDotProps {
   checked: boolean;
   onChange: () => void;
   label: string;
-  group: string;
 }
 
-function RadioDot({ checked, onChange, label, group }: RadioDotProps) {
+function RadioDot({ checked, onChange, label }: RadioDotProps) {
   return (
     /* biome-ignore lint/a11y/useSemanticElements: a 32x32 themed click target that needs button styling; native <input type="radio"> cannot be sized/themed consistently */
     <button
@@ -29,20 +28,19 @@ function RadioDot({ checked, onChange, label, group }: RadioDotProps) {
       role="radio"
       aria-checked={checked}
       aria-label={label}
-      data-group={group}
       onClick={onChange}
-      className={
-        "inline-flex h-8 w-8 items-center justify-center rounded-full border border-border " +
-        "transition-colors hover:bg-muted focus-visible:outline-none " +
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-      }
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-full border border-border",
+        "transition-colors hover:bg-muted",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+      )}
     >
       <span
         aria-hidden="true"
-        className={
-          "block h-3 w-3 rounded-full transition-colors " +
-          (checked ? "bg-primary" : "bg-transparent")
-        }
+        className={cn(
+          "block h-3 w-3 rounded-full transition-colors",
+          checked ? "bg-primary" : "bg-transparent",
+        )}
       />
     </button>
   );
@@ -106,7 +104,6 @@ export function RouteHistoryTable({
               </TableCell>
               <TableCell>
                 <RadioDot
-                  group="a"
                   checked={a === s.id}
                   onChange={() => setA(s.id)}
                   label={`Pick as A (id ${s.id})`}
@@ -114,7 +111,6 @@ export function RouteHistoryTable({
               </TableCell>
               <TableCell>
                 <RadioDot
-                  group="b"
                   checked={b === s.id}
                   onChange={() => setB(s.id)}
                   label={`Pick as B (id ${s.id})`}
