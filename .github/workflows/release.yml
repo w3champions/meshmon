@@ -80,16 +80,18 @@ jobs:
             type=registry,ref=ghcr.io/w3champions/${{ matrix.image }}:buildcache-arm64,mode=max,image-manifest=true
           provenance: false
 
-  # scan runs after publish; :latest + :main-<sha> are already live in GHCR
-  # by the time this gate fires. Failures block promotion decisions, not
-  # the push itself.
+  # scan runs after publish; :latest + :main-<sha> and :v<ver> are
+  # already live in GHCR by the time this gate fires. Failures block
+  # promotion decisions, not the push itself.
   scan:
     name: Trivy image scan
     needs: publish
     permissions:
       contents: read
       packages: read
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -104,7 +106,13 @@ jobs:
         env:
           TRIVY_PLATFORM: linux/amd64
         with:
-          image-ref: ghcr.io/w3champions/${{ matrix.image }}:main-${{ github.sha }}
+          # On main push: scan the :main-<sha> immutable tag just published.
+          # On v* tag push: scan the :v<ver> tag just published.
+          image-ref: >-
+            ghcr.io/w3champions/${{ matrix.image }}:${{
+              github.ref_type == 'tag' && github.ref_name ||
+              format('main-{0}', github.sha)
+            }}
           format: table
           exit-code: '1'
           severity: CRITICAL
