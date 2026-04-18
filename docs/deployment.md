@@ -75,8 +75,9 @@ Pinning example (edit `deploy/docker-compose.yml`):
 ```yaml
 services:
   meshmon-service:
-    # Replace with an actual commit SHA from ghcr.io/w3champions/meshmon-service.
-    image: ghcr.io/w3champions/meshmon-service:main-deadbeef1234
+    # Replace <sha> with the full 40-character commit SHA emitted by the
+    # release workflow. See the image's GHCR tag list for current values.
+    image: ghcr.io/w3champions/meshmon-service:main-<sha>
 ```
 
 Upgrade by editing the pin and `docker compose up -d --pull always meshmon-service`.
