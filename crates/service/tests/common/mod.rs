@@ -529,6 +529,43 @@ alertmanager_url = "{alertmanager_url}"
     )
 }
 
+/// Same as [`state_with_admin`] but with `upstream.grafana_url` set.
+/// Use this for Grafana-proxy tests that need the upstream URL configured.
+pub async fn state_with_admin_and_grafana(pool: PgPool, grafana_url: &str) -> AppState {
+    let toml = format!(
+        r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[probing]
+udp_probe_secret = "hex:0011223344556677"
+
+[service]
+trust_forwarded_headers = true
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+
+[upstream]
+grafana_url = "{grafana_url}"
+"#
+    );
+    let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+    let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+    let (_tx, rx) = watch::channel(cfg);
+    let ingestion = dummy_ingestion(pool.clone());
+    let registry = dummy_registry(pool.clone());
+    AppState::new(
+        swap,
+        rx,
+        pool,
+        ingestion,
+        registry,
+        test_prometheus_handle().await,
+    )
+}
+
 /// Same as [`state_with_admin`] but with `upstream.vm_url` set.
 /// Use this for metrics-proxy tests that need the VM URL configured.
 pub async fn state_with_admin_and_vm(pool: PgPool, vm_url: &str) -> AppState {
