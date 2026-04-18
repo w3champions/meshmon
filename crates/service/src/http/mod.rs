@@ -129,10 +129,22 @@ pub fn router(state: AppState) -> Router {
     // wiring layer so every request hits the session gate before the
     // proxy middleware runs — identical posture to the `/api/*`
     // surface.
+    //
+    // NOTE: we use `.layer(...)` here, not `.route_layer(...)`.
+    // `axum-reverse-proxy` registers its upstream via
+    // `Router::new().fallback_service(proxy)` (see the crate's
+    // `impl From<ReverseProxy<_>> for Router<_>`), meaning the sub-router
+    // contains no explicit routes — only a fallback service.
+    // `Router::route_layer` applies only to explicit routes and panics
+    // at build time when the router has none ("Adding a route_layer
+    // before any routes is a no-op"). `.layer` wraps the entire
+    // service, fallback included, so every `/grafana/*` and
+    // `/alertmanager/*` hop traverses `login_required!` before the
+    // per-proxy header middleware runs.
     let proxies = Router::<AppState>::new()
         .merge(grafana_proxy::build_router(state.clone()))
         .merge(alertmanager_proxy::build_router(state.clone()))
-        .route_layer(login_required!(ConfigAuthBackend));
+        .layer(login_required!(ConfigAuthBackend));
 
     let grpc_router = crate::grpc::routes(state.clone());
 
