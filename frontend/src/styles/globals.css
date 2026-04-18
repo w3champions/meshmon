@@ -1,6 +1,14 @@
 @import "leaflet/dist/leaflet.css";
 @import "tailwindcss";
 
+/* Dark is our default palette (see `@theme` below); `.light` on <html> is the
+   override class. Tailwind v4's built-in `dark` variant is bound to
+   `prefers-color-scheme: dark`, which is NOT what we want — `dark:` utilities
+   (e.g. `dark:text-amber-100`) must activate whenever the app is in dark mode,
+   i.e. whenever <html> does NOT carry `.light`. Redefine the variant so it
+   fires for elements that are neither `.light` nor descendants of `.light`. */
+@custom-variant dark (&:not(:where(.light, .light *)));
+
 @theme {
   --color-background: hsl(240 10% 3.9%);
   --color-foreground: hsl(0 0% 98%);
