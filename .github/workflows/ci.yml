@@ -194,12 +194,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: rust
     timeout-minutes: 25
-    # Runs on every PR and on pushes to main. Path-based gating would
-    # halve CI cost but `github.event.pull_request.files` is not a
-    # first-class context field — a proper filter requires
-    # `dorny/paths-filter@v3` or a top-level `on.pull_request.paths`.
-    # Deferred to a follow-up task once we see whether the job's
-    # runtime justifies the extra indirection.
     steps:
       - name: Checkout
         uses: actions/checkout@v5
