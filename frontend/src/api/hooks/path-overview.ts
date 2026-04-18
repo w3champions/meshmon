@@ -1,4 +1,4 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema.gen";
 import type { TimeRangeKey } from "@/lib/time-range";
@@ -57,11 +57,21 @@ export function usePathOverview(opts: UsePathOverviewOpts) {
       if (!data) throw new Error("empty response");
       return data;
     },
-    // Keep the prior result rendered while a new key fetches. Without this,
-    // every protocol/range change flips `isPending` on → PathDetail returns a
-    // top-level skeleton → the whole page visually "refreshes". With
-    // `keepPreviousData`, the page stays put and `isFetching` narrates progress.
-    placeholderData: keepPreviousData,
+    // Keep the prior result rendered while a new key fetches — but only when
+    // the underlying (source, target) pair is unchanged. Protocol/range changes
+    // on the same path should not flash a skeleton, while navigating to a
+    // different pair must fall back to a loading state rather than briefly
+    // rendering the previous path's data against the new URL.
+    placeholderData: (previous, previousQuery) => {
+      if (!previous || !previousQuery) return undefined;
+      const [, prevSource, prevTarget] = previousQuery.queryKey as [
+        string,
+        string,
+        string,
+        ...unknown[],
+      ];
+      return prevSource === source && prevTarget === target ? previous : undefined;
+    },
     refetchInterval: 60_000,
   });
 }
