@@ -10,9 +10,8 @@
 # copy, use `scripts/build-release.sh` and run the resulting binary
 # directly instead.
 #
-# Not for production. For the full stack (vmalert, alertmanager) see
-# deploy/docker-compose.yml once T24 fills it in. Grafana is included
-# here so the frontend's dashboard iframes render during dev.
+# Not for production. For the full stack (vmalert, alertmanager, grafana)
+# see deploy/docker-compose.yml once T24 fills it in.
 
 set -euo pipefail
 
@@ -32,22 +31,9 @@ ADMIN_USER=${MESHMON_SMOKE_USER:-admin}
 ADMIN_PASSWORD=${MESHMON_SMOKE_PASSWORD:-smoketest}
 SERVICE_LOG=${MESHMON_SMOKE_SERVICE_LOG:-/tmp/meshmon-smoke-service.log}
 
-GRAFANA_PORT=${MESHMON_SMOKE_GRAFANA_PORT:-3000}
-GRAFANA_CONTAINER=meshmon-smoke-grafana
-
-# Grafana tag is pinned in deploy/versions.env alongside VM/VMALERT/ALERTMANAGER.
-if [[ -f deploy/versions.env ]]; then
-  set -a
-  . ./deploy/versions.env
-  set +a
-fi
-: "${GRAFANA_TAG:?GRAFANA_TAG must be set in deploy/versions.env}"
-GRAFANA_IMAGE="grafana/grafana-oss:${GRAFANA_TAG}"
-
 TIMESCALE_IMAGE=timescale/timescaledb:2.26.3-pg16
 VM_IMAGE=victoriametrics/victoria-metrics:v1.104.0
 
-GRAFANA_PROVISIONING_DIR=
 SERVICE_PID=
 teardown() {
   echo
@@ -56,12 +42,8 @@ teardown() {
     kill "$SERVICE_PID" 2>/dev/null || true
     wait "$SERVICE_PID" 2>/dev/null || true
   fi
-  docker rm -f "$GRAFANA_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$VM_CONTAINER" >/dev/null 2>&1 || true
-  if [[ -n "$GRAFANA_PROVISIONING_DIR" && -d "$GRAFANA_PROVISIONING_DIR" ]]; then
-    rm -rf "$GRAFANA_PROVISIONING_DIR"
-  fi
 }
 trap teardown EXIT INT TERM
 
@@ -72,7 +54,6 @@ require() {
   }
 }
 require docker
-require envsubst
 require cargo
 require argon2
 require openssl
@@ -100,88 +81,6 @@ echo "[smoke] waiting for VictoriaMetrics on :${VM_PORT}"
 until curl -fs "http://127.0.0.1:${VM_PORT}/health" >/dev/null 2>&1; do
   sleep 0.5
 done
-
-# ---- Grafana ------------------------------------------------------------
-# Provision the VM datasource from the canonical template + the three
-# dashboards from grafana/dashboards/ so the frontend's iframes render.
-# Anonymous viewer + allow_embedding + disabled login form so the dev UX
-# is zero-interaction.
-GRAFANA_PROVISIONING_DIR=$(mktemp -d "/tmp/meshmon-smoke-grafana.XXXXXX")
-mkdir -p "$GRAFANA_PROVISIONING_DIR/datasources" "$GRAFANA_PROVISIONING_DIR/dashboards"
-
-# Materialize the datasource YAML from the canonical template via envsubst,
-# then strip the MeshmonPostgres entries (both the block and the
-# deleteDatasources inline entry) since smoke doesn't back Grafana with PG.
-MESHMON_VM_URL="http://host.docker.internal:${VM_PORT}" \
-MESHMON_PG_URL="" \
-MESHMON_PG_USER="" \
-MESHMON_PG_PASSWORD="" \
-MESHMON_PG_DATABASE="" \
-envsubst < grafana/provisioning/datasources.yml.template \
-  > "$GRAFANA_PROVISIONING_DIR/datasources/meshmon.yml"
-
-# NOTE: This stripping logic is duplicated in scripts/smoke-dashboards.sh.
-# If the datasources template gains new datasource blocks, update both.
-node -e "
-const fs=require('node:fs');
-const yaml=fs.readFileSync(process.argv[1],'utf8');
-const out=yaml
-  .replace(/\n  - name: MeshmonPostgres[\s\S]*?(?=\n\w|$)/, '')
-  .replace(/\n  - \{[^}]*name: MeshmonPostgres[^}]*\}[^\n]*/, '');
-fs.writeFileSync(process.argv[1], out);
-" "$GRAFANA_PROVISIONING_DIR/datasources/meshmon.yml"
-
-# File-based dashboard provider pointing at the mounted grafana/dashboards/.
-cat > "$GRAFANA_PROVISIONING_DIR/dashboards/meshmon.yml" <<'YAML'
-apiVersion: 1
-providers:
-  - name: meshmon
-    orgId: 1
-    folder: Meshmon
-    type: file
-    disableDeletion: false
-    updateIntervalSeconds: 10
-    allowUiUpdates: false
-    options:
-      path: /var/lib/grafana/dashboards
-      foldersFromFilesStructure: false
-YAML
-
-docker rm -f "$GRAFANA_CONTAINER" >/dev/null 2>&1 || true
-# Requires Docker Engine >= 20.10 for host-gateway resolution.
-# Docker Desktop injects host.docker.internal automatically; the flag is
-# a harmless no-op there.
-docker run --rm -d --name "$GRAFANA_CONTAINER" \
-  --add-host=host.docker.internal:host-gateway \
-  -e GF_SECURITY_ADMIN_USER=admin \
-  -e GF_SECURITY_ADMIN_PASSWORD=admin \
-  -e GF_SECURITY_ALLOW_EMBEDDING=true \
-  -e GF_AUTH_ANONYMOUS_ENABLED=true \
-  -e "GF_AUTH_ANONYMOUS_ORG_NAME=Main Org." \
-  -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
-  -e GF_AUTH_DISABLE_LOGIN_FORM=true \
-  -e GF_USERS_ALLOW_SIGN_UP=false \
-  -e GF_LOG_LEVEL=warn \
-  -v "$GRAFANA_PROVISIONING_DIR:/etc/grafana/provisioning:ro" \
-  -v "$(pwd)/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
-  -p "127.0.0.1:${GRAFANA_PORT}:3000" \
-  "$GRAFANA_IMAGE" >/dev/null
-
-echo "[smoke] waiting for Grafana on :${GRAFANA_PORT}"
-ok=false
-for i in {1..60}; do
-  body=$(curl -fsS "http://127.0.0.1:${GRAFANA_PORT}/api/health" 2>/dev/null || true)
-  if [[ -n "$body" ]] && node -e "const h=JSON.parse(process.argv[1]); if (h.database!=='ok') process.exit(1);" "$body" 2>/dev/null; then
-    ok=true
-    break
-  fi
-  sleep 1
-done
-if ! $ok; then
-  echo "[smoke] Grafana failed to become healthy in 60 s"
-  docker logs "$GRAFANA_CONTAINER" 2>&1 | tail -30
-  exit 1
-fi
 
 # ---- Config -------------------------------------------------------------
 echo "[smoke] hashing admin password"
@@ -222,14 +121,6 @@ refresh_interval_seconds = 10
 
 [probing]
 udp_probe_secret = "hex:0123456789abcdef"
-
-[web]
-grafana_base_url = "http://127.0.0.1:${GRAFANA_PORT}"
-
-[web.grafana_dashboards]
-meshmon-path     = "meshmon-path"
-meshmon-overview = "meshmon-overview"
-meshmon-agent    = "meshmon-agent"
 EOF
 
 # ---- Migrations + seed data --------------------------------------------
@@ -364,7 +255,6 @@ cat <<EOF
 [smoke] infra ready
   Postgres:          127.0.0.1:${DB_PORT}   (user: meshmon, db: meshmon)
   VictoriaMetrics:   127.0.0.1:${VM_PORT}
-  Grafana:           127.0.0.1:${GRAFANA_PORT}   (anonymous viewer; admin/admin for UI)
   Service:           127.0.0.1:${SERVICE_PORT}   (log: ${SERVICE_LOG})
   Config:            ${CONFIG_PATH}
 

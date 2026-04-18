@@ -51,22 +51,46 @@ edited copy.
 
 UIDs are pinned because every dashboard panel references them by UID.
 
-## Grafana prerequisites
+## Grafana auth posture
 
-The frontend iframes panels via `/d-solo/<uid>?…&kiosk`. Two Grafana settings
-are required:
+The frontend iframes panels via `/d-solo/<uid>?…&kiosk`. Two non-negotiable
+constraints govern how Grafana must be deployed:
 
-1. `[security] allow_embedding = true` in `grafana.ini` (or
-   `GF_SECURITY_ALLOW_EMBEDDING=true` env var) — lets the SPA embed panels
-   across origins.
-2. Anonymous or cookie-shared viewer access for the meshmon SPA's origin.
-   Typical options: Grafana Anonymous Auth (read-only viewer role),
-   OAuth-via-reverse-proxy, or a shared cookie if the two services are
-   same-origin.
+1. **No anonymous access**, in any environment. The dashboards expose the
+   full agent topology, IP addresses, and probe history; whoever can reach
+   Grafana can read it all and pivot through Explore against the
+   `MeshmonVM` / `MeshmonPostgres` datasources directly.
+2. **No second login.** The user authenticates against meshmon once;
+   iframes must inherit that session. Asking the user to log into Grafana
+   separately is not an acceptable UX.
 
-When a future task wires up a bundled Grafana under `deploy/docker-compose.yml`
-it must configure both settings. Operators using an external Grafana
-configure them once per environment as described above.
+The sanctioned architecture is **meshmon-service as a session-authenticated
+reverse proxy in front of an internal Grafana**, with Grafana running in
+`auth.proxy` mode:
+
+- Grafana binds to localhost / a docker bridge — never reachable from the
+  operator network directly.
+- Meshmon-service exposes `/grafana/*`, gated by the same tower-sessions
+  middleware as every other endpoint, and forwards requests upstream with
+  an injected `X-WEBAUTH-USER` header naming the session's username.
+- Grafana `[auth.proxy]` is enabled with `header_name = X-WEBAUTH-USER`,
+  `whitelist = 127.0.0.1` (so only the meshmon process can speak that
+  header), and `auto_sign_up = true` so user records appear on first
+  request without a manual provisioning step.
+- Same-origin from the browser's POV (`grafana_base_url = "/grafana"`).
+  CSP `frame-src 'self'` is sufficient; `allow_embedding = true` strictly
+  speaking not required.
+
+This mirrors the established Alertmanager-proxy pattern in
+`crates/service/src/http/alerts_proxy.rs`: meshmon plays "authenticated
+edge to internal infra," and the upstream's own auth posture stays
+trivial because nothing else can reach it.
+
+The proxy code itself is **not yet implemented**; it is tracked separately
+and blocks the bundled-deployment task. Until it lands, the iframe path
+is non-functional in any environment that does not already terminate auth
+in front of Grafana, and the dev smoke harness intentionally does not
+ship Grafana — the SPA renders a "Grafana not configured" placeholder.
 
 Meshmon iframes pass `theme=light` on the Report page so printed PDFs stay
 legible. Grafana honours that URL parameter regardless of the dashboard's

@@ -123,8 +123,9 @@ Validate on every change:
 ./scripts/smoke-dashboards.sh      # optional: VM + Grafana smoke harness
 ```
 
-See `grafana/README.md` for the dashboard contract, Grafana prerequisites
-(`allow_embedding`, anonymous viewer), and the editing workflow.
+See `grafana/README.md` for the dashboard contract, the auth posture
+(meshmon proxies an internal Grafana in `auth.proxy` mode — anonymous
+access is forbidden), and the editing workflow.
 
 ## Conventions
 
