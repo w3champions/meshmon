@@ -30,6 +30,10 @@ RUN cargo chef cook --release --recipe-path recipe.json --bin meshmon-service
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
 COPY xtask ./xtask
+# sqlx's query! / query_as! macros resolve against the committed
+# offline cache; without it the build tries to reach a live database.
+COPY .sqlx ./.sqlx
+ENV SQLX_OFFLINE=true
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 RUN cargo build --release --bin meshmon-service
 
