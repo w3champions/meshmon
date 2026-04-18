@@ -16,7 +16,8 @@
 
 use crate::http::auth;
 use crate::http::proxy_common::{
-    apply_forwarded_headers, strip_client_webauth_headers, upstream_missing_response,
+    apply_forwarded_headers, strip_client_webauth_headers, strip_session_cookie,
+    upstream_missing_response,
 };
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, State};
@@ -72,6 +73,7 @@ async fn inject_am_headers(
     // AM doesn't consume the header, but leaking operator-typed-in
     // values into AM access logs is still noise.
     strip_client_webauth_headers(&mut parts.headers);
+    strip_session_cookie(&mut parts.headers);
     apply_forwarded_headers(&mut parts.headers, real_ip, trust);
 
     req = Request::from_parts(parts, body);

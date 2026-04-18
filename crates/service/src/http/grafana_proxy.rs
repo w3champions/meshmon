@@ -12,7 +12,8 @@
 
 use crate::http::auth::{self, AuthSession};
 use crate::http::proxy_common::{
-    apply_forwarded_headers, strip_client_webauth_headers, upstream_missing_response,
+    apply_forwarded_headers, strip_client_webauth_headers, strip_session_cookie,
+    upstream_missing_response,
 };
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, State};
@@ -77,6 +78,7 @@ async fn inject_grafana_headers(
     let real_ip = auth::client_ip(&parts, trust).unwrap_or_else(|| peer.ip());
 
     strip_client_webauth_headers(&mut parts.headers);
+    strip_session_cookie(&mut parts.headers);
 
     parts.headers.insert(
         HeaderName::from_static("x-webauth-user"),

@@ -11,6 +11,9 @@
 //!   Grafana proxy. Runs BEFORE the `X-WEBAUTH-USER` injection so an
 //!   attacker with a session cannot also supply their own identity
 //!   header.
+//! - **`strip_session_cookie`** — drop the meshmon session cookie
+//!   from the forwarded `Cookie` header so the bearer-equivalent
+//!   secret doesn't land in upstream access logs.
 //! - **`upstream_missing_response`** — canonical 503 body when
 //!   `[upstream].grafana_url` / `.alertmanager_url` is unset.
 //!
@@ -19,6 +22,7 @@
 //! explicitly. Keep it layered once at the proxy boundary, not
 //! reimplemented here.
 
+use crate::http::auth::SESSION_COOKIE_NAME;
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -41,6 +45,41 @@ pub(crate) fn strip_client_webauth_headers(headers: &mut HeaderMap) {
         .collect();
     for k in to_remove {
         headers.remove(k);
+    }
+}
+
+/// Drop the meshmon session cookie from the forwarded `Cookie` header.
+///
+/// The cookie is a bearer-equivalent secret that upstream services
+/// (Grafana / Alertmanager) never consume, but leave sitting in their
+/// access logs — a "here's the thing to steal" pointer for any
+/// operator doing a debug capture on the upstream side. Strip it at
+/// the trust boundary, exactly like `strip_client_webauth_headers`.
+///
+/// Preserves every other cookie in the header so Grafana's own
+/// `grafana_session` cookie (and anything else the browser sends) still
+/// reaches the upstream.
+pub(crate) fn strip_session_cookie(headers: &mut HeaderMap) {
+    let cookie_header = HeaderName::from_static("cookie");
+    let inbound: Vec<HeaderValue> = headers.get_all(&cookie_header).iter().cloned().collect();
+    if inbound.is_empty() {
+        return;
+    }
+
+    let prefix = format!("{SESSION_COOKIE_NAME}=");
+    let remaining: Vec<String> = inbound
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(';').map(|s| s.trim().to_owned()))
+        .filter(|pair| !pair.is_empty() && !pair.starts_with(&prefix))
+        .collect();
+
+    headers.remove(&cookie_header);
+    if remaining.is_empty() {
+        return;
+    }
+    if let Ok(combined) = HeaderValue::try_from(remaining.join("; ")) {
+        headers.insert(cookie_header, combined);
     }
 }
 
@@ -132,6 +171,56 @@ mod tests {
         assert!(h.get("x-webauth-user").is_none());
         assert!(h.get("x-webauth-email").is_none());
         assert_eq!(h.get("cookie").unwrap(), "session=abc");
+    }
+
+    #[test]
+    fn strip_session_cookie_removes_only_meshmon_session() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "cookie",
+            HeaderValue::from_static("meshmon_session=deadbeef; grafana_session=abc; other=keep"),
+        );
+        strip_session_cookie(&mut h);
+        let combined = h.get("cookie").unwrap().to_str().unwrap();
+        assert!(
+            !combined.contains("meshmon_session"),
+            "meshmon_session must be removed, got: {combined}"
+        );
+        assert!(combined.contains("grafana_session=abc"));
+        assert!(combined.contains("other=keep"));
+    }
+
+    #[test]
+    fn strip_session_cookie_removes_header_when_only_cookie() {
+        let mut h = HeaderMap::new();
+        h.insert("cookie", HeaderValue::from_static("meshmon_session=xyz"));
+        strip_session_cookie(&mut h);
+        assert!(
+            h.get("cookie").is_none(),
+            "empty cookie header should be removed entirely",
+        );
+    }
+
+    #[test]
+    fn strip_session_cookie_noop_when_missing() {
+        let mut h = HeaderMap::new();
+        h.insert("cookie", HeaderValue::from_static("grafana_session=abc"));
+        strip_session_cookie(&mut h);
+        assert_eq!(h.get("cookie").unwrap(), "grafana_session=abc");
+    }
+
+    #[test]
+    fn strip_session_cookie_handles_multiple_cookie_headers() {
+        // RFC 6265 forbids multiple Cookie headers from the client,
+        // but axum/hyper accept them — fold both into a single
+        // filtered output.
+        let mut h = HeaderMap::new();
+        h.append("cookie", HeaderValue::from_static("meshmon_session=a"));
+        h.append("cookie", HeaderValue::from_static("grafana_session=b"));
+        strip_session_cookie(&mut h);
+        let values: Vec<_> = h.get_all("cookie").iter().collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], "grafana_session=b");
     }
 
     #[test]

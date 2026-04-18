@@ -384,8 +384,14 @@ pub async fn logout(mut auth_session: AuthSession) -> axum::response::Response {
     StatusCode::OK.into_response()
 }
 
+/// Name of the session cookie emitted by [`session_layer`]. Referenced
+/// by the proxy middleware to strip the cookie from requests forwarded
+/// to upstream (Grafana / Alertmanager) so the bearer-equivalent secret
+/// doesn't show up in upstream access logs.
+pub const SESSION_COOKIE_NAME: &str = "meshmon_session";
+
 /// Build the tower-sessions middleware stack: in-memory store, cookie name
-/// `meshmon_session`, 30-day rolling expiry, `Secure`+`HttpOnly`+`SameSite=Lax`.
+/// [`SESSION_COOKIE_NAME`], 30-day rolling expiry, `Secure`+`HttpOnly`+`SameSite=Lax`.
 ///
 /// Returns the store handle alongside the layer so callers can keep a
 /// reference for future migrations to a persistent store. Note:
@@ -404,7 +410,7 @@ pub fn session_layer() -> (
 
     let store = MemoryStore::default();
     let layer = SessionManagerLayer::new(store.clone())
-        .with_name("meshmon_session")
+        .with_name(SESSION_COOKIE_NAME)
         .with_secure(true)
         .with_http_only(true)
         .with_same_site(SameSite::Lax)
