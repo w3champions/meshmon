@@ -17,30 +17,36 @@ pre-commit:
   parallel: true
   commands:
     rustfmt:
+      # Runs on any .rs diff; cargo fmt --all checks the whole workspace (fast, no per-file pre-filter needed).
       glob: "*.rs"
       run: cargo fmt --all -- --check
       stage_fixed: false
 
     biome:
+      # Scoped to frontend/src/** because biome.json lives under frontend/ and only covers frontend TS/JS/JSON.
       root: "frontend/"
       glob: "src/**/*.{ts,tsx,js,jsx,json}"
       run: npx biome check --no-errors-on-unmatched {staged_files}
 
     yamllint:
+      # Scoped to deploy/ to match the CI yamllint job's scope; other YAML is covered by actionlint or has no applicable schema.
       glob: "deploy/**/*.{yml,yaml}"
       run: yamllint -c .yamllint.yml {staged_files}
 
     shellcheck:
+      # Scoped to scripts/ to match the CI shellcheck job's scope; ad-hoc scripts belong in a separate PR.
       glob: "scripts/*.sh"
       run: shellcheck --severity=warning {staged_files}
 
     actionlint:
+      # Scoped to .github/workflows/ because that's where workflows live (matches CI's actionlint job).
       glob: ".github/workflows/*.{yml,yaml}"
       run: actionlint {staged_files}
 
 pre-push:
   commands:
     cargo-check:
+      glob: "*.rs"
       run: cargo check --workspace --all-targets
-      # Last-line defense before pushing. Skipped automatically if not
-      # running inside the Rust workspace (no-op fallback).
+      # Last-line defense before pushing. Only fires when a .rs file
+      # is in the pushed diff; frontend-only pushes skip this entirely.
