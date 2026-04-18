@@ -112,12 +112,16 @@ jobs:
 
       - name: Resolve digest ref
         id: ref
+        shell: bash
         run: |
-          digest=$(ls /tmp/digest | head -n1)
-          if [ -z "${digest}" ]; then
+          set -euo pipefail
+          shopt -s nullglob
+          files=(/tmp/digest/*)
+          if [ ${#files[@]} -eq 0 ]; then
             echo "::error::no digest artifact present for ${{ matrix.image }}"
             exit 1
           fi
+          digest=$(basename "${files[0]}")
           echo "image=ghcr.io/w3champions/${{ matrix.image }}@sha256:${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Run Trivy scan (amd64 only — arch-invariant for our base images)
@@ -211,14 +215,24 @@ jobs:
             type=sha,prefix=dispatch-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
-        working-directory: /tmp/digests
         shell: bash
         run: |
           set -euo pipefail
           shopt -s failglob
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          tag_args=()
+          for t in "${tags[@]}"; do
+            tag_args+=(-t "$t")
+          done
+
+          source_args=()
+          for f in /tmp/digests/*; do
+            digest=$(basename "$f")
+            source_args+=("${REGISTRY_IMAGE}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${source_args[@]}"
 
       - name: Inspect manifest
         run: docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
