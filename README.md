@@ -67,18 +67,35 @@ cargo run --bin meshmon-agent
 
 ## Quick start (Docker)
 
-```bash
-# Build the images
-docker build -f docker/Dockerfile.service -t meshmon-service:dev .
-docker build -f docker/Dockerfile.agent   -t meshmon-agent:dev   .
+> ⚠️ **Do not expose this on the public internet without TLS.** See
+> [`docs/deployment.md`](docs/deployment.md) § Enabling TLS for the two
+> supported TLS paths. The block below is a localhost-only bootstrap.
 
-# Standalone stack
+```bash
+# 1. Configure secrets.
 cp deploy/.env.example deploy/.env
 $EDITOR deploy/.env
-docker compose -f deploy/docker-compose.yml up -d
+
+cp deploy/meshmon.example.toml deploy/meshmon.toml
+
+# 2. Bring up the bundled stack (service + Postgres + VM + vmalert + AM + bundled Grafana).
+cd deploy && docker compose up -d           # pulls ghcr.io/w3champions/* images
+# or:
+cd deploy && docker compose up -d --build   # builds meshmon-service + meshmon-grafana locally
+
+# 3. Log in at http://localhost:8080/ as admin.
 ```
 
-See `deploy/meshmon.example.toml` for the service configuration surface.
+See `deploy/meshmon.example.toml` for the full service configuration
+surface and [`docs/deployment.md`](docs/deployment.md) for the
+end-to-end OSS deployment guide (TLS, agent run instructions,
+external-Grafana datasource wiring, vmalert-vs-AM explainer).
+
+For local frontend + backend iteration with HMR:
+
+```bash
+./scripts/dev.sh
+```
 
 ## Running the service
 
