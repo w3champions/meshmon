@@ -84,6 +84,71 @@ surface and [`docs/deployment.md`](docs/deployment.md) for the
 end-to-end OSS deployment guide (TLS, agent run instructions,
 external-Grafana datasource wiring, vmalert-vs-AM explainer).
 
+## Published images
+
+Three images publish to GHCR on every push to `main` and on tagged releases,
+built for `linux/amd64` and `linux/arm64`:
+
+| Image | Pull command |
+|---|---|
+| Service (API + embedded SPA) | `docker pull ghcr.io/w3champions/meshmon-service:latest` |
+| Agent (probe worker) | `docker pull ghcr.io/w3champions/meshmon-agent:latest` |
+| Grafana (bundled dashboards + provisioning) | `docker pull ghcr.io/w3champions/meshmon-grafana:latest` |
+
+Available tags:
+- `:latest` — head of `main` after a successful publish + Trivy scan.
+- `:main-<sha>` — the immutable per-commit tag. Pin to this in production.
+- `:v<major>.<minor>.<patch>` — emitted when a `v*` git tag pushes.
+
+`deploy/docker-compose.yml` references `:latest` by default. For reproducible
+deploys, override each service's `image:` to `:main-<sha>` (or `:v<ver>`).
+
+## Running CI checks locally
+
+Every CI job has a one-liner local equivalent that reads the same config
+file CI does — no duplication to maintain.
+
+| CI job | Local command | Shared config |
+|---|---|---|
+| Rust fmt | `cargo fmt --all -- --check` | `rust-toolchain.toml` |
+| Rust clippy | `cargo clippy --workspace --all-targets -- -D warnings` | `Cargo.toml` |
+| Rust tests | `cargo test --workspace --exclude meshmon-e2e --all-targets` | `Cargo.toml` |
+| OpenAPI drift | `cargo xtask openapi && git diff --exit-code frontend/src/api/openapi.gen.json` | — |
+| Frontend lint | `cd frontend && npx biome check ./src` | `frontend/biome.json` |
+| Frontend type-check | `cd frontend && npm run type-check` | `frontend/tsconfig.json` |
+| Frontend tests | `cd frontend && npm test` | `frontend/vitest.config.ts` |
+| Frontend build | `cd frontend && npm run build` | `frontend/package.json` |
+| yamllint | `yamllint -c .yamllint.yml deploy` | `.yamllint.yml` |
+| shellcheck | `shellcheck --severity=warning scripts/*.sh` | — |
+| actionlint | `actionlint .github/workflows/*.yml` | — |
+| Rust E2E | `cd deploy && docker compose up -d --build --wait && cd .. && cargo e2e && cd deploy && docker compose down -v` | `deploy/docker-compose.yml` |
+
+Install the non-cargo tools with your package manager (macOS:
+`brew install yamllint shellcheck actionlint`). See **Pre-commit hooks
+(optional)** below for a lefthook-wrapped workflow that runs the fast
+subset on every commit.
+
+## Pre-commit hooks (optional)
+
+This repo ships a `lefthook.yml` that runs the same formatters and linters
+used in CI, scoped to staged files. To opt in:
+
+```bash
+# Install lefthook once (macOS example; see https://lefthook.dev/ for others)
+brew install lefthook
+
+# Inside the cloned repo:
+lefthook install
+```
+
+Requirements when the hooks run: `cargo`, `npx` (via frontend deps),
+`yamllint`, `shellcheck`, `actionlint`. Missing a tool skips that step
+locally — CI still enforces all of them.
+
+Skip a hook for a single commit with `LEFTHOOK=0 git commit` (entire
+hook bypass) or `git commit --no-verify` (standard git flag). Do not
+merge bypassed commits — the CI failure will surface anyway.
+
 For local frontend + backend iteration with HMR:
 
 ```bash

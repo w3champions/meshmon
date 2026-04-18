@@ -49,19 +49,36 @@ proxy (no second login).
 
 ## Published images
 
-CI publishes three images to `ghcr.io/w3champions/` automatically from
-`main`:
+CI publishes three images to `ghcr.io/w3champions/` on every push to
+`main` and on tagged releases, built for `linux/amd64` and `linux/arm64`:
 
-- `meshmon-service:latest` + `:main-<sha>` — the Axum + React binary.
-- `meshmon-agent:latest` + `:main-<sha>` — the probe agent.
-- `meshmon-grafana:latest` + `:main-<sha>` — the bundled Grafana with
-  dashboards + provisioning + `grafana.ini` baked in.
+- `meshmon-service` — the Axum API service with the embedded React SPA.
+- `meshmon-agent` — the per-node probe agent.
+- `meshmon-grafana` — bundled Grafana with dashboards, provisioning, and
+  `grafana.ini` baked in.
 
-The bundled compose references `:latest`. Pin to `:main-<sha>` in
-`deploy/docker-compose.yml` for reproducible deploys.
+The bundled compose references `:latest` by default. Pin to `:main-<sha>`
+in `deploy/docker-compose.yml` for reproducible deploys.
 
-Until the publish workflow lands, build locally with
-`docker compose up -d --build`.
+### Image tag conventions
+
+- `ghcr.io/w3champions/meshmon-service:latest` — rolling head of `main`. CI
+  publishes this on every green build after a Trivy CRITICAL scan.
+- `ghcr.io/w3champions/meshmon-service:main-<sha>` — per-commit immutable
+  tag. Use this in production to avoid silent upgrades.
+- `ghcr.io/w3champions/meshmon-service:v<major>.<minor>.<patch>` — published
+  when a `v*` git tag is pushed. Same shape for `meshmon-agent` and
+  `meshmon-grafana`.
+
+Pinning example (edit `deploy/docker-compose.yml`):
+
+```yaml
+services:
+  meshmon-service:
+    image: ghcr.io/w3champions/meshmon-service:main-deadbeef1234
+```
+
+Upgrade by editing the pin and `docker compose up -d --pull always meshmon-service`.
 
 ## Enabling TLS
 
