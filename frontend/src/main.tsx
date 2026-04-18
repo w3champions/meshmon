@@ -8,8 +8,9 @@ import { useUiStore } from "@/stores/ui";
 import "@/styles/globals.css";
 
 // Apply persisted theme before first paint to prevent flash.
+// @theme defaults to dark — we add `.light` when the user picked light.
 const { theme } = useUiStore.getState();
-document.documentElement.classList.toggle("dark", theme === "dark");
+document.documentElement.classList.toggle("light", theme === "light");
 
 const queryClient = new QueryClient({
   defaultOptions: {

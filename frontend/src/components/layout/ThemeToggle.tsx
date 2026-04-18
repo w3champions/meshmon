@@ -8,7 +8,7 @@ export function ThemeToggle() {
   const toggle = () => {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
-    document.documentElement.classList.toggle("dark", next === "dark");
+    document.documentElement.classList.toggle("light", next === "light");
   };
   return (
     <Button variant="ghost" size="icon" onClick={toggle} aria-label="Toggle theme">
