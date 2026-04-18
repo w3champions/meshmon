@@ -51,11 +51,11 @@ function FitToAgents({ points }: { points: Array<[number, number]> }) {
   // refetch produces a new array reference every poll and the map snaps
   // back, yanking any manual pan/zoom.
   const key = points.map(([la, lo]) => `${la},${lo}`).join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key fingerprints points
   useEffect(() => {
     if (points.length === 0) return;
     const bounds = L.latLngBounds(points);
     map.fitBounds(bounds, { padding: [40, 40], maxZoom: 5 });
-    // biome-ignore lint/correctness/useExhaustiveDependencies: key fingerprints points
   }, [map, key]);
   return null;
 }
