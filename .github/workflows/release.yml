@@ -118,3 +118,29 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           vuln-type: os,library
+
+      - name: Trivy scan (SARIF forensics)
+        uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: >-
+            ghcr.io/w3champions/${{ matrix.image }}:${{
+              github.ref_type == 'tag' && github.ref_name ||
+              format('main-{0}', github.sha)
+            }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif-${{ matrix.image }}
+          path: trivy-${{ matrix.image }}.sarif
+          retention-days: 90
