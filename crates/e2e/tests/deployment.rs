@@ -5,7 +5,7 @@
 //! Runs via `cargo e2e`. Requires the stack to be already running
 //! (see `crates/e2e/src/lib.rs::preflight`).
 
-use meshmon_e2e::{login_as_admin, preflight, Session};
+use meshmon_e2e::{login_as_admin, preflight, shared_admin_session, Session};
 use reqwest::blocking::Client;
 use std::time::Duration;
 
@@ -54,7 +54,7 @@ fn login_issues_a_session_cookie() {
 #[test]
 fn grafana_proxy_injects_webauth_user() {
     preflight();
-    let session = login_as_admin();
+    let session = shared_admin_session();
     // /grafana/api/health is a Grafana endpoint that returns JSON
     // indicating DB health. auth.proxy mode only lets the request
     // through when X-WEBAUTH-USER is injected by meshmon-service; the
@@ -76,7 +76,7 @@ fn grafana_proxy_injects_webauth_user() {
 #[test]
 fn alertmanager_proxy_serves_status() {
     preflight();
-    let session = login_as_admin();
+    let session = shared_admin_session();
     let resp = session.get("/alertmanager/api/v2/status").send().unwrap();
     assert!(
         resp.status().is_success(),
@@ -93,7 +93,7 @@ fn alertmanager_proxy_serves_status() {
 #[test]
 fn dashboards_are_provisioned() {
     preflight();
-    let session = login_as_admin();
+    let session = shared_admin_session();
     let resp = session.get("/grafana/api/search").send().unwrap();
     assert!(
         resp.status().is_success(),
@@ -135,7 +135,7 @@ fn alertmanager_route_prefix_is_configured() {
     // Access AM's /-/ready through the proxy. With --web.route-prefix=/alertmanager
     // the endpoint lives at /alertmanager/-/ready; a plain /-/ready
     // would return 404.
-    let session = login_as_admin();
+    let session = shared_admin_session();
     let resp = session.get("/alertmanager/-/ready").send().unwrap();
     assert!(
         resp.status().is_success(),

@@ -8,7 +8,7 @@
 //! (alias in `.cargo/config.toml`).
 
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 /// Base URL for the meshmon service under test. Defaults to the
 /// bundled compose's published port. Override via `MESHMON_E2E_URL` if
@@ -81,6 +81,12 @@ impl Session {
 
 /// Login as the configured admin. Panics if login fails (the e2e tests
 /// are entitled to assume stack-level integrity).
+///
+/// This performs a fresh login on every call. Use only where tests
+/// need to exercise the login endpoint itself; everywhere else call
+/// [`shared_admin_session`] so the whole test binary makes a single
+/// login, staying inside the service's per-IP login rate limit
+/// (3-burst + 1 every 3 min in `crates/service/src/http/auth.rs`).
 pub fn login_as_admin() -> Session {
     let session = Session::new();
     let resp: Response = session
@@ -97,4 +103,14 @@ pub fn login_as_admin() -> Session {
         resp.status()
     );
     session
+}
+
+/// Shared admin [`Session`] cached for the lifetime of the test
+/// process. Lazily initializes via [`login_as_admin`] on first call,
+/// then hands out a shared reference — subsequent callers reuse the
+/// same session cookie. Prefer this over `login_as_admin` in tests
+/// that only need an authenticated client.
+pub fn shared_admin_session() -> &'static Session {
+    static SHARED: OnceLock<Session> = OnceLock::new();
+    SHARED.get_or_init(login_as_admin)
 }
