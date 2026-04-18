@@ -24,7 +24,7 @@ PG_GRAFANA_PASSWORD=${MESHMON_DEV_PG_GRAFANA_PASSWORD:-grafana}
 AGENT_TOKEN=${MESHMON_DEV_AGENT_TOKEN:-dev-token-0123456789}
 # Non-standard default port to avoid clashing with Docker Desktop's
 # common :8080 binding.
-SERVICE_PORT=${MESHMON_DEV_SERVICE_PORT:-18080}
+SERVICE_PORT=${MESHMON_DEV_SERVICE_PORT:-18322}
 
 cleanup() {
     local rc=$?
