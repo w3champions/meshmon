@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -152,8 +152,6 @@ async fn run(
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
 ) {
-    // consumed in Task 4 (cross-contamination detection)
-    let _ = &allowlist_rx;
     // `ThreadRng` is not `Send`; seed a Send-safe SmallRng once. Used only
     // for probe-interval jitter — no cryptographic requirement.
     let mut rng = SmallRng::from_rng(&mut rand::rng());
@@ -201,6 +199,17 @@ async fn run(
 
                 match result {
                     Ok(Ok(obs)) => {
+                        let hit = {
+                            let allowlist = allowlist_rx.borrow();
+                            obs.hops
+                                .as_ref()
+                                .and_then(|hs| detect_contamination(target_ip, hs, allowlist.as_ref()))
+                        };
+                        if let Some(hit) = hit {
+                            CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            warn_contamination_if_due(&target_id, &hit);
+                            continue;
+                        }
                         if obs_tx.send(obs).await.is_err() {
                             return;
                         }
@@ -323,6 +332,54 @@ pub(super) fn build_config_for(
         trace_identifier,
         builder,
     })
+}
+
+/// Which foreign peer IP showed up at which hop position in a round that
+/// wasn't meant for us. Produced by `detect_contamination`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ContaminationHit {
+    pub position: u8,
+    pub foreign_ip: IpAddr,
+}
+
+/// Walks `hops` in order and returns the first hop whose IP is in
+/// `allowlist` but not equal to `target_ip`. `None` means the round is
+/// clean. The destination IP appearing at its own position (or beyond,
+/// via trippy over-probing) is never flagged — only sibling targets are.
+pub(super) fn detect_contamination(
+    target_ip: IpAddr,
+    hops: &[HopObservation],
+    allowlist: &HashSet<IpAddr>,
+) -> Option<ContaminationHit> {
+    for hop in hops {
+        if let Some(ip) = hop.ip {
+            if ip != target_ip && allowlist.contains(&ip) {
+                return Some(ContaminationHit {
+                    position: hop.position,
+                    foreign_ip: ip,
+                });
+            }
+        }
+    }
+    None
+}
+
+static CROSS_CONTAMINATION_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn cross_contamination_total() -> u64 {
+    CROSS_CONTAMINATION_TOTAL.load(Ordering::Relaxed)
+}
+
+fn warn_contamination_if_due(target_id: &str, hit: &ContaminationHit) {
+    // Task 5 wires the 60s cooldown. For Task 4 we always warn so
+    // tests can observe every contamination event.
+    tracing::warn!(
+        target_id = %target_id,
+        foreign_ip = %hit.foreign_ip,
+        position = hit.position,
+        contamination_total = cross_contamination_total(),
+        "trippy round cross-contamination detected; discarding observation",
+    );
 }
 
 /// Run one trippy round synchronously. Callers must wrap this in
@@ -544,5 +601,107 @@ mod tests {
         let handle = prober.spawn_target(target, config_rx, obs_tx, allowlist_rx, cancel.clone());
         cancel.cancel();
         let _ = handle.await;
+    }
+
+    #[test]
+    fn clean_round_is_not_contamination() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowlist = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()]
+            .into_iter()
+            .collect::<HashSet<IpAddr>>();
+        let hops = vec![
+            HopObservation {
+                position: 1,
+                ip: Some("192.168.0.1".parse().unwrap()),
+                rtt_micros: Some(100),
+            },
+            HopObservation {
+                position: 2,
+                ip: Some("10.0.0.1".parse().unwrap()),
+                rtt_micros: Some(200),
+            },
+        ];
+        assert_eq!(detect_contamination(me, &hops, &allowlist), None);
+    }
+
+    #[test]
+    fn foreign_target_ip_at_any_hop_is_contamination() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowlist = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()]
+            .into_iter()
+            .collect::<HashSet<IpAddr>>();
+        let hops = vec![
+            HopObservation {
+                position: 1,
+                ip: Some("192.168.0.1".parse().unwrap()),
+                rtt_micros: Some(100),
+            },
+            HopObservation {
+                position: 2,
+                ip: Some("10.0.0.2".parse().unwrap()),
+                rtt_micros: Some(200),
+            },
+        ];
+        let hit = detect_contamination(me, &hops, &allowlist).expect("contaminated");
+        assert_eq!(hit.position, 2);
+        assert_eq!(hit.foreign_ip, "10.0.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn own_target_ip_at_any_hop_is_not_contamination() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowlist = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()]
+            .into_iter()
+            .collect::<HashSet<IpAddr>>();
+        let hops = vec![
+            HopObservation {
+                position: 13,
+                ip: Some(me),
+                rtt_micros: Some(1000),
+            },
+            HopObservation {
+                position: 14,
+                ip: Some(me),
+                rtt_micros: Some(1000),
+            },
+        ];
+        assert_eq!(detect_contamination(me, &hops, &allowlist), None);
+    }
+
+    #[test]
+    fn ip_outside_allowlist_is_not_contamination() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowlist = ["10.0.0.1".parse().unwrap()]
+            .into_iter()
+            .collect::<HashSet<IpAddr>>();
+        let hops = vec![HopObservation {
+            position: 5,
+            ip: Some("8.8.8.8".parse().unwrap()),
+            rtt_micros: Some(15000),
+        }];
+        assert_eq!(detect_contamination(me, &hops, &allowlist), None);
+    }
+
+    #[test]
+    fn multiple_contaminations_report_first_in_order() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let a: IpAddr = "10.0.0.2".parse().unwrap();
+        let b: IpAddr = "10.0.0.3".parse().unwrap();
+        let allowlist: HashSet<IpAddr> = [me, a, b].into_iter().collect();
+        let hops = vec![
+            HopObservation {
+                position: 2,
+                ip: Some(b),
+                rtt_micros: Some(100),
+            },
+            HopObservation {
+                position: 5,
+                ip: Some(a),
+                rtt_micros: Some(300),
+            },
+        ];
+        let hit = detect_contamination(me, &hops, &allowlist).expect("hit");
+        assert_eq!(hit.foreign_ip, b);
+        assert_eq!(hit.position, 2);
     }
 }
