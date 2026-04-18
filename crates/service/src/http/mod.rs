@@ -130,17 +130,20 @@ pub fn router(state: AppState) -> Router {
     // proxy middleware runs — identical posture to the `/api/*`
     // surface.
     //
-    // NOTE: we use `.layer(...)` here, not `.route_layer(...)`.
-    // `axum-reverse-proxy` registers its upstream via
-    // `Router::new().fallback_service(proxy)` (see the crate's
-    // `impl From<ReverseProxy<_>> for Router<_>`), meaning the sub-router
-    // contains no explicit routes — only a fallback service.
-    // `Router::route_layer` applies only to explicit routes and panics
-    // at build time when the router has none ("Adding a route_layer
-    // before any routes is a no-op"). `.layer` wraps the entire
-    // service, fallback included, so every `/grafana/*` and
-    // `/alertmanager/*` hop traverses `login_required!` before the
-    // per-proxy header middleware runs.
+    // Router shape: `ReverseProxy::new(prefix, upstream).into()` with a
+    // non-empty prefix expands to `Router::new().nest(prefix,
+    // Router::new().fallback_service(proxy))` (see the crate's
+    // `impl From<ReverseProxy<_>> for Router<_>`). The outer router
+    // therefore has an explicit nested route at the prefix — NOT a
+    // fallback — which is why `.merge(grafana_proxy).merge(alertmanager_proxy)`
+    // composes cleanly (two custom-fallback routers would panic). The
+    // inner nested sub-router IS fallback-only, but nesting isolates
+    // its fallback from `merge`'s "two fallbacks" check.
+    //
+    // We use `.layer(...)` rather than `.route_layer(...)` so the
+    // session gate covers the nested fallback service too —
+    // `.route_layer` only applies to explicit routes and the nested
+    // mount's internal fallback would slip past it.
     let proxies = Router::<AppState>::new()
         .merge(grafana_proxy::build_router(state.clone()))
         .merge(alertmanager_proxy::build_router(state.clone()))
