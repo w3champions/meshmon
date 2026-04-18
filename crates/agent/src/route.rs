@@ -23,8 +23,8 @@
 //!
 //! ## Complexity targets
 //! - `observe(hops, now)`: O(H) per call where H = hops.len() (typically ≤ 30).
-//! - `build_snapshot(now, now_wall)`: O(H · K + K · log K) where K = number of
-//!   distinct IPs per position (typically 1–4). The sort is per-position.
+//! - `build_snapshot(now, now_wall)`: O(P · H_total + P · log P) per call
+//!   (P = positions in window, H_total = total (pos,ip) entries).
 //! - `diff_against(last)`: O(H · K) — two hashmap walks over current vs. last.
 //!
 //! ## Ownership boundary
@@ -65,7 +65,9 @@ pub struct HopSummary {
     /// Observed IPs at this position, sorted by frequency descending.
     pub observed_ips: Vec<ObservedIp>,
     /// Mean RTT across successful observations at this hop, in microseconds.
-    /// `0` when no successful observation (all timeouts).
+    /// `0` when no successful observation (all timeouts). Treated as
+    /// "no RTT data" by downstream aggregators — a measured RTT of 0 µs
+    /// is not physically possible on a routed network.
     pub avg_rtt_micros: u32,
     /// Population stddev of RTT across successful observations. `0` when
     /// `successful < 2`.
@@ -338,72 +340,55 @@ impl RouteTracker {
         if let Some(cutoff) = now.checked_sub(self.window) {
             self.purge_stale(cutoff);
         }
-
-        if self.hops.is_empty() {
+        if self.position_probes.is_empty() {
             return None;
         }
 
-        // Group accumulator entries by position. Iterate position_probes
-        // as the canonical set of active positions.
         let mut positions: Vec<u8> = self.position_probes.keys().copied().collect();
         positions.sort();
 
         let mut hops_out: Vec<HopSummary> = Vec::with_capacity(positions.len());
         for position in positions {
-            let total = self
-                .position_probes
-                .get(&position)
-                .map(|a| a.seen)
-                .unwrap_or(0);
-            if total == 0 {
-                // Defensive: should have been pruned. Skip instead of
-                // dividing by zero.
+            let Some(pos_acc) = self.position_probes.get(&position) else {
+                continue;
+            };
+            if pos_acc.seen == 0 {
                 continue;
             }
-            let total_f = total as f64;
-            let mut ips: Vec<ObservedIp> = Vec::new();
-            let mut sum_weighted_rtt: u64 = 0;
-            let mut sum_weighted_rtt_sq: u128 = 0;
-            let mut sum_seen: u32 = 0;
-            let mut sum_successful: u32 = 0;
+            let total_f = pos_acc.seen as f64;
 
-            for (key, acc) in self.hops.iter() {
-                if key.0 != position {
+            // Collect IPs observed at this position.
+            let mut observed_ips: Vec<ObservedIp> = Vec::new();
+            for ((p, ip), ip_acc) in self.hops.iter() {
+                if *p != position {
                     continue;
                 }
-                let frequency = acc.seen as f64 / total_f;
-                ips.push(ObservedIp {
-                    ip: key.1,
-                    frequency,
-                });
-                sum_weighted_rtt += acc.sum_rtt_micros;
-                sum_weighted_rtt_sq += acc.sum_rtt_sq_micros;
-                sum_seen += acc.seen;
-                sum_successful += acc.successful;
+                let frequency = ip_acc.seen as f64 / total_f;
+                observed_ips.push(ObservedIp { ip: *ip, frequency });
             }
-
-            // Sort IPs by frequency descending; tiebreak on IP for deterministic output.
-            ips.sort_by(|a, b| {
+            observed_ips.sort_by(|a, b| {
                 b.frequency
                     .partial_cmp(&a.frequency)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| a.ip.cmp(&b.ip))
             });
 
-            let avg_rtt_micros = if sum_successful == 0 {
+            // RTT mean + stddev from the position accumulator: covers every
+            // responding probe at this TTL regardless of which IP answered.
+            let avg_rtt_micros = if pos_acc.successful == 0 {
                 0
             } else {
-                (sum_weighted_rtt / sum_successful as u64).min(u32::MAX as u64) as u32
+                (pos_acc.sum_rtt_micros / pos_acc.successful as u64).min(u32::MAX as u64) as u32
             };
-            let stddev_rtt_micros = if sum_successful < 2 {
+            let stddev_rtt_micros = if pos_acc.successful < 2 {
                 0
             } else {
-                let n = sum_successful as f64;
-                let mean = sum_weighted_rtt as f64 / n;
-                let mean_sq = sum_weighted_rtt_sq as f64 / n;
+                let n = pos_acc.successful as f64;
+                let mean = pos_acc.sum_rtt_micros as f64 / n;
+                let mean_sq = pos_acc.sum_rtt_sq_micros as f64 / n;
                 let var = (mean_sq - mean * mean).max(0.0);
                 let stddev = var.sqrt();
-                if !stddev.is_finite() || stddev < 0.0 {
+                if !stddev.is_finite() {
                     0
                 } else if stddev >= u32::MAX as f64 {
                     u32::MAX
@@ -411,15 +396,13 @@ impl RouteTracker {
                     stddev as u32
                 }
             };
-            let loss_pct = if sum_seen == 0 {
-                0.0
-            } else {
-                (sum_seen - sum_successful) as f64 / sum_seen as f64
-            };
+
+            // Hop-level loss: silent probes / all probes at this TTL.
+            let loss_pct = (pos_acc.seen - pos_acc.successful) as f64 / pos_acc.seen as f64;
 
             hops_out.push(HopSummary {
                 position,
-                observed_ips: ips,
+                observed_ips,
                 avg_rtt_micros,
                 stddev_rtt_micros,
                 loss_pct,
@@ -1575,5 +1558,140 @@ mod tests {
             "swing must clear position_probes"
         );
         assert!(t.hops.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 7: silent-hop emission and hop-level loss from position_probes
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn build_snapshot_emits_silent_hop_with_empty_ips_and_loss_one() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(5, None, None), hop(5, None, None)], now);
+        let snap = t
+            .build_snapshot(now, systemtime_epoch_plus(0))
+            .expect("snap");
+        assert_eq!(snap.hops.len(), 1);
+        let h = &snap.hops[0];
+        assert_eq!(h.position, 5);
+        assert!(h.observed_ips.is_empty(), "silent hop has no IPs");
+        assert!((h.loss_pct - 1.0).abs() < 1e-9, "silent hop is 100% loss");
+        assert_eq!(h.avg_rtt_micros, 0);
+    }
+
+    #[test]
+    fn build_snapshot_partial_silence_loss_matches_silent_fraction() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        for _ in 0..7 {
+            t.observe(&[hop(2, Some(ipv4(10, 0, 0, 2)), Some(1_000))], now);
+        }
+        for _ in 0..3 {
+            t.observe(&[hop(2, None, None)], now);
+        }
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let h = &snap.hops[0];
+        assert!((h.loss_pct - 0.30).abs() < 1e-9, "loss={}", h.loss_pct);
+        assert_eq!(h.observed_ips.len(), 1);
+        let f = h.observed_ips[0].frequency;
+        assert!((f - 0.70).abs() < 1e-9, "freq={f}");
+    }
+
+    #[test]
+    fn build_snapshot_ecmp_with_silence_frequencies() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        for _ in 0..4 {
+            t.observe(&[hop(3, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+        }
+        for _ in 0..4 {
+            t.observe(&[hop(3, Some(ipv4(10, 0, 0, 2)), Some(1_500))], now);
+        }
+        for _ in 0..2 {
+            t.observe(&[hop(3, None, None)], now);
+        }
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let h = &snap.hops[0];
+        assert!((h.loss_pct - 0.20).abs() < 1e-9);
+        assert_eq!(h.observed_ips.len(), 2);
+        let total: f64 = h.observed_ips.iter().map(|o| o.frequency).sum();
+        assert!(
+            (total - 0.80).abs() < 1e-9,
+            "freqs sum to {total}, want 0.80 (= 1 - loss)"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_avg_rtt_ignores_silent_samples() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(2_000))], now);
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(4_000))], now);
+        t.observe(&[hop(1, None, None)], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(snap.hops[0].avg_rtt_micros, 3_000);
+    }
+
+    #[test]
+    fn build_snapshot_sort_order_with_silent_middle_hop() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+        t.observe(&[hop(5, None, None)], now);
+        t.observe(&[hop(3, Some(ipv4(10, 0, 0, 3)), Some(3_000))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let positions: Vec<u8> = snap.hops.iter().map(|h| h.position).collect();
+        assert_eq!(positions, vec![1, 3, 5]);
+        assert!(snap.hops[2].observed_ips.is_empty(), "position 5 silent");
+    }
+
+    #[test]
+    fn purge_removes_empty_ip_entry_but_keeps_position_probes_with_silent_samples() {
+        let base = Instant::now();
+        let mut t = tracker_ready(Duration::from_secs(60), Protocol::Icmp);
+        // IP-bearing at t=0, silent at t=30s (both at position 4).
+        t.observe(&[hop(4, Some(ipv4(10, 0, 0, 4)), Some(2_000))], base);
+        t.observe(&[hop(4, None, None)], base + Duration::from_secs(30));
+        // Advance past 60s window — only the IP-bearing sample expires.
+        t.observe(&[hop(4, None, None)], base + Duration::from_secs(70));
+        assert!(
+            !t.hops.contains_key(&(4, ipv4(10, 0, 0, 4))),
+            "IP-bearing sample at pos 4 should have purged",
+        );
+        // position_probes still holds the two silent samples.
+        let pacc = t
+            .position_probes
+            .get(&4)
+            .expect("silent samples keep pos 4 alive");
+        assert_eq!(pacc.seen, 2, "two silent samples within window");
+        assert_eq!(pacc.successful, 0, "neither sample produced an RTT");
+    }
+
+    #[test]
+    fn consistency_debug_assert_passes_after_mixed_observe_sequence() {
+        use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let mut rng = SmallRng::seed_from_u64(0xD00D_BEEF);
+        let base = Instant::now();
+        for i in 0..100 {
+            let pos: u8 = rng.random_range(1..=30);
+            let is_silent = rng.random_bool(0.3);
+            let hop_obs = if is_silent {
+                hop(pos, None, None)
+            } else {
+                hop(
+                    pos,
+                    Some(ipv4(10, 0, 0, rng.random_range(1..=5))),
+                    Some(rng.random_range(500..=5_000)),
+                )
+            };
+            t.observe(&[hop_obs], base + Duration::from_millis(i * 10));
+        }
+        // If assert_consistency had fired, we'd have panicked inside observe.
+        // Final direct call for belt-and-suspenders.
+        #[cfg(debug_assertions)]
+        t.assert_consistency();
     }
 }
