@@ -18,12 +18,20 @@ const HOST_PORT: u16 = 5432;
 pub(crate) const DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/postgres";
 
 pub fn up() -> anyhow::Result<()> {
-    if is_running()? {
-        println!("test DB already running on port {HOST_PORT}");
-    } else {
-        docker_run()?;
-        wait_ready(Duration::from_secs(30))?;
-        println!("started {CONTAINER_NAME} ({IMAGE})");
+    match container_state()? {
+        ContainerState::Running => {
+            println!("test DB already running on port {HOST_PORT}");
+        }
+        ContainerState::Stopped => {
+            docker_start()?;
+            wait_ready(Duration::from_secs(30))?;
+            println!("started existing {CONTAINER_NAME} ({IMAGE})");
+        }
+        ContainerState::Absent => {
+            docker_run()?;
+            wait_ready(Duration::from_secs(30))?;
+            println!("created {CONTAINER_NAME} ({IMAGE})");
+        }
     }
     println!();
     println!("export DATABASE_URL={DATABASE_URL}");
@@ -53,24 +61,55 @@ pub fn down() -> anyhow::Result<()> {
 }
 
 pub fn status() -> anyhow::Result<()> {
-    if is_running()? {
-        println!("running on localhost:{HOST_PORT}");
-        println!("DATABASE_URL={DATABASE_URL}");
-    } else {
-        println!("not running");
+    match container_state()? {
+        ContainerState::Running => {
+            println!("running on localhost:{HOST_PORT}");
+            println!("DATABASE_URL={DATABASE_URL}");
+        }
+        ContainerState::Stopped | ContainerState::Absent => {
+            println!("not running");
+        }
     }
     Ok(())
 }
 
-fn is_running() -> anyhow::Result<bool> {
+/// Three-way state of the shared test DB container.
+///
+/// `Absent` vs `Stopped` matters because `docker run --name X` on a
+/// stopped-but-existing container fails with "container name already in
+/// use" — the `up()` path must `docker start X` instead.
+enum ContainerState {
+    Running,
+    Stopped,
+    Absent,
+}
+
+fn container_state() -> anyhow::Result<ContainerState> {
     let out = Command::new("docker")
         .args(["inspect", "-f", "{{.State.Running}}", CONTAINER_NAME])
         .stderr(Stdio::null())
         .output()?;
     if !out.status.success() {
-        return Ok(false);
+        // `docker inspect` exits non-zero when the container doesn't exist.
+        return Ok(ContainerState::Absent);
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim() == "true")
+    let running = String::from_utf8_lossy(&out.stdout).trim() == "true";
+    Ok(if running {
+        ContainerState::Running
+    } else {
+        ContainerState::Stopped
+    })
+}
+
+fn docker_start() -> anyhow::Result<()> {
+    let status = Command::new("docker")
+        .args(["start", CONTAINER_NAME])
+        .stdout(Stdio::null())
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("docker start {CONTAINER_NAME} failed ({status})");
+    }
+    Ok(())
 }
 
 fn docker_run() -> anyhow::Result<()> {

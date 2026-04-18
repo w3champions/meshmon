@@ -18,7 +18,7 @@ fn docker_available() -> bool {
             .unwrap_or(false)
 }
 
-/// Consolidated lifecycle test. All three scenarios share the single
+/// Consolidated lifecycle test. All scenarios share the single
 /// `meshmon-test-pg` container name and therefore MUST run serially —
 /// splitting them across `#[test]` functions lets `cargo test`'s default
 /// parallel runner race on `docker run`, yielding a `Conflict` failure on
@@ -54,7 +54,31 @@ fn xtask_test_db_lifecycle() {
         "second up must note idempotency; got: {s2}"
     );
 
-    // Scenario 3: `xtask test` runs nextest against the shared DB. Skips
+    // Scenario 3: `up` on a stopped-but-existing container starts it
+    // instead of failing with "container name already in use". This is
+    // the path a developer hits after a reboot or an interrupted CI run.
+    let stop = Command::new("docker")
+        .args(["stop", "meshmon-test-pg"])
+        .output()
+        .expect("docker stop");
+    assert!(
+        stop.status.success(),
+        "docker stop meshmon-test-pg must succeed; stderr: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let up3 = xtask(&["test-db", "up"]);
+    assert!(
+        up3.status.success(),
+        "up on stopped container must succeed; stderr: {}",
+        String::from_utf8_lossy(&up3.stderr)
+    );
+    let s3 = String::from_utf8_lossy(&up3.stdout);
+    assert!(
+        s3.contains("started existing"),
+        "up on stopped container must report 'started existing'; got: {s3}"
+    );
+
+    // Scenario 4: `xtask test` runs nextest against the shared DB. Skips
     // gracefully when cargo-nextest isn't installed.
     let have_nextest = Command::new("cargo")
         .args(["nextest", "--version"])
@@ -75,7 +99,7 @@ fn xtask_test_db_lifecycle() {
             String::from_utf8_lossy(&out.stderr)
         );
     } else {
-        eprintln!("skip scenario 3: cargo-nextest not installed");
+        eprintln!("skip scenario 4: cargo-nextest not installed");
     }
 
     // Cleanup — leave the host in the pre-test state.
