@@ -6,33 +6,43 @@
 
 //! Integration-test harness for the meshmon service.
 //!
-//! # Design
+//! # Three isolation tiers
 //!
-//! A single `timescale/timescaledb` container is spawned per test binary on
-//! first use and shared across every test in that binary. Tests get
-//! isolation at one of two granularities:
+//! Pick the entry point that matches what your test actually needs. Going
+//! below the listed tier is a contract violation and will flake under
+//! parallel execution (nextest).
 //!
-//! 1. **Fresh database per test** via [`acquire`] — use when the test runs
-//!    `CREATE/ALTER/DROP`, installs an extension, or calls
-//!    [`meshmon_service::db::run_migrations`] against a clean slate. In
-//!    other words: anything DDL.
-//! 2. **Shared pre-migrated database + transaction rollback** via
-//!    [`shared_migrated_pool`] — the default for everything else. Writers,
-//!    readers, HTTP handlers. Each test wraps its work in
-//!    `pool.begin().await?` and rolls back for isolation.
+//! | Entry point                  | Uses shared DB? | Isolation                                | Cost      |
+//! |------------------------------|-----------------|------------------------------------------|-----------|
+//! | `shared_migrated_pool()`     | yes             | transaction rollback (caller wraps)      | ~ms       |
+//! | `acquire(with_timescale)`    | yes             | fresh UUID-named database per test       | ~100 ms   |
+//! | `own_container()`            | no              | dedicated TimescaleDB container per test | ~4 s boot |
 //!
-//! The shared container is stopped and removed at process exit by a
-//! [`ctor::dtor`] hook. This is necessary because Rust statics never run
-//! `Drop`, so the `ContainerAsync` held in a `OnceCell` would otherwise
-//! leak every time `cargo test` finishes.
+//! ## When to use which
 //!
-//! Setting `DATABASE_URL` bypasses the container spawn and targets the
-//! supplied Postgres. Useful for iterating against a long-lived local
-//! server or for reproducing issues against a remote DB. When in override
-//! mode the harness does not own the server, so the `#[dtor]` is a no-op.
-//! `acquire(true)` against a plain-Postgres `DATABASE_URL` fails at the
-//! `CREATE EXTENSION timescaledb` step — that's intentional: point the
-//! override at a TimescaleDB-capable server if you need the TS paths.
+//! - **`shared_migrated_pool()`** — DML tests. MUST wrap work in
+//!   `pool.begin()` / `tx.rollback()`. Anything that survives rollback
+//!   (sequence advancement, advisory-lock-at-connection-close, explicit
+//!   commits) leaks between concurrent tests.
+//! - **`acquire(with_timescale)`** — per-database DDL tests: `CREATE
+//!   TABLE`, schema assertions, running migrations, installing
+//!   `timescaledb` (extensions are per-database). MUST NOT touch
+//!   cluster-wide state.
+//! - **`own_container()`** — cluster-wide state. Any of: `CREATE ROLE` /
+//!   `ALTER ROLE` / `DROP ROLE`, touching `pg_roles`, replication slots,
+//!   tablespaces, cluster-level GUCs, `pg_stat_activity` beyond own
+//!   sessions. Pays a ~4 s container startup per test — use sparingly.
+//!
+//! ## Local dev and CI use `cargo xtask test`
+//!
+//! Canonical workflow:
+//! ```sh
+//! cargo xtask test            # provisions shared DB, runs nextest
+//! cargo xtask test-db down    # explicit teardown when done
+//! ```
+//! `cargo test` still works (falls back to the per-binary testcontainers
+//! path, unchanged). `cargo nextest run` without `DATABASE_URL` will
+//! panic loudly — use xtask.
 //!
 //! # What transaction rollback does NOT cover
 //!
@@ -47,6 +57,7 @@
 //!   and anything else that implicitly commits.
 //!
 //! If your test needs a truly clean schema, use [`acquire`] instead.
+//! If your test touches cluster-wide state, use [`own_container`] instead.
 //!
 //! # Example: DDL-owning test
 //!
@@ -195,29 +206,73 @@ async fn shared() -> &'static SharedContainer {
 /// (or the `DATABASE_URL`-supplied server). Call [`TestDb::close`] to drop
 /// the DB when the test finishes — the shared container survives across
 /// tests and is cleaned up at process exit.
+///
+/// When created via [`own_container`], this struct also owns the container
+/// itself and tears it down on `close()`.
 pub struct TestDb {
     pub pool: PgPool,
     pub name: String,
     admin_opts: PgConnectOptions,
+    /// Present only when this `TestDb` was created by [`own_container`].
+    /// The container is stopped and removed inside `close()` in that case.
+    owned_container: Option<ContainerAsync<GenericImage>>,
 }
 
 impl TestDb {
+    /// Construct a `TestDb` that owns its dedicated container. Called only
+    /// from [`own_container`].
+    fn owned(
+        container: ContainerAsync<GenericImage>,
+        pool: PgPool,
+        admin_opts: PgConnectOptions,
+    ) -> Self {
+        Self {
+            pool,
+            name: "postgres".to_string(),
+            admin_opts,
+            owned_container: Some(container),
+        }
+    }
+
     /// Drop the test database. Always safe to call; `DROP DATABASE ...
     /// WITH (FORCE)` terminates any lingering sessions (Postgres 13+).
+    ///
+    /// When this `TestDb` owns its container (created via [`own_container`]),
+    /// the container is also stopped and removed synchronously via
+    /// `docker rm -f`.
     pub async fn close(self) {
         let Self {
             pool,
             name,
             admin_opts,
+            owned_container,
         } = self;
         pool.close().await;
-        let admin = PgPool::connect_with(admin_opts)
-            .await
-            .expect("connect admin for teardown");
-        let _ = admin
-            .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
-            .await;
-        admin.close().await;
+
+        if let Some(container) = owned_container {
+            // For the owned-container variant, the container holds the
+            // entire server — no separate database to drop. The container
+            // teardown below handles full cleanup.
+            //
+            // Dropping `ContainerAsync` in the async context sends a stop
+            // signal; we use `docker rm -f` via the dtor pattern to ensure
+            // cleanup even if the runtime is shutting down.
+            let id = container.id().to_string();
+            drop(container);
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &id])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        } else {
+            let admin = PgPool::connect_with(admin_opts)
+                .await
+                .expect("connect admin for teardown");
+            let _ = admin
+                .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
+                .await;
+            admin.close().await;
+        }
     }
 }
 
@@ -262,6 +317,7 @@ pub async fn acquire(with_timescale: bool) -> TestDb {
         pool,
         name: db_name,
         admin_opts: shared.admin_opts.clone(),
+        owned_container: None,
     }
 }
 
@@ -320,6 +376,43 @@ pub async fn shared_migrated_pool() -> PgPool {
         .connect_with(shared.admin_opts.clone().database(db_name))
         .await
         .expect("connect shared test db")
+}
+
+/// Dedicated TimescaleDB container for exactly one test.
+///
+/// Use this ONLY when the test touches cluster-wide state that cannot be
+/// contained by a single database: `pg_roles`, `CREATE ROLE`, replication
+/// slots, tablespaces, or cluster-wide GUCs. For every other DDL test,
+/// [`acquire`] (fresh DB inside the shared server) is correct and faster.
+///
+/// The container is owned by the returned value and torn down on drop.
+pub async fn own_container() -> TestDb {
+    let container = GenericImage::new(TIMESCALEDB_IMAGE, TIMESCALEDB_TAG)
+        .with_exposed_port(ContainerPort::Tcp(5432))
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .start()
+        .await
+        .expect("spawn dedicated TimescaleDB container");
+
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container port");
+    let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+    let opts = PgConnectOptions::from_str(&url).expect("parse private URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with(opts.clone())
+        .await
+        .expect("connect private pool");
+
+    TestDb::owned(container, pool, opts)
 }
 
 /// Process-exit cleanup for the shared container.
