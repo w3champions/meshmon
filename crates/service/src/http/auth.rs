@@ -388,7 +388,7 @@ pub async fn logout(mut auth_session: AuthSession) -> axum::response::Response {
 /// by the proxy middleware to strip the cookie from requests forwarded
 /// to upstream (Grafana / Alertmanager) so the bearer-equivalent secret
 /// doesn't show up in upstream access logs.
-pub const SESSION_COOKIE_NAME: &str = "meshmon_session";
+pub(crate) const SESSION_COOKIE_NAME: &str = "meshmon_session";
 
 /// Build the tower-sessions middleware stack: in-memory store, cookie name
 /// [`SESSION_COOKIE_NAME`], 30-day rolling expiry, `Secure`+`HttpOnly`+`SameSite=Lax`.
