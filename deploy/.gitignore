@@ -2,4 +2,5 @@
 # ignored at repo root; duplicating here so local tooling doesn't
 # surface it as untracked under deploy/.
 .env
+agent.env
 meshmon.toml

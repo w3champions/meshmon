@@ -1,0 +1,39 @@
+# OSS agent deployment for meshmon. One compose file per monitored host.
+#
+# Usage on each host you want to probe from:
+#
+#   cp agent.env.example agent.env       # fill in per-host values
+#   docker compose -f docker-compose.agent.yml --env-file agent.env up -d
+#
+# The agent opens an outbound gRPC stream to MESHMON_SERVICE_URL. The
+# only inbound requirement is the two peer-to-peer probe ports
+# (MESHMON_TCP_PROBE_PORT, MESHMON_UDP_PROBE_PORT) — they must be
+# reachable on AGENT_IP from every other agent in the fleet.
+#
+# host networking is required so the agent binds the probe ports on
+# real host interfaces and so ICMP/trippy raw sockets work without
+# bridge-NAT rewriting peer addresses. Docker Desktop (macOS/Windows)
+# does not fully implement `network_mode: host`; run agents on Linux.
+
+services:
+  meshmon-agent:
+    image: ghcr.io/w3champions/meshmon-agent:latest
+    container_name: meshmon-agent
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_RAW    # ICMP + trippy raw sockets
+      - NET_ADMIN  # trippy fd control
+    environment:
+      - MESHMON_SERVICE_URL=${MESHMON_SERVICE_URL}
+      - MESHMON_AGENT_TOKEN=${MESHMON_AGENT_TOKEN}
+      - AGENT_ID=${AGENT_ID}
+      - AGENT_DISPLAY_NAME=${AGENT_DISPLAY_NAME}
+      - AGENT_LOCATION=${AGENT_LOCATION}
+      - AGENT_IP=${AGENT_IP}
+      - AGENT_LAT=${AGENT_LAT}
+      - AGENT_LON=${AGENT_LON}
+      - MESHMON_TCP_PROBE_PORT=${MESHMON_TCP_PROBE_PORT:-3555}
+      - MESHMON_UDP_PROBE_PORT=${MESHMON_UDP_PROBE_PORT:-3552}
+      - MESHMON_ICMP_TARGET_CONCURRENCY=${MESHMON_ICMP_TARGET_CONCURRENCY:-32}
+      - RUST_LOG=${RUST_LOG:-meshmon_agent=info,warn}
