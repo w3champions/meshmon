@@ -1,6 +1,6 @@
 import cytoscape, { type LayoutOptions } from "cytoscape";
 import dagre from "cytoscape-dagre";
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { components } from "@/api/schema.gen";
 import type { RouteDiff } from "@/lib/route-diff";
 import { cn } from "@/lib/utils";
@@ -160,6 +160,8 @@ export function RouteTopology({
     return () => cy.destroy();
   }, [hops, highlightChanges, onNodeClick, colorBy]);
 
+  const reactId = useId();
+
   if (hops.length === 0) {
     return <p className={cn("text-sm text-muted-foreground", className)}>No route data yet.</p>;
   }
@@ -169,7 +171,7 @@ export function RouteTopology({
   // via aria-describedby — previously we used an sr-only <table> with a
   // <caption>, but Tailwind v4's `.sr-only` clip doesn't cover `<caption>` in
   // all browsers, so the caption leaked as floating text below the topology.
-  const descId = `route-topology-desc-${hops[0]?.position ?? "empty"}`;
+  const descId = `route-topology-desc-${reactId}`;
   const descText = hops
     .map(
       (h) =>
