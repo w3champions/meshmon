@@ -8,6 +8,7 @@ WORKDIR /app
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY xtask ./xtask
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ----- Stage 3: builder ---------------------------------------------------
@@ -16,6 +17,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --bin meshmon-agent
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY xtask ./xtask
 RUN cargo build --release --bin meshmon-agent
 
 # ----- Stage 4: runtime ---------------------------------------------------
