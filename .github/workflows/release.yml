@@ -166,6 +166,9 @@ jobs:
       needs.build.result == 'success' &&
       (needs.scan.result == 'success' || needs.scan.result == 'skipped')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -195,17 +198,24 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
+          # The `:latest` and `:main-<sha>` raw tags are gated on push
+          # events to `main` (not just `is_default_branch`) so that a
+          # workflow_dispatch run from main cannot bypass the scan gate
+          # and overwrite production tags — scan is skipped for
+          # workflow_dispatch by design. Dispatch runs still emit
+          # `dispatch-<short-sha>` as the non-production fallback.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main-${{ github.sha }},enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main-${{ github.sha }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=semver,pattern=v{{version}}
-            # workflow_dispatch fallback: emits dispatch-<short-sha> so
-            # manual runs from any branch still produce at least one tag.
             type=sha,prefix=dispatch-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
+        shell: bash
         run: |
+          set -euo pipefail
+          shopt -s failglob
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
