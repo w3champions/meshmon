@@ -7,11 +7,15 @@
 # the Grafana container's compose file.
 #
 # Required:
-#   MESHMON_VM_URL          e.g. http://meshmon-vm:8428
-#   MESHMON_PG_URL          e.g. meshmon-db:5432
-#   MESHMON_PG_DATABASE     usually "meshmon"
-#   MESHMON_PG_USER         usually "meshmon" (a read-only role is preferred)
-#   MESHMON_PG_PASSWORD     injected at deploy time via secret
+#   MESHMON_VM_URL              e.g. http://meshmon-vm:8428
+#   MESHMON_PG_URL              e.g. meshmon-db:5432
+#   MESHMON_PG_DATABASE         usually "meshmon"
+#   MESHMON_PG_GRAFANA_PASSWORD password for the read-only `meshmon_grafana`
+#                               role; injected at deploy time via secret.
+#                               The meshmon service flips the role from
+#                               NOLOGIN to LOGIN with this password on
+#                               startup — see
+#                               `crates/service/src/db.rs::apply_grafana_role_password`.
 #
 # After copying, restart Grafana (or wait for the provisioning reloader) so
 # the datasources appear with the fixed UIDs `MeshmonVM` and
@@ -47,7 +51,7 @@ datasources:
     access: proxy
     orgId: 1
     url: ${MESHMON_PG_URL}
-    user: ${MESHMON_PG_USER}
+    user: meshmon_grafana
     database: ${MESHMON_PG_DATABASE}
     isDefault: false
     editable: false
@@ -59,4 +63,4 @@ datasources:
       maxIdleConns: 2
       connMaxLifetime: 14400
     secureJsonData:
-      password: ${MESHMON_PG_PASSWORD}
+      password: ${MESHMON_PG_GRAFANA_PASSWORD}

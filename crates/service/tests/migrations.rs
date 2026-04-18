@@ -18,9 +18,16 @@ async fn migrations_apply_on_plain_postgres() {
     // Sanity: extension is *not* installed in this DB.
     assert!(!detect_timescaledb(&db.pool).await.unwrap());
 
-    run_migrations(&db.pool)
-        .await
-        .expect("run_migrations on plain Postgres");
+    // Hold the grafana test lock while migrations run — migrations
+    // touch the cluster-level `meshmon_grafana` role, which races with
+    // the grafana-specific tests. See `GRAFANA_TEST_LOCK` below.
+    {
+        let _guard = GRAFANA_TEST_LOCK.lock().await;
+        std::env::remove_var(GRAFANA_PASSWORD_ENV);
+        run_migrations(&db.pool)
+            .await
+            .expect("run_migrations on plain Postgres");
+    }
 
     // Tables exist.
     let agents_exists: (bool,) = sqlx::query_as(
@@ -88,9 +95,13 @@ async fn migrations_apply_on_timescaledb() {
 
     assert!(detect_timescaledb(&db.pool).await.unwrap());
 
-    run_migrations(&db.pool)
-        .await
-        .expect("run_migrations on TimescaleDB");
+    {
+        let _guard = GRAFANA_TEST_LOCK.lock().await;
+        std::env::remove_var(GRAFANA_PASSWORD_ENV);
+        run_migrations(&db.pool)
+            .await
+            .expect("run_migrations on TimescaleDB");
+    }
 
     // Hypertable has been created.
     let is_hyper: (bool,) = sqlx::query_as(
@@ -138,10 +149,14 @@ async fn migrations_apply_on_timescaledb() {
 async fn migrations_are_idempotent_on_timescaledb() {
     let db = common::acquire(true).await;
 
-    run_migrations(&db.pool).await.expect("first run");
-    run_migrations(&db.pool)
-        .await
-        .expect("second run must be a no-op, not an error");
+    {
+        let _guard = GRAFANA_TEST_LOCK.lock().await;
+        std::env::remove_var(GRAFANA_PASSWORD_ENV);
+        run_migrations(&db.pool).await.expect("first run");
+        run_migrations(&db.pool)
+            .await
+            .expect("second run must be a no-op, not an error");
+    }
 
     // Still exactly one compression + one retention job.
     let jobs: (i64,) = sqlx::query_as(
@@ -162,8 +177,12 @@ async fn migrations_are_idempotent_on_timescaledb() {
 async fn migrations_are_idempotent_on_plain_postgres() {
     let db = common::acquire(false).await;
 
-    run_migrations(&db.pool).await.expect("first run");
-    run_migrations(&db.pool).await.expect("second run");
+    {
+        let _guard = GRAFANA_TEST_LOCK.lock().await;
+        std::env::remove_var(GRAFANA_PASSWORD_ENV);
+        run_migrations(&db.pool).await.expect("first run");
+        run_migrations(&db.pool).await.expect("second run");
+    }
 
     // sqlx tracks applied migrations — the count must match the number of
     // files actually committed under `crates/service/migrations/` (grows by
@@ -188,13 +207,214 @@ async fn migrations_are_idempotent_on_plain_postgres() {
     db.close().await;
 }
 
+/// Serializes every `run_migrations` call in this test binary.
+///
+/// `apply_grafana_role_password` reads `MESHMON_PG_GRAFANA_PASSWORD`
+/// from the process environment, and the `meshmon_grafana` role lives
+/// at the Postgres *cluster* level (visible across every database in
+/// the shared test container). Two axes of shared state therefore
+/// break parallelism:
+///
+/// 1. `std::env::{set_var,remove_var}` mutates process-global state,
+///    so an env-var-mutating test races with any parallel reader.
+/// 2. Concurrent `ALTER ROLE meshmon_grafana ...` statements race on
+///    `pg_authid` rows and surface as `XX000: tuple concurrently
+///    updated`.
+///
+/// Holding a single mutex across *every* `run_migrations` call in this
+/// binary — grafana-specific tests AND the broader
+/// `migrations_apply_on_*` / `migrations_are_idempotent_on_*` tests —
+/// eliminates both races. Per-test DB isolation still lets the
+/// non-migration bodies run in parallel; only the migrations are
+/// serialized.
+static GRAFANA_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const GRAFANA_PASSWORD_ENV: &str = "MESHMON_PG_GRAFANA_PASSWORD";
+
+/// Run `run_migrations` with the grafana lock held and the env var
+/// forced to a known state (`Some(pw)` → set; `None` → cleared). The
+/// lock is released before returning, which is fine for tests that
+/// don't subsequently assert on the cluster-level role state. Tests
+/// that do assert on role state must keep the guard alive themselves.
+async fn run_migrations_locked_with_env(
+    pool: &sqlx::PgPool,
+    env: Option<&str>,
+) -> Result<tokio::sync::MutexGuard<'static, ()>, sqlx::Error> {
+    let guard = GRAFANA_TEST_LOCK.lock().await;
+    match env {
+        Some(pw) => std::env::set_var(GRAFANA_PASSWORD_ENV, pw),
+        None => std::env::remove_var(GRAFANA_PASSWORD_ENV),
+    }
+    run_migrations(pool).await?;
+    // Clear the env var eagerly so that if this guard is dropped and a
+    // non-grafana test runs next, it doesn't accidentally pick up a
+    // stale `set_var`.
+    std::env::remove_var(GRAFANA_PASSWORD_ENV);
+    Ok(guard)
+}
+
+#[tokio::test]
+async fn run_migrations_creates_grafana_role_nologin_by_default() {
+    let db = common::acquire(false).await;
+
+    // Hold the guard across the assertions so a sibling test can't
+    // flip the cluster-level role between our `run_migrations` and our
+    // `rolcanlogin` query.
+    let _guard = run_migrations_locked_with_env(&db.pool, None)
+        .await
+        .expect("run_migrations must succeed without the env var");
+
+    // Reset the role to NOLOGIN: the migration's CREATE ROLE NOLOGIN
+    // only fires on first creation; a prior sibling test may have
+    // flipped it to LOGIN before releasing the lock. The assertion we
+    // actually care about is "apply_grafana_role_password with the env
+    // var unset does not move the role toward LOGIN". Reset, then
+    // re-run, then assert.
+    sqlx::query("ALTER ROLE meshmon_grafana WITH NOLOGIN")
+        .execute(&db.pool)
+        .await
+        .expect("reset role to NOLOGIN");
+    run_migrations(&db.pool)
+        .await
+        .expect("second run_migrations (still env-unset) must succeed");
+
+    // Role exists.
+    let role_exists: (bool,) =
+        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'meshmon_grafana')")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(role_exists.0, "meshmon_grafana role must be created");
+
+    // Role is NOLOGIN.
+    let can_login: (bool,) =
+        sqlx::query_as("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !can_login.0,
+        "meshmon_grafana must remain NOLOGIN when env var is unset"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn run_migrations_flips_grafana_role_to_login_when_password_set() {
+    let db = common::acquire(false).await;
+
+    let _guard = run_migrations_locked_with_env(&db.pool, Some("s3cret$pw$value"))
+        .await
+        .expect("run_migrations with env var set must succeed");
+
+    let can_login: (bool,) =
+        sqlx::query_as("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'meshmon_grafana'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        can_login.0,
+        "meshmon_grafana must be LOGIN once MESHMON_PG_GRAFANA_PASSWORD is applied"
+    );
+
+    // A password has been set — pg_authid.rolpassword is non-null for
+    // md5/scram-stored credentials. Superuser is required to read it,
+    // and the test container runs as `postgres`, so this check works.
+    let has_password: (bool,) = sqlx::query_as(
+        "SELECT rolpassword IS NOT NULL
+         FROM pg_authid WHERE rolname = 'meshmon_grafana'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(has_password.0, "meshmon_grafana must have a password set");
+
+    // Reset the role back to NOLOGIN so a sibling test that acquires
+    // the lock next doesn't observe the LOGIN flip from this test.
+    sqlx::query("ALTER ROLE meshmon_grafana WITH NOLOGIN")
+        .execute(&db.pool)
+        .await
+        .expect("reset role to NOLOGIN");
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn grafana_role_has_select_but_not_insert() {
+    let db = common::acquire(false).await;
+
+    let _guard = run_migrations_locked_with_env(&db.pool, None)
+        .await
+        .expect("run_migrations must succeed");
+
+    // SELECT on agents is granted.
+    let can_select_agents: (bool,) =
+        sqlx::query_as("SELECT has_table_privilege('meshmon_grafana', 'public.agents', 'SELECT')")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        can_select_agents.0,
+        "meshmon_grafana must have SELECT on agents"
+    );
+
+    // SELECT on route_snapshots is granted.
+    let can_select_snaps: (bool,) = sqlx::query_as(
+        "SELECT has_table_privilege('meshmon_grafana', 'public.route_snapshots', 'SELECT')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        can_select_snaps.0,
+        "meshmon_grafana must have SELECT on route_snapshots"
+    );
+
+    // INSERT/UPDATE/DELETE must NOT be granted.
+    for priv_name in ["INSERT", "UPDATE", "DELETE"] {
+        let has_priv: (bool,) =
+            sqlx::query_as("SELECT has_table_privilege('meshmon_grafana', 'public.agents', $1)")
+                .bind(priv_name)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert!(
+            !has_priv.0,
+            "meshmon_grafana must NOT have {priv_name} on agents"
+        );
+
+        let has_priv_snaps: (bool,) = sqlx::query_as(
+            "SELECT has_table_privilege('meshmon_grafana', 'public.route_snapshots', $1)",
+        )
+        .bind(priv_name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            !has_priv_snaps.0,
+            "meshmon_grafana must NOT have {priv_name} on route_snapshots"
+        );
+    }
+
+    db.close().await;
+}
+
 /// Covers both post-migration constraint behaviors (FK restriction + CHECK
 /// constraint on protocol) against the process-shared pre-migrated DB.
 /// Each scenario wraps its work in a transaction that rolls back for
 /// isolation — the same pattern T04+ DML tests should follow by default.
 #[tokio::test]
 async fn schema_constraints_behave_correctly() {
-    let pool = common::shared_migrated_pool().await;
+    // The first caller of `shared_migrated_pool` triggers its
+    // internal `run_migrations`, which touches the cluster-level
+    // `meshmon_grafana` role. Take the lock to avoid racing with
+    // grafana-role tests that mutate `MESHMON_PG_GRAFANA_PASSWORD`.
+    let pool = {
+        let _guard = GRAFANA_TEST_LOCK.lock().await;
+        std::env::remove_var(GRAFANA_PASSWORD_ENV);
+        common::shared_migrated_pool().await
+    };
 
     // Scenario 1: ON DELETE RESTRICT blocks removal of an agent that still
     // has route_snapshots pointing at it.
