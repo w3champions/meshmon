@@ -24,6 +24,14 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
         );
     }
 
+    // Exclusions:
+    //   * `meshmon-e2e` — requires the full compose stack, covered by
+    //     `cargo xtask test-e2e`.
+    //   * `xtask` — its integration tests drive the singleton
+    //     `meshmon-test-pg` container lifecycle (down/up/stop/start).
+    //     Running them alongside the service's `DATABASE_URL`-based
+    //     integration tests races the shared DB. Run them via
+    //     `cargo test -p xtask` instead.
     let mut cmd = Command::new("cargo");
     cmd.args([
         "nextest",
@@ -31,6 +39,8 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
         "--workspace",
         "--exclude",
         "meshmon-e2e",
+        "--exclude",
+        "xtask",
         "--all-targets",
     ])
     .args(&extra)
@@ -46,8 +56,17 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
 
     // Doctests: nextest doesn't cover them. Run separately if any exist.
     // (A single pass across the workspace; cheap when there are none.)
+    // Same exclusions as above for the same reasons.
     let status = Command::new("cargo")
-        .args(["test", "--doc", "--workspace", "--exclude", "meshmon-e2e"])
+        .args([
+            "test",
+            "--doc",
+            "--workspace",
+            "--exclude",
+            "meshmon-e2e",
+            "--exclude",
+            "xtask",
+        ])
         .env("DATABASE_URL", test_db::DATABASE_URL)
         .env("SQLX_OFFLINE", "true")
         .status()?;

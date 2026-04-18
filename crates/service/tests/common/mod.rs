@@ -44,6 +44,12 @@
 //! path, unchanged). `cargo nextest run` without `DATABASE_URL` will
 //! panic loudly — use xtask.
 //!
+//! `cargo xtask test` excludes the `xtask` and `meshmon-e2e` packages —
+//! they run in separate invocations. Verify xtask's own lifecycle
+//! commands with `cargo test -p xtask` (does not need `DATABASE_URL`;
+//! spawns its own `meshmon-test-pg` as part of the test). Run
+//! end-to-end tests with `cargo xtask test-e2e`.
+//!
 //! # What transaction rollback does NOT cover
 //!
 //! `shared_migrated_pool()` isolation relies on transactional rollback.

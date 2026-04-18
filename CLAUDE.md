@@ -24,7 +24,7 @@ cargo xtask test-db down    # stop the shared test database when finished
 cargo clippy --workspace -- -D warnings
 ```
 
-`cargo test` still works as a zero-setup fallback (spawns a TimescaleDB container per integration-test binary via testcontainers). `cargo nextest run` directly is not supported — use `cargo xtask test`, which provisions a single shared Postgres and sets `DATABASE_URL` so every test connects to it. See `crates/service/tests/common/mod.rs` for the three-tier isolation contract used by the test harness.
+`cargo test` still works as a zero-setup fallback (spawns a TimescaleDB container per integration-test binary via testcontainers). `cargo nextest run` directly is not supported — use `cargo xtask test`, which provisions a single shared Postgres and sets `DATABASE_URL` so every test connects to it. `cargo xtask test` excludes `xtask` and `meshmon-e2e` — run those via `cargo test -p xtask` and `cargo xtask test-e2e` respectively. See `crates/service/tests/common/mod.rs` for the three-tier isolation contract used by the test harness.
 
 `deploy/docker-compose.yml` is the local-dev-safe compose file; `deploy/docker-compose.ci-cache.yml` is a CI-only overlay that adds the GHA buildx cache backend (requires `ACTIONS_RUNTIME_TOKEN`) and is wired in via `MESHMON_E2E_CACHE_OVERLAY` in the workflow — do not pass it locally.
 

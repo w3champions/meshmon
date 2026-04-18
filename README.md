@@ -257,6 +257,12 @@ cargo xtask test-db down    # tear down the shared test database
 container, sets `DATABASE_URL`, and runs `cargo nextest` against it. This
 is the canonical path for local dev and CI.
 
+`cargo xtask test` excludes the `xtask` and `meshmon-e2e` packages —
+they run in separate invocations. Verify xtask's own lifecycle commands
+with `cargo test -p xtask` (does not need `DATABASE_URL`; the test
+drives its own `meshmon-test-pg` container). Run end-to-end tests with
+`cargo xtask test-e2e`.
+
 `cargo test --workspace --all-targets` still works as a zero-setup
 fallback — it spawns one container per test binary via
 [`testcontainers`](https://crates.io/crates/testcontainers) and tears
