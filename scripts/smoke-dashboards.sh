@@ -37,6 +37,16 @@ DS_DIR="grafana/test-harness/provisioning/datasources"
 mkdir -p "$DS_DIR"
 DS_YAML="$DS_DIR/meshmon.yml"
 
+COMPOSE=(docker compose -f grafana/test-harness/docker-compose.yml --env-file deploy/versions.env)
+
+# Install the cleanup trap before doing any work that could leave the
+# generated DS YAML behind on partial failure.
+cleanup() {
+  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  rm -f "$DS_YAML"
+}
+trap cleanup EXIT
+
 # Fill in harness-internal URLs against the canonical template.
 MESHMON_VM_URL="http://meshmon-vm:8428" \
 MESHMON_PG_URL="" \
@@ -48,8 +58,6 @@ envsubst < grafana/provisioning/datasources.yml.template > "$DS_YAML"
 # Postgres isn't part of the smoke harness (no dashboard queries Postgres),
 # so strip the MeshmonPostgres datasource block from the generated file.
 # Simpler than adding conditionals to the template.
-# NOTE: This stripping logic is duplicated in scripts/smoke.sh.
-# If the datasources template gains new datasource blocks, update both.
 node -e "
 const fs=require('node:fs');
 const yaml=fs.readFileSync(process.argv[1],'utf8');
@@ -58,14 +66,6 @@ const out=yaml
   .replace(/\n  - \{[^}]*name: MeshmonPostgres[^}]*\}[^\n]*/, '');
 fs.writeFileSync(process.argv[1], out);
 " "$DS_YAML"
-
-COMPOSE=(docker compose -f grafana/test-harness/docker-compose.yml --env-file deploy/versions.env)
-
-cleanup() {
-  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$DS_YAML"
-}
-trap cleanup EXIT
 
 echo "==> bringing up VM + Grafana (tags: VM=${VM_TAG}, Grafana=${GRAFANA_TAG})"
 "${COMPOSE[@]}" up -d
