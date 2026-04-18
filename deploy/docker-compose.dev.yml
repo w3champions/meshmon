@@ -17,6 +17,13 @@ services:
     ports: ["127.0.0.1:8428:8428"]
   meshmon-grafana:
     ports: ["127.0.0.1:3000:3000"]
+    environment:
+      # Prod pins the whitelist to meshmon-service's static bridge IP
+      # (172.30.0.10). In dev, meshmon-service runs on the host via
+      # `cargo run`, so its requests to Grafana arrive from the bridge
+      # gateway instead. Widen the whitelist to the whole subnet so the
+      # /grafana/* iframe works in `scripts/dev.sh` too.
+      - GF_AUTH_PROXY_WHITELIST=172.30.0.0/24
   meshmon-alertmanager:
     ports: ["127.0.0.1:9093:9093"]
   meshmon-vmalert:
