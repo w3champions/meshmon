@@ -184,12 +184,18 @@ pub struct RouteTracker {
     /// `(position, ip)` → per-hop accumulator. Flat for cache locality.
     /// Maintained by `observe`; consumed by `build_snapshot` (Task 4).
     hops: HashMap<(u8, IpAddr), HopObservationsAcc>,
-    /// Sum of `HopObservationsAcc.seen` across all IPs at each position.
-    /// Maintained O(1) on insert + O(1) on purge so hop-frequency
-    /// computation in `build_snapshot` is O(1) per `(position, ip)`.
-    position_totals: HashMap<u8, u32>,
+    /// Per-position probe accumulator. Every probe to TTL `p` (silent or
+    /// IP-bearing) lands here; IP-bearing probes additionally land in
+    /// `hops[(p, ip)]` at the same timestamp. Replaces the former
+    /// `position_totals: HashMap<u8, u32>` scalar.
+    position_probes: HashMap<u8, HopObservationsAcc>,
     /// Most-recently emitted snapshot, for the next `diff_against` call.
     last_reported: Option<RouteSnapshot>,
+    /// IP address of the probe target. Reserved for future tasks (Task 8:
+    /// truncation at destination). Stored now so the constructor signature
+    /// is stable; reads will land in later tasks.
+    #[allow(dead_code)]
+    target_ip: IpAddr,
 }
 
 impl RouteTracker {
@@ -197,13 +203,14 @@ impl RouteTracker {
     /// (`primary_window_sec`, default 300 s). Starts with `protocol = None`
     /// so the tracker silently drops observations until the supervisor
     /// calls [`RouteTracker::reset_for_protocol`] once a primary is elected.
-    pub fn new(window: Duration) -> Self {
+    pub fn new(window: Duration, target_ip: IpAddr) -> Self {
         Self {
             protocol: None,
             window,
             hops: HashMap::new(),
-            position_totals: HashMap::new(),
+            position_probes: HashMap::new(),
             last_reported: None,
+            target_ip,
         }
     }
 
@@ -232,8 +239,10 @@ impl RouteTracker {
     pub fn reset_for_protocol(&mut self, protocol: Option<Protocol>) {
         self.protocol = protocol;
         self.hops.clear();
-        self.position_totals.clear();
+        self.position_probes.clear();
         self.last_reported = None;
+        #[cfg(debug_assertions)]
+        self.assert_consistency();
     }
 
     /// Ingest the hop observations from one trippy round. Purges samples
@@ -251,45 +260,72 @@ impl RouteTracker {
             self.purge_stale(cutoff);
         }
 
-        // Star hops (ip = None) are ignored because they can't be
-        // attributed to a (position, ip) key. The histogram tracks OBSERVED
-        // IPs; star hops are the absence of observation.
         for obs in hops {
-            let Some(ip) = obs.ip else { continue };
-            let key = (obs.position, ip);
-            let acc = self.hops.entry(key).or_default();
-            acc.insert(now, obs.rtt_micros);
-            *self.position_totals.entry(obs.position).or_insert(0) += 1;
+            // Record the probe at this position, silent or not.
+            let pos_acc = self.position_probes.entry(obs.position).or_default();
+            pos_acc.insert(now, obs.rtt_micros);
+            // If an IP responded, also record at (position, ip).
+            if let Some(ip) = obs.ip {
+                let acc = self.hops.entry((obs.position, ip)).or_default();
+                acc.insert(now, obs.rtt_micros);
+            }
         }
+        #[cfg(debug_assertions)]
+        self.assert_consistency();
     }
 
     /// Walk the accumulator and drop samples older than `cutoff`. Keeps
-    /// `position_totals` in sync and removes `(position, ip)` entries that
+    /// `position_probes` in sync and removes `(position, ip)` entries that
     /// became empty so ghost zero-count rows can't surface in
     /// `build_snapshot`. Boundary semantics match
     /// `stats::RollingStats::purge_old`: a sample with `t == cutoff` is
     /// expired.
     fn purge_stale(&mut self, cutoff: Instant) {
-        let mut empty_keys: Vec<(u8, IpAddr)> = Vec::new();
+        let mut empty_ip_keys: Vec<(u8, IpAddr)> = Vec::new();
         for (key, acc) in self.hops.iter_mut() {
-            let purged = acc.purge(cutoff);
-            if purged > 0 {
-                if let Some(total) = self.position_totals.get_mut(&key.0) {
-                    *total = total.saturating_sub(purged);
-                }
-            }
+            acc.purge(cutoff);
             if acc.is_empty() {
-                empty_keys.push(*key);
+                empty_ip_keys.push(*key);
             }
         }
-        for key in &empty_keys {
+        for key in &empty_ip_keys {
             self.hops.remove(key);
-            // If this was the last IP at that position, drop the total too.
-            if let Some(total) = self.position_totals.get(&key.0) {
-                if *total == 0 {
-                    self.position_totals.remove(&key.0);
-                }
+        }
+
+        let mut empty_positions: Vec<u8> = Vec::new();
+        for (pos, acc) in self.position_probes.iter_mut() {
+            acc.purge(cutoff);
+            if acc.is_empty() {
+                empty_positions.push(*pos);
             }
+        }
+        for pos in &empty_positions {
+            self.position_probes.remove(pos);
+        }
+
+        #[cfg(debug_assertions)]
+        self.assert_consistency();
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_consistency(&self) {
+        for (pos, _) in self.hops.keys() {
+            debug_assert!(
+                self.position_probes.contains_key(pos),
+                "hops has entry for pos {pos} but position_probes does not",
+            );
+        }
+        let mut ip_sums: HashMap<u8, u32> = HashMap::new();
+        for ((pos, _), acc) in &self.hops {
+            *ip_sums.entry(*pos).or_default() += acc.seen;
+        }
+        for (pos, acc) in &self.position_probes {
+            let ip_sum = ip_sums.get(pos).copied().unwrap_or(0);
+            debug_assert!(
+                acc.seen >= ip_sum,
+                "position_probes[{pos}].seen={} < Σ hops={ip_sum}",
+                acc.seen,
+            );
         }
     }
 
@@ -307,14 +343,18 @@ impl RouteTracker {
             return None;
         }
 
-        // Group accumulator entries by position. Iterate position_totals
+        // Group accumulator entries by position. Iterate position_probes
         // as the canonical set of active positions.
-        let mut positions: Vec<u8> = self.position_totals.keys().copied().collect();
+        let mut positions: Vec<u8> = self.position_probes.keys().copied().collect();
         positions.sort();
 
         let mut hops_out: Vec<HopSummary> = Vec::with_capacity(positions.len());
         for position in positions {
-            let total = *self.position_totals.get(&position).unwrap_or(&0);
+            let total = self
+                .position_probes
+                .get(&position)
+                .map(|a| a.seen)
+                .unwrap_or(0);
             if total == 0 {
                 // Defensive: should have been pruned. Skip instead of
                 // dividing by zero.
@@ -550,7 +590,7 @@ mod tests {
 
     #[test]
     fn new_tracker_has_no_protocol_no_last_reported() {
-        let t = RouteTracker::new(five_min());
+        let t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         assert_eq!(t.protocol(), None);
         assert_eq!(t.window(), five_min());
         assert!(t.last_reported().is_none());
@@ -558,14 +598,14 @@ mod tests {
 
     #[test]
     fn reset_for_protocol_sets_protocol() {
-        let mut t = RouteTracker::new(five_min());
+        let mut t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         t.reset_for_protocol(Some(Protocol::Icmp));
         assert_eq!(t.protocol(), Some(Protocol::Icmp));
     }
 
     #[test]
     fn reset_for_protocol_to_none_clears_protocol() {
-        let mut t = RouteTracker::new(five_min());
+        let mut t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         t.reset_for_protocol(Some(Protocol::Icmp));
         t.reset_for_protocol(None);
         assert_eq!(t.protocol(), None);
@@ -573,7 +613,7 @@ mod tests {
 
     #[test]
     fn reset_clears_last_reported() {
-        let mut t = RouteTracker::new(five_min());
+        let mut t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         t.reset_for_protocol(Some(Protocol::Icmp));
         t.set_last_reported(RouteSnapshot {
             protocol: Protocol::Icmp,
@@ -597,20 +637,20 @@ mod tests {
     }
 
     fn tracker_ready(window: Duration, protocol: Protocol) -> RouteTracker {
-        let mut t = RouteTracker::new(window);
+        let mut t = RouteTracker::new(window, ipv4(127, 0, 0, 1));
         t.reset_for_protocol(Some(protocol));
         t
     }
 
     #[test]
     fn observe_noop_when_no_protocol() {
-        let mut t = RouteTracker::new(five_min());
+        let mut t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         // No reset_for_protocol call — protocol is None.
         let now = Instant::now();
         t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
         // Internal accumulator must remain empty.
         assert!(t.hops.is_empty());
-        assert!(t.position_totals.is_empty());
+        assert!(t.position_probes.is_empty());
     }
 
     #[test]
@@ -624,18 +664,24 @@ mod tests {
         assert_eq!(acc.successful, 1);
         assert_eq!(acc.sum_rtt_micros, 5_000);
         assert_eq!(acc.sum_rtt_sq_micros, 25_000_000);
-        assert_eq!(t.position_totals.get(&1).copied(), Some(1));
+        assert_eq!(t.position_probes.get(&1).map(|a| a.seen), Some(1));
     }
 
     #[test]
     fn observe_star_hop_is_ignored() {
         // A hop with ip = None AND rtt = None = total timeout ("star hop").
-        // Star hops have no IP, so they are NOT recorded in the accumulator
-        // at all — there's no (position, ip) key to attribute them to.
+        // Star hops have no IP, so they are NOT recorded in the per-(pos,ip)
+        // hops map — but they DO land in position_probes (probe was sent).
         let mut t = tracker_ready(five_min(), Protocol::Icmp);
         t.observe(&[hop(3, None, None)], Instant::now());
-        assert!(t.hops.is_empty(), "star hops carry no IP and are ignored");
-        assert!(t.position_totals.is_empty());
+        assert!(
+            t.hops.is_empty(),
+            "star hops carry no IP and are not in hops map"
+        );
+        assert!(
+            !t.position_probes.is_empty(),
+            "silent hops land in position_probes"
+        );
     }
 
     #[test]
@@ -648,7 +694,7 @@ mod tests {
         assert_eq!(acc.seen, 1);
         assert_eq!(acc.successful, 0);
         assert_eq!(acc.sum_rtt_micros, 0);
-        assert_eq!(t.position_totals.get(&2).copied(), Some(1));
+        assert_eq!(t.position_probes.get(&2).map(|a| a.seen), Some(1));
     }
 
     #[test]
@@ -666,7 +712,7 @@ mod tests {
             acc.sum_rtt_sq_micros,
             1_000_u128.pow(2) + 2_000_u128.pow(2) + 3_000_u128.pow(2)
         );
-        assert_eq!(t.position_totals.get(&1).copied(), Some(3));
+        assert_eq!(t.position_probes.get(&1).map(|a| a.seen), Some(3));
     }
 
     #[test]
@@ -692,7 +738,7 @@ mod tests {
             .expect("still present");
         assert_eq!(acc.seen, 2, "t+0 sample was purged");
         assert_eq!(acc.sum_rtt_micros, 2_000 + 3_000);
-        assert_eq!(t.position_totals.get(&1).copied(), Some(2));
+        assert_eq!(t.position_probes.get(&1).map(|a| a.seen), Some(2));
     }
 
     #[test]
@@ -707,7 +753,7 @@ mod tests {
         let b = t.hops.get(&(3u8, ipv4(10, 1, 0, 2))).unwrap();
         assert_eq!(a.seen, 2);
         assert_eq!(b.seen, 1);
-        assert_eq!(t.position_totals.get(&3).copied(), Some(3));
+        assert_eq!(t.position_probes.get(&3).map(|a| a.seen), Some(3));
     }
 
     #[test]
@@ -728,7 +774,7 @@ mod tests {
             "empty accumulator entries must be pruned, hops={:?}",
             t.hops.keys().collect::<Vec<_>>(),
         );
-        assert_eq!(t.position_totals.get(&1).copied(), None);
+        assert_eq!(t.position_probes.get(&1).map(|a| a.seen), None);
     }
 
     fn systemtime_epoch_plus(micros: u64) -> SystemTime {
@@ -748,7 +794,7 @@ mod tests {
         // Even if hops somehow landed in the accumulator (they can't
         // via observe(), but defensively), a no-protocol tracker has
         // nothing meaningful to emit.
-        let mut t = RouteTracker::new(five_min());
+        let mut t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         let now = Instant::now();
         let wall = systemtime_epoch_plus(1_000);
         assert!(t.build_snapshot(now, wall).is_none());
@@ -896,7 +942,7 @@ mod tests {
     }
 
     fn tracker_with_last(protocol: Protocol, last: RouteSnapshot) -> RouteTracker {
-        let mut t = RouteTracker::new(five_min());
+        let mut t = RouteTracker::new(five_min(), ipv4(127, 0, 0, 1));
         t.reset_for_protocol(Some(protocol));
         t.set_last_reported(last);
         t
@@ -1441,7 +1487,7 @@ mod tests {
         t.reset_for_protocol(Some(Protocol::Tcp));
         assert!(t.last_reported().is_none());
         assert!(t.hops.is_empty());
-        assert!(t.position_totals.is_empty());
+        assert!(t.position_probes.is_empty());
         assert_eq!(t.protocol(), Some(Protocol::Tcp));
 
         // Next observation under TCP, snapshot emits as new baseline.
@@ -1457,5 +1503,77 @@ mod tests {
         // diff_against without a last_reported is always None — supervisor
         // branch takes the "is_none()" path and emits unconditionally.
         assert_eq!(t.diff_against(&first_after_swing, &default_diff()), None);
+    }
+
+    #[test]
+    fn observe_silent_hop_populates_position_probes_only() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(5, None, None)], now);
+        assert!(
+            t.hops.is_empty(),
+            "silent hop has no IP, must not land in per-(pos,ip) map",
+        );
+        let acc = t
+            .position_probes
+            .get(&5)
+            .expect("silent hop in position_probes");
+        assert_eq!(acc.seen, 1);
+        assert_eq!(acc.successful, 0);
+    }
+
+    #[test]
+    fn observe_ip_bearing_hop_populates_both_maps() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+        let pacc = t.position_probes.get(&1).expect("in position_probes");
+        let iacc = t.hops.get(&(1, ipv4(10, 0, 0, 1))).expect("in hops");
+        assert_eq!(pacc.seen, 1);
+        assert_eq!(pacc.successful, 1);
+        assert_eq!(iacc.seen, 1);
+        assert_eq!(iacc.successful, 1);
+    }
+
+    #[test]
+    fn purge_keeps_maps_in_sync() {
+        let base = Instant::now();
+        let mut t = tracker_ready(Duration::from_secs(60), Protocol::Icmp);
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], base);
+        t.observe(&[hop(2, None, None)], base);
+        t.observe(
+            &[hop(3, Some(ipv4(10, 0, 0, 3)), Some(3_000))],
+            base + Duration::from_secs(120),
+        );
+        assert!(
+            !t.hops.contains_key(&(1, ipv4(10, 0, 0, 1))),
+            "pos 1 IP expired"
+        );
+        assert!(!t.position_probes.contains_key(&1), "pos 1 probes expired");
+        assert!(
+            !t.position_probes.contains_key(&2),
+            "pos 2 silent probe expired"
+        );
+        assert_eq!(t.position_probes.get(&3).unwrap().seen, 1);
+    }
+
+    #[test]
+    fn reset_for_protocol_clears_position_probes() {
+        let mut t = tracker_ready(five_min(), Protocol::Icmp);
+        let now = Instant::now();
+        t.observe(
+            &[
+                hop(1, None, None),
+                hop(2, Some(ipv4(10, 0, 0, 2)), Some(1_000)),
+            ],
+            now,
+        );
+        assert!(!t.position_probes.is_empty());
+        t.reset_for_protocol(Some(Protocol::Tcp));
+        assert!(
+            t.position_probes.is_empty(),
+            "swing must clear position_probes"
+        );
+        assert!(t.hops.is_empty());
     }
 }

@@ -191,7 +191,9 @@ pub fn spawn(
     // `protocol = None` so it silently drops incoming hops until T14 elects
     // a primary and the supervisor calls `reset_for_protocol`.
     let initial_primary_window = Duration::from_secs(initial.primary_window_sec as u64);
-    let route_tracker = RouteTracker::new(initial_primary_window);
+    let target_ip = meshmon_protocol::ip::to_ipaddr(&target.ip)
+        .expect("target.ip must decode to IpAddr (4-byte IPv4 or 16-byte IPv6 per proto contract)");
+    let route_tracker = RouteTracker::new(initial_primary_window, target_ip);
     // All three protocols start at the diversity window. The eval tick calls
     // `set_window` on whichever protocol it elects as primary.
     let stats: Arc<StatsArray> = Arc::new([
