@@ -276,6 +276,24 @@ impl TestDb {
     }
 }
 
+/// Panics if we are running under nextest (`NEXTEST=1`) without a
+/// `DATABASE_URL` override. Without the override, each nextest test
+/// process would fire the module-level `OnceCell` and spawn its own
+/// TimescaleDB container — 14-way parallelism saturates the Docker
+/// daemon and takes minutes longer than `cargo test`.
+///
+/// Called from the top of [`shared_migrated_pool`] and [`acquire`].
+fn guard_nextest_requires_shared_db() {
+    if std::env::var("NEXTEST").is_ok() && std::env::var("DATABASE_URL").is_err() {
+        panic!(
+            "running under nextest without DATABASE_URL is unsupported. \
+             Each nextest process would spawn its own TimescaleDB container. \
+             Use `cargo xtask test` (auto-provisions a shared DB) or fall \
+             back to `cargo test`."
+        );
+    }
+}
+
 /// Acquire a fresh, isolated Postgres database for a DDL-owning test.
 ///
 /// The database is created inside the process-shared TimescaleDB container
@@ -288,6 +306,7 @@ impl TestDb {
 /// leaks the database inside the shared server for the rest of the test
 /// binary's lifetime, then the `#[dtor]` tears down the whole container.
 pub async fn acquire(with_timescale: bool) -> TestDb {
+    guard_nextest_requires_shared_db();
     let shared = shared().await;
     let db_name = format!("meshmon_t03_{}", Uuid::new_v4().simple());
 
@@ -337,6 +356,7 @@ pub async fn acquire(with_timescale: bool) -> TestDb {
 /// the external server — that's acceptable because the database name is a
 /// UUID and conflicts are impossible across runs.
 pub async fn shared_migrated_pool() -> PgPool {
+    guard_nextest_requires_shared_db();
     let shared = shared().await;
     let db_name = SHARED_MIGRATED_DB
         .get_or_init(|| async {
@@ -868,4 +888,42 @@ pub async fn login_as_admin(app: &axum::Router, client_ip: &str) -> String {
         .to_str()
         .expect("session cookie is valid utf-8")
         .to_string()
+}
+
+#[cfg(test)]
+#[test]
+fn nextest_without_database_url_panics_clearly() {
+    // Run the guard inline — in practice it's called from the
+    // shared_migrated_pool() / acquire() entry points.
+    let saved_nextest = std::env::var("NEXTEST").ok();
+    let saved_db_url = std::env::var("DATABASE_URL").ok();
+
+    std::env::set_var("NEXTEST", "1");
+    std::env::remove_var("DATABASE_URL");
+
+    let result = std::panic::catch_unwind(guard_nextest_requires_shared_db);
+
+    match saved_nextest {
+        Some(v) => std::env::set_var("NEXTEST", v),
+        None => std::env::remove_var("NEXTEST"),
+    };
+    match saved_db_url {
+        Some(v) => std::env::set_var("DATABASE_URL", v),
+        None => std::env::remove_var("DATABASE_URL"),
+    };
+
+    let err = result.expect_err("must panic");
+    let msg = err
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| err.downcast_ref::<&'static str>().copied())
+        .unwrap_or("<non-string panic>");
+    assert!(
+        msg.contains("DATABASE_URL"),
+        "message must mention DATABASE_URL; got: {msg}"
+    );
+    assert!(
+        msg.contains("cargo xtask test"),
+        "message must point at xtask; got: {msg}"
+    );
 }
