@@ -260,9 +260,13 @@ async fn fetch_latest_by_protocol(
             "icmp" => &mut out.icmp,
             "udp" => &mut out.udp,
             "tcp" => &mut out.tcp,
-            // Unknown protocols stored by an older agent build are simply
-            // dropped from the per-protocol slots; they still show up in
-            // the recent_snapshots list.
+            // Defensive: ingestion only persists `icmp`/`udp`/`tcp` (see
+            // `ingestion::protocol_label`), so any other value would come
+            // from a schema drift / hand-written row. Drop it rather than
+            // fabricating a slot. Such rows are also skipped from
+            // `recent_snapshots` — this is intentional: without a resolved
+            // primary protocol there's no sensible single-protocol list
+            // to render.
             _ => continue,
         };
         let detail: RouteSnapshotDetail = LatestRow {
