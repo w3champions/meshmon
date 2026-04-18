@@ -52,11 +52,14 @@ ADMIN_HASH=$(echo -n "$ADMIN_PASSWORD" | argon2 "$(openssl rand -base64 16)" -id
 # directly to `cargo run` below.
 ADMIN_HASH_ESCAPED=${ADMIN_HASH//\$/\$\$}
 
+UDP_PROBE_SECRET="hex:$(openssl rand -hex 8)"
+
 cat > "$DEPLOY_DIR/.env" <<EOF
 MESHMON_ADMIN_PASSWORD_HASH=$ADMIN_HASH_ESCAPED
 MESHMON_AGENT_TOKEN=$AGENT_TOKEN
 MESHMON_PG_PASSWORD=$PG_PASSWORD
 MESHMON_PG_GRAFANA_PASSWORD=$PG_GRAFANA_PASSWORD
+MESHMON_UDP_PROBE_SECRET=$UDP_PROBE_SECRET
 # Compose rejects stacks when a secret's source env var is unset; empty
 # values produce empty secret files inside Alertmanager (loud delivery
 # errors rather than silent drops).
@@ -74,6 +77,8 @@ cat > "$DEPLOY_DIR/meshmon.toml" <<EOF
 
 [service]
 listen_addr = "0.0.0.0:${SERVICE_PORT}"
+# Dev server is plain HTTP; browsers drop Secure cookies on HTTP.
+session_cookie_secure = false
 
 [database]
 url_env = "MESHMON_POSTGRES_URL"
@@ -91,7 +96,7 @@ alertmanager_url = "http://127.0.0.1:9093/alertmanager"
 grafana_url = "http://127.0.0.1:3000/grafana"
 
 [probing]
-udp_probe_secret = "hex:0011223344556677"
+udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
 EOF
 
 echo "[dev.sh] starting infra via docker compose dev overlay"
@@ -131,6 +136,7 @@ export MESHMON_CONFIG="$DEPLOY_DIR/meshmon.toml"
 export MESHMON_AGENT_TOKEN="$AGENT_TOKEN"
 export MESHMON_ADMIN_PASSWORD_HASH="$ADMIN_HASH"
 export MESHMON_PG_GRAFANA_PASSWORD="$PG_GRAFANA_PASSWORD"
+export MESHMON_UDP_PROBE_SECRET="$UDP_PROBE_SECRET"
 export MESHMON_POSTGRES_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable"
 export RUST_LOG="${RUST_LOG:-meshmon_service=debug,info}"
 # Port comes from the throwaway toml's `service.listen_addr` above
