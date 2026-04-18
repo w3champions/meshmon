@@ -199,12 +199,17 @@ format = "yaml"
 
 #[test]
 fn shipped_example_parses() {
-    // Env vars the example references; set before load, clean up after.
     std::env::set_var(
         "MESHMON_POSTGRES_URL",
         "postgres://admin:pw@localhost:5432/db",
     );
     std::env::set_var("MESHMON_AGENT_TOKEN", "dummy-token");
+    // Added by T24: meshmon.example.toml now references this env var
+    // from its [[auth.users]] entry.
+    std::env::set_var(
+        "MESHMON_ADMIN_PASSWORD_HASH",
+        "$argon2id$v=19$m=16,t=1,p=1$c2FsdHNhbHQ$87ARSxtFrFp/0EGLYgzI7Giyu6y7PD1rUqoZugn3NqY",
+    );
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -216,9 +221,13 @@ fn shipped_example_parses() {
     assert_eq!(cfg.service.listen_addr.to_string(), "0.0.0.0:8080");
     assert_eq!(cfg.database.url(), "postgres://admin:pw@localhost:5432/db");
     assert_eq!(cfg.agent_api.shared_token.as_deref(), Some("dummy-token"));
+    // Added by T24: verify the env-indirected admin hash resolved.
+    assert_eq!(cfg.auth.users.len(), 1);
+    assert_eq!(cfg.auth.users[0].username, "admin");
 
     std::env::remove_var("MESHMON_POSTGRES_URL");
     std::env::remove_var("MESHMON_AGENT_TOKEN");
+    std::env::remove_var("MESHMON_ADMIN_PASSWORD_HASH");
 }
 
 #[test]

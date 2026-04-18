@@ -1,0 +1,19 @@
+# File provider pointing at /etc/grafana/dashboards — the directory
+# where docker/Dockerfile.grafana COPY's the three JSON files from
+# grafana/dashboards/. Deliberately outside /var/lib/grafana so the
+# persistent volume does not shadow updated dashboards across image
+# bumps. `allowUiUpdates: false` keeps the repo the source of truth
+# (any UI edit is discarded on container restart).
+apiVersion: 1
+
+providers:
+  - name: meshmon
+    orgId: 1
+    folder: meshmon
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

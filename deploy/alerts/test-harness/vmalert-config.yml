@@ -1,7 +1,0 @@
-# Human-readable reference for the flags passed on the command line in
-# docker-compose.yml. Kept alongside the harness files so operators don't
-# have to cross-read the compose.
-datasource.url: http://vm:8428
-notifier.url:   http://alertmanager:9093
-rule:           /rules/rules.yaml
-evaluationInterval: 10s

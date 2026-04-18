@@ -35,16 +35,9 @@ Subsystems:
 
 Meshmon ships three Grafana dashboards under `grafana/` (per-path,
 fleet-overview, per-agent) plus a datasources provisioning template for
-VictoriaMetrics and Postgres.
-
-Validate:
-
-```bash
-./scripts/validate-dashboards.sh     # CI-safe: JSON + contract
-./scripts/smoke-dashboards.sh        # local: VM + Grafana + /d-solo assert
-```
-
-See `grafana/README.md` for the operator guide.
+VictoriaMetrics and Postgres. The bundled compose bakes them into
+`ghcr.io/w3champions/meshmon-grafana`; operators pointing at their own
+Grafana use the template. See `grafana/README.md` for the operator guide.
 
 ## Quick start (development)
 
@@ -67,18 +60,35 @@ cargo run --bin meshmon-agent
 
 ## Quick start (Docker)
 
-```bash
-# Build the images
-docker build -f docker/Dockerfile.service -t meshmon-service:dev .
-docker build -f docker/Dockerfile.agent   -t meshmon-agent:dev   .
+> ⚠️ **Do not expose this on the public internet without TLS.** See
+> [`docs/deployment.md`](docs/deployment.md) § Enabling TLS for the two
+> supported TLS paths. The block below is a localhost-only bootstrap.
 
-# Standalone stack
+```bash
+# 1. Configure secrets.
 cp deploy/.env.example deploy/.env
 $EDITOR deploy/.env
-docker compose -f deploy/docker-compose.yml up -d
+
+cp deploy/meshmon.example.toml deploy/meshmon.toml
+
+# 2. Bring up the bundled stack (service + Postgres + VM + vmalert + AM + bundled Grafana).
+cd deploy && docker compose up -d           # pulls ghcr.io/w3champions/* images
+# or:
+cd deploy && docker compose up -d --build   # builds meshmon-service + meshmon-grafana locally
+
+# 3. Log in at http://localhost:8080/ as admin.
 ```
 
-See `deploy/meshmon.example.toml` for the service configuration surface.
+See `deploy/meshmon.example.toml` for the full service configuration
+surface and [`docs/deployment.md`](docs/deployment.md) for the
+end-to-end OSS deployment guide (TLS, agent run instructions,
+external-Grafana datasource wiring, vmalert-vs-AM explainer).
+
+For local frontend + backend iteration with HMR:
+
+```bash
+./scripts/dev.sh
+```
 
 ## Running the service
 
@@ -106,20 +116,22 @@ The service binds on `service.listen_addr` (default `0.0.0.0:8080`). Useful endp
 - `GET /api/docs` — Swagger UI for the operator API.
 - `GET /api/openapi.json` — OpenAPI 3.1 schema (also checked in at `frontend/src/api/openapi.json`).
 
-### One-command smoke harness
+### One-command dev loop
 
-`scripts/smoke.sh` brings up Postgres + VictoriaMetrics in Docker, writes a
-throwaway config, seeds a few agents and route snapshots, starts the service
-in the background, and runs the Vite dev server in the foreground (which
-proxies `/api` to the service). Ctrl-C tears everything down.
+`scripts/dev.sh` brings up the bundled infra (Postgres + VictoriaMetrics
++ Grafana + Alertmanager + vmalert) via the dev compose overlay, seeds a
+couple of agents and route snapshots, starts `cargo run -p meshmon-service`
+in the background, and runs the Vite dev server in the foreground
+(HMR, `/api` proxied to the service). Ctrl-C tears everything down.
 
 ```bash
-./scripts/smoke.sh
+./scripts/dev.sh
 # Open http://127.0.0.1:5173/  —  login: admin / smoketest
 ```
 
-Intended for local UI smoke-testing only — see `deploy/docker-compose.yml`
-for the full production stack.
+Intended for local UI iteration only — for the full production stack
+(including the service container from `docker/Dockerfile.service`), see
+the Quick start (Docker) block above and `docs/deployment.md`.
 
 Requires `docker`, `cargo`, `argon2`, `openssl`, `psql`, `sqlx`, and `npm`
 on `$PATH`.

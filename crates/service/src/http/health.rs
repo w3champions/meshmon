@@ -23,8 +23,8 @@ use std::fmt::Write;
 // Agent metric name constants — single source of truth for names used in the
 // custom text-format block appended to /metrics.  Alert rules in
 // deploy/alerts/rules.yaml reference these metric names; the cross-check
-// script (scripts/check-rule-metrics.sh) looks for the quoted string literal
-// in the service source, which these constants provide.
+// (the alert_metrics_contract integration test) looks for the quoted string
+// literal in the service source, which these constants provide.
 // ---------------------------------------------------------------------------
 
 /// Gauge (= 1): registered agent metadata. Labels: `source`, `agent_version`.

@@ -6,6 +6,15 @@ members = [
     "crates/protocol",
     "crates/common",
     "crates/revtunnel",
+    "crates/e2e",
+    "xtask",
+]
+default-members = [
+    "crates/service",
+    "crates/agent",
+    "crates/protocol",
+    "crates/common",
+    "crates/revtunnel",
     "xtask",
 ]
 

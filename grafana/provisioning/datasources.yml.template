@@ -1,25 +1,28 @@
-# Grafana datasource provisioning template for meshmon.
+# ===========================================================================
+# EXTERNAL OPERATOR-OWNED GRAFANA INSTANCES ONLY.
+# ===========================================================================
 #
-# Copy to the target Grafana's provisioning/datasources/ directory and expand
-# ${...} placeholders via the operator's env-var / secret management of
-# choice. Grafana itself supports `$VAR` / `${VAR}` expansion from the
-# process environment, so the simplest path is to export these vars in
-# the Grafana container's compose file.
+# The bundled meshmon-Grafana uses
+# deploy/grafana/provisioning/datasources/meshmon.yml (baked into the
+# meshmon-grafana image). Editing this file does NOT change bundled
+# behaviour — if that's what you're after, edit the file under
+# deploy/grafana/ and rebuild the image.
 #
-# Required:
+# Use this template when you want to consume meshmon's VictoriaMetrics
+# and Postgres data sources from an *external* Grafana instance (e.g.
+# a corporate Grafana that combines meshmon metrics with other systems).
+# Copy it into your Grafana's provisioning/datasources/ directory and
+# expand the ${...} placeholders from your Grafana container's env.
+#
+# Required env vars:
 #   MESHMON_VM_URL              e.g. http://meshmon-vm:8428
 #   MESHMON_PG_URL              e.g. meshmon-db:5432
 #   MESHMON_PG_DATABASE         usually "meshmon"
-#   MESHMON_PG_GRAFANA_PASSWORD password for the read-only `meshmon_grafana`
-#                               role; injected at deploy time via secret.
-#                               The meshmon service flips the role from
-#                               NOLOGIN to LOGIN with this password on
-#                               startup — see
-#                               `crates/service/src/db.rs::apply_grafana_role_password`.
+#   MESHMON_PG_GRAFANA_PASSWORD password for the read-only meshmon_grafana role
 #
-# After copying, restart Grafana (or wait for the provisioning reloader) so
-# the datasources appear with the fixed UIDs `MeshmonVM` and
-# `MeshmonPostgres` the dashboard JSON references.
+# After copying, restart Grafana (or wait for the provisioning reloader)
+# so the datasources appear with the fixed UIDs MeshmonVM and
+# MeshmonPostgres that the dashboard JSON references.
 apiVersion: 1
 
 # Delete entries for datasources with matching `uid` that are no longer in

@@ -8,6 +8,7 @@ WORKDIR /app
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY xtask ./xtask
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ----- Stage 3: frontend — build SPA --------------------------------------
@@ -16,6 +17,10 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
+# Vite + tsconfig alias `@grafana/*` resolves to ../grafana/, so the
+# frontend build needs grafana/panels.json at /app/grafana alongside
+# /app/frontend.
+COPY grafana /app/grafana
 RUN npm run build
 
 # ----- Stage 4: builder — compile service binary --------------------------
@@ -24,6 +29,11 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --bin meshmon-service
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY xtask ./xtask
+# sqlx's query! / query_as! macros resolve against the committed
+# offline cache; without it the build tries to reach a live database.
+COPY .sqlx ./.sqlx
+ENV SQLX_OFFLINE=true
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 RUN cargo build --release --bin meshmon-service
 

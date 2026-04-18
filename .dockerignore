@@ -5,6 +5,9 @@ frontend/dist/
 .github/
 docs/
 deploy/
+# Bundled Grafana image assets (docker/Dockerfile.grafana) need these
+# re-included despite the blanket deploy/ exclusion above.
+!deploy/grafana/
 *.md
 !README.md
 .DS_Store

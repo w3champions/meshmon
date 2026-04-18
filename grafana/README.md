@@ -24,13 +24,13 @@ frontend imports it via the `@grafana` Vite alias and builds
 panel listed in `panels.json`, iframes silently fall back to the "Dashboard
 not configured" placeholder.
 
-`verify-panels.mjs` enforces the contract on every PR:
+The contract is enforced on every PR by a hermetic Rust test:
 
 ```bash
-node grafana/verify-panels.mjs
+cargo test -p meshmon-service --test grafana_contract
 ```
 
-The script checks that every `panels.json` entry's dashboard exists, declares
+The test checks that every `panels.json` entry's dashboard exists, declares
 the matching `uid`, contains the expected panel IDs, and declares the
 required template variables. It does NOT enforce the reverse direction —
 dashboards not listed in `panels.json` (overview, agent) can evolve freely.
@@ -46,8 +46,8 @@ It defines two datasources:
 Operators fill in `${MESHMON_VM_URL}`, `${MESHMON_PG_URL}`, `${MESHMON_PG_USER}`,
 `${MESHMON_PG_PASSWORD}`, `${MESHMON_PG_DATABASE}` via `envsubst` or their
 secret tool of choice, then drop the result into Grafana's provisioning
-directory. The smoke harness uses the same template — no parallel hand-
-edited copy.
+directory. The bundled compose stack consumes this same template — no
+parallel hand-edited copy.
 
 UIDs are pinned because every dashboard panel references them by UID.
 
@@ -171,26 +171,7 @@ own `style` field — no per-dashboard config needed.
 
 ## Validation
 
-### Hermetic (CI, no containers)
-
-```bash
-./scripts/validate-dashboards.sh
-```
-
-JSON syntax + `verify-panels.mjs` contract. Runs in GitHub Actions on every
-PR.
-
-### Smoke (end-to-end, local only)
-
-```bash
-./scripts/smoke-dashboards.sh
-```
-
-Spins up `grafana/test-harness/docker-compose.yml` (VM + Grafana), seeds VM
-with a synthetic `meshmon_path_*` series via `envsubst`-generated
-datasources, then GETs `/d-solo/<uid>?panelId=…` for each dashboard and
-asserts HTTP 200. Requires Docker + Compose v2 + `envsubst` (from gettext).
-Takes ~30 s. Not run in CI.
+**Validation:** `cargo test -p meshmon-service --test grafana_contract` (hermetic; cross-checks `panels.json` against dashboard JSONs). End-to-end dashboards-are-provisioned smoke: `cargo e2e` (requires the bundled compose stack to be running).
 
 ## Editing workflow
 
@@ -199,9 +180,9 @@ When adding or modifying a dashboard:
 1. Edit the JSON. Keep it formatted (2-space indent, trailing newline).
 2. If the change touches panels listed in `panels.json`, update
    `panels.json` in the same commit. Otherwise leave `panels.json` alone.
-3. `./scripts/validate-dashboards.sh` — must exit 0.
-4. `./scripts/smoke-dashboards.sh` — manual, at least once per PR.
-5. Open PR. CI runs the validator automatically.
+3. `cargo test -p meshmon-service --test grafana_contract` — must exit 0.
+4. `cargo e2e` — manual, at least once per PR (requires the bundled compose stack to be running).
+5. Open PR. CI runs the contract test automatically.
 
 Commit messages follow `feat(grafana): …` or `fix(grafana): …`.
 

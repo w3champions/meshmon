@@ -34,6 +34,3 @@ deploy/meshmon.toml
 .DS_Store
 .vscode/
 .idea/
-
-# Runtime-materialized by scripts/smoke-dashboards.sh (envsubst from template).
-grafana/test-harness/provisioning/datasources/
