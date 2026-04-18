@@ -20,6 +20,9 @@ cd "$REPO_ROOT"
 
 DB_CONTAINER=meshmon-smoke-db
 VM_CONTAINER=meshmon-smoke-vm
+GRAFANA_CONTAINER=meshmon-smoke-grafana
+AM_CONTAINER=meshmon-smoke-am
+NETWORK=meshmon-smoke-net
 DB_PORT=${MESHMON_SMOKE_DB_PORT:-5432}
 VM_PORT=${MESHMON_SMOKE_VM_PORT:-8428}
 # Non-standard default port to avoid clashing with Docker Desktop's common
@@ -34,6 +37,25 @@ SERVICE_LOG=${MESHMON_SMOKE_SERVICE_LOG:-/tmp/meshmon-smoke-service.log}
 TIMESCALE_IMAGE=timescale/timescaledb:2.26.3-pg16
 VM_IMAGE=victoriametrics/victoria-metrics:v1.104.0
 
+# Image tags for bundled Grafana + Alertmanager come from the single source
+# of truth in deploy/versions.env so the smoke harness stays pinned to the
+# same images as CI + production.
+if [[ -f deploy/versions.env ]]; then
+  # shellcheck disable=SC1091
+  source deploy/versions.env
+fi
+GRAFANA_TAG=${GRAFANA_TAG:-13.0.1}
+ALERTMANAGER_TAG=${ALERTMANAGER_TAG:-v0.32.0}
+
+# Resolve the docker-assigned ephemeral host port for a container's internal
+# port. We request "127.0.0.1:" in the -p flag so docker picks a free port
+# on loopback; `docker port` then reports host_ip:host_port.
+port_of() {
+  local container="$1" internal="$2"
+  docker port "$container" "${internal}/tcp" 2>/dev/null \
+    | awk -F: '/^127\.0\.0\.1:/ {print $2; exit}'
+}
+
 SERVICE_PID=
 teardown() {
   echo
@@ -44,6 +66,9 @@ teardown() {
   fi
   docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$VM_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$GRAFANA_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$AM_CONTAINER"      >/dev/null 2>&1 || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
 }
 trap teardown EXIT INT TERM
 
@@ -61,9 +86,17 @@ require psql
 require sqlx
 require npm
 
+# ---- Docker network -----------------------------------------------------
+# User-defined bridge network lets the bundled Grafana + Alertmanager resolve
+# each other (and Postgres / VM) by container name, mirroring the topology
+# operators ship in deploy/docker-compose.yml.
+docker network rm "$NETWORK" >/dev/null 2>&1 || true
+docker network create "$NETWORK" >/dev/null
+
 # ---- Postgres -----------------------------------------------------------
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
 docker run --rm -d --name "$DB_CONTAINER" \
+  --network "$NETWORK" \
   -e POSTGRES_USER=meshmon -e POSTGRES_PASSWORD=meshmon -e POSTGRES_DB=meshmon \
   -p "${DB_PORT}:5432" "$TIMESCALE_IMAGE" >/dev/null
 
@@ -75,10 +108,81 @@ done
 # ---- VictoriaMetrics ----------------------------------------------------
 docker rm -f "$VM_CONTAINER" >/dev/null 2>&1 || true
 docker run --rm -d --name "$VM_CONTAINER" \
+  --network "$NETWORK" \
   -p "${VM_PORT}:8428" "$VM_IMAGE" >/dev/null
 
 echo "[smoke] waiting for VictoriaMetrics on :${VM_PORT}"
 until curl -fs "http://127.0.0.1:${VM_PORT}/health" >/dev/null 2>&1; do
+  sleep 0.5
+done
+
+# ---- Alertmanager -------------------------------------------------------
+# Bundled Alertmanager so the "View in Alertmanager" links on the Alerts
+# page render against a real instance. The container binds 9093 to an
+# ephemeral loopback port so parallel smoke runs don't collide.
+#
+# We mount a minimal alertmanager.yml (null receiver) because the stock
+# image fails to start without one, and the smoke harness has no use for
+# real routing — we only need the HTTP API reachable behind the same
+# /alertmanager sub-path the service proxies to in prod.
+AM_CONFIG_PATH=/tmp/meshmon-smoke-alertmanager.yml
+cat > "$AM_CONFIG_PATH" <<EOF
+route:
+  receiver: 'null'
+receivers:
+  - name: 'null'
+EOF
+
+docker rm -f "$AM_CONTAINER" >/dev/null 2>&1 || true
+# --web.external-url must be a full URL including the sub-path; v0.32.0
+# rejects a bare path. The hostname is cosmetic (it only appears in
+# generated links); the path is what configures the route prefix, so
+# /alertmanager here mirrors production's sub-path routing.
+docker run --rm -d --name "$AM_CONTAINER" \
+  --network "$NETWORK" \
+  -p "127.0.0.1::9093" \
+  -v "${AM_CONFIG_PATH}:/etc/alertmanager/alertmanager.yml:ro" \
+  "prom/alertmanager:${ALERTMANAGER_TAG}" \
+  --config.file=/etc/alertmanager/alertmanager.yml \
+  --web.external-url=http://127.0.0.1/alertmanager \
+  --storage.path=/tmp/am-data \
+  >/dev/null
+
+AM_PORT=$(port_of "$AM_CONTAINER" 9093)
+if [[ -z "$AM_PORT" ]]; then
+  echo "[smoke] error: could not resolve Alertmanager host port" >&2
+  exit 1
+fi
+
+# Sub-path routing means the ready endpoint moves from /-/ready to
+# /alertmanager/-/ready — same as the production deployment.
+echo "[smoke] waiting for Alertmanager on :${AM_PORT}"
+until curl -fs "http://127.0.0.1:${AM_PORT}/alertmanager/-/ready" >/dev/null 2>&1; do
+  sleep 0.5
+done
+
+# ---- Grafana ------------------------------------------------------------
+# Bundled Grafana OSS mounted with the harness grafana.ini (auth.proxy mode,
+# serve_from_sub_path). Ephemeral loopback port keeps the harness safe to
+# run on hosts already bound to :3000.
+docker rm -f "$GRAFANA_CONTAINER" >/dev/null 2>&1 || true
+docker run --rm -d --name "$GRAFANA_CONTAINER" \
+  --network "$NETWORK" \
+  -p "127.0.0.1::3000" \
+  -v "$(pwd)/grafana/test-harness/grafana.ini:/etc/grafana/grafana.ini:ro" \
+  "grafana/grafana-oss:${GRAFANA_TAG}" \
+  >/dev/null
+
+GRAFANA_PORT=$(port_of "$GRAFANA_CONTAINER" 3000)
+if [[ -z "$GRAFANA_PORT" ]]; then
+  echo "[smoke] error: could not resolve Grafana host port" >&2
+  exit 1
+fi
+
+# grafana.ini sets serve_from_sub_path = true, so the health endpoint moves
+# from /api/health to /grafana/api/health — mirrors the production URL.
+echo "[smoke] waiting for Grafana on :${GRAFANA_PORT}"
+until curl -fs "http://127.0.0.1:${GRAFANA_PORT}/grafana/api/health" >/dev/null 2>&1; do
   sleep 0.5
 done
 
@@ -110,10 +214,15 @@ shared_token = "smoke-token-unused"
 
 [upstream]
 vm_url = "http://127.0.0.1:${VM_PORT}"
-# Placeholder so the "View in Alertmanager" link renders on the Alerts
-# page. Smoke doesn't run an actual Alertmanager — clicks will 404 until
-# the full stack lands (see deploy/docker-compose.yml).
-alertmanager_url = "http://127.0.0.1:9093"
+# Both bundled services serve under the same sub-path the meshmon reverse
+# proxies expect (see grafana_proxy.rs / alertmanager_proxy.rs): the
+# proxy strips its mount prefix off the incoming request and appends the
+# remainder to the upstream URL, so the upstream base must itself include
+# the sub-path. This mirrors the production topology where Grafana's
+# root_url + AM's --web.external-url both sit under /grafana and
+# /alertmanager respectively.
+alertmanager_url = "http://127.0.0.1:${AM_PORT}/alertmanager"
+grafana_url = "http://127.0.0.1:${GRAFANA_PORT}/grafana"
 
 [agents]
 target_active_window_minutes = 5
@@ -255,6 +364,8 @@ cat <<EOF
 [smoke] infra ready
   Postgres:          127.0.0.1:${DB_PORT}   (user: meshmon, db: meshmon)
   VictoriaMetrics:   127.0.0.1:${VM_PORT}
+  Alertmanager:      127.0.0.1:${AM_PORT}   (sub-path: /alertmanager)
+  Grafana:           127.0.0.1:${GRAFANA_PORT}   (sub-path: /grafana)
   Service:           127.0.0.1:${SERVICE_PORT}   (log: ${SERVICE_LOG})
   Config:            ${CONFIG_PATH}
 
