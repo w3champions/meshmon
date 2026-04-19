@@ -247,23 +247,23 @@ async fn run() -> anyhow::Result<()> {
     // service still serves the rest of the API, and the runner keeps
     // running against an empty chain so the sweep still moves
     // `pending` rows to `enriched` via whichever providers did resolve.
-    // Other fallible startup steps (database, listener, registry) use
-    // fail-fast semantics; enrichment is a best-effort enrichment
-    // pipeline and its failure mode is "rows stay `pending`" — not a
-    // service outage — so we log-and-continue.
-    let enrichment_chain = match build_chain(&initial_config.enrichment) {
-        Ok(chain) => {
-            info!(providers = chain.len(), "enrichment chain initialised");
-            chain
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "enrichment chain construction failed; continuing with empty chain",
-            );
-            Vec::new()
-        }
-    };
+    // Fail startup when `build_chain` can't construct the configured
+    // chain. An earlier revision swallowed the error and continued with
+    // an empty chain — but a single misconfigured provider
+    // (e.g. ipgeolocation enabled without `api_key_env`) would then
+    // silently disable *every* provider, including the correctly-configured
+    // ones, and the operator would see warn logs while production
+    // enrichment globally stopped. That failure mode is strictly worse
+    // than the no-enrichment mode, so we surface it at boot the same
+    // way missing `acknowledged_tos` does in the config loader. The
+    // operator can disable the broken provider explicitly to return to
+    // a healthy chain.
+    let enrichment_chain = build_chain(&initial_config.enrichment)
+        .context("build enrichment provider chain")?;
+    info!(
+        providers = enrichment_chain.len(),
+        "enrichment chain initialised",
+    );
     let (enrichment_queue_raw, enrichment_rx) = EnrichmentQueue::new(ENRICHMENT_QUEUE_CAPACITY);
     let enrichment_queue = Arc::new(enrichment_queue_raw);
 
