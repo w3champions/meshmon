@@ -223,15 +223,45 @@ pub async fn list(
 /// the existing column untouched. Returns [`RepoError::NotFound`] if the
 /// id is unknown.
 pub async fn patch(
-    _pool: &PgPool,
-    _id: Uuid,
-    _title: Option<&str>,
-    _notes: Option<&str>,
-    _loss_threshold_pct: Option<f32>,
-    _stddev_weight: Option<f32>,
-    _evaluation_mode: Option<EvaluationMode>,
+    pool: &PgPool,
+    id: Uuid,
+    title: Option<&str>,
+    notes: Option<&str>,
+    loss_threshold_pct: Option<f32>,
+    stddev_weight: Option<f32>,
+    evaluation_mode: Option<EvaluationMode>,
 ) -> Result<CampaignRow, RepoError> {
-    todo!("implement partial update; use CASE/COALESCE per column")
+    let raw = sqlx::query_as!(
+        CampaignRowRaw,
+        r#"
+        UPDATE measurement_campaigns
+           SET title              = COALESCE($2, title),
+               notes              = COALESCE($3, notes),
+               loss_threshold_pct = COALESCE($4, loss_threshold_pct),
+               stddev_weight      = COALESCE($5, stddev_weight),
+               evaluation_mode    = COALESCE($6::evaluation_mode, evaluation_mode)
+         WHERE id = $1
+         RETURNING id, title, notes,
+                   state AS "state: CampaignState",
+                   protocol AS "protocol: ProbeProtocol",
+                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
+                   force_measurement, loss_threshold_pct, stddev_weight,
+                   evaluation_mode AS "evaluation_mode: EvaluationMode",
+                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
+        "#,
+        id,
+        title,
+        notes,
+        loss_threshold_pct,
+        stddev_weight,
+        evaluation_mode as Option<EvaluationMode>,
+    )
+    .fetch_optional(pool)
+    .await?;
+    match raw {
+        Some(r) => Ok(r.into()),
+        None => Err(RepoError::NotFound(id)),
+    }
 }
 
 /// Delete a campaign. Cascades to `campaign_pairs`. Returns `true` if a
