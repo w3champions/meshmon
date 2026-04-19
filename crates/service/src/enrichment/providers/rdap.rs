@@ -21,7 +21,7 @@
 //!   through to later providers in the chain. Task 10 replaces the body
 //!   with the actual network call.
 //!
-//! This split matches the plan: the critical scope for Task 7 is the field
+//! This split matches the plan: the critical scope for Task 1 is the field
 //! mapping contract + the provider skeleton; wiring the real RDAP call
 //! happens once Task 10's fixtures and test harness are in place.
 
@@ -308,6 +308,7 @@ mod tests {
                     .insert_header("content-type", "application/rdap+json")
                     .set_body_json(body),
             )
+            .expect(1)
             .mount(&server)
             .await;
         server
