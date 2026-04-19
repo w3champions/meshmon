@@ -329,7 +329,7 @@
           {
             "name": "ip_prefix",
             "in": "query",
-            "description": "Optional IP prefix (CIDR or bare IP). Filters `c.ip << $prefix`\nwhen parseable; an unparseable value is silently dropped.",
+            "description": "Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`\n(contained-or-equal) when parseable so bare-host queries match\ntheir own `/32` / `/128` row as well as CIDR prefixes; an\nunparseable value is silently dropped.",
             "required": false,
             "schema": {
               "type": "string"
@@ -338,7 +338,7 @@
           {
             "name": "name",
             "in": "query",
-            "description": "Optional `display_name` ILIKE pattern. Wildcards are the\ncaller's responsibility.",
+            "description": "Optional `display_name` substring. Passed verbatim to the\nhandler, which wraps it with `%…%` before running an `ILIKE`\nmatch, so callers send the literal substring they want to find\n(e.g. `?name=Fastly`). `%` / `_` characters in the input are\nintentionally not escaped — they behave as ILIKE wildcards.",
             "required": false,
             "schema": {
               "type": "string"
@@ -501,7 +501,7 @@
           "catalogue"
         ],
         "summary": "`POST /api/catalogue/reenrich` — bulk re-enrichment.",
-        "description": "Each id in [`BulkReenrichRequest::ids`] is pushed onto the\nenrichment queue without a prior existence check. Unknown ids\nresolve to a no-op inside the runner (the row lookup returns\nnone), so callers may include speculative ids without surfacing a\nper-id error path.\n\nReturns 202 Accepted unconditionally — bulk re-enrich is\nbest-effort. A `false` from the enqueue call is intentionally\ndropped (queue-full or closed-channel conditions are handled by\nthe runner's periodic sweep, same as the single-id path).",
+        "description": "Each id in [`BulkReenrichRequest::ids`] is flipped back to\n`enrichment_status = 'pending'` in a single\n[`repo::mark_enrichment_start_bulk`] call and then pushed onto the\nenrichment queue. Unknown ids silently no-op at both layers (the\nbulk UPDATE matches zero rows and the runner tolerates missing ids\non dequeue), so callers may include speculative ids without\nsurfacing a per-id error path.\n\nThe prior mark-`pending` step makes the sweep a true safety net:\nqueue drops (backpressure or closed channel) no longer silently lose\nre-enrich requests because the row is already `pending` with an\nolder `created_at`, so the runner's 30-second sweep will pick it up\non the next tick.\n\nReturns 400 when `ids.len() > MAX_BULK_REENRICH_IDS` and 202 on\nsuccess (including the empty-`ids` case).",
         "operationId": "reenrich_many",
         "requestBody": {
           "content": {
@@ -517,8 +517,28 @@
           "202": {
             "description": "Bulk re-enrichment enqueued"
           },
+          "400": {
+            "description": "Too many ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "401": {
             "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -675,6 +695,16 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "401": {
             "description": "No active session"
           },
@@ -707,7 +737,7 @@
           "catalogue"
         ],
         "summary": "`POST /api/catalogue/{id}/reenrich` — enqueue a single row for a\nfresh enrichment pass.",
-        "description": "Returns 202 Accepted when the id exists (the enrichment runner will\npick the row up asynchronously) and 404 when the id is unknown. The\nexistence check runs synchronously because a 404 is cheap to surface\nand spares callers from an \"accepted then silently dropped\" UX.\n\nThe enqueue return value is intentionally discarded — a `false`\nfrom [`crate::enrichment::runner::EnrichmentQueue::enqueue`] means\nthe bounded channel is full (or — under current wiring — that the\npaired receiver has been dropped; see the T16 TODO on\n[`crate::state::AppState::enrichment_queue`]). In both cases the\nrow's `created_at`-driven sweep is the safety net.",
+        "description": "Returns 202 Accepted when the id exists (the enrichment runner will\npick the row up asynchronously) and 404 when the id is unknown. The\nexistence check runs synchronously because a 404 is cheap to surface\nand spares callers from an \"accepted then silently dropped\" UX.\n\nBefore enqueuing, the row is flipped back to `enrichment_status =\n'pending'` via [`repo::mark_enrichment_start`]. This makes the sweep\na true safety net: if the bounded queue is full (or its receiver is\ngone) and the enqueue drops, the row is already `pending` with an\nolder `created_at`, so the runner's 30-second sweep will pick it up\non the next tick instead of leaving the re-enrich request silently\nstranded (sweep only scans rows in `pending`, so a still-`enriched`\nrow would otherwise never be retried).",
         "operationId": "reenrich_one",
         "parameters": [
           {
