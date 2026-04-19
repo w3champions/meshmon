@@ -85,10 +85,10 @@ pub struct IpGeolocationSection {
     pub acknowledged_tos: bool,
 }
 
-/// RDAP provider settings. Disabled by default while the in-tree
-/// provider's `lookup()` is a TODO stub — see [`rdap_enabled_default`]
-/// for why. RDAP itself is a free, credential-less protocol; this
-/// default flips back to `true` once the real wire-up ships.
+/// RDAP provider settings. Enabled by default. The provider issues a
+/// bootstrapped RDAP request via `icann-rdap-client` (IANA → RIR) and
+/// needs no API key. See [`rdap_enabled_default`] for details on what
+/// the provider populates.
 #[derive(Debug, Clone)]
 pub struct RdapSection {
     /// Whether to invoke this provider during enrichment.
