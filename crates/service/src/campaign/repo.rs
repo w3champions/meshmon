@@ -182,13 +182,41 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoErr
 /// and/or `created_by`. Results are ordered by `created_at` DESC and
 /// capped at `min(limit, 500)`.
 pub async fn list(
-    _pool: &PgPool,
-    _q: Option<&str>,
-    _state: Option<CampaignState>,
-    _created_by: Option<&str>,
-    _limit: i64,
+    pool: &PgPool,
+    q: Option<&str>,
+    state: Option<CampaignState>,
+    created_by: Option<&str>,
+    limit: i64,
 ) -> Result<Vec<CampaignRow>, RepoError> {
-    todo!("implement filtered list; see spec 02 §7 /api/campaigns")
+    // Static SQL for compile-time checking. Each filter becomes
+    // "arg IS NULL OR column matches" so absent filters are inert.
+    let q_like = q.map(|s| format!("%{s}%"));
+    let bounded = limit.clamp(1, 500);
+    let raws = sqlx::query_as!(
+        CampaignRowRaw,
+        r#"
+        SELECT id, title, notes,
+               state AS "state: CampaignState",
+               protocol AS "protocol: ProbeProtocol",
+               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
+               force_measurement, loss_threshold_pct, stddev_weight,
+               evaluation_mode AS "evaluation_mode: EvaluationMode",
+               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
+          FROM measurement_campaigns
+         WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)
+           AND ($2::campaign_state IS NULL OR state = $2)
+           AND ($3::text IS NULL OR created_by = $3)
+         ORDER BY created_at DESC
+         LIMIT $4
+        "#,
+        q_like.as_deref(),
+        state as Option<CampaignState>,
+        created_by,
+        bounded,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(raws.into_iter().map(Into::into).collect())
 }
 
 /// Partially update an editable campaign. `None`-valued arguments leave
