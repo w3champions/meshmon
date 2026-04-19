@@ -1298,6 +1298,41 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
             .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
     }
 
+    /// Fire a body-less `POST` and deserialize the response body into
+    /// `T`. Panics on non-200 status — mirrors [`Self::post_json`] for
+    /// routes that accept no request body (e.g.
+    /// `/api/campaigns/{id}/start`). For status-specific assertions
+    /// (e.g. 409 on a second start), use [`Self::post_empty`] and
+    /// check the raw status.
+    pub async fn post_json_empty<T: for<'de> serde::Deserialize<'de>>(&self, path: &str) -> T {
+        use axum::http::{header, Request, StatusCode};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .body(axum::body::Body::empty())
+            .expect("build POST request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "POST {path} expected 200, got {}",
+            resp.status()
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        serde_json::from_slice::<T>(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
+    }
+
     /// Fire a body-less `POST` and return the raw status + body string.
     /// Used by tests that assert on 202 responses with no JSON body
     /// (e.g. the re-enrichment endpoints) without needing a content
