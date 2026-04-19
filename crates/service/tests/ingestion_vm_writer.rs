@@ -285,20 +285,13 @@ async fn retries_after_failure() {
     for i in 0..5 {
         queue.push(sample("meshmon_test", i as f64, 1_700_000_000_000));
     }
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let total: usize = success
-        .received_requests()
-        .await
-        .iter()
-        .map(|r| {
-            decode_write_request(&r.body)
-                .timeseries
-                .iter()
-                .map(|ts| ts.samples.len())
-                .sum::<usize>()
-        })
-        .sum();
+    // Poll the success-scope mock until the retry budget pays off —
+    // fixed 2 s sleep flaked under nextest parallel load when the first
+    // two 503s and the exponential backoffs consumed more wall time
+    // than the timeout allowed. 10 s is comfortably above the 5 s
+    // `max_retry` cap.
+    let total = wait_for_samples(&success, 5, Duration::from_secs(10)).await;
     assert_eq!(total, 5);
 
     token.cancel();
