@@ -344,12 +344,32 @@ pub async fn force_pair(
 /// List pairs for a campaign, optionally filtered to a specific set of
 /// resolution states. Results ordered by id, capped at `min(limit, 500)`.
 pub async fn list_pairs(
-    _pool: &PgPool,
-    _id: Uuid,
-    _states: &[PairResolutionState],
-    _limit: i64,
+    pool: &PgPool,
+    id: Uuid,
+    states: &[PairResolutionState],
+    limit: i64,
 ) -> Result<Vec<PairRow>, RepoError> {
-    todo!("implement filtered pair list; see spec 02 §7")
+    let bounded = limit.clamp(1, 500);
+    let raws = sqlx::query_as!(
+        PairRowRaw,
+        r#"
+        SELECT id, campaign_id, source_agent_id, destination_ip,
+               resolution_state AS "resolution_state: PairResolutionState",
+               measurement_id, dispatched_at, settled_at, attempt_count, last_error
+          FROM campaign_pairs
+         WHERE campaign_id = $1
+           AND (cardinality($2::pair_resolution_state[]) = 0
+                OR resolution_state = ANY($2::pair_resolution_state[]))
+         ORDER BY id
+         LIMIT $3
+        "#,
+        id,
+        states as &[PairResolutionState],
+        bounded,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(raws.into_iter().map(Into::into).collect())
 }
 
 /// Count the total pairs the given sources × destinations would produce,
