@@ -178,7 +178,11 @@ impl Runner {
             }
         }
         let status = match repo::apply_enrichment_result(&self.pool, id, merged).await {
-            Ok(s) => s,
+            // `None` means the row was concurrently deleted between
+            // our read and write — skip the progress broadcast rather
+            // than emit a ghost `EnrichmentProgress` for a gone row.
+            Ok(Some(s)) => s,
+            Ok(None) => return,
             Err(e) => {
                 warn!(%id, error = %e, "enrichment: apply_result failed");
                 return;

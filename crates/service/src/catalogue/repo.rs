@@ -434,8 +434,13 @@ pub async fn mark_enrichment_start_bulk(pool: &PgPool, ids: &[Uuid]) -> Result<u
 /// is stamped to `NOW()` unconditionally — the timestamp marks when the
 /// pipeline last finished, regardless of outcome.
 ///
-/// Returns the terminal [`EnrichmentStatus`] that was just written, so the
-/// caller can publish a progress event without a second round-trip.
+/// Returns `Some(terminal_status)` when the UPDATE affected a row, so
+/// the caller can publish a progress event without a second round-trip.
+/// Returns `None` when no row was updated — the id was concurrently
+/// deleted between the runner's `find_by_id` / `mark_enrichment_start`
+/// and this UPDATE. The runner uses the `None` case to suppress the
+/// `EnrichmentProgress` broadcast so SSE subscribers do not see ghost
+/// status updates for rows that no longer exist.
 ///
 /// Lock enforcement happens at two points: [`MergedFields::apply`] skips
 /// provider writes against the locked set the *runner* snapshotted before
@@ -456,13 +461,13 @@ pub async fn apply_enrichment_result(
     pool: &PgPool,
     id: Uuid,
     merged: MergedFields,
-) -> Result<EnrichmentStatus, sqlx::Error> {
+) -> Result<Option<EnrichmentStatus>, sqlx::Error> {
     let status = if merged.any_populated() {
         EnrichmentStatus::Enriched
     } else {
         EnrichmentStatus::Failed
     };
-    sqlx::query!(
+    let result = sqlx::query!(
         r#"
         UPDATE ip_catalogue SET
             city = CASE
@@ -509,7 +514,15 @@ pub async fn apply_enrichment_result(
     )
     .execute(pool)
     .await?;
-    Ok(status)
+    if result.rows_affected() == 0 {
+        // The row was deleted between the runner's lookup and this
+        // UPDATE. Surface `None` so the runner can suppress the
+        // `EnrichmentProgress` broadcast — a `Deleted` SSE frame is
+        // already in flight and emitting a second-hand progress event
+        // for a gone row would mislead clients.
+        return Ok(None);
+    }
+    Ok(Some(status))
 }
 
 /// Upsert a row driven by an agent's self-report on register.

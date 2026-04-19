@@ -343,9 +343,11 @@ async fn apply_enrichment_respects_locks_committed_after_snapshot() {
         &[],
     );
 
-    repo::apply_enrichment_result(&db.pool, id, merged)
+    let terminal = repo::apply_enrichment_result(&db.pool, id, merged)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("row exists so UPDATE must touch it");
+    assert_eq!(terminal, EnrichmentStatus::Enriched);
 
     // Assert: city survived (write-time CASE saw the lock); country_code
     // landed (not locked).
@@ -364,6 +366,53 @@ async fn apply_enrichment_respects_locks_committed_after_snapshot() {
         row.1.as_deref(),
         Some("US"),
         "unlocked field must still be written",
+    );
+
+    db.close().await;
+}
+
+/// Regression guard for the concurrent-delete race in
+/// `apply_enrichment_result`: if the row is deleted between the runner's
+/// lookup and this UPDATE, the function must return `Ok(None)` instead
+/// of `Ok(Some(status))` so the caller skips the progress broadcast and
+/// doesn't emit ghost `EnrichmentProgress` events for gone rows.
+#[tokio::test]
+async fn apply_enrichment_returns_none_when_row_deleted_concurrently() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["10.99.99.99".parse().unwrap()];
+    let out = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = out.created[0].id;
+
+    // Delete the row before the "runner" calls apply_enrichment_result.
+    let deleted = repo::delete(&db.pool, id).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    // Now simulate the runner racing: call apply_enrichment_result on
+    // the now-missing id. The UPDATE touches zero rows and the function
+    // must return `Ok(None)` so the caller suppresses the SSE broadcast.
+    let mut merged = MergedFields::default();
+    merged.apply(
+        "test-provider",
+        meshmon_service::enrichment::EnrichmentResult {
+            fields: [(
+                Field::City,
+                meshmon_service::enrichment::FieldValue::Text("GhostCity".into()),
+            )]
+            .into_iter()
+            .collect(),
+        },
+        &[],
+    );
+    let result = repo::apply_enrichment_result(&db.pool, id, merged)
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "apply_enrichment_result on a deleted row must return Ok(None), got {result:?}",
     );
 
     db.close().await;
