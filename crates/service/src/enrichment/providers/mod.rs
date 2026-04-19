@@ -62,25 +62,49 @@ pub fn build_chain(cfg: &EnrichmentSection) -> anyhow::Result<Vec<Arc<dyn Enrich
         chain.push(Arc::new(provider));
     }
 
-    #[cfg(feature = "enrichment-maxmind")]
     if cfg.maxmind.enabled {
-        // Silently skip when paths are missing: the spec treats an
-        // enabled-but-unpathed maxmind block as a benign misconfiguration
-        // (operator toggled the flag before staging the mmdb files) rather
-        // than a boot-blocking error. The provider is only constructed when
-        // both paths are present.
-        if let (Some(city), Some(asn)) = (&cfg.maxmind.city_mmdb, &cfg.maxmind.asn_mmdb) {
-            let provider = maxmind::MaxmindProvider::open(city, asn)
-                .map_err(|e| anyhow::anyhow!("maxmind provider: {e}"))?;
-            chain.push(Arc::new(provider));
+        #[cfg(feature = "enrichment-maxmind")]
+        {
+            // Silently skip when paths are missing: the spec treats an
+            // enabled-but-unpathed maxmind block as a benign misconfiguration
+            // (operator toggled the flag before staging the mmdb files) rather
+            // than a boot-blocking error. The provider is only constructed when
+            // both paths are present.
+            if let (Some(city), Some(asn)) = (&cfg.maxmind.city_mmdb, &cfg.maxmind.asn_mmdb) {
+                let provider = maxmind::MaxmindProvider::open(city, asn)
+                    .map_err(|e| anyhow::anyhow!("maxmind provider: {e}"))?;
+                chain.push(Arc::new(provider));
+            }
+        }
+        #[cfg(not(feature = "enrichment-maxmind"))]
+        {
+            // README: "setting enabled = true in config without the feature
+            // compiled in is a boot-time error." Without this guard the
+            // `#[cfg]` branch above would simply compile out, silently
+            // dropping the enabled provider and leaving the operator
+            // unaware their configured chain is weaker than requested.
+            return Err(anyhow::anyhow!(
+                "enrichment.maxmind.enabled = true but the \
+                 `enrichment-maxmind` cargo feature is not compiled in"
+            ));
         }
     }
 
-    #[cfg(feature = "enrichment-whois")]
     if cfg.whois.enabled {
-        let provider =
-            whois::WhoisProvider::new().map_err(|e| anyhow::anyhow!("whois provider: {e}"))?;
-        chain.push(Arc::new(provider));
+        #[cfg(feature = "enrichment-whois")]
+        {
+            let provider =
+                whois::WhoisProvider::new().map_err(|e| anyhow::anyhow!("whois provider: {e}"))?;
+            chain.push(Arc::new(provider));
+        }
+        #[cfg(not(feature = "enrichment-whois"))]
+        {
+            // See maxmind branch above for the rationale.
+            return Err(anyhow::anyhow!(
+                "enrichment.whois.enabled = true but the \
+                 `enrichment-whois` cargo feature is not compiled in"
+            ));
+        }
     }
 
     Ok(chain)
@@ -167,6 +191,50 @@ mod tests {
         assert!(
             chain.iter().all(|p| p.id() != maxmind::ID),
             "maxmind provider must not be pushed when paths are missing"
+        );
+    }
+
+    #[cfg(not(feature = "enrichment-maxmind"))]
+    #[test]
+    fn maxmind_enabled_without_feature_is_boot_error() {
+        // README: "setting `enabled = true` in config without the
+        // feature compiled in is a boot-time error." Guard against
+        // the older silent-skip behaviour that would have left the
+        // chain weaker than configured.
+        let cfg = EnrichmentSection {
+            maxmind: MaxmindSection {
+                enabled: true,
+                ..MaxmindSection::default()
+            },
+            ..EnrichmentSection::default()
+        };
+        // `dyn EnrichmentProvider` does not derive Debug, so we can't
+        // use `.expect_err(...)` — hand-roll the match.
+        let err = match build_chain(&cfg) {
+            Ok(_) => panic!("build_chain must error when maxmind feature is off"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("enrichment-maxmind"),
+            "error must mention the missing cargo feature, got: {err}",
+        );
+    }
+
+    #[cfg(not(feature = "enrichment-whois"))]
+    #[test]
+    fn whois_enabled_without_feature_is_boot_error() {
+        // See `maxmind_enabled_without_feature_is_boot_error`.
+        let cfg = EnrichmentSection {
+            whois: WhoisSection { enabled: true },
+            ..EnrichmentSection::default()
+        };
+        let err = match build_chain(&cfg) {
+            Ok(_) => panic!("build_chain must error when whois feature is off"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("enrichment-whois"),
+            "error must mention the missing cargo feature, got: {err}",
         );
     }
 
