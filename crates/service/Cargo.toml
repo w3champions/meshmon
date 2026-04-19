@@ -18,6 +18,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 argon2 = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 axum-login = { workspace = true }
 axum-prometheus = { workspace = true }
@@ -31,8 +32,12 @@ meshmon-revtunnel = { path = "../revtunnel" }
 prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
 governor = { workspace = true }
 hyper = { workspace = true }
+icann-rdap-client = { workspace = true }
+maxminddb = { workspace = true, optional = true }
+whois-rust = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 password-hash = { workspace = true }
 reqwest = { workspace = true }
@@ -86,3 +91,8 @@ wiremock = { workspace = true }
 
 [build-dependencies]
 memory-serve = { workspace = true }
+
+[features]
+default = []
+enrichment-maxmind = ["maxminddb"]
+enrichment-whois = ["whois-rust"]

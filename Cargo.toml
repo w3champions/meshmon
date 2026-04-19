@@ -30,6 +30,7 @@ authors = ["meshmon contributors"]
 # Shared dependency versions. Downstream tasks add entries here.
 anyhow = "1"
 arc-swap = "1"
+async-trait = "0.1.89"
 axum = "0.8"
 axum-extra = "0.12"
 axum-login = "0.18"
@@ -39,6 +40,7 @@ base64 = "0.22"
 bytes = "1"
 ctor = "0.10"
 dashmap = "6"
+futures = "0.3"
 futures-util = "0.3"
 # Named directly because our `LoginRateLimitLayer` alias uses
 # `governor::middleware::NoOpMiddleware`, which `tower_governor` does not
@@ -46,6 +48,10 @@ futures-util = "0.3"
 # version must match what `tower_governor` pulls in transitively, or the
 # type alias will fail to unify.
 governor = "0.10"
+icann-rdap-client = "0.0.28"
+# Enumerates local network interface IPs (POSIX + Windows); used by the
+# upstream self-referential guard to detect wildcard-bind recursion.
+if-addrs = "0.15"
 pin-project-lite = "0.2"
 prost = "0.14"
 proptest = "1"
@@ -65,9 +71,6 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
 tower-sessions = { version = "0.14", default-features = false, features = ["memory-store"] }
 tower_governor = "0.8"
-# Enumerates local network interface IPs (POSIX + Windows); used by the
-# upstream self-referential guard to detect wildcard-bind recursion.
-if-addrs = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 trippy-core = "0.13"
@@ -90,12 +93,14 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 
+maxminddb = "0.27"
 memory-serve = "2.1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 prometheus-reqwest-remote-write = "0.5"
 snap = "1"
 surge-ping = "0.8"
+whois-rust = "1.6"
 wiremock = "0.6"
 yamux = "0.13"
 
