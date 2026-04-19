@@ -44,6 +44,20 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     paths(crate::http::auth::login, crate::http::auth::logout),
     components(schemas(
+        crate::campaign::dto::CampaignDto,
+        crate::campaign::dto::CreateCampaignRequest,
+        crate::campaign::dto::EditCampaignRequest,
+        crate::campaign::dto::EditPairDto,
+        crate::campaign::dto::ErrorEnvelope,
+        crate::campaign::dto::ForcePairRequest,
+        crate::campaign::dto::PairDto,
+        crate::campaign::dto::PatchCampaignRequest,
+        crate::campaign::dto::PreviewDispatchResponse,
+        crate::campaign::model::CampaignState,
+        crate::campaign::model::EvaluationMode,
+        crate::campaign::model::MeasurementKind,
+        crate::campaign::model::PairResolutionState,
+        crate::campaign::model::ProbeProtocol,
         crate::catalogue::dto::BulkReenrichRequest,
         crate::catalogue::dto::CatalogueEntryDto,
         crate::catalogue::dto::ErrorEnvelope,
@@ -142,6 +156,24 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         ))
         .routes(utoipa_axum::routes!(
             crate::catalogue::handlers::reenrich_one
+        ))
+        // Campaign CRUD. Static segments (`/preview-dispatch-count`,
+        // `/force_pair`, `/start`, `/stop`, `/edit`, `/pairs`) are matched
+        // before the `{id}`-prefixed routes by `matchit` regardless of
+        // registration order; keeping list/create first is a readability
+        // convention consistent with the catalogue block above.
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::create))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::list))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::get_one))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::patch))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::delete))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::start))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::stop))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::edit))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::force_pair))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::pairs))
+        .routes(utoipa_axum::routes!(
+            crate::campaign::handlers::preview_dispatch_count
         ))
 }
 
