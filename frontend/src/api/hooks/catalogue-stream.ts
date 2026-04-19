@@ -1,8 +1,12 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
+import {
+  CATALOGUE_FACETS_KEY,
+  CATALOGUE_LIST_KEY,
+  type CatalogueEntry,
+  catalogueEntryKey,
+} from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
-
-export type CatalogueEntry = components["schemas"]["CatalogueEntryDto"];
 
 /**
  * Catalogue stream event shapes.
@@ -17,13 +21,6 @@ export type CatalogueEntry = components["schemas"]["CatalogueEntryDto"];
 type CatalogueEventSchema = components["schemas"]["CatalogueEvent"];
 type LagFrame = { kind: "lag"; missed: number };
 type CatalogueStreamEvent = CatalogueEventSchema | LagFrame;
-
-const CATALOGUE_LIST_KEY = ["catalogue", "list"] as const;
-const CATALOGUE_FACETS_KEY = ["catalogue", "facets"] as const;
-
-function catalogueEntryKey(id: string) {
-  return ["catalogue", "entry", id] as const;
-}
 
 /** Reconnect backoff schedule: 1s → 2s → 4s → 8s → 16s → 30s (cap). */
 const INITIAL_BACKOFF_MS = 1_000;
@@ -140,6 +137,10 @@ export function useCatalogueStream(): void {
         if (disposed) return;
         source?.close();
         source = null;
+        // Some browsers fire `onerror` more than once per dead connection.
+        // Bail if a reconnect is already scheduled so we don't double-book
+        // timers and end up with two concurrent EventSource instances.
+        if (reconnectTimer !== null) return;
         const delay = backoffMs;
         backoffMs = nextBackoff(backoffMs);
         console.warn(`[catalogue-stream] connection error; reconnecting in ${delay}ms`);

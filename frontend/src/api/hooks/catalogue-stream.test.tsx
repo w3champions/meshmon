@@ -3,7 +3,8 @@ import { renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { type CatalogueEntry, useCatalogueStream } from "@/api/hooks/catalogue-stream";
+import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { useCatalogueStream } from "@/api/hooks/catalogue-stream";
 
 /** Minimal in-memory EventSource stand-in for deterministic tests. */
 class MockEventSource {
@@ -180,6 +181,33 @@ describe("useCatalogueStream", () => {
       vi.advanceTimersByTime(1);
     });
     expect(MockEventSource.instances).toHaveLength(3);
+  });
+
+  test("does not schedule multiple reconnects when onerror fires twice", () => {
+    // Some browsers fire `onerror` more than once for the same dead
+    // connection. Without a guard, each call would queue a fresh timer
+    // and, after the delay elapses, spawn multiple concurrent
+    // EventSource instances in parallel.
+    vi.useFakeTimers();
+    const qc = makeQueryClient();
+    renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    // Two errors on the same connection, before the reconnect timer fires.
+    act(() => {
+      MockEventSource.instances[0]?.raise();
+      MockEventSource.instances[0]?.raise();
+    });
+    // No reconnect yet — the single scheduled timer is still pending.
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    // Advance well past any plausible backoff (cap is 30s). If the guard
+    // is missing, the second `raise` will have scheduled a second timer
+    // and we'll end up with 3 instances instead of 2.
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(MockEventSource.instances).toHaveLength(2);
   });
 
   test("cleans up EventSource + pending reconnect timer on unmount", () => {

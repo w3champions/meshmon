@@ -22,10 +22,10 @@ export type CatalogueBulkReenrichRequest = components["schemas"]["BulkReenrichRe
  */
 export type CatalogueListQuery = NonNullable<operations["list"]["parameters"]["query"]>;
 
-const CATALOGUE_LIST_KEY = ["catalogue", "list"] as const;
-const CATALOGUE_FACETS_KEY = ["catalogue", "facets"] as const;
+export const CATALOGUE_LIST_KEY = ["catalogue", "list"] as const;
+export const CATALOGUE_FACETS_KEY = ["catalogue", "facets"] as const;
 
-function catalogueEntryKey(id: string) {
+export function catalogueEntryKey(id: string) {
   return ["catalogue", "entry", id] as const;
 }
 
