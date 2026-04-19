@@ -60,12 +60,18 @@ function FitToAgents({ points }: { points: Array<[number, number]> }) {
   return null;
 }
 
+type AgentWithCoords = AgentSummary & {
+  catalogue_coordinates: { latitude: number; longitude: number };
+};
+
 export function AgentMap({ agents, matrix, className, onMarkerClick }: AgentMapProps) {
   const withCoords = agents.filter(
-    (a): a is AgentSummary & { lat: number; lon: number } =>
-      typeof a.lat === "number" && typeof a.lon === "number",
+    (a): a is AgentWithCoords => a.catalogue_coordinates != null,
   );
-  const points: Array<[number, number]> = withCoords.map((a) => [a.lat, a.lon]);
+  const points: Array<[number, number]> = withCoords.map((a) => [
+    a.catalogue_coordinates.latitude,
+    a.catalogue_coordinates.longitude,
+  ]);
 
   return (
     <div
@@ -93,7 +99,10 @@ export function AgentMap({ agents, matrix, className, onMarkerClick }: AgentMapP
           return (
             <Marker
               key={agent.id}
-              position={[agent.lat, agent.lon]}
+              position={[
+                agent.catalogue_coordinates.latitude,
+                agent.catalogue_coordinates.longitude,
+              ]}
               eventHandlers={onMarkerClick ? { click: () => onMarkerClick(agent.id) } : undefined}
             >
               <Popup>

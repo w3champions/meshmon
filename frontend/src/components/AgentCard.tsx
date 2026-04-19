@@ -43,11 +43,12 @@ export function AgentCard({ agent, compact = false }: AgentCardProps) {
               <span>{agent.location}</span>
             </div>
           )}
-          {agent.lat != null && agent.lon != null && (
+          {agent.catalogue_coordinates != null && (
             <div>
               <span className="text-muted-foreground">Coordinates: </span>
               <span>
-                {agent.lat}, {agent.lon}
+                {agent.catalogue_coordinates.latitude},{" "}
+                {agent.catalogue_coordinates.longitude}
               </span>
             </div>
           )}

@@ -226,6 +226,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalogue/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * SSE stream of catalogue lifecycle events.
+         * @description Requires an authenticated session (the enclosing router applies
+         *     `login_required!`). The response never ends on its own — the server
+         *     closes it on shutdown or when the client disconnects.
+         */
+        get: operations["catalogue_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalogue/{id}": {
         parameters: {
             query?: never;
@@ -642,6 +664,54 @@ export interface components {
             source: components["schemas"]["CatalogueSource"];
             /** @description Operator-supplied external link. */
             website?: string | null;
+        };
+        /**
+         * @description Catalogue lifecycle event delivered to every SSE subscriber.
+         *
+         *     The `tag = "kind"` serde representation matches the wire shape the
+         *     frontend expects: one top-level `kind` discriminant plus flat
+         *     per-variant fields. Keep variant names in `snake_case` on the wire —
+         *     `utoipa` and serde both honour `rename_all = "snake_case"`.
+         */
+        CatalogueEvent: {
+            /**
+             * Format: uuid
+             * @description Primary key of the newly-inserted row.
+             */
+            id: string;
+            /**
+             * @description Textual rendering of the catalogued IP for convenient client-side
+             *     display without a second fetch.
+             */
+            ip: string;
+            /** @enum {string} */
+            kind: "created";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the updated row.
+             */
+            id: string;
+            /** @enum {string} */
+            kind: "updated";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the row that was removed.
+             */
+            id: string;
+            /** @enum {string} */
+            kind: "deleted";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the row whose enrichment status changed.
+             */
+            id: string;
+            /** @enum {string} */
+            kind: "enrichment_progress";
+            /** @description New enrichment status. */
+            status: components["schemas"]["EnrichmentStatus"];
         };
         /**
          * @description Where a catalogue row originated.
@@ -1451,6 +1521,31 @@ export interface operations {
         responses: {
             /** @description Bulk re-enrichment enqueued */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    catalogue_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE stream of catalogue changes */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
