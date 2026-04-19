@@ -438,15 +438,54 @@ pub async fn apply_edit(
 /// transition the campaign back to `running`. Used by the operator's
 /// "force this one pair" button on finished campaigns.
 pub async fn force_pair(
-    _pool: &PgPool,
-    _id: Uuid,
-    _source_agent_id: &str,
-    _destination_ip: IpAddr,
+    pool: &PgPool,
+    id: Uuid,
+    source_agent_id: &str,
+    destination_ip: IpAddr,
 ) -> Result<CampaignRow, RepoError> {
-    todo!(
-        "implement: reset specified pair, transition campaign to running \
-         via transition_state(expected=[Completed,Stopped,Evaluated])"
+    let mut tx = pool.begin().await?;
+
+    let dst_net = IpNetwork::from(destination_ip);
+    let matched = sqlx::query_scalar!(
+        "UPDATE campaign_pairs
+            SET resolution_state = 'pending',
+                measurement_id   = NULL,
+                settled_at       = NULL,
+                dispatched_at    = NULL,
+                attempt_count    = 0,
+                last_error       = NULL
+          WHERE campaign_id = $1
+            AND source_agent_id = $2
+            AND destination_ip = $3
+         RETURNING id",
+        id,
+        source_agent_id,
+        dst_net,
     )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if matched.is_none() {
+        return Err(RepoError::NotFound(id));
+    }
+
+    // Running → Running is a valid no-op; finished campaigns re-enter
+    // rotation. transition_state_in_tx is inclusive of Running so the
+    // caller can force a pair without first checking the parent state.
+    let row = transition_state_in_tx(
+        &mut tx,
+        id,
+        &[
+            CampaignState::Running,
+            CampaignState::Completed,
+            CampaignState::Stopped,
+            CampaignState::Evaluated,
+        ],
+        CampaignState::Running,
+        Some("started_at"),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(row)
 }
 
 /// List pairs for a campaign, optionally filtered to a specific set of
