@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE ip_catalogue SET\n            city             = COALESCE($2, city),\n            country_code     = COALESCE($3, country_code),\n            country_name     = COALESCE($4, country_name),\n            latitude         = COALESCE($5, latitude),\n            longitude        = COALESCE($6, longitude),\n            asn              = COALESCE($7, asn),\n            network_operator = COALESCE($8, network_operator),\n            enrichment_status = $9::enrichment_status,\n            enriched_at       = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bpchar",
+        "Text",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Text",
+        {
+          "Custom": {
+            "name": "enrichment_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "enriched",
+                "failed"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56f33211f35f005b638401e1f4861388a636f30ff26ca42ff977cb669caedf09"
+}

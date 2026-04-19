@@ -7,6 +7,7 @@
 //! any matching field.
 
 use super::model::{CatalogueEntry, CatalogueSource, EnrichmentStatus, Field};
+use crate::enrichment::MergedFields;
 use chrono::{DateTime, Utc};
 use sqlx::{types::ipnetwork::IpNetwork, PgPool};
 use std::net::IpAddr;
@@ -372,6 +373,86 @@ pub async fn patch(
     .await?;
 
     Ok(row.into())
+}
+
+/// Reset a row to `pending` before the runner walks the provider chain.
+///
+/// Clears `enriched_at` so the UI can distinguish "currently being
+/// enriched" from "previously enriched but now being re-run". Idempotent:
+/// calling on a row already in `pending` with no prior enrichment is a
+/// no-op at the value level.
+pub async fn mark_enrichment_start(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE ip_catalogue SET
+            enrichment_status = 'pending'::enrichment_status,
+            enriched_at       = NULL
+        WHERE id = $1
+        "#,
+        id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Persist a [`MergedFields`] result onto the catalogue row.
+///
+/// Only populated (`Some(_)`) columns on `merged` are written; absent
+/// entries are preserved via `COALESCE($N, <column>)`. `enrichment_status`
+/// flips to `enriched` when at least one field was populated (per
+/// [`MergedFields::any_populated`]) and `failed` otherwise. `enriched_at`
+/// is stamped to `NOW()` unconditionally — the timestamp marks when the
+/// pipeline last finished, regardless of outcome.
+///
+/// Returns the terminal [`EnrichmentStatus`] that was just written, so the
+/// caller can publish a progress event without a second round-trip.
+///
+/// The operator lock was already enforced by [`MergedFields::apply`]; this
+/// function does not re-check it.
+///
+/// The operator-only columns `display_name`, `website`, and `notes` are
+/// intentionally not touched by this function — they are never populated
+/// by enrichment providers. Code adding a new enrichable field to
+/// [`MergedFields`] must also add the corresponding `SET` column here or
+/// the new field will silently fail to persist.
+pub async fn apply_enrichment_result(
+    pool: &PgPool,
+    id: Uuid,
+    merged: MergedFields,
+) -> Result<EnrichmentStatus, sqlx::Error> {
+    let status = if merged.any_populated() {
+        EnrichmentStatus::Enriched
+    } else {
+        EnrichmentStatus::Failed
+    };
+    sqlx::query!(
+        r#"
+        UPDATE ip_catalogue SET
+            city             = COALESCE($2, city),
+            country_code     = COALESCE($3, country_code),
+            country_name     = COALESCE($4, country_name),
+            latitude         = COALESCE($5, latitude),
+            longitude        = COALESCE($6, longitude),
+            asn              = COALESCE($7, asn),
+            network_operator = COALESCE($8, network_operator),
+            enrichment_status = $9::enrichment_status,
+            enriched_at       = NOW()
+        WHERE id = $1
+        "#,
+        id,
+        merged.city,
+        merged.country_code,
+        merged.country_name,
+        merged.latitude,
+        merged.longitude,
+        merged.asn,
+        merged.network_operator,
+        status as EnrichmentStatus,
+    )
+    .execute(pool)
+    .await?;
+    Ok(status)
 }
 
 /// Upsert a row driven by an agent's self-report on register.

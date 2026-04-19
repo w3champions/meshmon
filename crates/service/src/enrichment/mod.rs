@@ -21,6 +21,7 @@
 //! runner that composes them.
 
 pub mod providers;
+pub mod runner;
 
 use crate::catalogue::model::Field;
 use async_trait::async_trait;
