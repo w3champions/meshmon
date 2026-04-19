@@ -175,12 +175,25 @@ pub async fn paste(
     ),
 )]
 pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
+    // The `name` query param is a user-facing substring filter. The repo
+    // binds it verbatim into `display_name ILIKE $5`, so wrap the value
+    // here so callers can pass `?name=Fastly` and match rows whose
+    // `display_name` *contains* "Fastly" rather than having to send
+    // the raw `%Fastly%` themselves. ILIKE treats `%` / `_` as wildcards
+    // and the user-supplied characters pass through unescaped — that
+    // matches other catalogue search surfaces (e.g. `agents.name`).
+    let name_filter = q
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{s}%"));
     let filter = repo::ListFilter {
         country_code: q.country_code,
         asn: q.asn,
         network: q.network,
         ip_prefix: q.ip_prefix,
-        name: q.name,
+        name: name_filter,
         bounding_box: q.bbox,
         limit: q.limit,
         cursor_created_at: q.cursor_created_at,
@@ -369,12 +382,14 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resp
 /// existence check runs synchronously because a 404 is cheap to surface
 /// and spares callers from an "accepted then silently dropped" UX.
 ///
-/// The enqueue return value is intentionally discarded — a `false`
-/// from [`crate::enrichment::runner::EnrichmentQueue::enqueue`] means
-/// the bounded channel is full (or — under current wiring — that the
-/// paired receiver has been dropped; see the T16 TODO on
-/// [`crate::state::AppState::enrichment_queue`]). In both cases the
-/// row's `created_at`-driven sweep is the safety net.
+/// Before enqueuing, the row is flipped back to `enrichment_status =
+/// 'pending'` via [`repo::mark_enrichment_start`]. This makes the sweep
+/// a true safety net: if the bounded queue is full (or its receiver is
+/// gone) and the enqueue drops, the row is already `pending` with an
+/// older `created_at`, so the runner's 30-second sweep will pick it up
+/// on the next tick instead of leaving the re-enrich request silently
+/// stranded (sweep only scans rows in `pending`, so a still-`enriched`
+/// row would otherwise never be retried).
 #[utoipa::path(
     post,
     path = "/api/catalogue/{id}/reenrich",
@@ -392,7 +407,10 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resp
 pub async fn reenrich_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
     match repo::find_by_id(&state.pool, id).await {
         Ok(Some(_)) => {
-            // If the row is deleted between the lookup and the enqueue, the
+            if let Err(e) = repo::mark_enrichment_start(&state.pool, id).await {
+                return db_error("catalogue reenrich_one: mark_enrichment_start failed", e);
+            }
+            // If the row is deleted between the mark and the enqueue, the
             // enrichment runner handles the now-missing row gracefully —
             // benign race.
             let _ = state.enrichment_queue.enqueue(id);
@@ -403,18 +421,32 @@ pub async fn reenrich_one(State(state): State<AppState>, Path(id): Path<Uuid>) -
     }
 }
 
+/// Maximum `ids.len()` accepted by [`reenrich_many`].
+///
+/// Mirrors the clamp policy applied to the other catalogue endpoints
+/// (`list.limit` → 500, facets → 250 per category) so a malformed or
+/// malicious client cannot make one request walk O(N) database and
+/// queue-send work.
+pub const MAX_BULK_REENRICH_IDS: usize = 512;
+
 /// `POST /api/catalogue/reenrich` — bulk re-enrichment.
 ///
-/// Each id in [`BulkReenrichRequest::ids`] is pushed onto the
-/// enrichment queue without a prior existence check. Unknown ids
-/// resolve to a no-op inside the runner (the row lookup returns
-/// none), so callers may include speculative ids without surfacing a
-/// per-id error path.
+/// Each id in [`BulkReenrichRequest::ids`] is flipped back to
+/// `enrichment_status = 'pending'` in a single
+/// [`repo::mark_enrichment_start_bulk`] call and then pushed onto the
+/// enrichment queue. Unknown ids silently no-op at both layers (the
+/// bulk UPDATE matches zero rows and the runner tolerates missing ids
+/// on dequeue), so callers may include speculative ids without
+/// surfacing a per-id error path.
 ///
-/// Returns 202 Accepted unconditionally — bulk re-enrich is
-/// best-effort. A `false` from the enqueue call is intentionally
-/// dropped (queue-full or closed-channel conditions are handled by
-/// the runner's periodic sweep, same as the single-id path).
+/// The prior mark-`pending` step makes the sweep a true safety net:
+/// queue drops (backpressure or closed channel) no longer silently lose
+/// re-enrich requests because the row is already `pending` with an
+/// older `created_at`, so the runner's 30-second sweep will pick it up
+/// on the next tick.
+///
+/// Returns 400 when `ids.len() > MAX_BULK_REENRICH_IDS` and 202 on
+/// success (including the empty-`ids` case).
 #[utoipa::path(
     post,
     path = "/api/catalogue/reenrich",
@@ -422,16 +454,31 @@ pub async fn reenrich_one(State(state): State<AppState>, Path(id): Path<Uuid>) -
     request_body = BulkReenrichRequest,
     responses(
         (status = 202, description = "Bulk re-enrichment enqueued"),
+        (status = 400, description = "Too many ids", body = ErrorEnvelope),
         (status = 401, description = "No active session"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
 pub async fn reenrich_many(
     State(state): State<AppState>,
     Json(body): Json<BulkReenrichRequest>,
 ) -> Response {
-    // No 500 path: the handler issues only non-fallible enqueues (try_send
-    // swallows Full/Closed) and never touches the DB. If future changes add a
-    // fallible operation, extend the responses list accordingly.
+    if body.ids.len() > MAX_BULK_REENRICH_IDS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "too_many_ids" })),
+        )
+            .into_response();
+    }
+    if body.ids.is_empty() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+    if let Err(e) = repo::mark_enrichment_start_bulk(&state.pool, &body.ids).await {
+        return db_error(
+            "catalogue reenrich_many: mark_enrichment_start_bulk failed",
+            e,
+        );
+    }
     for id in body.ids {
         let _ = state.enrichment_queue.enqueue(id);
     }

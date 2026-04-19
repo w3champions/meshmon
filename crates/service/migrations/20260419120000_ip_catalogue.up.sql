@@ -49,6 +49,24 @@ CREATE INDEX idx_ip_catalogue_search ON ip_catalogue USING GIN (
     )
 );
 
+-- Backfill any existing agent coordinates into the catalogue *before*
+-- dropping the columns. Without this, upgrading a live deployment
+-- silently loses every registered agent's lat/lon until each agent
+-- re-registers — and the registry view `agents_with_catalogue` reads
+-- geo from `ip_catalogue`, so the API would serve empty coordinates
+-- in the interim. `Latitude` / `Longitude` go straight into
+-- `operator_edited_fields` so the enrichment chain will not overwrite
+-- the agent-reported position.
+INSERT INTO ip_catalogue (ip, source, latitude, longitude, operator_edited_fields)
+SELECT a.ip,
+       'agent_registration'::catalogue_source,
+       a.lat,
+       a.lon,
+       ARRAY['Latitude', 'Longitude']::text[]
+FROM agents a
+WHERE a.lat IS NOT NULL AND a.lon IS NOT NULL
+ON CONFLICT (ip) DO NOTHING;
+
 -- Agents -> catalogue: geo lives on the catalogue only
 ALTER TABLE agents DROP COLUMN lat;
 ALTER TABLE agents DROP COLUMN lon;

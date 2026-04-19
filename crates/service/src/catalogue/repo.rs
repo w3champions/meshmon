@@ -401,6 +401,30 @@ pub async fn mark_enrichment_start(pool: &PgPool, id: Uuid) -> Result<(), sqlx::
     Ok(())
 }
 
+/// Bulk variant of [`mark_enrichment_start`] for bulk re-enrichment.
+///
+/// Unknown ids in `ids` silently no-op (the `WHERE id = ANY(...)` clause
+/// simply matches no row). Returns the number of rows actually flipped
+/// so the caller can distinguish "all ids resolved" from "some were
+/// speculative" if that ever matters — current callers ignore the value.
+pub async fn mark_enrichment_start_bulk(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let res = sqlx::query!(
+        r#"
+        UPDATE ip_catalogue SET
+            enrichment_status = 'pending'::enrichment_status,
+            enriched_at       = NULL
+        WHERE id = ANY($1::uuid[])
+        "#,
+        ids,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Persist a [`MergedFields`] result onto the catalogue row.
 ///
 /// Only populated (`Some(_)`) columns on `merged` are written; absent
@@ -535,8 +559,11 @@ pub struct ListFilter {
     /// when substring matching is intended — this function does not add
     /// wildcards for you.
     pub network: Vec<String>,
-    /// CIDR / single-IP containment (`ip << $prefix`). Unparseable
-    /// values are ignored (no filter applied).
+    /// CIDR / single-IP containment (`ip <<= $prefix`). The contained-or-equal
+    /// operator is deliberate: a bare host like `1.2.3.4` parses to
+    /// `1.2.3.4/32`, which `<<` (strict containment) would fail to match
+    /// against the stored `/32` row. Unparseable values are ignored (no
+    /// filter applied).
     pub ip_prefix: Option<String>,
     /// Case-insensitive ILIKE match on `display_name`. Wildcards are
     /// the caller's responsibility, as above.
@@ -600,7 +627,7 @@ pub async fn list(
         WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))
           AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))
           AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))
-          AND ($4::INET IS NULL OR c.ip << $4::INET)
+          AND ($4::INET IS NULL OR c.ip <<= $4::INET)
           AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)
           AND (NOT $6::BOOL OR (
                 latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
@@ -631,7 +658,7 @@ pub async fn list(
         WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))
           AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))
           AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))
-          AND ($4::INET IS NULL OR c.ip << $4::INET)
+          AND ($4::INET IS NULL OR c.ip <<= $4::INET)
           AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)
           AND (NOT $6::BOOL OR (
                 latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
