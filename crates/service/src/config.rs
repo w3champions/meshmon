@@ -45,6 +45,79 @@ pub struct Config {
     pub agents: AgentsSection,
     /// Probing configuration broadcast to agents via `GetConfig`.
     pub probing: crate::probing::ProbingSection,
+    /// Enrichment provider configuration for the IP catalogue.
+    pub enrichment: EnrichmentSection,
+}
+
+/// Enrichment provider chain configuration.
+///
+/// Each sub-section toggles one concrete provider. The catalogue
+/// runner walks providers in a fixed order and skips any whose
+/// `enabled` flag is `false`.
+#[derive(Debug, Clone, Default)]
+pub struct EnrichmentSection {
+    /// IPGeolocation.io — paid geo / ASN / network operator. ToS-gated.
+    pub ipgeolocation: IpGeolocationSection,
+    /// RDAP — free, registry-maintained allocation metadata.
+    pub rdap: RdapSection,
+    /// MaxMind GeoLite2 — local mmdb databases (opt-in, feature-flagged).
+    pub maxmind: MaxmindSection,
+    /// WHOIS — legacy ASN / netblock fallback (opt-in, feature-flagged).
+    pub whois: WhoisSection,
+}
+
+/// IPGeolocation.io provider settings.
+///
+/// The free tier imposes a terms-of-service acknowledgement: the
+/// service refuses to start with `enabled = true` unless the operator
+/// explicitly sets `acknowledged_tos = true` (see
+/// `docs/campaigns/architecture.md`).
+#[derive(Debug, Clone, Default)]
+pub struct IpGeolocationSection {
+    /// Whether to invoke this provider during enrichment.
+    pub enabled: bool,
+    /// Resolved API key (from inline `api_key` or `api_key_env`). `None`
+    /// only when `enabled = false` — the loader rejects `enabled = true`
+    /// with no key present.
+    pub api_key: Option<String>,
+    /// Operator's explicit acknowledgement of the provider's terms of
+    /// service. Must be `true` when `enabled = true`.
+    pub acknowledged_tos: bool,
+}
+
+/// RDAP provider settings. Enabled by default — RDAP is a free,
+/// registry-maintained protocol that needs no credentials.
+#[derive(Debug, Clone)]
+pub struct RdapSection {
+    /// Whether to invoke this provider during enrichment.
+    pub enabled: bool,
+}
+
+impl Default for RdapSection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// MaxMind GeoLite2 provider settings. Requires the
+/// `enrichment-maxmind` feature flag at build time; the paths point to
+/// operator-provided mmdb files.
+#[derive(Debug, Clone, Default)]
+pub struct MaxmindSection {
+    /// Whether to invoke this provider during enrichment.
+    pub enabled: bool,
+    /// Path to the GeoLite2 City mmdb file.
+    pub city_mmdb: Option<std::path::PathBuf>,
+    /// Path to the GeoLite2 ASN mmdb file.
+    pub asn_mmdb: Option<std::path::PathBuf>,
+}
+
+/// WHOIS provider settings. Requires the `enrichment-whois` feature
+/// flag at build time.
+#[derive(Debug, Clone, Default)]
+pub struct WhoisSection {
+    /// Whether to invoke this provider during enrichment.
+    pub enabled: bool,
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -247,6 +320,66 @@ struct RawConfig {
     agents: RawAgentsSection,
     #[serde(default)]
     probing: crate::probing::RawProbingSection,
+    #[serde(default)]
+    enrichment: RawEnrichmentSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawEnrichmentSection {
+    #[serde(default)]
+    ipgeolocation: RawIpGeolocationSection,
+    #[serde(default)]
+    rdap: RawRdapSection,
+    #[serde(default)]
+    maxmind: RawMaxmindSection,
+    #[serde(default)]
+    whois: RawWhoisSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawIpGeolocationSection {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    acknowledged_tos: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRdapSection {
+    #[serde(default = "rdap_enabled_default")]
+    enabled: bool,
+}
+
+impl Default for RawRdapSection {
+    fn default() -> Self {
+        Self {
+            enabled: rdap_enabled_default(),
+        }
+    }
+}
+
+fn rdap_enabled_default() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMaxmindSection {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    city_mmdb: Option<std::path::PathBuf>,
+    #[serde(default)]
+    asn_mmdb: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWhoisSection {
+    #[serde(default)]
+    enabled: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -565,6 +698,9 @@ impl Config {
             }
         })?;
 
+        // --- enrichment section ---
+        let enrichment = resolve_enrichment(raw.enrichment, path)?;
+
         Ok(Config {
             service,
             database,
@@ -574,6 +710,7 @@ impl Config {
             upstream,
             agents,
             probing,
+            enrichment,
         })
     }
 }
@@ -874,6 +1011,81 @@ fn resolve_metrics_auth(
         username: raw.username,
         password_hash: hash,
     }))
+}
+
+/// Resolve the `[enrichment.*]` block. Each provider toggle is passed
+/// through verbatim; ipgeolocation is additionally gated on a terms-of-
+/// service acknowledgement and on a present API key (inline or via
+/// `api_key_env`).
+///
+/// The ToS and api_key validations only fire when
+/// `ipgeolocation.enabled = true` so an operator who leaves the
+/// provider disabled can keep the block in the file without setting
+/// the env var.
+fn resolve_enrichment(
+    raw: RawEnrichmentSection,
+    path: &str,
+) -> Result<EnrichmentSection, BootError> {
+    // ToS check first — a missing acknowledgement is the most
+    // operator-actionable failure and shouldn't be masked by an
+    // env-resolution error raised for a key we'd never use anyway.
+    if raw.ipgeolocation.enabled && !raw.ipgeolocation.acknowledged_tos {
+        return Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: "[enrichment.ipgeolocation] enabled=true requires \
+                     acknowledged_tos=true (see docs/campaigns/architecture.md \
+                     — ipgeolocation ToS gate)"
+                .to_string(),
+        });
+    }
+
+    let ipgeolocation_api_key = if raw.ipgeolocation.enabled {
+        // Resolve inline first, then env. When both are absent we
+        // surface the specific "api_key or api_key_env" error below
+        // rather than the generic `EnvMissing` so operators see the
+        // exact knob they need to set.
+        match (raw.ipgeolocation.api_key, raw.ipgeolocation.api_key_env) {
+            (Some(v), _) if !v.is_empty() => Some(v),
+            (_, Some(env)) => {
+                resolve_optional_secret(None, Some(env), "enrichment.ipgeolocation.api_key", path)?
+            }
+            _ => None,
+        }
+    } else {
+        // When disabled we don't touch env vars — an operator who
+        // flipped enabled off should not need IPGEO_KEY defined.
+        None
+    };
+
+    if raw.ipgeolocation.enabled && ipgeolocation_api_key.is_none() {
+        return Err(BootError::ConfigInvalid {
+            path: path.to_string(),
+            reason: "[enrichment.ipgeolocation] enabled=true requires \
+                     api_key or api_key_env"
+                .to_string(),
+        });
+    }
+
+    let ipgeolocation = IpGeolocationSection {
+        enabled: raw.ipgeolocation.enabled,
+        api_key: ipgeolocation_api_key,
+        acknowledged_tos: raw.ipgeolocation.acknowledged_tos,
+    };
+
+    Ok(EnrichmentSection {
+        ipgeolocation,
+        rdap: RdapSection {
+            enabled: raw.rdap.enabled,
+        },
+        maxmind: MaxmindSection {
+            enabled: raw.maxmind.enabled,
+            city_mmdb: raw.maxmind.city_mmdb,
+            asn_mmdb: raw.maxmind.asn_mmdb,
+        },
+        whois: WhoisSection {
+            enabled: raw.whois.enabled,
+        },
+    })
 }
 
 /// Construct an [`AppState`](crate::state::AppState) from raw TOML for unit
@@ -1300,5 +1512,102 @@ alertmanager_url = "http://0.0.0.0:8080/alertmanager"
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn refuses_ipgeolocation_without_tos_ack() {
+        // Enabling the ipgeolocation provider without the ToS flag
+        // must fail at load — the provider's free tier makes the
+        // acknowledgement a launch-gate, not a runtime nudge.
+        let toml = format!(
+            r#"{MIN_TOML}
+[enrichment.ipgeolocation]
+enabled = true
+api_key_env = "MESHMON_TEST_IPGEO_KEY_FOR_TOS_TEST"
+acknowledged_tos = false
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        assert!(
+            err.to_string().to_lowercase().contains("acknowledged_tos"),
+            "expected acknowledged_tos mention, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_ipgeolocation_disabled() {
+        // When the provider is disabled the ToS and api_key checks
+        // never fire, so the block parses without needing the env
+        // var to be set.
+        let toml = format!(
+            r#"{MIN_TOML}
+[enrichment.ipgeolocation]
+enabled = false
+api_key_env = "MESHMON_TEST_IPGEO_KEY_UNSET"
+acknowledged_tos = false
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("must accept");
+        assert!(!cfg.enrichment.ipgeolocation.enabled);
+        assert!(cfg.enrichment.ipgeolocation.api_key.is_none());
+        assert!(!cfg.enrichment.ipgeolocation.acknowledged_tos);
+    }
+
+    #[test]
+    fn refuses_ipgeolocation_without_api_key() {
+        // Enabled + ToS ack but no API key (neither inline nor env)
+        // is a launch-time misconfiguration — catch it at load.
+        let toml = format!(
+            r#"{MIN_TOML}
+[enrichment.ipgeolocation]
+enabled = true
+acknowledged_tos = true
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("must reject");
+        match err {
+            BootError::ConfigInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("api_key"),
+                    "expected api_key mention, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_ipgeolocation_enabled_with_env_key() {
+        // Full valid setup: enabled, ToS acked, and the env var
+        // actually populated. Should load cleanly and the key
+        // should be threaded through to the resolved section.
+        std::env::set_var("MESHMON_TEST_IPGEO_KEY_VALID", "sekret-key-123");
+        let toml = format!(
+            r#"{MIN_TOML}
+[enrichment.ipgeolocation]
+enabled = true
+api_key_env = "MESHMON_TEST_IPGEO_KEY_VALID"
+acknowledged_tos = true
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("must accept");
+        std::env::remove_var("MESHMON_TEST_IPGEO_KEY_VALID");
+        assert!(cfg.enrichment.ipgeolocation.enabled);
+        assert_eq!(
+            cfg.enrichment.ipgeolocation.api_key.as_deref(),
+            Some("sekret-key-123"),
+        );
+        assert!(cfg.enrichment.ipgeolocation.acknowledged_tos);
+    }
+
+    #[test]
+    fn enrichment_defaults_when_section_absent() {
+        // No [enrichment] block at all → every provider is disabled
+        // except RDAP (free, registry-maintained — default on).
+        let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
+        assert!(!cfg.enrichment.ipgeolocation.enabled);
+        assert!(cfg.enrichment.rdap.enabled);
+        assert!(!cfg.enrichment.maxmind.enabled);
+        assert!(!cfg.enrichment.whois.enabled);
     }
 }

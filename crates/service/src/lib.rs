@@ -4,6 +4,7 @@
 //! - [`catalogue`] — IP catalogue registry, paste parser, enrichment wiring.
 //! - [`config`] — `meshmon.toml` parsing + validation.
 //! - [`db`] — Postgres pool + migrations.
+//! - [`enrichment`] — pluggable provider chain for catalogue enrichment.
 //! - [`error`] — boot/startup error types.
 //! - [`grpc`] — tonic gRPC service assembly.
 //! - [`http`] — axum router assembly, health endpoints, OpenAPI serving.
@@ -21,6 +22,7 @@ pub mod catalogue;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod enrichment;
 pub mod error;
 pub mod grpc;
 pub mod http;
