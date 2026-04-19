@@ -13,24 +13,24 @@
 //!   we consume) and produces an [`EnrichmentResult`]. Unit tests exercise
 //!   this directly; no HTTP or bootstrap store involved.
 //! - [`RdapProvider::lookup`] is the async trait method that talks to the
-//!   network. The end-to-end path (IANA bootstrap + HTTP fetch + response
-//!   parsing) is deferred to Task 10's integration test. Until Task 10
-//!   wires the real RDAP call, the method returns
-//!   [`EnrichmentError::Permanent`] so the runner does not schedule
-//!   retries against a permanently-stubbed provider — it simply falls
-//!   through to later providers in the chain. Task 10 replaces the body
-//!   with the actual network call.
-//!
-//! This split matches the plan: the critical scope for Task 1 is the field
-//! mapping contract + the provider skeleton; wiring the real RDAP call
-//! happens once Task 10's fixtures and test harness are in place.
+//!   network. Two code paths exist: the bootstrap path uses
+//!   [`icann_rdap_client::rdap::rdap_bootstrapped_request`] in production to
+//!   resolve the RIR via IANA; the test-only override path skips bootstrap
+//!   and issues a direct raw `GET {base}/ip/{ip}` against a `wiremock`
+//!   server. Both paths destructure the response into an
+//!   [`RdapRecordFixture`] before handing off to `map_record`.
 
 use crate::catalogue::model::Field;
 use crate::enrichment::{EnrichmentError, EnrichmentProvider, EnrichmentResult, FieldValue};
 use async_trait::async_trait;
 use icann_rdap_client::http::{create_client, Client, ClientConfig};
 use icann_rdap_client::iana::MemoryBootstrapStore;
+use icann_rdap_client::rdap::{rdap_bootstrapped_request, QueryType};
+use icann_rdap_client::RdapClientError;
+use icann_rdap_common::response::RdapResponse;
+use serde_json::Value;
 use std::net::IpAddr;
+use std::str::FromStr;
 
 /// Stable identifier for this provider — appears in logs and metrics
 /// labels. Kept as a module-level constant so the `EnrichmentProvider::id`
@@ -65,28 +65,29 @@ pub(crate) struct RdapRecordFixture {
 /// RDAP provider — looks up IP ownership via the IANA-bootstrapped
 /// RDAP tree and produces ASN / network-operator / country-code hints.
 pub struct RdapProvider {
-    /// The wrapped reqwest client used for RDAP requests. Held so that
-    /// connection pools are reused across lookups. Currently unused
-    /// because [`Self::lookup`] is a `TODO(T10)` stub, but kept on the
-    /// struct so the field-level lifecycle (one client per process)
-    /// survives the Task-10 rewrite.
-    #[allow(dead_code)]
+    /// The wrapped reqwest client used for bootstrapped RDAP requests
+    /// (production path). Held so that connection pools are reused
+    /// across lookups.
     client: Client,
+    /// Plain reqwest client used for the test-only override path, which
+    /// bypasses the icann-rdap-client wrapper so we can get the raw
+    /// JSON text back. The wrapper consumes the response body and only
+    /// exposes the typed [`RdapResponse`], which drops unknown fields
+    /// like the ARIN `arin_originas0_originautnums` extension that
+    /// carries the ASN on IP Network objects.
+    raw_client: reqwest::Client,
     /// IANA bootstrap registry cache. Populated lazily on the first
     /// lookup against a given registry (ARIN, RIPE, APNIC, …) so cold
     /// start does not hit IANA five times in a row.
-    #[allow(dead_code)]
     bootstrap: MemoryBootstrapStore,
-    /// Test-only override: when `Some`, the real Task-10 `lookup`
-    /// implementation will skip the IANA bootstrap fetch and issue a
-    /// direct `rdap_url_request` against `{base_url}/ip/{ip}`. Lets
-    /// the integration tests point the provider at a `wiremock`
-    /// [`MockServer`](wiremock::MockServer) without standing up a fake
-    /// bootstrap endpoint too. `None` in production paths — the
-    /// Task-10 `lookup` body routes through
+    /// Test-only override: when `Some`, [`Self::lookup`] skips the IANA
+    /// bootstrap fetch and issues a direct raw GET against
+    /// `{base_url}/ip/{ip}`. Lets integration tests point the provider
+    /// at a `wiremock` [`MockServer`](wiremock::MockServer) without
+    /// standing up a fake bootstrap endpoint too. `None` in production
+    /// paths — the lookup routes through
     /// [`icann_rdap_client::rdap::rdap_bootstrapped_request`] in that
     /// case.
-    #[allow(dead_code)]
     base_url_override: Option<String>,
 }
 
@@ -103,8 +104,12 @@ impl RdapProvider {
         let config = ClientConfig::default();
         let client = create_client(&config)
             .map_err(|e| EnrichmentError::Permanent(format!("rdap client init failed: {e}")))?;
+        let raw_client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| EnrichmentError::Permanent(format!("rdap raw client init failed: {e}")))?;
         Ok(Self {
             client,
+            raw_client,
             bootstrap: MemoryBootstrapStore::new(),
             base_url_override: None,
         })
@@ -124,8 +129,8 @@ impl RdapProvider {
     /// the `http://` URL wiremock hands out is accepted — the default
     /// `ClientConfig` refuses non-HTTPS requests.
     // `dead_code` allow: only called from the in-file test module; no
-    // production caller today (Task 2 will leave this as a test-only
-    // seam even after wiring the real `lookup` body).
+    // production caller today (stays a test-only seam — production
+    // code constructs via `new()`).
     #[allow(dead_code)]
     pub(crate) fn new_with_bootstrap_override(
         base_url: impl Into<String>,
@@ -133,8 +138,15 @@ impl RdapProvider {
         let config = ClientConfig::builder().https_only(false).build();
         let client = create_client(&config)
             .map_err(|e| EnrichmentError::Permanent(format!("rdap client init failed: {e}")))?;
+        // Plain reqwest client used by the override path. `https_only`
+        // is the reqwest default (`false`), so the `http://` URL
+        // wiremock hands out is accepted without further config.
+        let raw_client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| EnrichmentError::Permanent(format!("rdap raw client init failed: {e}")))?;
         Ok(Self {
             client,
+            raw_client,
             bootstrap: MemoryBootstrapStore::new(),
             base_url_override: Some(base_url.into()),
         })
@@ -150,10 +162,6 @@ impl RdapProvider {
     /// For `NetworkOperator` we prefer `organisation` over `net_name`
     /// when both are present: operators recognise "Cloudflare, Inc."
     /// more readily than "CLOUDFLARENET".
-    // `dead_code` allow: only called from unit tests today; Task 10's
-    // `lookup` implementation will invoke it once it destructures the
-    // real `RdapResponse::Network` into an `RdapRecordFixture`.
-    #[allow(dead_code)]
     pub(crate) fn map_record(r: RdapRecordFixture) -> EnrichmentResult {
         let mut out = EnrichmentResult::default();
         if let Some(asn) = r.asn {
@@ -185,21 +193,163 @@ impl EnrichmentProvider for RdapProvider {
         SUPPORTED_FIELDS
     }
 
-    async fn lookup(&self, _ip: IpAddr) -> Result<EnrichmentResult, EnrichmentError> {
-        // TODO(T10): wire the real `rdap_bootstrapped_request` call and
-        // destructure the `RdapResponse::Network` into an
-        // `RdapRecordFixture` before handing off to `map_record`. The
-        // end-to-end RDAP path (IANA bootstrap + HTTP + response parse)
-        // is covered by Task 10's integration test; until that fixture
-        // exists the call would be untested. Until Task 10 wires the
-        // real RDAP call, this returns `Permanent` so the runner does
-        // not schedule retries against a permanently-stubbed provider
-        // (a `Transient` classification would trigger backoff retries
-        // and burn work every cycle). Task 10 replaces this body with
-        // the actual network call.
-        Err(EnrichmentError::Permanent(
-            "rdap lookup not yet wired — TODO(T10)".into(),
-        ))
+    async fn lookup(&self, ip: IpAddr) -> Result<EnrichmentResult, EnrichmentError> {
+        // Two code paths: the test-only override path issues a direct
+        // raw GET (so we can keep the raw JSON `Value` alongside the
+        // typed `RdapResponse`, which is required to read the ARIN
+        // `arin_originas0_originautnums` extension that isn't modelled
+        // on `Network` in icann-rdap-common 0.0.28). The production
+        // path uses `rdap_bootstrapped_request` so IANA resolves the
+        // right RIR — at the cost of losing the ARIN extension ASN,
+        // which is acceptable here: RIPE/APNIC/LACNIC/AFRINIC do not
+        // emit that extension, and Cloudflare-style ARIN ASN data will
+        // still come through via the WHOIS provider chain.
+        let (value, rdap) = if let Some(base) = &self.base_url_override {
+            let url = format!("{}/ip/{}", base.trim_end_matches('/'), ip);
+            let response = self
+                .raw_client
+                .get(&url)
+                .send()
+                .await
+                .map_err(map_reqwest_err)?;
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Err(EnrichmentError::NotFound);
+            }
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(EnrichmentError::RateLimited { retry_after: None });
+            }
+            if status.is_server_error() {
+                return Err(EnrichmentError::Transient(format!(
+                    "rdap server error: {status}"
+                )));
+            }
+            if !status.is_success() {
+                return Err(EnrichmentError::Permanent(format!(
+                    "rdap unexpected status: {status}"
+                )));
+            }
+            let text = response.text().await.map_err(map_reqwest_err)?;
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|e| EnrichmentError::Permanent(format!("rdap response not json: {e}")))?;
+            let rdap = RdapResponse::try_from(value.clone())
+                .map_err(|e| EnrichmentError::Permanent(format!("rdap response malformed: {e}")))?;
+            (Some(value), rdap)
+        } else {
+            let query = QueryType::from_str(&ip.to_string())
+                .map_err(|e| EnrichmentError::Permanent(format!("rdap query build: {e}")))?;
+            let response = rdap_bootstrapped_request(&query, &self.client, &self.bootstrap, |_| {})
+                .await
+                .map_err(map_rdap_client_err)?;
+            (None, response.rdap)
+        };
+
+        match rdap {
+            RdapResponse::Network(net) => {
+                let fixture = fixture_from_network(&net, value.as_ref());
+                Ok(Self::map_record(fixture))
+            }
+            RdapResponse::ErrorResponse(err) => {
+                // An RFC 9083 errorResponse in the body — treat
+                // errorCode 404 as NotFound, 429 as RateLimited, and
+                // everything else as Permanent (the server has spoken
+                // unambiguously; retrying won't change the answer).
+                match err.error_code {
+                    404 => Err(EnrichmentError::NotFound),
+                    429 => Err(EnrichmentError::RateLimited { retry_after: None }),
+                    code => Err(EnrichmentError::Permanent(format!(
+                        "rdap error response: {code}"
+                    ))),
+                }
+            }
+            other => Err(EnrichmentError::Permanent(format!(
+                "unexpected rdap response variant: {other}"
+            ))),
+        }
+    }
+}
+
+/// Destructure an RDAP [`icann_rdap_common::response::Network`] into the
+/// provider-neutral [`RdapRecordFixture`]. The optional raw `Value` is
+/// only used to pull the ARIN `arin_originas0_originautnums` extension,
+/// which icann-rdap-common 0.0.28 does not model on `Network`.
+fn fixture_from_network(
+    net: &icann_rdap_common::response::Network,
+    raw: Option<&Value>,
+) -> RdapRecordFixture {
+    let net_name = net.name.as_deref().map(str::to_owned);
+    let country = net.country.as_deref().map(str::to_owned);
+    // Walk entities → pick the first vCard that yields an organisation
+    // (preferred) or a formatted name (fallback). Entity roles like
+    // `registrant` / `administrative` differ between RIRs (ARIN uses
+    // `registrant`; APNIC often uses `administrative`), so we do not
+    // filter by role — the first usable vCard wins.
+    let organisation = net
+        .object_common
+        .entities
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find_map(|e| {
+            let contact = e.contact()?;
+            contact
+                .organization_name()
+                .map(str::to_owned)
+                .or_else(|| contact.full_name().map(str::to_owned))
+        });
+    // Fallback for ASN: raw JSON lookup for the ARIN-extension field
+    // `arin_originas0_originautnums`, which is an array of AS numbers.
+    // Typed access would be preferred, but the 0.0.28 `Network` struct
+    // doesn't surface this extension.
+    let asn = raw
+        .and_then(|v| v.get("arin_originas0_originautnums"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|n| n.as_i64())
+        .and_then(|n| i32::try_from(n).ok());
+    RdapRecordFixture {
+        asn,
+        net_name,
+        country,
+        organisation,
+    }
+}
+
+/// Map a raw reqwest error (raised on the override path) into the
+/// runner's error taxonomy. Connection / timeout / decoding errors are
+/// transient; anything else falls through to permanent.
+fn map_reqwest_err(err: reqwest::Error) -> EnrichmentError {
+    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() {
+        EnrichmentError::Transient(err.to_string())
+    } else {
+        EnrichmentError::Permanent(err.to_string())
+    }
+}
+
+/// Map an [`RdapClientError`] (raised on the bootstrap path) into the
+/// runner's error taxonomy.
+///
+/// The `icann-rdap-client` wrapper swallows HTTP status codes into its
+/// own parsing flow — a 404 typically surfaces as a `ParsingError` or
+/// a `Response(UnknownRdapResponse)` because the response body is not
+/// a recognised RDAP object. We therefore only classify the unambiguous
+/// signals (transport errors → Transient; bootstrap registry failures
+/// → Transient; anything else → Permanent). HTTP-status-based NotFound
+/// / RateLimited mapping is only reachable via the override path's
+/// raw-GET flow.
+fn map_rdap_client_err(err: RdapClientError) -> EnrichmentError {
+    // `RdapClientError::Client` and `IoError` wrap transport-level
+    // failures (TCP reset, DNS miss, TLS handshake, timeout) —
+    // transient. Bootstrap-registry fetch failures are also transient
+    // (IANA hiccups shouldn't black-list us permanently). Everything
+    // else — parsing, malformed JSON, invalid query, unknown response
+    // variant — is permanent: retrying does not change the answer.
+    match err {
+        RdapClientError::Client(_)
+        | RdapClientError::IoError(_)
+        | RdapClientError::BootstrapUnavailable
+        | RdapClientError::BootstrapError(_) => EnrichmentError::Transient(err.to_string()),
+        _ => EnrichmentError::Permanent(err.to_string()),
     }
 }
 

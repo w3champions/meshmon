@@ -36,6 +36,7 @@ futures = { workspace = true }
 governor = { workspace = true }
 hyper = { workspace = true }
 icann-rdap-client = { workspace = true }
+icann-rdap-common = { workspace = true }
 maxminddb = { workspace = true, optional = true }
 whois-rust = { workspace = true, optional = true }
 hyper-util = { workspace = true }
