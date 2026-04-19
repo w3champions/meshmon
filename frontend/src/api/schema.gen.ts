@@ -208,16 +208,22 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/catalogue/reenrich` — bulk re-enrichment.
-         * @description Each id in [`BulkReenrichRequest::ids`] is pushed onto the
-         *     enrichment queue without a prior existence check. Unknown ids
-         *     resolve to a no-op inside the runner (the row lookup returns
-         *     none), so callers may include speculative ids without surfacing a
-         *     per-id error path.
+         * @description Each id in [`BulkReenrichRequest::ids`] is flipped back to
+         *     `enrichment_status = 'pending'` in a single
+         *     [`repo::mark_enrichment_start_bulk`] call and then pushed onto the
+         *     enrichment queue. Unknown ids silently no-op at both layers (the
+         *     bulk UPDATE matches zero rows and the runner tolerates missing ids
+         *     on dequeue), so callers may include speculative ids without
+         *     surfacing a per-id error path.
          *
-         *     Returns 202 Accepted unconditionally — bulk re-enrich is
-         *     best-effort. A `false` from the enqueue call is intentionally
-         *     dropped (queue-full or closed-channel conditions are handled by
-         *     the runner's periodic sweep, same as the single-id path).
+         *     The prior mark-`pending` step makes the sweep a true safety net:
+         *     queue drops (backpressure or closed channel) no longer silently lose
+         *     re-enrich requests because the row is already `pending` with an
+         *     older `created_at`, so the runner's 30-second sweep will pick it up
+         *     on the next tick.
+         *
+         *     Returns 400 when `ids.len() > MAX_BULK_REENRICH_IDS` and 202 on
+         *     success (including the empty-`ids` case).
          */
         post: operations["reenrich_many"];
         delete?: never;
@@ -301,12 +307,14 @@ export interface paths {
          *     existence check runs synchronously because a 404 is cheap to surface
          *     and spares callers from an "accepted then silently dropped" UX.
          *
-         *     The enqueue return value is intentionally discarded — a `false`
-         *     from [`crate::enrichment::runner::EnrichmentQueue::enqueue`] means
-         *     the bounded channel is full (or — under current wiring — that the
-         *     paired receiver has been dropped; see the T16 TODO on
-         *     [`crate::state::AppState::enrichment_queue`]). In both cases the
-         *     row's `created_at`-driven sweep is the safety net.
+         *     Before enqueuing, the row is flipped back to `enrichment_status =
+         *     'pending'` via [`repo::mark_enrichment_start`]. This makes the sweep
+         *     a true safety net: if the bounded queue is full (or its receiver is
+         *     gone) and the enqueue drops, the row is already `pending` with an
+         *     older `created_at`, so the runner's 30-second sweep will pick it up
+         *     on the next tick instead of leaving the re-enrich request silently
+         *     stranded (sweep only scans rows in `pending`, so a still-`enriched`
+         *     row would otherwise never be retried).
          */
         post: operations["reenrich_one"];
         delete?: never;
@@ -1375,13 +1383,18 @@ export interface operations {
                  */
                 network?: string[];
                 /**
-                 * @description Optional IP prefix (CIDR or bare IP). Filters `c.ip << $prefix`
-                 *     when parseable; an unparseable value is silently dropped.
+                 * @description Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`
+                 *     (contained-or-equal) when parseable so bare-host queries match
+                 *     their own `/32` / `/128` row as well as CIDR prefixes; an
+                 *     unparseable value is silently dropped.
                  */
                 ip_prefix?: string;
                 /**
-                 * @description Optional `display_name` ILIKE pattern. Wildcards are the
-                 *     caller's responsibility.
+                 * @description Optional `display_name` substring. Passed verbatim to the
+                 *     handler, which wraps it with `%…%` before running an `ILIKE`
+                 *     match, so callers send the literal substring they want to find
+                 *     (e.g. `?name=Fastly`). `%` / `_` characters in the input are
+                 *     intentionally not escaped — they behave as ILIKE wildcards.
                  */
                 name?: string;
                 /**
@@ -1526,12 +1539,30 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Too many ids */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description No active session */
             401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };
@@ -1668,6 +1699,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogueEntryDto"];
+                };
+            };
+            /** @description Invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description No active session */
