@@ -577,11 +577,20 @@ pub async fn apply_reuse(pool: &PgPool, decisions: &[(i64, i64)]) -> Result<(), 
 /// Safety-net sweep that flips any `pending` pair with
 /// `attempt_count >= max_attempts` to `skipped` with
 /// `last_error = 'max_attempts_exceeded'`. Returns rows affected.
-pub async fn expire_stale_attempts(_pool: &PgPool, _max_attempts: i16) -> Result<u64, RepoError> {
-    todo!(
-        "UPDATE campaign_pairs SET resolution_state='skipped', last_error='max_attempts_exceeded' \
-         WHERE resolution_state='pending' AND attempt_count >= $1"
+pub async fn expire_stale_attempts(pool: &PgPool, max_attempts: i16) -> Result<u64, RepoError> {
+    let affected = sqlx::query!(
+        "UPDATE campaign_pairs
+            SET resolution_state = 'skipped',
+                last_error       = 'max_attempts_exceeded',
+                settled_at       = now()
+          WHERE resolution_state = 'pending'
+            AND attempt_count >= $1",
+        max_attempts
     )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected)
 }
 
 /// Atomically flip a `running` campaign to `completed` iff no pair
