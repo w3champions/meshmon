@@ -875,4 +875,129 @@ mod tests {
             "expected 2 warns: one before and one after the cooldown expires"
         );
     }
+
+    // --- Task 11: integration test — contaminated rounds never reach downstream ---
+
+    /// Scripted trippy-like task that replays pre-built `ProbeObservation` rounds
+    /// through the same contamination-detection path used by the real `run()` loop:
+    /// borrow the allowlist, call `detect_contamination`, bump the counter and drop
+    /// on a hit, forward to `obs_tx` on a clean round.
+    ///
+    /// This is intentionally **not** the real supervisor — it has no raw sockets,
+    /// no `spawn_blocking`, and no timing logic. Its only purpose is to exercise
+    /// the `Ok(Ok(obs))` branch of `run()` in a deterministic, no-privilege way.
+    async fn spawn_scripted_trippy_for_test(
+        target_ip: IpAddr,
+        allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
+        obs_tx: mpsc::Sender<ProbeObservation>,
+        rounds: Vec<ProbeObservation>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for obs in rounds {
+                let hit = {
+                    let allowlist = allowlist_rx.borrow();
+                    obs.hops
+                        .as_ref()
+                        .and_then(|hs| detect_contamination(target_ip, hs, allowlist.as_ref()))
+                };
+                if hit.is_some() {
+                    CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if obs_tx.send(obs).await.is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn supervisor_discards_contaminated_round_does_not_feed_stats_or_tracker() {
+        // Reset counter so the delta is observable deterministically.
+        reset_contamination_state_for_test();
+
+        let target_ip: IpAddr = "45.248.78.119".parse().unwrap();
+        let foreign_ip: IpAddr = "146.185.214.131".parse().unwrap();
+
+        let (_allow_tx, allowlist_rx) = tokio::sync::watch::channel(Arc::new(
+            [target_ip, foreign_ip]
+                .into_iter()
+                .collect::<HashSet<IpAddr>>(),
+        ));
+
+        let (obs_tx, mut obs_rx) = tokio::sync::mpsc::channel::<ProbeObservation>(8);
+
+        let clean_round_1 = ProbeObservation {
+            protocol: Protocol::Icmp,
+            target_id: "au-west".into(),
+            outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+            hops: Some(vec![HopObservation {
+                position: 1,
+                ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))),
+                rtt_micros: Some(100),
+            }]),
+            observed_at: tokio::time::Instant::now(),
+        };
+        let contaminated_round = ProbeObservation {
+            protocol: Protocol::Icmp,
+            target_id: "au-west".into(),
+            outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+            hops: Some(vec![HopObservation {
+                position: 5,
+                ip: Some(foreign_ip),
+                rtt_micros: Some(200),
+            }]),
+            observed_at: tokio::time::Instant::now(),
+        };
+        let clean_round_2 = ProbeObservation {
+            protocol: Protocol::Icmp,
+            target_id: "au-west".into(),
+            outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
+            hops: Some(vec![HopObservation {
+                position: 1,
+                ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))),
+                rtt_micros: Some(150),
+            }]),
+            observed_at: tokio::time::Instant::now(),
+        };
+
+        let handle = spawn_scripted_trippy_for_test(
+            target_ip,
+            allowlist_rx,
+            obs_tx.clone(),
+            vec![
+                clean_round_1.clone(),
+                contaminated_round,
+                clean_round_2.clone(),
+            ],
+        )
+        .await;
+
+        handle.await.expect("scripted task joins cleanly");
+        drop(obs_tx); // close the channel so recv drains
+
+        let mut emitted: Vec<ProbeObservation> = Vec::new();
+        while let Some(obs) = obs_rx.recv().await {
+            emitted.push(obs);
+        }
+
+        assert_eq!(emitted.len(), 2, "only 2 clean rounds reach downstream");
+        assert_eq!(
+            cross_contamination_total(),
+            1,
+            "one contaminated round counted"
+        );
+
+        // Preserve ordering: the contaminated round was dropped, so emitted[0]
+        // corresponds to clean_round_1 and emitted[1] to clean_round_2.
+        assert_eq!(
+            emitted[0].hops, clean_round_1.hops,
+            "first emitted round must be clean_round_1"
+        );
+        assert_eq!(
+            emitted[1].hops, clean_round_2.hops,
+            "second emitted round must be clean_round_2"
+        );
+    }
 }
