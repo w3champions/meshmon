@@ -316,14 +316,122 @@ pub async fn stop(pool: &PgPool, id: Uuid) -> Result<CampaignRow, RepoError> {
 /// pairs; when `force_measurement` is set, every non-delta pair is
 /// reset so the whole campaign re-runs.
 pub async fn apply_edit(
-    _pool: &PgPool,
-    _id: Uuid,
-    _edit: EditInput,
+    pool: &PgPool,
+    id: Uuid,
+    edit: EditInput,
 ) -> Result<CampaignRow, RepoError> {
-    todo!(
-        "implement delta edit; lock row FOR UPDATE, apply adds/removes, \
-         reset non-delta pairs if force_measurement, transition to running"
+    let mut tx = pool.begin().await?;
+
+    // 1. Lock the row so concurrent completion/evaluation can't race.
+    let current_state: Option<CampaignState> = sqlx::query_scalar!(
+        r#"SELECT state AS "state: CampaignState"
+             FROM measurement_campaigns
+            WHERE id = $1
+            FOR UPDATE"#,
+        id
     )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current_state) = current_state else {
+        return Err(RepoError::NotFound(id));
+    };
+    let allowed = [
+        CampaignState::Completed,
+        CampaignState::Stopped,
+        CampaignState::Evaluated,
+    ];
+    if !allowed.contains(&current_state) {
+        return Err(RepoError::IllegalTransition {
+            campaign_id: id,
+            from: Some(current_state),
+            expected: allowed.to_vec(),
+        });
+    }
+
+    // 2. Remove pairs the operator dropped.
+    for (src, dst) in &edit.remove_pairs {
+        let dst_net = IpNetwork::from(*dst);
+        sqlx::query!(
+            "DELETE FROM campaign_pairs
+              WHERE campaign_id = $1
+                AND source_agent_id = $2
+                AND destination_ip = $3",
+            id,
+            src,
+            dst_net
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // 3. Insert or reset added pairs. A previously-skipped pair that is
+    //    re-added resets to `pending` with cleared bookkeeping.
+    if !edit.add_pairs.is_empty() {
+        let srcs: Vec<&str> = edit.add_pairs.iter().map(|(s, _)| s.as_str()).collect();
+        let dsts: Vec<IpNetwork> = edit
+            .add_pairs
+            .iter()
+            .map(|(_, d)| IpNetwork::from(*d))
+            .collect();
+        sqlx::query!(
+            "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)
+             SELECT $1, src, dst
+               FROM UNNEST($2::text[], $3::inet[]) AS p(src, dst)
+             ON CONFLICT (campaign_id, source_agent_id, destination_ip) DO UPDATE
+                SET resolution_state = 'pending',
+                    settled_at       = NULL,
+                    dispatched_at    = NULL,
+                    attempt_count    = 0,
+                    last_error       = NULL,
+                    measurement_id   = NULL",
+            id,
+            &srcs as &[&str],
+            &dsts as &[IpNetwork],
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // 4. If force_measurement, flip the sticky flag and reset every
+    //    non-delta pair so the whole campaign re-runs.
+    if edit.force_measurement.unwrap_or(false) {
+        sqlx::query!(
+            "UPDATE measurement_campaigns SET force_measurement = TRUE WHERE id = $1",
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "UPDATE campaign_pairs
+                SET resolution_state = 'pending',
+                    measurement_id   = NULL,
+                    settled_at       = NULL,
+                    dispatched_at    = NULL,
+                    attempt_count    = 0,
+                    last_error       = NULL
+              WHERE campaign_id = $1
+                AND resolution_state IN ('reused','succeeded','unreachable')",
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // 5. Transition back to Running and bump started_at.
+    let row = transition_state_in_tx(
+        &mut tx,
+        id,
+        &allowed,
+        CampaignState::Running,
+        Some("started_at"),
+    )
+    .await?;
+
+    // TODO(T48): also dismiss any existing campaign_evaluations row for
+    // this campaign once that table exists.
+
+    tx.commit().await?;
+    Ok(row)
 }
 
 /// Reset one specific pair to `pending` (clearing bookkeeping) and
