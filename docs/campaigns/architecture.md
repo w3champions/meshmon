@@ -140,6 +140,8 @@ Per pair, the prober builds a `trippy_core::Tracer` from the batch's fields:
 
 Trace identifiers come from `probing::trippy::next_trace_id()` — a process-wide `AtomicU16` that hands out unique non-zero `u16`s across continuous and campaign tracers alike. No range carving, no partitioning.
 
+Campaign tracers run under `spawn_blocking` (trippy's round loop uses blocking raw-socket syscalls) with a dedicated `Semaphore` sized from the agent's effective concurrency cap. Continuous MTR has its own semaphore (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32). The two pools are independent so neither class can starve the other. The agent's tokio runtime sets `max_blocking_threads(64)`, so operators raising either cap must keep the combined ceiling under that budget.
+
 Loss semantics:
 - **ICMP** — success iff the destination's echo reply arrived within the timeout.
 - **TCP** — success iff the destination returned SYN/ACK or RST within the timeout (a closed port is still reachable; silent loss is the only failure mode contributing to `loss_pct`). A pair whose every probe was RST'd emits `MeasurementFailure { REFUSED }` instead of a summary.
