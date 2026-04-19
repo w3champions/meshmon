@@ -108,6 +108,13 @@ Key patterns:
 - Self-metrics: `meshmon_service_tunnel_agents` (gauge — registered
   tunnels) and `meshmon_service_command_rpcs_total{method,outcome}`
   (counter — fan-out RPC outcomes).
+- `ip_catalogue` is the sole authority for IP geography, ASN, and
+  network operator. `agents` keeps runtime fields only; the
+  `agents_with_catalogue` view left-joins the two so agent-facing
+  queries resolve geo without duplicating columns.
+- Boot-time constraint: `[enrichment.ipgeolocation] enabled = true`
+  requires `acknowledged_tos = true`. The config loader aborts
+  startup otherwise.
 
 ## Alerting
 
