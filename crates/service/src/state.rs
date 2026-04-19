@@ -5,6 +5,7 @@
 
 use crate::catalogue::events::CatalogueBroker;
 use crate::config::Config;
+use crate::enrichment::runner::EnrichmentQueue;
 use crate::ingestion::IngestionPipeline;
 use crate::metrics::Handle as PrometheusHandle;
 use crate::registry::AgentRegistry;
@@ -82,6 +83,22 @@ pub struct AppState {
     /// — overflow surfaces to the client as a `lag` frame rather than
     /// blocking the publisher.
     pub catalogue_broker: CatalogueBroker,
+    /// Producer handle for the enrichment work queue. Paste and
+    /// agent-register handlers push newly-inserted ids here so the
+    /// runner picks them up ahead of the periodic sweep.
+    ///
+    /// Wrapped in `Arc` so `AppState::clone()` shares the single bounded
+    /// sender rather than requiring `EnrichmentQueue: Clone` (which the
+    /// runner module intentionally does not implement).
+    ///
+    /// TODO(T16): wire the paired receiver into the spawned runner.
+    /// Until then `AppState::new` constructs a queue and immediately
+    /// drops the receiver, which means every `enqueue` call lands on a
+    /// closed channel and returns `false` silently (the queue treats
+    /// `Closed` as a no-op by design, logging only on `Full`). Rows
+    /// still get enriched because the sweep sees them once their
+    /// `created_at` crosses the 30 s staleness threshold.
+    pub enrichment_queue: Arc<EnrichmentQueue>,
 }
 
 impl AppState {
@@ -94,6 +111,12 @@ impl AppState {
         registry: Arc<AgentRegistry>,
         prom: PrometheusHandle,
     ) -> Self {
+        // Construct the queue producer here and drop the paired receiver.
+        // T16 will replace this with a real wiring that spawns the runner
+        // task against the receiver; until then `enqueue` silently no-ops
+        // (`TrySendError::Closed` arm in `EnrichmentQueue::enqueue` does
+        // not log) and the sweep picks up unprocessed rows.
+        let (queue, _rx) = EnrichmentQueue::new(1024);
         Self {
             config,
             config_rx,
@@ -117,6 +140,7 @@ impl AppState {
             // any deployment-specific knob. See
             // [`crate::catalogue::events::DEFAULT_CAPACITY`].
             catalogue_broker: CatalogueBroker::default(),
+            enrichment_queue: Arc::new(queue),
         }
     }
 

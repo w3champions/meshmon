@@ -882,6 +882,112 @@ pub async fn insert_agent_with_ip(pool: &PgPool, id: &str, ip: std::net::IpAddr)
     .unwrap_or_else(|e| panic!("insert_agent_with_ip({id}, {ip}) failed: {e}"));
 }
 
+/// Response-body byte ceiling for `HttpHarness` helpers. 4 MiB is
+/// enough for every catalogue response the integration tests send and
+/// receive today; larger payloads should build requests by hand so the
+/// limit is an explicit test-level decision rather than silent
+/// truncation.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+/// Convenience wrapper around `AppState + router + login cookie` used
+/// by the T11 catalogue HTTP tests. Keeps the three smoke tests terse
+/// without being a general-purpose fixture (`state_with_admin` +
+/// `login_as_admin` remains the canonical path for richer flows).
+pub struct HttpHarness {
+    /// Axum router with the real production wiring, bound to a
+    /// test-scoped `AppState`.
+    pub app: axum::Router,
+    /// Pre-issued `Set-Cookie` value from a successful admin login.
+    /// Callers attach it via the `Cookie` header on every request.
+    pub cookie: String,
+    /// The same `AppState` baked into `app`, surfaced so tests can
+    /// reach the shared Postgres pool (or broker / state helpers added
+    /// later).
+    pub state: meshmon_service::state::AppState,
+}
+
+impl HttpHarness {
+    /// Start a harness backed by `state_with_admin` and a cookie for
+    /// the default `admin` principal. The client IP used for login is
+    /// `203.0.113.42` — a TEST-NET-3 address that is not otherwise
+    /// reserved by the auth-test allocation table above.
+    pub async fn start() -> Self {
+        let pool = shared_migrated_pool().await.clone();
+        let state = state_with_admin(pool).await;
+        let app = meshmon_service::http::router(state.clone());
+        let cookie = login_as_admin(&app, "203.0.113.42").await;
+        Self { app, cookie, state }
+    }
+
+    /// Fire a `POST` with a JSON body and deserialize the response body
+    /// into `T`. Panics on non-200 status — callers use this when they
+    /// expect success and want the parsed body; for status-specific
+    /// assertions, build the request manually.
+    pub async fn post_json<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> T {
+        use axum::http::{header, Request, StatusCode};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("build POST request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "POST {path} expected 200, got {}",
+            resp.status()
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        serde_json::from_slice::<T>(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
+    }
+
+    /// Fire a `GET` and return the raw status + body string. The raw
+    /// surface lets tests assert on both successful shapes and error
+    /// shapes (e.g. 404 bodies) without duplicating the cookie wiring.
+    pub async fn get(&self, path: &str) -> (axum::http::StatusCode, String) {
+        use axum::http::{header, Request};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .body(axum::body::Body::empty())
+            .expect("build GET request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        // Fail loudly on binary responses — the harness only serves
+        // JSON / text handlers today, so any non-UTF-8 body is a test
+        // bug worth seeing rather than silently replacing with U+FFFD.
+        let body = String::from_utf8(bytes.to_vec()).expect("response body must be valid UTF-8");
+        (status, body)
+    }
+}
+
 /// Drive a successful login as the default `admin` user on `app` and
 /// return the `Set-Cookie` value so the caller can attach it to follow-up
 /// requests. Panics if the login fails — callers use this as test setup,

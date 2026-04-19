@@ -504,6 +504,152 @@ pub async fn ensure_from_agent(
     Ok(row.into())
 }
 
+// --- List ------------------------------------------------------------------
+
+/// Filter set accepted by [`list`].
+///
+/// Empty `Vec` filters mean "no restriction" — the query compiles this
+/// as `$N::TEXT[] = '{}' OR column = ANY($N::TEXT[])`. `ip_prefix`
+/// accepts any Postgres-parseable CIDR or bare IP; an unparseable value
+/// is treated as "no filter" (falling through to `$N IS NULL`). The
+/// bounding box is `[minLat, minLon, maxLat, maxLon]`.
+///
+/// `cursor_created_at` / `cursor_id` are accepted for forward
+/// compatibility with T13 (cursor-paginated list). T11 ignores them —
+/// the list returns the first `limit.min(500)` rows sorted by
+/// `created_at DESC, id DESC` and a separate `COUNT(*)` over the same
+/// filter set.
+#[derive(Debug, Default)]
+pub struct ListFilter {
+    /// Exact country-code match, ANY semantics across the vector.
+    pub country_code: Vec<String>,
+    /// Exact ASN match, ANY semantics across the vector.
+    pub asn: Vec<i32>,
+    /// Case-insensitive ILIKE match on `network_operator`, ANY across
+    /// the vector. Substrings must be wrapped in `%…%` by the caller
+    /// when substring matching is intended — this function does not add
+    /// wildcards for you.
+    pub network: Vec<String>,
+    /// CIDR / single-IP containment (`ip << $prefix`). Unparseable
+    /// values are ignored (no filter applied).
+    pub ip_prefix: Option<String>,
+    /// Case-insensitive ILIKE match on `display_name`. Wildcards are
+    /// the caller's responsibility, as above.
+    pub name: Option<String>,
+    /// `[minLat, minLon, maxLat, maxLon]` geographic bounding box.
+    pub bounding_box: Option<[f64; 4]>,
+    /// Max rows to return. Clamped to `500` internally.
+    pub limit: i64,
+    /// TODO(T13): cursor pagination. Ignored in T11.
+    pub cursor_created_at: Option<DateTime<Utc>>,
+    /// TODO(T13): cursor pagination. Ignored in T11.
+    pub cursor_id: Option<Uuid>,
+}
+
+/// Maximum page size for [`list`] — larger inputs are silently clamped.
+pub const LIST_MAX_LIMIT: i64 = 500;
+
+/// List catalogue rows matching `filter`, returning the rows and the
+/// unpaged `COUNT(*)` over the same WHERE clauses.
+///
+/// T11 returns the first `limit.min(LIST_MAX_LIMIT)` matching rows in
+/// `(created_at DESC, id DESC)` order. Cursor pagination is deferred to
+/// T13 (see [`ListFilter::cursor_created_at`]).
+pub async fn list(
+    pool: &PgPool,
+    filter: ListFilter,
+) -> Result<(Vec<CatalogueEntry>, i64), sqlx::Error> {
+    let limit = filter.limit.clamp(1, LIST_MAX_LIMIT);
+
+    // `ip_prefix` may be user-supplied; tolerate unparseable values by
+    // dropping the filter rather than 400ing. Downstream SQL handles
+    // `NULL` as "no filter" via `$N::INET IS NULL`.
+    let ip_prefix: Option<IpNetwork> = filter
+        .ip_prefix
+        .as_deref()
+        .and_then(|s| s.parse::<IpNetwork>().ok());
+
+    // Bounding box parts. When absent or all-NULL, the SQL arm collapses
+    // to the always-true `$bbox_set IS NULL` branch.
+    let (bbox_set, min_lat, min_lon, max_lat, max_lon) = match filter.bounding_box {
+        Some([a, b, c, d]) => (true, Some(a), Some(b), Some(c), Some(d)),
+        None => (false, None, None, None, None),
+    };
+
+    let name_like = filter.name.as_deref();
+
+    let rows = sqlx::query_as!(
+        CatalogueEntryRow,
+        r#"
+        SELECT
+            id,
+            ip AS "ip: IpNetwork",
+            display_name, city, country_code, country_name,
+            latitude, longitude, asn, network_operator, website, notes,
+            enrichment_status AS "enrichment_status: EnrichmentStatus",
+            enriched_at,
+            operator_edited_fields,
+            source AS "source: CatalogueSource",
+            created_at, created_by
+        FROM ip_catalogue c
+        WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))
+          AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))
+          AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))
+          AND ($4::INET IS NULL OR c.ip << $4::INET)
+          AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)
+          AND (NOT $6::BOOL OR (
+                latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+            AND longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION
+          ))
+        ORDER BY created_at DESC, id DESC
+        LIMIT $11
+        "#,
+        &filter.country_code as &[String],
+        &filter.asn as &[i32],
+        &filter.network as &[String],
+        ip_prefix as Option<IpNetwork>,
+        name_like,
+        bbox_set,
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let total = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) AS "total!"
+        FROM ip_catalogue c
+        WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))
+          AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))
+          AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))
+          AND ($4::INET IS NULL OR c.ip << $4::INET)
+          AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)
+          AND (NOT $6::BOOL OR (
+                latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+            AND longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION
+          ))
+        "#,
+        &filter.country_code as &[String],
+        &filter.asn as &[i32],
+        &filter.network as &[String],
+        ip_prefix as Option<IpNetwork>,
+        name_like,
+        bbox_set,
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok((rows.into_iter().map(Into::into).collect(), total))
+}
+
 // --- Facets ----------------------------------------------------------------
 
 /// Per-country occurrence count.

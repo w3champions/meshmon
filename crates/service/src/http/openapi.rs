@@ -44,6 +44,15 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     paths(crate::http::auth::login, crate::http::auth::logout),
     components(schemas(
+        crate::catalogue::dto::CatalogueEntryDto,
+        crate::catalogue::dto::ErrorEnvelope,
+        crate::catalogue::dto::ListResponse,
+        crate::catalogue::dto::PasteInvalid,
+        crate::catalogue::dto::PasteRequest,
+        crate::catalogue::dto::PasteResponse,
+        crate::catalogue::dto::PatchRequest,
+        crate::catalogue::model::CatalogueSource,
+        crate::catalogue::model::EnrichmentStatus,
         crate::http::alerts_proxy::AlertSummary,
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
@@ -102,6 +111,9 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(
             crate::http::metrics_proxy::query_range
         ))
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::paste))
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::list))
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::get_one))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

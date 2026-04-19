@@ -274,6 +274,249 @@
         }
       }
     },
+    "/api/catalogue": {
+      "get": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`GET /api/catalogue` — filtered, size-bounded list.",
+        "description": "The handler converts [`ListQuery`] straight into [`repo::ListFilter`]\nand returns a [`ListResponse`]. Cursor pagination is accepted on the\nwire but ignored until T13 — the repo implementation clamps the\nresponse to the first `limit.min(500)` rows in\n`(created_at DESC, id DESC)` order.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "country_code",
+            "in": "query",
+            "description": "Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics.\n\nCSV string; e.g. `?country_code=US,DE`. Repeat-key form\n(`?country_code=US&country_code=DE`) is NOT supported — axum's\ndefault `Query` extractor is `serde_urlencoded`, which does not\ndeserialize repeated keys into `Vec<T>`.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "asn",
+            "in": "query",
+            "description": "Zero-or-more ASN numbers. ANY semantics.\n\nCSV string; e.g. `?asn=64500,64501`. See `country_code` for\nrationale; repeat-key form is not accepted.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "description": "Zero-or-more `network_operator` ILIKE patterns. ANY semantics.\nWildcards are the caller's responsibility.\n\nCSV string; e.g. `?network=foo,bar`. See `country_code` for\nrationale; repeat-key form is not accepted.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "ip_prefix",
+            "in": "query",
+            "description": "Optional IP prefix (CIDR or bare IP). Filters `c.ip << $prefix`\nwhen parseable; an unparseable value is silently dropped.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Optional `display_name` ILIKE pattern. Wildcards are the\ncaller's responsibility.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "description": "Optional bounding box as a CSV string; exactly four floats\n`minLat,minLon,maxLat,maxLon`. Permissive parse — malformed\nvalues silently yield no filter, matching `ip_prefix` semantics.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "cursor_created_at",
+            "in": "query",
+            "description": "TODO(T13): cursor pagination by `created_at`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor_id",
+            "in": "query",
+            "description": "TODO(T13): cursor pagination by `id` (tie-breaker).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size. Clamped to `1..=500` internally; default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalogue page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`POST /api/catalogue` — operator paste flow.",
+        "description": "Tokens are concatenated with spaces and run through\n[`parse_ip_tokens`]; accepted IPs become catalogue rows via\n[`repo::insert_many`], and each newly-created id is enqueued for\nenrichment. Existing rows come back under `existing` so the UI can\nsurface their current enrichment state without a follow-up fetch.\nRejected tokens land in `invalid`.",
+        "operationId": "paste",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Paste outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalogue/{id}": {
+      "get": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`GET /api/catalogue/{id}` — single-row lookup.",
+        "description": "Returns 404 with a JSON error body when the id is absent. Keeping\nthe 404 body parallel to [`crate::http::user_api::get_agent`] so\nSPA error handling stays uniform across catalogue + registry.",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalogue row id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalogue row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogueEntryDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Row not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/query": {
       "get": {
         "tags": [
@@ -790,6 +1033,17 @@
             ],
             "description": "Optional agent version string."
           },
+          "catalogue_coordinates": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CatalogueCoordinates",
+                "description": "Geo coordinates joined from the IP catalogue. Absent when the\nagent's IP is not in the catalogue or neither coord is populated."
+              }
+            ]
+          },
           "display_name": {
             "type": "string",
             "description": "Human-readable display label."
@@ -807,28 +1061,12 @@
             "format": "date-time",
             "description": "Last successful push (register/metrics/snapshot)."
           },
-          "lat": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double",
-            "description": "Optional latitude."
-          },
           "location": {
             "type": [
               "string",
               "null"
             ],
             "description": "Optional free-form location string."
-          },
-          "lon": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double",
-            "description": "Optional longitude."
           },
           "registered_at": {
             "type": "string",
@@ -887,6 +1125,187 @@
               "null"
             ],
             "description": "Short human-readable summary from the `summary` annotation."
+          }
+        }
+      },
+      "CatalogueCoordinates": {
+        "type": "object",
+        "description": "Latitude / longitude pair sourced from the IP catalogue join.\n\nPresent only when both coordinates are known; otherwise the parent\n`AgentSummary.catalogue_coordinates` is `None`.",
+        "required": [
+          "latitude",
+          "longitude"
+        ],
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "description": "Decimal latitude (-90..=90)."
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "description": "Decimal longitude (-180..=180)."
+          }
+        }
+      },
+      "CatalogueEntryDto": {
+        "type": "object",
+        "description": "Operator-facing view of a single catalogue row.\n\nThis is the wire shape returned by `GET /api/catalogue/{id}` and\nembedded in [`ListResponse::entries`] / [`PasteResponse::created`].",
+        "required": [
+          "id",
+          "ip",
+          "enrichment_status",
+          "operator_edited_fields",
+          "source",
+          "created_at"
+        ],
+        "properties": {
+          "asn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Autonomous system number."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "City name."
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO 3166-1 alpha-2 country code."
+          },
+          "country_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Country human-readable name."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Row creation timestamp."
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator principal (session username) that created the row."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-supplied display label. Absent when unset."
+          },
+          "enriched_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Timestamp of the most recent successful enrichment run."
+          },
+          "enrichment_status": {
+            "$ref": "#/components/schemas/EnrichmentStatus",
+            "description": "Current enrichment pipeline status."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Primary key (UUID v4)."
+          },
+          "ip": {
+            "type": "string",
+            "description": "Catalogued IP, rendered via `IpAddr::to_string()` (no CIDR\nprefix — the row is always a host address)."
+          },
+          "latitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Decimal latitude."
+          },
+          "longitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Decimal longitude."
+          },
+          "network_operator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Network operator / ISP name."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-form operator notes."
+          },
+          "operator_edited_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Columns the operator has explicitly edited. PascalCase strings\nmatching [`super::model::Field::as_str`]."
+          },
+          "source": {
+            "$ref": "#/components/schemas/CatalogueSource",
+            "description": "Where the row originated."
+          },
+          "website": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-supplied external link."
+          }
+        }
+      },
+      "CatalogueSource": {
+        "type": "string",
+        "description": "Where a catalogue row originated.",
+        "enum": [
+          "operator",
+          "agent_registration"
+        ]
+      },
+      "EnrichmentStatus": {
+        "type": "string",
+        "description": "Current status of the enrichment pipeline for a row.",
+        "enum": [
+          "pending",
+          "enriched",
+          "failed"
+        ]
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "description": "Error envelope used by every non-2xx catalogue response.\n\nThe single `error` field carries a stable, machine-parseable\nsnake_case code (e.g. `not_found`, `database_error`). Matches the\ngateway-level JSON 404 emitted by `crate::http::backend_path_404`\nso clients can use one shape for every `/api` error.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Stable error code. Clients should match on this string, not on\nthe HTTP status alone."
           }
         }
       },
@@ -1011,6 +1430,28 @@
           }
         }
       },
+      "ListResponse": {
+        "type": "object",
+        "description": "Response body for `GET /api/catalogue`.",
+        "required": [
+          "entries",
+          "total"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueEntryDto"
+            },
+            "description": "Matching rows in `created_at DESC, id DESC` order."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Count of all rows matching the filter (ignores `limit`)."
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "POST body for `/api/auth/login`.",
@@ -1039,6 +1480,158 @@
           "username": {
             "type": "string",
             "description": "Echoed username on success."
+          }
+        }
+      },
+      "PasteInvalid": {
+        "type": "object",
+        "description": "Per-token rejection surfaced by [`PasteResponse::invalid`].",
+        "required": [
+          "token",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Short human-readable reason — intended for immediate UI display."
+          },
+          "token": {
+            "type": "string",
+            "description": "The exact token as received from the client."
+          }
+        }
+      },
+      "PasteRequest": {
+        "type": "object",
+        "description": "Paste payload — a raw list of IP tokens. Each token is parsed by\n[`super::parse::parse_ip_tokens`]; tokens may be bare IPs or host\nCIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable\ntokens fall into [`PasteResponse::invalid`] instead of aborting the\nwhole request.",
+        "required": [
+          "ips"
+        ],
+        "properties": {
+          "ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Raw tokens to parse and (when valid) insert into the catalogue."
+          }
+        }
+      },
+      "PasteResponse": {
+        "type": "object",
+        "description": "Response body for `POST /api/catalogue` — a three-way split of the\npaste outcome.",
+        "required": [
+          "created",
+          "existing",
+          "invalid"
+        ],
+        "properties": {
+          "created": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueEntryDto"
+            },
+            "description": "Rows newly inserted by this call."
+          },
+          "existing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueEntryDto"
+            },
+            "description": "Rows already present in the catalogue. Surfaces the existing\nenrichment state without a follow-up fetch."
+          },
+          "invalid": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PasteInvalid"
+            },
+            "description": "Tokens rejected during parse."
+          }
+        }
+      },
+      "PatchRequest": {
+        "type": "object",
+        "description": "PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12\nso all catalogue wire shapes live in one module).\n\nTriple-state field encoding (outer `Option` = touched?, inner\n`Option` = NULL?) mirrors [`super::repo::PatchValue`]. Callers omit\nthe JSON key for \"leave untouched\", send `null` for \"set NULL\",\nand send a concrete value for \"set to this\".",
+        "properties": {
+          "asn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "New ASN."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New city."
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New ISO 3166-1 alpha-2 country code."
+          },
+          "country_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New country human-readable name."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New display name. See the struct doc for triple-state encoding."
+          },
+          "latitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "New latitude."
+          },
+          "longitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "New longitude."
+          },
+          "network_operator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New network operator."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New notes."
+          },
+          "revert_to_auto": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of fields the operator wants reverted to automatic\nenrichment. Values must match [`super::model::Field::as_str`]."
+          },
+          "website": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New website URL."
           }
         }
       },

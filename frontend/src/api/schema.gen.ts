@@ -139,6 +139,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalogue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue` — filtered, size-bounded list.
+         * @description The handler converts [`ListQuery`] straight into [`repo::ListFilter`]
+         *     and returns a [`ListResponse`]. Cursor pagination is accepted on the
+         *     wire but ignored until T13 — the repo implementation clamps the
+         *     response to the first `limit.min(500)` rows in
+         *     `(created_at DESC, id DESC)` order.
+         */
+        get: operations["list"];
+        put?: never;
+        /**
+         * `POST /api/catalogue` — operator paste flow.
+         * @description Tokens are concatenated with spaces and run through
+         *     [`parse_ip_tokens`]; accepted IPs become catalogue rows via
+         *     [`repo::insert_many`], and each newly-created id is enqueued for
+         *     enrichment. Existing rows come back under `existing` so the UI can
+         *     surface their current enrichment state without a follow-up fetch.
+         *     Rejected tokens land in `invalid`.
+         */
+        post: operations["paste"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue/{id}` — single-row lookup.
+         * @description Returns 404 with a JSON error body when the id is absent. Keeping
+         *     the 404 body parallel to [`crate::http::user_api::get_agent`] so
+         *     SPA error handling stays uniform across catalogue + registry.
+         */
+        get: operations["get_one"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/metrics/query": {
         parameters: {
             query?: never;
@@ -326,6 +381,7 @@ export interface components {
         AgentSummary: {
             /** @description Optional agent version string. */
             agent_version?: string | null;
+            catalogue_coordinates?: null | components["schemas"]["CatalogueCoordinates"];
             /** @description Human-readable display label. */
             display_name: string;
             /** @description Unique agent identifier (matches the agent's `AGENT_ID` env var). */
@@ -337,18 +393,8 @@ export interface components {
              * @description Last successful push (register/metrics/snapshot).
              */
             last_seen_at: string;
-            /**
-             * Format: double
-             * @description Optional latitude.
-             */
-            lat?: number | null;
             /** @description Optional free-form location string. */
             location?: string | null;
-            /**
-             * Format: double
-             * @description Optional longitude.
-             */
-            lon?: number | null;
             /**
              * Format: date-time
              * @description When this agent first registered.
@@ -383,6 +429,102 @@ export interface components {
             /** @description Short human-readable summary from the `summary` annotation. */
             summary?: string | null;
         };
+        /**
+         * @description Latitude / longitude pair sourced from the IP catalogue join.
+         *
+         *     Present only when both coordinates are known; otherwise the parent
+         *     `AgentSummary.catalogue_coordinates` is `None`.
+         */
+        CatalogueCoordinates: {
+            /**
+             * Format: double
+             * @description Decimal latitude (-90..=90).
+             */
+            latitude: number;
+            /**
+             * Format: double
+             * @description Decimal longitude (-180..=180).
+             */
+            longitude: number;
+        };
+        /**
+         * @description Operator-facing view of a single catalogue row.
+         *
+         *     This is the wire shape returned by `GET /api/catalogue/{id}` and
+         *     embedded in [`ListResponse::entries`] / [`PasteResponse::created`].
+         */
+        CatalogueEntryDto: {
+            /**
+             * Format: int32
+             * @description Autonomous system number.
+             */
+            asn?: number | null;
+            /** @description City name. */
+            city?: string | null;
+            /** @description ISO 3166-1 alpha-2 country code. */
+            country_code?: string | null;
+            /** @description Country human-readable name. */
+            country_name?: string | null;
+            /**
+             * Format: date-time
+             * @description Row creation timestamp.
+             */
+            created_at: string;
+            /** @description Operator principal (session username) that created the row. */
+            created_by?: string | null;
+            /** @description Operator-supplied display label. Absent when unset. */
+            display_name?: string | null;
+            /**
+             * Format: date-time
+             * @description Timestamp of the most recent successful enrichment run.
+             */
+            enriched_at?: string | null;
+            /** @description Current enrichment pipeline status. */
+            enrichment_status: components["schemas"]["EnrichmentStatus"];
+            /**
+             * Format: uuid
+             * @description Primary key (UUID v4).
+             */
+            id: string;
+            /**
+             * @description Catalogued IP, rendered via `IpAddr::to_string()` (no CIDR
+             *     prefix — the row is always a host address).
+             */
+            ip: string;
+            /**
+             * Format: double
+             * @description Decimal latitude.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Decimal longitude.
+             */
+            longitude?: number | null;
+            /** @description Network operator / ISP name. */
+            network_operator?: string | null;
+            /** @description Free-form operator notes. */
+            notes?: string | null;
+            /**
+             * @description Columns the operator has explicitly edited. PascalCase strings
+             *     matching [`super::model::Field::as_str`].
+             */
+            operator_edited_fields: string[];
+            /** @description Where the row originated. */
+            source: components["schemas"]["CatalogueSource"];
+            /** @description Operator-supplied external link. */
+            website?: string | null;
+        };
+        /**
+         * @description Where a catalogue row originated.
+         * @enum {string}
+         */
+        CatalogueSource: "operator" | "agent_registration";
+        /**
+         * @description Current status of the enrichment pipeline for a row.
+         * @enum {string}
+         */
+        EnrichmentStatus: "pending" | "enriched" | "failed";
         /** @description JSON representation of an observed IP at a hop. */
         HopIpJson: {
             /**
@@ -437,6 +579,16 @@ export interface components {
             tcp?: null | components["schemas"]["RouteSnapshotDetail"];
             udp?: null | components["schemas"]["RouteSnapshotDetail"];
         };
+        /** @description Response body for `GET /api/catalogue`. */
+        ListResponse: {
+            /** @description Matching rows in `created_at DESC, id DESC` order. */
+            entries: components["schemas"]["CatalogueEntryDto"][];
+            /**
+             * Format: int64
+             * @description Count of all rows matching the filter (ignores `limit`).
+             */
+            total: number;
+        };
         /** @description POST body for `/api/auth/login`. */
         LoginRequest: {
             /**
@@ -451,6 +603,84 @@ export interface components {
         LoginResponse: {
             /** @description Echoed username on success. */
             username: string;
+        };
+        /** @description Per-token rejection surfaced by [`PasteResponse::invalid`]. */
+        PasteInvalid: {
+            /** @description Short human-readable reason — intended for immediate UI display. */
+            reason: string;
+            /** @description The exact token as received from the client. */
+            token: string;
+        };
+        /**
+         * @description Paste payload — a raw list of IP tokens. Each token is parsed by
+         *     [`super::parse::parse_ip_tokens`]; tokens may be bare IPs or host
+         *     CIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable
+         *     tokens fall into [`PasteResponse::invalid`] instead of aborting the
+         *     whole request.
+         */
+        PasteRequest: {
+            /** @description Raw tokens to parse and (when valid) insert into the catalogue. */
+            ips: string[];
+        };
+        /**
+         * @description Response body for `POST /api/catalogue` — a three-way split of the
+         *     paste outcome.
+         */
+        PasteResponse: {
+            /** @description Rows newly inserted by this call. */
+            created: components["schemas"]["CatalogueEntryDto"][];
+            /**
+             * @description Rows already present in the catalogue. Surfaces the existing
+             *     enrichment state without a follow-up fetch.
+             */
+            existing: components["schemas"]["CatalogueEntryDto"][];
+            /** @description Tokens rejected during parse. */
+            invalid: components["schemas"]["PasteInvalid"][];
+        };
+        /**
+         * @description PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12
+         *     so all catalogue wire shapes live in one module).
+         *
+         *     Triple-state field encoding (outer `Option` = touched?, inner
+         *     `Option` = NULL?) mirrors [`super::repo::PatchValue`]. Callers omit
+         *     the JSON key for "leave untouched", send `null` for "set NULL",
+         *     and send a concrete value for "set to this".
+         */
+        PatchRequest: {
+            /**
+             * Format: int32
+             * @description New ASN.
+             */
+            asn?: number | null;
+            /** @description New city. */
+            city?: string | null;
+            /** @description New ISO 3166-1 alpha-2 country code. */
+            country_code?: string | null;
+            /** @description New country human-readable name. */
+            country_name?: string | null;
+            /** @description New display name. See the struct doc for triple-state encoding. */
+            display_name?: string | null;
+            /**
+             * Format: double
+             * @description New latitude.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description New longitude.
+             */
+            longitude?: number | null;
+            /** @description New network operator. */
+            network_operator?: string | null;
+            /** @description New notes. */
+            notes?: string | null;
+            /**
+             * @description Names of fields the operator wants reverted to automatic
+             *     enrichment. Values must match [`super::model::Field::as_str`].
+             */
+            revert_to_auto?: string[];
+            /** @description New website URL. */
+            website?: string | null;
         };
         /** @description VictoriaMetrics-sourced RTT / loss series for the primary protocol. */
         PathMetrics: {
@@ -854,6 +1084,150 @@ export interface operations {
         responses: {
             /** @description Logged out */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list: {
+        parameters: {
+            query?: {
+                /** @description Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics. */
+                country_code?: string[];
+                /** @description Zero-or-more ASN numbers. ANY semantics. */
+                asn?: number[];
+                /**
+                 * @description Zero-or-more `network_operator` ILIKE patterns. ANY semantics.
+                 *     Wildcards are the caller's responsibility.
+                 */
+                network?: string[];
+                /**
+                 * @description Optional IP prefix (CIDR or bare IP). Filters `c.ip << $prefix`
+                 *     when parseable; an unparseable value is silently dropped.
+                 */
+                ip_prefix?: string;
+                /**
+                 * @description Optional `display_name` ILIKE pattern. Wildcards are the
+                 *     caller's responsibility.
+                 */
+                name?: string;
+                /** @description Optional bounding box `minLat,minLon,maxLat,maxLon`. */
+                bbox?: number[];
+                /** @description TODO(T13): cursor pagination by `created_at`. */
+                cursor_created_at?: string;
+                /** @description TODO(T13): cursor pagination by `id` (tie-breaker). */
+                cursor_id?: string;
+                /** @description Page size. Clamped to `1..=500` internally; default 100. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalogue page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    paste: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasteRequest"];
+            };
+        };
+        responses: {
+            /** @description Paste outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasteResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalogue row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogueEntryDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Row not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

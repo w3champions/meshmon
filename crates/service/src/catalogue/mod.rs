@@ -3,7 +3,9 @@
 //! `agents` through the `agents_with_catalogue` view so geo / ASN data
 //! lives in one authoritative table.
 
+pub mod dto;
 pub mod events;
+pub mod handlers;
 pub mod model;
 pub mod parse;
 pub mod repo;
