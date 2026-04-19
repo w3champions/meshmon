@@ -259,3 +259,149 @@ async fn runner_skips_provider_when_all_supported_fields_are_settled() {
     handle.abort();
     db.close().await;
 }
+
+/// Provider double that always returns a retryable error. Used to
+/// verify the runner leaves rows in `pending` when every provider
+/// returned a retryable failure — otherwise the sweep would never
+/// pick them up again and a brief upstream outage would permanently
+/// strand rows as `failed`.
+struct FailingRetryableProvider {
+    id: &'static str,
+    call_count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EnrichmentProvider for FailingRetryableProvider {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+    fn supported(&self) -> &'static [Field] {
+        &[Field::City, Field::CountryCode]
+    }
+    async fn lookup(&self, _ip: IpAddr) -> Result<EnrichmentResult, EnrichmentError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        Err(EnrichmentError::Transient("simulated 502".into()))
+    }
+}
+
+/// Provider double that always returns a terminal (non-retryable) error.
+struct FailingTerminalProvider;
+
+#[async_trait]
+impl EnrichmentProvider for FailingTerminalProvider {
+    fn id(&self) -> &'static str {
+        "terminal-fail"
+    }
+    fn supported(&self) -> &'static [Field] {
+        &[Field::City, Field::CountryCode]
+    }
+    async fn lookup(&self, _ip: IpAddr) -> Result<EnrichmentResult, EnrichmentError> {
+        Err(EnrichmentError::NotFound)
+    }
+}
+
+#[tokio::test]
+async fn runner_leaves_row_pending_when_all_providers_return_retryable_errors() {
+    // A burst of rate-limited / 502 errors from every provider must not
+    // flip the row to terminal `failed` — the sweep would then never
+    // pick it up again and a transient upstream outage would silently
+    // wedge rows in a non-retryable state.
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["8.8.4.4".parse().unwrap()];
+    let ins = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = ins.created[0].id;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let broker = CatalogueBroker::new(16);
+    let mut ev_rx = broker.subscribe();
+    let (queue, rx) = EnrichmentQueue::new(1024);
+    let chain: Vec<Arc<dyn EnrichmentProvider>> = vec![Arc::new(FailingRetryableProvider {
+        id: "retryable-fail",
+        call_count: calls.clone(),
+    })];
+    let handle = tokio::spawn(
+        Runner::new(
+            db.pool.clone(),
+            chain,
+            broker,
+            rx,
+            Duration::from_secs(60), // sweep disabled; queue path only.
+        )
+        .run(),
+    );
+
+    let _ = queue.enqueue(id);
+
+    let ev = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+        .await
+        .expect("broker receive timed out")
+        .expect("broker recv failed");
+    match ev {
+        meshmon_service::catalogue::events::CatalogueEvent::EnrichmentProgress {
+            id: got,
+            status,
+        } => {
+            assert_eq!(got, id);
+            assert_eq!(
+                status,
+                EnrichmentStatus::Pending,
+                "retryable-only failures must leave the row in `pending`",
+            );
+        }
+        other => panic!("unexpected event variant: {other:?}"),
+    }
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let entry = repo::find_by_id(&db.pool, id).await.unwrap().unwrap();
+    assert_eq!(entry.enrichment_status, EnrichmentStatus::Pending);
+
+    handle.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn runner_marks_row_failed_when_all_providers_return_terminal_errors() {
+    // NotFound / Unauthorized / Permanent errors are genuinely terminal:
+    // the sweep retrying won't help. Zero populated fields + zero
+    // retryable errors → row transitions to `failed`.
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["203.0.113.77".parse().unwrap()];
+    let ins = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = ins.created[0].id;
+
+    let broker = CatalogueBroker::new(16);
+    let mut ev_rx = broker.subscribe();
+    let (queue, rx) = EnrichmentQueue::new(1024);
+    let chain: Vec<Arc<dyn EnrichmentProvider>> = vec![Arc::new(FailingTerminalProvider)];
+    let handle = tokio::spawn(
+        Runner::new(db.pool.clone(), chain, broker, rx, Duration::from_secs(60)).run(),
+    );
+
+    let _ = queue.enqueue(id);
+
+    let ev = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+        .await
+        .expect("broker receive timed out")
+        .expect("broker recv failed");
+    match ev {
+        meshmon_service::catalogue::events::CatalogueEvent::EnrichmentProgress {
+            id: got,
+            status,
+        } => {
+            assert_eq!(got, id);
+            assert_eq!(status, EnrichmentStatus::Failed);
+        }
+        other => panic!("unexpected event variant: {other:?}"),
+    }
+
+    handle.abort();
+    db.close().await;
+}

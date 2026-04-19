@@ -343,7 +343,7 @@ async fn apply_enrichment_respects_locks_committed_after_snapshot() {
         &[],
     );
 
-    let terminal = repo::apply_enrichment_result(&db.pool, id, merged)
+    let terminal = repo::apply_enrichment_result(&db.pool, id, merged, EnrichmentStatus::Failed)
         .await
         .unwrap()
         .expect("row exists so UPDATE must touch it");
@@ -407,7 +407,7 @@ async fn apply_enrichment_returns_none_when_row_deleted_concurrently() {
         },
         &[],
     );
-    let result = repo::apply_enrichment_result(&db.pool, id, merged)
+    let result = repo::apply_enrichment_result(&db.pool, id, merged, EnrichmentStatus::Failed)
         .await
         .unwrap();
     assert!(

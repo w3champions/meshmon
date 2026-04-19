@@ -26,6 +26,7 @@
 use super::{EnrichmentProvider, MergedFields};
 use crate::catalogue::{
     events::{CatalogueBroker, CatalogueEvent},
+    model::EnrichmentStatus,
     repo,
 };
 use sqlx::PgPool;
@@ -169,6 +170,15 @@ impl Runner {
         }
         let locked = entry.operator_edited_fields.clone();
         let mut merged = MergedFields::default();
+        // `saw_retryable_error` tracks whether any provider returned a
+        // retryable failure (rate-limited / transient). If every provider
+        // in the chain errored retryably *and* produced no data, we must
+        // leave the row in `pending` — otherwise the sweep will never
+        // pick it up again and a brief upstream outage permanently
+        // strands rows in `failed`. Terminal errors (Unauthorized,
+        // NotFound, Permanent) don't set this: they represent "retrying
+        // won't help" states.
+        let mut saw_retryable_error = false;
         for provider in &self.chain {
             // Skip providers whose entire `supported()` set is already
             // settled (filled by an earlier provider or locked by the
@@ -181,11 +191,26 @@ impl Runner {
             match provider.lookup(entry.ip).await {
                 Ok(res) => merged.apply(provider.id(), res, &locked),
                 Err(e) => {
+                    if e.is_retryable() {
+                        saw_retryable_error = true;
+                    }
                     warn!(%id, provider = provider.id(), error = %e, "enrichment: provider error");
                 }
             }
         }
-        let status = match repo::apply_enrichment_result(&self.pool, id, merged).await {
+        // Pick the terminal status the DB will record when `merged` is
+        // empty: `Pending` keeps the row in the sweep's queue for a
+        // retry, `Failed` is the end state when every provider gave a
+        // terminal verdict. `apply_enrichment_result` ignores this when
+        // at least one provider populated a field (the row always
+        // becomes `Enriched` in that case).
+        let empty_status = if saw_retryable_error {
+            EnrichmentStatus::Pending
+        } else {
+            EnrichmentStatus::Failed
+        };
+        let status = match repo::apply_enrichment_result(&self.pool, id, merged, empty_status).await
+        {
             // `None` means the row was concurrently deleted between
             // our read and write — skip the progress broadcast rather
             // than emit a ghost `EnrichmentProgress` for a gone row.

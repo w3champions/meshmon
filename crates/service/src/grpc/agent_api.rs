@@ -339,26 +339,22 @@ impl AgentApi for AgentApiImpl {
         // below also discards the `agents` write. SSE publish + enrichment
         // enqueue happen only after the transaction commits, so clients
         // never see a row that the DB will ultimately discard.
-        let catalogue_entry = match crate::catalogue::repo::ensure_from_agent(
-            &mut *tx,
-            claimed_ip,
-            req.lat,
-            req.lon,
-        )
-        .await
-        {
-            Ok(entry) => entry,
-            Err(e) => {
-                let _ = tx.rollback().await;
-                tracing::error!(
-                    error = %e,
-                    agent_id = %req.id,
-                    claimed_ip = %claimed_ip,
-                    "register: ip_catalogue ensure_from_agent failed",
-                );
-                return Err(Status::internal("register catalogue sync failed"));
-            }
-        };
+        let catalogue_entry =
+            match crate::catalogue::repo::ensure_from_agent(&mut *tx, claimed_ip, req.lat, req.lon)
+                .await
+            {
+                Ok(entry) => entry,
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    tracing::error!(
+                        error = %e,
+                        agent_id = %req.id,
+                        claimed_ip = %claimed_ip,
+                        "register: ip_catalogue ensure_from_agent failed",
+                    );
+                    return Err(Status::internal("register catalogue sync failed"));
+                }
+            };
         tx.commit().await.map_err(|e| {
             tracing::error!(error = %e, "register: commit transaction failed");
             Status::internal("register: commit transaction failed")

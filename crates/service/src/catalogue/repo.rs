@@ -461,11 +461,17 @@ pub async fn apply_enrichment_result(
     pool: &PgPool,
     id: Uuid,
     merged: MergedFields,
+    empty_status: EnrichmentStatus,
 ) -> Result<Option<EnrichmentStatus>, sqlx::Error> {
+    // Populated rows are always `Enriched`. Empty rows fall back to the
+    // caller's choice: the runner picks `Pending` when every provider
+    // error was retryable (rate limited / transient) so the sweep gets
+    // another go, and `Failed` when the chain produced only terminal
+    // errors or no providers are configured.
     let status = if merged.any_populated() {
         EnrichmentStatus::Enriched
     } else {
-        EnrichmentStatus::Failed
+        empty_status
     };
     let result = sqlx::query!(
         r#"

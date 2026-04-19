@@ -65,6 +65,23 @@ pub enum EnrichmentError {
     Permanent(String),
 }
 
+impl EnrichmentError {
+    /// True iff a later sweep tick could plausibly succeed where this
+    /// attempt failed. Used by the runner to decide whether a row that
+    /// produced zero populated fields should stay `pending` (so the
+    /// sweep picks it up again) or transition to terminal `failed`.
+    ///
+    /// Retryable: [`Self::RateLimited`] (quota window), [`Self::Transient`]
+    /// (network hiccup / 5xx).
+    /// Terminal: [`Self::Unauthorized`] (credentials are wrong until the
+    /// operator fixes config), [`Self::NotFound`] (provider confirmed
+    /// the IP has no record — retrying doesn't help), [`Self::Permanent`]
+    /// (malformed response / programmer error).
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RateLimited { .. } | Self::Transient(_))
+    }
+}
+
 /// Value a provider reports for a given [`Field`]. The enum keeps the
 /// merge layer simple — every catalogue column is expressible as text,
 /// `i32`, or `f64`.
@@ -367,6 +384,26 @@ mod tests {
         assert!(merged.contains(Field::Website));
         assert!(merged.contains(Field::Notes));
         assert!(!merged.contains(Field::City));
+    }
+
+    #[test]
+    fn enrichment_error_is_retryable_matches_variant_semantics() {
+        // Retryable variants: RateLimited (quota window), Transient
+        // (network / 5xx). Terminal variants: Unauthorized, NotFound,
+        // Permanent. The runner keys its `Pending`-vs-`Failed` decision
+        // off this classification, so a miscategorization would either
+        // strand rows permanently or thrash the sweep on unrecoverable
+        // errors.
+        use std::time::Duration;
+        assert!(EnrichmentError::RateLimited { retry_after: None }.is_retryable());
+        assert!(EnrichmentError::RateLimited {
+            retry_after: Some(Duration::from_secs(30))
+        }
+        .is_retryable());
+        assert!(EnrichmentError::Transient("5xx".into()).is_retryable());
+        assert!(!EnrichmentError::Unauthorized.is_retryable());
+        assert!(!EnrichmentError::NotFound.is_retryable());
+        assert!(!EnrichmentError::Permanent("malformed".into()).is_retryable());
     }
 
     #[test]
