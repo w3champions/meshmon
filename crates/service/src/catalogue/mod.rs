@@ -3,6 +3,8 @@
 //! `agents` through the `agents_with_catalogue` view so geo / ASN data
 //! lives in one authoritative table.
 
+pub mod events;
 pub mod model;
 pub mod parse;
 pub mod repo;
+pub(crate) mod sse;

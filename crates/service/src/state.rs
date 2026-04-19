@@ -3,6 +3,7 @@
 //! Cheap to `Clone` — heavyweight fields are `Arc`-backed; `Instant` and
 //! `BuildInfo` are small `Copy` types (a few words each).
 
+use crate::catalogue::events::CatalogueBroker;
 use crate::config::Config;
 use crate::ingestion::IngestionPipeline;
 use crate::metrics::Handle as PrometheusHandle;
@@ -74,6 +75,13 @@ pub struct AppState {
     /// `source_id`. Populated by the `OpenTunnel` handler; consumed by
     /// `commands::spawn_config_watcher` to broadcast `RefreshConfig`.
     pub tunnel_manager: Arc<TunnelManager>,
+    /// In-process catalogue event broker. Every mutating catalogue
+    /// handler publishes here; the SSE handler in
+    /// [`crate::catalogue::sse`] forwards events to connected clients.
+    /// Capacity is fixed at [`crate::catalogue::events::DEFAULT_CAPACITY`]
+    /// — overflow surfaces to the client as a `lag` frame rather than
+    /// blocking the publisher.
+    pub catalogue_broker: CatalogueBroker,
 }
 
 impl AppState {
@@ -103,6 +111,12 @@ impl AppState {
             tunnel_manager: Arc::new(TunnelManager::with_observer(|len| {
                 crate::metrics::tunnel_agents().set(len as f64);
             })),
+            // Catalogue broker: single process-wide broadcast channel. The
+            // capacity is a fixed constant rather than a caller argument
+            // because tuning is driven by the paste-flow burst size, not by
+            // any deployment-specific knob. See
+            // [`crate::catalogue::events::DEFAULT_CAPACITY`].
+            catalogue_broker: CatalogueBroker::default(),
         }
     }
 
