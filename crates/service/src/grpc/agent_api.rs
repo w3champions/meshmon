@@ -316,8 +316,11 @@ impl AgentApi for AgentApiImpl {
 
         // Step 6: ensure the catalogue carries this agent's geo and marks
         // Latitude/Longitude as operator-edited so enrichment providers
-        // never overwrite the agent's self-report.
-        if let Err(e) = crate::catalogue::repo::ensure_from_agent(
+        // never overwrite the agent's self-report. Publish an `Updated`
+        // SSE frame so the UI lights up the new/updated row, and kick
+        // the enrichment runner if the row is newly `pending` so we
+        // don't wait for the 30-second sweep.
+        let catalogue_entry = match crate::catalogue::repo::ensure_from_agent(
             &self.state.pool,
             claimed_ip,
             req.lat,
@@ -325,13 +328,27 @@ impl AgentApi for AgentApiImpl {
         )
         .await
         {
-            tracing::error!(
-                error = %e,
-                agent_id = %req.id,
-                claimed_ip = %claimed_ip,
-                "register: ip_catalogue ensure_from_agent failed",
-            );
-            return Err(Status::internal("register catalogue sync failed"));
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    agent_id = %req.id,
+                    claimed_ip = %claimed_ip,
+                    "register: ip_catalogue ensure_from_agent failed",
+                );
+                return Err(Status::internal("register catalogue sync failed"));
+            }
+        };
+        self.state
+            .catalogue_broker
+            .publish(crate::catalogue::events::CatalogueEvent::Updated {
+                id: catalogue_entry.id,
+            });
+        if catalogue_entry.enrichment_status == crate::catalogue::model::EnrichmentStatus::Pending {
+            // Bounded queue: a `false` return means the runner is busy
+            // and the row will be picked up by the sweep instead — the
+            // same safety net the paste path relies on.
+            let _ = self.state.enrichment_queue.enqueue(catalogue_entry.id);
         }
 
         // Step 7: synchronous registry refresh so the next push sees it.
