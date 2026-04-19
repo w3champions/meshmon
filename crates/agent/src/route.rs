@@ -1896,4 +1896,106 @@ mod tests {
         let second = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
         assert_eq!(t.diff_against(&second, &default_diff()), None);
     }
+
+    // ---- Definition-of-Done scenario tests ----
+
+    #[test]
+    fn dod_over_probing_past_destination_no_longer_diffs() {
+        let target: IpAddr = ipv4(208, 83, 237, 164);
+        let mut t = RouteTracker::new(Duration::from_secs(300), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let mut now = Instant::now();
+
+        // Baseline: 5 rounds, each with dest at pos 13 and over-probes at 14, 15.
+        for _ in 0..5 {
+            t.observe(
+                &[
+                    hop(1, Some(ipv4(10, 0, 0, 1)), Some(100)),
+                    hop(13, Some(target), Some(260_000)),
+                    hop(14, Some(target), Some(260_000)),
+                    hop(15, Some(target), Some(260_000)),
+                ],
+                now,
+            );
+            now += Duration::from_secs(60);
+        }
+        let first = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(
+            first.hops.len(),
+            2,
+            "truncated to pos 13; pos 14/15 dropped"
+        );
+        t.set_last_reported(first);
+
+        // Next window: same pattern, but over-probe reaches pos 16 only
+        // (destination rate-limited at 14/15 this round).
+        for _ in 0..5 {
+            t.observe(
+                &[
+                    hop(1, Some(ipv4(10, 0, 0, 1)), Some(100)),
+                    hop(13, Some(target), Some(260_000)),
+                    hop(16, Some(target), Some(260_000)),
+                ],
+                now,
+            );
+            now += Duration::from_secs(60);
+        }
+        let second = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(
+            second.hops.len(),
+            2,
+            "over-probe variance must not change reported hop count",
+        );
+        assert_eq!(
+            t.diff_against(&second, &default_diff()),
+            None,
+            "truncated snapshots must be identical → no diff",
+        );
+    }
+
+    #[test]
+    fn dod_silent_middle_hop_stable_across_snapshots() {
+        let target: IpAddr = ipv4(45, 248, 78, 119);
+        let mut t = RouteTracker::new(Duration::from_secs(300), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let mut now = Instant::now();
+
+        fn emit(t: &mut RouteTracker, now: &mut Instant, target: IpAddr) {
+            for _ in 0..20 {
+                t.observe(
+                    &[
+                        hop(1, Some(ipv4(10, 0, 0, 1)), Some(100)),
+                        hop(2, Some(ipv4(10, 0, 0, 2)), Some(200)),
+                        hop(3, Some(ipv4(10, 0, 0, 3)), Some(300)),
+                        hop(4, Some(ipv4(10, 0, 0, 4)), Some(400)),
+                        hop(5, None, None),
+                        hop(6, Some(ipv4(10, 0, 0, 6)), Some(600)),
+                        hop(13, Some(target), Some(260_000)),
+                    ],
+                    *now,
+                );
+                *now += Duration::from_secs(1);
+            }
+        }
+
+        emit(&mut t, &mut now, target);
+        let first = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(
+            first.hops.iter().map(|h| h.position).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 13],
+            "silent pos 5 retained, no over-probe positions present",
+        );
+        t.set_last_reported(first);
+
+        for n in 0..3 {
+            emit(&mut t, &mut now, target);
+            let next = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+            assert_eq!(
+                t.diff_against(&next, &default_diff()),
+                None,
+                "stable silent-middle path must not diff on tick {}",
+                n + 2,
+            );
+        }
+    }
 }
