@@ -502,16 +502,76 @@ pub async fn take_pending_batch(
 /// have a reuse match as `(pair_id, measurement_id)`; unmatched pairs
 /// are absent from the result and must be dispatched fresh.
 pub async fn resolve_reuse(
-    _pool: &PgPool,
-    _pairs: &[PairRow],
-    _protocol: ProbeProtocol,
+    pool: &PgPool,
+    pairs: &[PairRow],
+    protocol: ProbeProtocol,
 ) -> Result<Vec<(i64, i64)>, RepoError> {
-    todo!("implement batched reuse lookup per §5.2 design notes")
+    if pairs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pair_ids: Vec<i64> = pairs.iter().map(|p| p.id).collect();
+    let sources: Vec<&str> = pairs.iter().map(|p| p.source_agent_id.as_str()).collect();
+    let dests: Vec<String> = pairs
+        .iter()
+        .map(|p| p.destination_ip.ip().to_string())
+        .collect();
+
+    let rows = sqlx::query!(
+        r#"
+        WITH requested AS (
+            SELECT pair_id, source_agent_id, destination_ip_str
+              FROM UNNEST($1::bigint[], $2::text[], $3::text[])
+                     AS r(pair_id, source_agent_id, destination_ip_str)
+        ),
+        latest AS (
+            SELECT DISTINCT ON (r.source_agent_id, r.destination_ip_str)
+                   r.pair_id, m.id AS measurement_id
+              FROM requested r
+              JOIN measurements m
+                ON m.source_agent_id = r.source_agent_id
+               AND m.destination_ip = r.destination_ip_str::inet
+               AND m.protocol = $4::probe_protocol
+               AND m.measured_at > now() - interval '24 hours'
+             ORDER BY r.source_agent_id, r.destination_ip_str,
+                      m.probe_count DESC, m.measured_at DESC
+        )
+        SELECT pair_id AS "pair_id!", measurement_id AS "measurement_id!"
+          FROM latest
+        "#,
+        &pair_ids as &[i64],
+        &sources as &[&str],
+        &dests as &[String],
+        protocol as ProbeProtocol,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.pair_id, r.measurement_id))
+        .collect())
 }
 
 /// Mark each `(pair_id, measurement_id)` pair as `reused`.
-pub async fn apply_reuse(_pool: &PgPool, _decisions: &[(i64, i64)]) -> Result<(), RepoError> {
-    todo!("UPDATE campaign_pairs SET resolution_state='reused', measurement_id=$2 via UNNEST")
+pub async fn apply_reuse(pool: &PgPool, decisions: &[(i64, i64)]) -> Result<(), RepoError> {
+    if decisions.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i64> = decisions.iter().map(|(p, _)| *p).collect();
+    let measurement_ids: Vec<i64> = decisions.iter().map(|(_, m)| *m).collect();
+    sqlx::query!(
+        "UPDATE campaign_pairs AS cp
+            SET resolution_state = 'reused',
+                measurement_id   = d.measurement_id,
+                settled_at       = now()
+           FROM UNNEST($1::bigint[], $2::bigint[]) AS d(pair_id, measurement_id)
+          WHERE cp.id = d.pair_id",
+        &ids as &[i64],
+        &measurement_ids as &[i64],
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Safety-net sweep that flips any `pending` pair with
