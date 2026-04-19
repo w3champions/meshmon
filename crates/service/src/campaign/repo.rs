@@ -584,6 +584,34 @@ pub async fn preview_dispatch_count(
 
 // ----- Scheduler-facing repo helpers ------------------------------------
 
+/// Fetch a single campaign row for the scheduler's dispatch path.
+///
+/// Mirrors [`get`] but exists as a distinct name so scheduler-origin
+/// reads stand out in traces; the compiler de-duplicates the SQL.
+pub async fn get_raw_for_scheduler(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<CampaignRow>, RepoError> {
+    Ok(sqlx::query_as!(
+        CampaignRowRaw,
+        r#"
+        SELECT id, title, notes,
+               state AS "state: CampaignState",
+               protocol AS "protocol: ProbeProtocol",
+               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
+               force_measurement, loss_threshold_pct, stddev_weight,
+               evaluation_mode AS "evaluation_mode: EvaluationMode",
+               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
+          FROM measurement_campaigns
+         WHERE id = $1
+        "#,
+        id
+    )
+    .fetch_optional(pool)
+    .await?
+    .map(Into::into))
+}
+
 /// Snapshot of campaigns currently in `running` state, ordered by
 /// `started_at` ASC (stable rotation order for the scheduler).
 pub async fn active_campaigns(pool: &PgPool) -> Result<Vec<Uuid>, RepoError> {
