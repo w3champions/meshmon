@@ -237,7 +237,9 @@ impl RouteTracker {
             hops: HashMap::new(),
             position_probes: HashMap::new(),
             last_reported: None,
-            target_ip,
+            // Canonicalize at construction so the truncation predicate in
+            // build_snapshot always compares canonical-form IPs on both sides.
+            target_ip: target_ip.to_canonical(),
         }
     }
 
@@ -292,7 +294,11 @@ impl RouteTracker {
             let pos_acc = self.position_probes.entry(obs.position).or_default();
             pos_acc.insert(now, obs.rtt_micros);
             // If an IP responded, also record at (position, ip).
+            // Canonicalize the IP so the truncation predicate in build_snapshot
+            // matches target_ip (also canonical) regardless of whether trippy
+            // returns IPv4-mapped-IPv6 or plain IPv4 from the kernel.
             if let Some(ip) = obs.ip {
+                let ip = ip.to_canonical();
                 let acc = self.hops.entry((obs.position, ip)).or_default();
                 acc.insert(now, obs.rtt_micros);
             }
@@ -2028,6 +2034,31 @@ mod tests {
                 n + 2,
             );
         }
+    }
+
+    #[test]
+    fn build_snapshot_truncates_when_target_is_ipv4_mapped_ipv6() {
+        // Constructor canonicalizes, so passing ::ffff:a.b.c.d is equivalent
+        // to passing a.b.c.d. observe() also canonicalizes, so hops carrying
+        // either form converge to the same stored key.
+        let target: IpAddr = "::ffff:10.0.0.99".parse().unwrap();
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        // Hop reports the destination as IPv4-mapped-IPv6 too; must still truncate.
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(100))], now);
+        t.observe(
+            &[hop(3, Some("::ffff:10.0.0.99".parse().unwrap()), Some(250))],
+            now,
+        );
+        t.observe(&[hop(4, Some(ipv4(10, 0, 0, 4)), Some(350))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let positions: Vec<u8> = snap.hops.iter().map(|h| h.position).collect();
+        assert_eq!(
+            positions,
+            vec![1, 3],
+            "truncation finds target despite mapped-v6 form"
+        );
     }
 
     #[test]

@@ -168,9 +168,14 @@ impl SupervisorHandle {
 /// `RollingStats`, runs `purge_old` on each stats slot every 10s, evaluates
 /// the state machine, publishes rates to the 4 prober watch senders, and
 /// reacts to [`ProbeConfig`] updates.
+///
+/// `target_ip` must be the already-decoded and canonicalized IP address for
+/// `target`. Callers are responsible for converting `target.ip` bytes and
+/// skipping malformed targets before calling this function.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     target: Target,
+    target_ip: IpAddr,
     config_rx: watch::Receiver<ProbeConfig>,
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     udp_pool: Arc<UdpProberPool>,
@@ -191,8 +196,6 @@ pub fn spawn(
     // `protocol = None` so it silently drops incoming hops until a primary is
     // elected and the supervisor calls `reset_for_protocol`.
     let initial_primary_window = Duration::from_secs(initial.primary_window_sec as u64);
-    let target_ip = meshmon_protocol::ip::to_ipaddr(&target.ip)
-        .expect("target.ip must decode to IpAddr (4-byte IPv4 or 16-byte IPv6 per proto contract)");
     let route_tracker = RouteTracker::new(initial_primary_window, target_ip);
     // All three protocols start at the diversity window. The eval tick calls
     // `set_window` on whichever protocol it elects as primary.
@@ -884,6 +887,7 @@ mod tests {
 
         let handle = spawn(
             test_target("test-1"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1056,6 +1060,7 @@ mod tests {
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("test-2"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1111,6 +1116,7 @@ mod tests {
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("routed"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1167,6 +1173,7 @@ mod tests {
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("refused"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1346,6 +1353,7 @@ mod tests {
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
         let handle = spawn(
             test_target("swing-test"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1478,6 +1486,7 @@ mod tests {
 
         let handle = spawn(
             test_target("first-snap"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1561,6 +1570,7 @@ mod tests {
 
         let handle = spawn(
             test_target("steady"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1682,6 +1692,7 @@ mod tests {
 
         let handle = spawn(
             test_target("closed-snap"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1755,6 +1766,7 @@ mod tests {
 
         let handle = spawn(
             test_target("snapshot-state-test"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1869,6 +1881,7 @@ mod tests {
 
         let handle = spawn(
             test_target("metrics-tick-test"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,
@@ -1946,6 +1959,7 @@ mod tests {
 
         let handle = spawn(
             test_target("window-label-test"),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
             config_rx,
             allowlist_rx,
             pool,

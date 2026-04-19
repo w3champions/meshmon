@@ -375,13 +375,26 @@ pub(super) struct ContaminationHit {
 /// `allowlist` but not equal to `target_ip`. `None` means the round is
 /// clean. The destination IP appearing at its own position (or beyond,
 /// via trippy over-probing) is never flagged — only sibling targets are.
+///
+/// Both `target_ip` and each hop IP are canonicalized before comparison.
+/// `target_ip` is already canonical in most call paths (bootstrap +
+/// `RouteTracker::new` both normalize), but `TrippyProber::spawn_target`
+/// / `run` pass the raw decoded IP straight through, so we canonicalize
+/// here as belt-and-suspenders. Without this, an IPv4-mapped-IPv6
+/// target would never match its own canonical destination hop, and
+/// every legitimate destination round would be silently discarded as
+/// contamination. The allowlist is populated from canonical IPs (see
+/// `publish_allowlist` in bootstrap.rs) so hop-side canonicalization
+/// matters equally.
 pub(super) fn detect_contamination(
     target_ip: IpAddr,
     hops: &[HopObservation],
     allowlist: &HashSet<IpAddr>,
 ) -> Option<ContaminationHit> {
+    let target_ip = target_ip.to_canonical();
     for hop in hops {
         if let Some(ip) = hop.ip {
+            let ip = ip.to_canonical();
             if ip != target_ip && allowlist.contains(&ip) {
                 return Some(ContaminationHit {
                     position: hop.position,
@@ -825,6 +838,68 @@ mod tests {
         let hit = detect_contamination(me, &hops, &allowlist).expect("hit");
         assert_eq!(hit.foreign_ip, b);
         assert_eq!(hit.position, 2);
+    }
+
+    #[test]
+    fn contamination_handles_ipv4_mapped_ipv6_target() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowlist: HashSet<IpAddr> = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()]
+            .into_iter()
+            .collect();
+        // Hop reports the target as IPv4-mapped-IPv6; must NOT be flagged as contamination.
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        let hops = vec![HopObservation {
+            position: 1,
+            ip: Some(mapped),
+            rtt_micros: Some(100),
+        }];
+        assert_eq!(detect_contamination(me, &hops, &allowlist), None);
+    }
+
+    #[test]
+    fn contamination_flags_ipv4_mapped_foreign_peer() {
+        let me: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowlist: HashSet<IpAddr> = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()]
+            .into_iter()
+            .collect();
+        // Foreign sibling reported as IPv4-mapped-IPv6 — must still flag.
+        let mapped_foreign: IpAddr = "::ffff:10.0.0.2".parse().unwrap();
+        let hops = vec![HopObservation {
+            position: 5,
+            ip: Some(mapped_foreign),
+            rtt_micros: Some(200),
+        }];
+        let hit = detect_contamination(me, &hops, &allowlist).expect("should flag");
+        assert_eq!(
+            hit.foreign_ip,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            "foreign_ip reported as canonical"
+        );
+        assert_eq!(hit.position, 5);
+    }
+
+    #[test]
+    fn contamination_handles_canonical_destination_when_target_is_mapped_v6() {
+        // Inverse of contamination_handles_ipv4_mapped_ipv6_target: the caller
+        // supplies target_ip in IPv4-mapped-IPv6 form (as TrippyProber::run
+        // does when trippy-core hands back a mapped-v6 destination) while the
+        // hop reports the destination in canonical IPv4 form. Without the
+        // target-side canonicalization inside detect_contamination, this
+        // would silently drop every legitimate destination round.
+        let me: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        let allowlist: HashSet<IpAddr> = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()]
+            .into_iter()
+            .collect();
+        let hops = vec![HopObservation {
+            position: 13,
+            ip: Some("10.0.0.1".parse().unwrap()),
+            rtt_micros: Some(260_000),
+        }];
+        assert_eq!(
+            detect_contamination(me, &hops, &allowlist),
+            None,
+            "canonical hop must match mapped-v6 target",
+        );
     }
 
     // --- warn rate-limiting tests ---
