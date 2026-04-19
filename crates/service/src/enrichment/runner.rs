@@ -203,7 +203,7 @@ impl Runner {
             r#"SELECT id FROM ip_catalogue
                WHERE enrichment_status = 'pending'
                  AND created_at < NOW() - INTERVAL '30 seconds'
-               ORDER BY created_at ASC
+               ORDER BY created_at ASC, id ASC
                LIMIT 128"#
         )
         .fetch_all(&self.pool)

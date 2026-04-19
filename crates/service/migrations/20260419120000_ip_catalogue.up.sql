@@ -38,6 +38,19 @@ CREATE INDEX idx_ip_catalogue_country ON ip_catalogue (country_code);
 CREATE INDEX idx_ip_catalogue_asn     ON ip_catalogue (asn);
 CREATE INDEX idx_ip_catalogue_latlon  ON ip_catalogue (latitude, longitude);
 
+-- Partial index supporting the enrichment runner sweep. The sweep runs
+-- every 30 s with
+--   SELECT id FROM ip_catalogue
+--   WHERE enrichment_status = 'pending' AND created_at < NOW() - INTERVAL '30 seconds'
+--   ORDER BY created_at ASC, id ASC LIMIT 128
+-- so a partial `(created_at, id)` index restricted to `pending` rows
+-- keeps the index tiny (most rows settle into `enriched` / `failed`)
+-- while still ordering the hot set. Without this, the sweep degenerates
+-- into sequential scans as the catalogue grows.
+CREATE INDEX idx_ip_catalogue_pending_sweep
+    ON ip_catalogue (created_at, id)
+    WHERE enrichment_status = 'pending';
+
 -- Full-text search across every filterable text field (notes excluded).
 CREATE INDEX idx_ip_catalogue_search ON ip_catalogue USING GIN (
     to_tsvector(

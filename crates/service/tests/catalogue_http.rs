@@ -19,6 +19,8 @@
 //! | `delete_missing_row_is_idempotent_no_event`     | (random UUID only)   |
 //! | `patch_revert_wins_over_concurrent_set`         | `198.51.100.91`      |
 //! | `reenrich_sets_pending_and_returns_202`         | `198.51.100.101`     |
+//! | `reenrich_many_marks_all_known_ids_pending`     | `198.51.100.103–104` |
+//! | `ip_prefix_filter_matches_exact_host_and_cidr`  | `198.51.100.111–113` |
 //! | `facets_response_has_expected_array_shape`      | (no seeded IPs)      |
 
 mod common;
@@ -381,15 +383,39 @@ async fn reenrich_sets_pending_and_returns_202() {
     let h = common::HttpHarness::start().await;
     let id = ensure_row_id(&h, "198.51.100.101").await;
 
+    // Pre-set the row to `enriched` so the assertion below tests the
+    // *flip* back to `pending`, not an accident of insertion state.
+    // Uses `sqlx::query(...)` (dynamic) to stay out of the offline cache.
+    sqlx::query(
+        "UPDATE ip_catalogue SET enrichment_status = 'enriched', enriched_at = NOW() \
+         WHERE id = $1::uuid",
+    )
+    .bind(&id)
+    .execute(&h.state.pool)
+    .await
+    .expect("seed enriched state");
+
     // `POST /api/catalogue/{id}/reenrich` has no body — 202 Accepted on
-    // success. The endpoint does a synchronous existence check, enqueues
-    // on the bounded channel (this test harness drops the receiver via
-    // `common::test_enrichment_queue`, so the enqueue silently no-ops
-    // and no runner is spawned), and returns without waiting for the
-    // runner.
+    // success. The endpoint does a synchronous existence check,
+    // flips the row back to `pending` via `mark_enrichment_start`, and
+    // enqueues on the bounded channel (this test harness drops the
+    // receiver via `common::test_enrichment_queue`, so the enqueue
+    // silently no-ops — which is exactly why the DB-side flip matters).
     let (status, body) = h.post_empty(&format!("/api/catalogue/{id}/reenrich")).await;
     assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
     assert!(body.is_empty(), "202 body must be empty, got {body:?}");
+
+    // Regression guard for the C-P3 fix: the row must be `pending` now,
+    // regardless of whether the enqueue landed on the closed receiver.
+    // Without the `mark_enrichment_start` hop the sweep (which only scans
+    // `pending`) would never recover a queue-full drop.
+    let status_row: String =
+        sqlx::query_scalar("SELECT enrichment_status::text FROM ip_catalogue WHERE id = $1::uuid")
+            .bind(&id)
+            .fetch_one(&h.state.pool)
+            .await
+            .expect("status lookup");
+    assert_eq!(status_row, "pending", "row must be flipped to pending");
 
     // Unknown id → 404 with `{"error": "not_found"}`.
     let unknown = uuid::Uuid::new_v4();
@@ -400,6 +426,127 @@ async fn reenrich_sets_pending_and_returns_202() {
     let parsed: serde_json::Value =
         serde_json::from_str(&body).expect("404 body must be JSON envelope");
     assert_eq!(parsed["error"], "not_found", "body = {parsed}");
+}
+
+#[tokio::test]
+async fn reenrich_many_marks_all_known_ids_pending() {
+    let h = common::HttpHarness::start().await;
+    let id_a = ensure_row_id(&h, "198.51.100.103").await;
+    let id_b = ensure_row_id(&h, "198.51.100.104").await;
+
+    // Both rows start `enriched` so the assertion tests the flip path.
+    sqlx::query(
+        "UPDATE ip_catalogue SET enrichment_status = 'enriched', enriched_at = NOW() \
+         WHERE id = ANY($1::uuid[])",
+    )
+    .bind([
+        uuid::Uuid::parse_str(&id_a).unwrap(),
+        uuid::Uuid::parse_str(&id_b).unwrap(),
+    ])
+    .execute(&h.state.pool)
+    .await
+    .expect("seed enriched state");
+
+    // Dispatch POST /api/catalogue/reenrich directly on the axum `Service`
+    // — the shared `post_json` helper asserts 200, but the bulk endpoint
+    // returns 202 with an empty body, so it would panic there.
+    use axum::http::{header, Request};
+    use tower::util::ServiceExt;
+    let unknown = uuid::Uuid::new_v4().to_string();
+    let body = serde_json::json!({ "ids": [&id_a, &unknown, &id_b] });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/catalogue/reenrich")
+        .header(header::COOKIE, &h.cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("build POST request");
+    let resp = h.app.clone().oneshot(req).await.expect("oneshot dispatch");
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // Both known rows must be `pending`; the unknown id is silently no-op'd.
+    let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT id, enrichment_status::text FROM ip_catalogue WHERE id = ANY($1::uuid[])",
+    )
+    .bind([
+        uuid::Uuid::parse_str(&id_a).unwrap(),
+        uuid::Uuid::parse_str(&id_b).unwrap(),
+    ])
+    .fetch_all(&h.state.pool)
+    .await
+    .expect("status lookup");
+    assert_eq!(rows.len(), 2, "both known rows present");
+    for (row_id, status) in rows {
+        assert_eq!(status, "pending", "row {row_id} must be flipped to pending");
+    }
+}
+
+#[tokio::test]
+async fn ip_prefix_filter_matches_exact_host_and_cidr() {
+    let h = common::HttpHarness::start().await;
+
+    // Seed three distinct rows in TEST-NET-2 so we can assert:
+    //   - bare-IP query matches its own /32 (regression guard for the
+    //     `<<=` fix; strict `<<` containment would miss this case).
+    //   - `/24` prefix matches every row in that /24.
+    //   - rows outside the filter are excluded.
+    let _: serde_json::Value = h
+        .post_json(
+            "/api/catalogue",
+            &serde_json::json!({
+                "ips": ["198.51.100.111", "198.51.100.112", "198.51.100.113"]
+            }),
+        )
+        .await;
+
+    // Bare-host filter — must return exactly the `.111` row.
+    let body: serde_json::Value = h.get_json("/api/catalogue?ip_prefix=198.51.100.111").await;
+    let ips: Vec<&str> = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["ip"].as_str())
+        .collect();
+    assert!(
+        ips.contains(&"198.51.100.111"),
+        "bare-host ip_prefix must match the /32 row; got {ips:?}"
+    );
+    assert!(
+        !ips.contains(&"198.51.100.112") && !ips.contains(&"198.51.100.113"),
+        "bare-host ip_prefix must not match sibling /32 rows; got {ips:?}"
+    );
+
+    // `/32` explicit form — same behaviour as the bare host.
+    let body: serde_json::Value = h
+        .get_json("/api/catalogue?ip_prefix=198.51.100.112/32")
+        .await;
+    let ips: Vec<&str> = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["ip"].as_str())
+        .collect();
+    assert!(ips.contains(&"198.51.100.112"), "got {ips:?}");
+    assert!(
+        !ips.contains(&"198.51.100.111") && !ips.contains(&"198.51.100.113"),
+        "got {ips:?}"
+    );
+
+    // `/24` CIDR prefix — all three seeded IPs must be present (and
+    // possibly other rows from parallel tests in the same /24).
+    let body: serde_json::Value = h.get_json("/api/catalogue?ip_prefix=198.51.100.0/24").await;
+    let ips: Vec<&str> = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["ip"].as_str())
+        .collect();
+    for expected in ["198.51.100.111", "198.51.100.112", "198.51.100.113"] {
+        assert!(
+            ips.contains(&expected),
+            "/24 CIDR filter must include {expected}; got {ips:?}"
+        );
+    }
 }
 
 #[tokio::test]

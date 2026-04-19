@@ -173,12 +173,17 @@ pub struct ListQuery {
     #[serde(default, deserialize_with = "deserialize_csv_string")]
     #[param(style = Form, explode = false)]
     pub network: Vec<String>,
-    /// Optional IP prefix (CIDR or bare IP). Filters `c.ip << $prefix`
-    /// when parseable; an unparseable value is silently dropped.
+    /// Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`
+    /// (contained-or-equal) when parseable so bare-host queries match
+    /// their own `/32` / `/128` row as well as CIDR prefixes; an
+    /// unparseable value is silently dropped.
     #[serde(default)]
     pub ip_prefix: Option<String>,
-    /// Optional `display_name` ILIKE pattern. Wildcards are the
-    /// caller's responsibility.
+    /// Optional `display_name` substring. Passed verbatim to the
+    /// handler, which wraps it with `%…%` before running an `ILIKE`
+    /// match, so callers send the literal substring they want to find
+    /// (e.g. `?name=Fastly`). `%` / `_` characters in the input are
+    /// intentionally not escaped — they behave as ILIKE wildcards.
     #[serde(default)]
     pub name: Option<String>,
     /// Optional bounding box as a CSV string; exactly four floats
