@@ -155,9 +155,6 @@ mod tests {
         // Spec contract: an enabled maxmind block with missing mmdb
         // paths is treated as a benign misconfiguration — the branch
         // skips without pushing a provider or returning an error.
-        // RDAP defaults to enabled, so the resulting chain is
-        // whatever the other default-on providers contribute, minus
-        // any maxmind entry.
         let cfg = EnrichmentSection {
             maxmind: MaxmindSection {
                 enabled: true,
@@ -178,15 +175,17 @@ mod tests {
     fn whois_enabled_appears_last_in_chain() {
         // The whois provider constructor does no network I/O, so this
         // test exercises both the feature gate and the chain push.
-        // RDAP defaults to enabled so we leave it in — the point of
-        // this test is to lock whois's ordering relative to it
-        // (network operator fallback runs last).
+        // Explicitly enable RDAP so this test is stable regardless of
+        // the stubbed-RDAP default — the point is to lock whois's
+        // ordering relative to RDAP (network operator fallback runs
+        // last).
         let cfg = EnrichmentSection {
+            rdap: RdapSection { enabled: true },
             whois: WhoisSection { enabled: true },
             ..EnrichmentSection::default()
         };
         let chain = build_chain(&cfg).expect("rdap+whois chain builds");
-        assert_eq!(chain.len(), 2, "rdap (default-on) + whois expected");
+        assert_eq!(chain.len(), 2, "rdap + whois expected");
         assert_eq!(chain[0].id(), "rdap");
         assert_eq!(chain[1].id(), "whois");
     }

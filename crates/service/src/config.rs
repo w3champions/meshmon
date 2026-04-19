@@ -85,8 +85,10 @@ pub struct IpGeolocationSection {
     pub acknowledged_tos: bool,
 }
 
-/// RDAP provider settings. Enabled by default — RDAP is a free,
-/// registry-maintained protocol that needs no credentials.
+/// RDAP provider settings. Disabled by default while the in-tree
+/// provider's `lookup()` is a TODO stub — see [`rdap_enabled_default`]
+/// for why. RDAP itself is a free, credential-less protocol; this
+/// default flips back to `true` once the real wire-up ships.
 #[derive(Debug, Clone)]
 pub struct RdapSection {
     /// Whether to invoke this provider during enrichment.
@@ -95,7 +97,9 @@ pub struct RdapSection {
 
 impl Default for RdapSection {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: rdap_enabled_default(),
+        }
     }
 }
 

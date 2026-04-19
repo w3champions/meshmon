@@ -59,7 +59,7 @@ row. Otherwise the row flips to `enriched`.
 
 | Feature | Default | Compiles |
 |---|---|---|
-| (default build) | on | `ipgeolocation` + `rdap` |
+| (default build) | — | `ipgeolocation` + `rdap` (both off by default; flip the `enabled` toggle per provider) |
 | `enrichment-maxmind` | off | adds `maxmind` |
 | `enrichment-whois` | off | adds `whois` |
 

@@ -80,7 +80,9 @@ config section.
 1. **`ipgeolocation`** — richest field coverage (city, country, lat/lon,
    ASN, network operator). Default first in the chain. Subject to the
    provider's free-tier quota.
-2. **`rdap`** (default on) — free, credential-less registry lookup via
+2. **`rdap`** (off by default while the in-tree lookup is a stub; flip
+   `[enrichment.rdap] enabled = true` once the real registry wiring
+   ships) — free, credential-less registry lookup via
    `icann-rdap-client`. Fills registry-level fields (ASN, network
    operator, country) that `ipgeolocation` did not already supply.
 3. **`maxmind-geolite2`** (feature `enrichment-maxmind`, off by default) —
@@ -226,7 +228,9 @@ api_key_env      = "IPGEOLOCATION_API_KEY"
 acknowledged_tos = false  # must be true when enabled = true
 
 [enrichment.rdap]
-enabled = true
+# The in-tree provider is a stub today — leave disabled until the real
+# wire-up ships. See `rdap_enabled_default` for the reasoning.
+enabled = false
 
 [enrichment.maxmind]
 enabled   = false
