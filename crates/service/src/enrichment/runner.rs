@@ -116,9 +116,19 @@ impl Runner {
 
     /// Drive the runner until the queue sender is dropped.
     ///
-    /// Queue deliveries take priority over the sweep via `biased`
-    /// `tokio::select!`; the sweep is a safety net for rows that missed
-    /// the queue (restart-after-enqueue, queue-full drop).
+    /// Both branches — queue-drain and periodic sweep — share one
+    /// `tokio::select!`. The select is *unbiased* on purpose: a `biased`
+    /// select that preferred the queue would starve the sweep whenever
+    /// the queue stayed continuously non-empty (sustained paste load),
+    /// and rows dropped by `enqueue` backpressure would never be
+    /// recovered. Unbiased scheduling means tokio picks randomly when
+    /// both are ready, so the sweep fires within a bounded window
+    /// (~2 × `sweep_interval` worst case under continuous queue
+    /// traffic). Concurrent execution of both branches is not a
+    /// correctness hazard: `process_one` is idempotent (the repo's
+    /// `COALESCE`-plus-lock-re-check `UPDATE` tolerates being re-run
+    /// on the same row) and the select itself serialises the two
+    /// branches within this task.
     pub async fn run(mut self) {
         let mut ticker = tokio::time::interval(self.sweep_interval);
         // `Delay` spaces ticks evenly after the select! arm unblocks; the
@@ -131,7 +141,6 @@ impl Runner {
         );
         loop {
             tokio::select! {
-                biased;
                 maybe_id = self.rx.recv() => match maybe_id {
                     Some(id) => self.process_one(id).await,
                     None => break,
