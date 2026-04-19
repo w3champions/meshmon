@@ -20,6 +20,8 @@
 //! Subsequent tasks in this plan add the concrete providers and the
 //! runner that composes them.
 
+pub mod providers;
+
 use crate::catalogue::model::Field;
 use async_trait::async_trait;
 use std::collections::HashMap;
