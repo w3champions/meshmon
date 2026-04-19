@@ -1,0 +1,8 @@
+DROP VIEW IF EXISTS agents_with_catalogue;
+
+ALTER TABLE agents ADD COLUMN lat DOUBLE PRECISION;
+ALTER TABLE agents ADD COLUMN lon DOUBLE PRECISION;
+
+DROP TABLE IF EXISTS ip_catalogue;
+DROP TYPE  IF EXISTS catalogue_source;
+DROP TYPE  IF EXISTS enrichment_status;
