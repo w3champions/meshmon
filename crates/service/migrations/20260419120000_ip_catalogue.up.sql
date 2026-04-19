@@ -67,17 +67,25 @@ CREATE INDEX idx_ip_catalogue_search ON ip_catalogue USING GIN (
 -- silently loses every registered agent's lat/lon until each agent
 -- re-registers — and the registry view `agents_with_catalogue` reads
 -- geo from `ip_catalogue`, so the API would serve empty coordinates
--- in the interim. `Latitude` / `Longitude` go straight into
--- `operator_edited_fields` so the enrichment chain will not overwrite
--- the agent-reported position.
+-- in the interim. Only the fields that are actually populated get
+-- entered into `operator_edited_fields`: the pre-T42 `agents` schema
+-- allows a row with `lat` set and `lon` NULL (or vice versa), and
+-- locking a field that was never populated would block the enrichment
+-- chain from ever filling in the missing half.
 INSERT INTO ip_catalogue (ip, source, latitude, longitude, operator_edited_fields)
 SELECT a.ip,
        'agent_registration'::catalogue_source,
        a.lat,
        a.lon,
-       ARRAY['Latitude', 'Longitude']::text[]
+       CASE
+           WHEN a.lat IS NOT NULL AND a.lon IS NOT NULL
+               THEN ARRAY['Latitude', 'Longitude']::text[]
+           WHEN a.lat IS NOT NULL THEN ARRAY['Latitude']::text[]
+           WHEN a.lon IS NOT NULL THEN ARRAY['Longitude']::text[]
+           ELSE '{}'::text[]
+       END
 FROM agents a
-WHERE a.lat IS NOT NULL AND a.lon IS NOT NULL
+WHERE a.lat IS NOT NULL OR a.lon IS NOT NULL
 ON CONFLICT (ip) DO NOTHING;
 
 -- Agents -> catalogue: geo lives on the catalogue only

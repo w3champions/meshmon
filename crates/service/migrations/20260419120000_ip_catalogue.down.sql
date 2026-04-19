@@ -17,13 +17,16 @@ DROP VIEW IF EXISTS agents_with_catalogue;
 ALTER TABLE agents ADD COLUMN lat DOUBLE PRECISION;
 ALTER TABLE agents ADD COLUMN lon DOUBLE PRECISION;
 
+-- Symmetrical with the up migration's backfill: restore whichever
+-- coordinate the catalogue holds, even when only one of the two is
+-- present. Filtering on both-non-null would silently drop partial
+-- data on rollback.
 UPDATE agents a
 SET lat = c.latitude,
     lon = c.longitude
 FROM ip_catalogue c
 WHERE c.ip = a.ip
-  AND c.latitude  IS NOT NULL
-  AND c.longitude IS NOT NULL;
+  AND (c.latitude IS NOT NULL OR c.longitude IS NOT NULL);
 
 DROP INDEX IF EXISTS idx_ip_catalogue_pending_sweep;
 DROP TABLE IF EXISTS ip_catalogue;
