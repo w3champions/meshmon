@@ -367,14 +367,13 @@ impl Default for RawRdapSection {
 }
 
 fn rdap_enabled_default() -> bool {
-    // The RDAP provider is currently a stub — its `lookup()` returns a
-    // permanent error for every IP (the real `rdap_bootstrapped_request`
-    // wiring is scheduled for a follow-up task). Defaulting to `false`
-    // keeps the out-of-the-box enrichment chain from walking through a
-    // guaranteed-fail provider on every row. Operators who want to
-    // opt in to the live wiring can flip `[enrichment.rdap] enabled`
-    // to `true` once the provider ships.
-    false
+    // RDAP enrichment ships enabled out of the box. The provider drives
+    // `rdap_bootstrapped_request` against IANA + the RIRs, extracts
+    // net_name / country / organisation (and ASN on ARIN networks via the
+    // `arin_originas0_originautnums` extension, falling back to WHOIS
+    // elsewhere), and needs no API key. Operators who want to skip it can
+    // set `[enrichment.rdap] enabled = false` in their config.
+    true
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1615,12 +1614,12 @@ acknowledged_tos = true
 
     #[test]
     fn enrichment_defaults_when_section_absent() {
-        // No [enrichment] block at all → every provider is disabled.
-        // RDAP is default-off while its lookup remains a stub (see
+        // No [enrichment] block at all → paid / feature-gated providers
+        // stay disabled, and RDAP opts in by default (see
         // `rdap_enabled_default` for the reasoning).
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
         assert!(!cfg.enrichment.ipgeolocation.enabled);
-        assert!(!cfg.enrichment.rdap.enabled);
+        assert!(cfg.enrichment.rdap.enabled);
         assert!(!cfg.enrichment.maxmind.enabled);
         assert!(!cfg.enrichment.whois.enabled);
     }

@@ -59,7 +59,7 @@ row. Otherwise the row flips to `enriched`.
 
 | Feature | Default | Compiles |
 |---|---|---|
-| (default build) | — | `ipgeolocation` + `rdap` (both off by default; flip the `enabled` toggle per provider) |
+| (default build) | — | `ipgeolocation` (off by default) + `rdap` (on by default) |
 | `enrichment-maxmind` | off | adds `maxmind` |
 | `enrichment-whois` | off | adds `whois` |
 
@@ -73,9 +73,9 @@ the feature compiled in is a boot-time error.
 
 ### RDAP default
 
-`[enrichment.rdap] enabled` defaults to `false` because the provider's
-`lookup()` is currently a TODO stub that returns a permanent error for
-every IP. Toggle to `true` only after the real `rdap_bootstrapped_request`
-wire-up ships (tracked separately), otherwise every row that reaches the
-RDAP slot walks through a guaranteed-fail path and spends log lines
-without producing fields.
+`[enrichment.rdap] enabled` defaults to `true`. The provider issues a
+bootstrapped `icann-rdap-client` request (IANA → the appropriate RIR),
+needs no API key, and fills `net_name`, `country`, `organisation`, plus
+ASN on ARIN networks via the `arin_originas0_originautnums` extension
+(with WHOIS as the ASN fallback for the other RIRs). Set
+`[enrichment.rdap] enabled = false` to skip it.
