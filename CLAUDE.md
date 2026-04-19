@@ -149,6 +149,12 @@ See `grafana/README.md` for the dashboard contract, the auth posture
 (meshmon proxies an internal Grafana in `auth.proxy` mode — anonymous
 access is forbidden), and the editing workflow.
 
+## Documentation
+
+When you add or change something essential, create or update the matching `.md` — per-folder `README.md`, `CLAUDE.md` at any level where conventions are non-obvious (root or subdirectory), or feature docs under `docs/`. Skip trivia; cover what a future reader needs.
+
+Write present tense for the current state. No change logs, "previously", progress notes, or task/PR references.
+
 ## Conventions
 
 - Squash-merge only (no merge commits, no rebase)
