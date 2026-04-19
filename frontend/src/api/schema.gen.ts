@@ -188,10 +188,24 @@ export interface paths {
         get: operations["get_one"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * `DELETE /api/catalogue/{id}` — idempotent row removal.
+         * @description Returns 204 whether or not the row existed: [`repo::delete`] issues a
+         *     plain `DELETE ... WHERE id = $1` and surfaces only the affected-row
+         *     count, so the HTTP surface always answers 204. The
+         *     [`CatalogueEvent::Deleted`] event is broadcast only when a row was
+         *     actually removed (`rows_affected > 0`) — redundant deletes against a
+         *     missing id complete silently to avoid waking SSE subscribers on a
+         *     no-op.
+         */
+        delete: operations["delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * `PATCH /api/catalogue/{id}` — partial update with revert-to-auto.
+         * @description Partial update with revert-to-auto support. If a field is present in both the body and `revert_to_auto`, the revert wins and the write is suppressed (matches repo::patch semantics).
+         */
+        patch: operations["patch"];
         trace?: never;
     };
     "/api/metrics/query": {
@@ -525,6 +539,21 @@ export interface components {
          * @enum {string}
          */
         EnrichmentStatus: "pending" | "enriched" | "failed";
+        /**
+         * @description Error envelope used by every non-2xx catalogue response.
+         *
+         *     The single `error` field carries a stable, machine-parseable
+         *     snake_case code (e.g. `not_found`, `database_error`). Matches the
+         *     gateway-level JSON 404 emitted by `crate::http::backend_path_404`
+         *     so clients can use one shape for every `/api` error.
+         */
+        ErrorEnvelope: {
+            /**
+             * @description Stable error code. Clients should match on this string, not on
+             *     the HTTP status alone.
+             */
+            error: string;
+        };
         /** @description JSON representation of an observed IP at a hop. */
         HopIpJson: {
             /**
@@ -1094,13 +1123,28 @@ export interface operations {
     list: {
         parameters: {
             query?: {
-                /** @description Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics. */
+                /**
+                 * @description Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics.
+                 *
+                 *     CSV string; e.g. `?country_code=US,DE`. Repeat-key form
+                 *     (`?country_code=US&country_code=DE`) is NOT supported — axum's
+                 *     default `Query` extractor is `serde_urlencoded`, which does not
+                 *     deserialize repeated keys into `Vec<T>`.
+                 */
                 country_code?: string[];
-                /** @description Zero-or-more ASN numbers. ANY semantics. */
+                /**
+                 * @description Zero-or-more ASN numbers. ANY semantics.
+                 *
+                 *     CSV string; e.g. `?asn=64500,64501`. See `country_code` for
+                 *     rationale; repeat-key form is not accepted.
+                 */
                 asn?: number[];
                 /**
                  * @description Zero-or-more `network_operator` ILIKE patterns. ANY semantics.
                  *     Wildcards are the caller's responsibility.
+                 *
+                 *     CSV string; e.g. `?network=foo,bar`. See `country_code` for
+                 *     rationale; repeat-key form is not accepted.
                  */
                 network?: string[];
                 /**
@@ -1113,7 +1157,11 @@ export interface operations {
                  *     caller's responsibility.
                  */
                 name?: string;
-                /** @description Optional bounding box `minLat,minLon,maxLat,maxLon`. */
+                /**
+                 * @description Optional bounding box as a CSV string; exactly four floats
+                 *     `minLat,minLon,maxLat,maxLon`. Permissive parse — malformed
+                 *     values silently yield no filter, matching `ip_prefix` semantics.
+                 */
                 bbox?: number[];
                 /** @description TODO(T13): cursor pagination by `created_at`. */
                 cursor_created_at?: string;
@@ -1149,7 +1197,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };
@@ -1187,7 +1237,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };
@@ -1224,6 +1276,45 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
                 content?: never;
             };
             /** @description Internal error */
@@ -1231,7 +1322,61 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogueEntryDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
                 content?: never;
+            };
+            /** @description Row not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };

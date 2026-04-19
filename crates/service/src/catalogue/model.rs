@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+use std::str::FromStr;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -68,6 +69,26 @@ pub enum Field {
 }
 
 impl Field {
+    /// Every enumerable [`Field`] variant. Enables exhaustive iteration in
+    /// tests and callers that need to enumerate the catalogue's enrichable
+    /// columns without hand-maintaining a parallel list.
+    ///
+    /// Adding a variant to [`Field`] without updating this slice (and the
+    /// [`Field::as_str`] / [`FromStr`] matches) will fail the round-trip
+    /// test in `#[cfg(test)]` below.
+    pub const ALL: &'static [Field] = &[
+        Field::City,
+        Field::CountryCode,
+        Field::CountryName,
+        Field::Latitude,
+        Field::Longitude,
+        Field::Asn,
+        Field::NetworkOperator,
+        Field::DisplayName,
+        Field::Website,
+        Field::Notes,
+    ];
+
     /// Canonical PascalCase rendering stored in `operator_edited_fields`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -81,6 +102,33 @@ impl Field {
             Field::DisplayName => "DisplayName",
             Field::Website => "Website",
             Field::Notes => "Notes",
+        }
+    }
+}
+
+/// Parse the canonical PascalCase rendering back into a [`Field`].
+///
+/// The inverse of [`Field::as_str`]: unknown strings return `Err(())` so
+/// callers (e.g. the PATCH handler) can silently drop unrecognised field
+/// names. Keep this match mirrored with [`Field::as_str`] — the
+/// `as_str_and_from_str_are_inverses_for_all_variants` test fails loudly
+/// if a variant is added or removed without updating both sides.
+impl FromStr for Field {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "City" => Ok(Field::City),
+            "CountryCode" => Ok(Field::CountryCode),
+            "CountryName" => Ok(Field::CountryName),
+            "Latitude" => Ok(Field::Latitude),
+            "Longitude" => Ok(Field::Longitude),
+            "Asn" => Ok(Field::Asn),
+            "NetworkOperator" => Ok(Field::NetworkOperator),
+            "DisplayName" => Ok(Field::DisplayName),
+            "Website" => Ok(Field::Website),
+            "Notes" => Ok(Field::Notes),
+            _ => Err(()),
         }
     }
 }
@@ -152,6 +200,21 @@ mod tests {
         assert_eq!(Field::CountryCode.as_str(), "CountryCode");
         assert_eq!(Field::Asn.as_str(), "Asn");
         assert_eq!(Field::DisplayName.as_str(), "DisplayName");
+    }
+
+    #[test]
+    fn as_str_and_from_str_are_inverses_for_all_variants() {
+        use std::str::FromStr;
+        for field in Field::ALL {
+            let parsed = Field::from_str(field.as_str()).unwrap_or_else(|_| {
+                panic!(
+                    "as_str '{}' must parse back to the same variant",
+                    field.as_str()
+                )
+            });
+            assert_eq!(parsed, *field);
+        }
+        assert!(Field::from_str("Unknown").is_err());
     }
 
     #[test]

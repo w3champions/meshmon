@@ -986,6 +986,74 @@ impl HttpHarness {
         let body = String::from_utf8(bytes.to_vec()).expect("response body must be valid UTF-8");
         (status, body)
     }
+
+    /// Fire a `PATCH` with a JSON body and deserialize the response
+    /// body into `T`. Panics on non-200 status — callers use this when
+    /// they expect success and want the parsed body; for status-specific
+    /// assertions (404, validation errors), build the request manually.
+    pub async fn patch_json<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> T {
+        use axum::http::{header, Request, StatusCode};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("build PATCH request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PATCH {path} expected 200, got {}",
+            resp.status()
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        serde_json::from_slice::<T>(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
+    }
+
+    /// Fire a `DELETE` and return the raw status + body string. The raw
+    /// surface mirrors `get()` so tests can assert on `204 No Content`
+    /// bodies (empty) or error shapes without duplicating cookie wiring.
+    pub async fn delete(&self, path: &str) -> (axum::http::StatusCode, String) {
+        use axum::http::{header, Request};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .body(axum::body::Body::empty())
+            .expect("build DELETE request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        // Fail loudly on binary responses — the harness only serves
+        // JSON / text handlers today, so any non-UTF-8 body is a test
+        // bug worth seeing rather than silently replacing with U+FFFD.
+        let body = String::from_utf8(bytes.to_vec()).expect("response body must be valid UTF-8");
+        (status, body)
+    }
 }
 
 /// Drive a successful login as the default `admin` user on `app` and

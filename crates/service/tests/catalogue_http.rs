@@ -1,5 +1,6 @@
 //! Integration tests for the operator catalogue HTTP surface
-//! (`POST /api/catalogue`, `GET /api/catalogue`, `GET /api/catalogue/{id}`).
+//! (`POST /api/catalogue`, `GET /api/catalogue`, `GET /api/catalogue/{id}`,
+//! `PATCH /api/catalogue/{id}`, `DELETE /api/catalogue/{id}`).
 //!
 //! The catalogue table is globally unique on `ip`, and this binary
 //! shares a Postgres database with every other test in the suite via
@@ -7,17 +8,24 @@
 //! per-test subrange of `198.51.100.0/24` (RFC 5737 TEST-NET-2) so
 //! parallel runs never collide on `ON CONFLICT` bookkeeping.
 //!
-//! | Test                                  | IP range                 |
-//! |---------------------------------------|--------------------------|
-//! | `paste_inserts_rows_and_reports_…`    | `198.51.100.11–15`       |
-//! | `get_one_returns_row_by_id`           | `198.51.100.21`          |
-//! | `list_supports_country_filter`        | `198.51.100.41–42`       |
+//! | Test                                            | IP range             |
+//! |-------------------------------------------------|----------------------|
+//! | `paste_inserts_rows_and_reports_…`              | `198.51.100.11–15`   |
+//! | `get_one_returns_row_by_id`                     | `198.51.100.21`      |
+//! | `list_supports_country_filter`                  | `198.51.100.41–42`   |
+//! | `patch_sets_fields_and_marks_edited`            | `198.51.100.61`      |
+//! | `revert_to_auto_removes_mark_and_clears_value`  | `198.51.100.71`      |
+//! | `delete_removes_entry`                          | `198.51.100.81`      |
+//! | `delete_missing_row_is_idempotent_no_event`     | (random UUID only)   |
+//! | `patch_revert_wins_over_concurrent_set`         | `198.51.100.91`      |
 
 mod common;
 
 use axum::http::StatusCode;
+use meshmon_service::catalogue::events::CatalogueEvent;
 use sqlx::types::ipnetwork::IpNetwork;
 use std::str::FromStr;
+use std::time::Duration;
 
 #[tokio::test]
 async fn paste_inserts_rows_and_reports_invalid() {
@@ -178,5 +186,224 @@ async fn list_supports_country_filter() {
         parsed["total"].as_i64(),
         Some(0),
         "total must be 0 for unknown country; body = {parsed}"
+    );
+}
+
+/// Helper: resolve a catalogue row id for the given IP via the paste
+/// endpoint, whether the row was newly created or already existed.
+async fn ensure_row_id(h: &common::HttpHarness, ip: &str) -> String {
+    let paste: serde_json::Value = h
+        .post_json("/api/catalogue", &serde_json::json!({ "ips": [ip] }))
+        .await;
+    let row = paste["created"]
+        .as_array()
+        .and_then(|a| a.first())
+        .or_else(|| paste["existing"].as_array().and_then(|a| a.first()))
+        .unwrap_or_else(|| panic!("paste surfaced no row for {ip}: {paste}"));
+    row["id"].as_str().expect("id is string").to_string()
+}
+
+#[tokio::test]
+async fn patch_sets_fields_and_marks_edited() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.61").await;
+
+    // Subscribe to the catalogue broker BEFORE the PATCH so we can assert
+    // the handler fans out a `CatalogueEvent::Updated` for the row id
+    // without depending on the enrichment runner or other side effects.
+    let mut rx = h.state.catalogue_broker.subscribe();
+
+    // Patch display_name + city; the handler must write both columns and
+    // append the two PascalCase names to `operator_edited_fields`.
+    let body = serde_json::json!({
+        "display_name": "Operator-Labelled Host",
+        "city": "Berlin",
+    });
+    let resp: serde_json::Value = h.patch_json(&format!("/api/catalogue/{id}"), &body).await;
+
+    assert_eq!(resp["display_name"], "Operator-Labelled Host");
+    assert_eq!(resp["city"], "Berlin");
+
+    let edited: Vec<&str> = resp["operator_edited_fields"]
+        .as_array()
+        .expect("operator_edited_fields is array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        edited.contains(&"DisplayName"),
+        "expected DisplayName in lock set; got {edited:?}"
+    );
+    assert!(
+        edited.contains(&"City"),
+        "expected City in lock set; got {edited:?}"
+    );
+
+    // Drain the broker until we see `Updated { id }` or time out. Other
+    // tests sharing the same process may have published unrelated events
+    // onto the broker before we subscribed (the subscription is per-
+    // state, so only events newer than `rx.subscribe()` reach us, but we
+    // still want to tolerate spurious Created/etc. from unrelated rows
+    // should the fan-out wiring change later).
+    let expected_id = uuid::Uuid::parse_str(resp["id"].as_str().expect("id is string"))
+        .expect("resp id is a valid uuid");
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let ev = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timed out waiting for Updated event")
+            .expect("broker recv failed");
+        if let CatalogueEvent::Updated { id: got } = ev {
+            assert_eq!(got, expected_id, "Updated event id must match row id");
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn revert_to_auto_removes_mark_and_clears_value() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.71").await;
+
+    // Step 1: stamp a city so the lock and the value both exist.
+    let after_set: serde_json::Value = h
+        .patch_json(
+            &format!("/api/catalogue/{id}"),
+            &serde_json::json!({ "city": "Munich" }),
+        )
+        .await;
+    assert_eq!(after_set["city"], "Munich");
+    let edited: Vec<&str> = after_set["operator_edited_fields"]
+        .as_array()
+        .expect("operator_edited_fields is array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        edited.contains(&"City"),
+        "expected City in lock set after initial patch; got {edited:?}"
+    );
+
+    // Step 2: revert City — the value must drop to NULL (absent from
+    // the response body since the DTO skips `None`) and the lock must
+    // disappear from `operator_edited_fields`.
+    let after_revert: serde_json::Value = h
+        .patch_json(
+            &format!("/api/catalogue/{id}"),
+            &serde_json::json!({ "revert_to_auto": ["City"] }),
+        )
+        .await;
+    assert!(
+        after_revert.get("city").is_none() || after_revert["city"].is_null(),
+        "city must be cleared; body = {after_revert}"
+    );
+    let edited: Vec<&str> = after_revert["operator_edited_fields"]
+        .as_array()
+        .expect("operator_edited_fields is array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !edited.contains(&"City"),
+        "City must no longer be in lock set after revert; got {edited:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_removes_entry() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.81").await;
+
+    // Subscribe to the broker BEFORE the DELETE so we can assert the
+    // handler publishes a `CatalogueEvent::Deleted` carrying the row id.
+    let mut rx = h.state.catalogue_broker.subscribe();
+
+    // DELETE must return 204 No Content with an empty body.
+    let (status, body) = h.delete(&format!("/api/catalogue/{id}")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "body = {body}");
+    assert!(body.is_empty(), "204 body must be empty, got {body:?}");
+
+    // Subsequent GET of the same id must 404.
+    let (status, _body) = h.get(&format!("/api/catalogue/{id}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The delete must have broadcast `Deleted { id }`. Drain until we
+    // see the matching event or time out.
+    let expected_id = uuid::Uuid::parse_str(&id).expect("id is a valid uuid");
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let ev = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timed out waiting for Deleted event")
+            .expect("broker recv failed");
+        if let CatalogueEvent::Deleted { id: got } = ev {
+            assert_eq!(got, expected_id, "Deleted event id must match row id");
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn delete_missing_row_is_idempotent_no_event() {
+    let h = common::HttpHarness::start().await;
+
+    // Subscribe first so any stray event would be observable.
+    let mut rx = h.state.catalogue_broker.subscribe();
+
+    // Pick a random UUID that was never inserted by any test.
+    let missing = uuid::Uuid::new_v4();
+
+    let (status, body) = h.delete(&format!("/api/catalogue/{missing}")).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "idempotent delete must 204; body = {body}"
+    );
+    assert!(body.is_empty(), "204 body must be empty, got {body:?}");
+
+    // No event must fire when the row was already absent. The broker is
+    // shared with handlers on this `AppState`, so a narrow 200 ms window
+    // is enough to catch an accidental publish.
+    let res = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        res.is_err(),
+        "delete of a missing row must not publish any event; observed {:?}",
+        res
+    );
+}
+
+#[tokio::test]
+async fn patch_revert_wins_over_concurrent_set() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.91").await;
+
+    // Send a PATCH that simultaneously writes a city value AND reverts
+    // the same field. `repo::patch` documents that revert wins: the SQL
+    // CASE evaluates the clear branch first, and `operator_edited_fields`
+    // subtracts the removed name from the lock set before the union with
+    // added names adds it back. The handler mirrors this behavior
+    // transparently — so city must end up NULL and `City` must NOT be in
+    // `operator_edited_fields`.
+    let body = serde_json::json!({
+        "city": "Berlin",
+        "revert_to_auto": ["City"],
+    });
+    let resp: serde_json::Value = h.patch_json(&format!("/api/catalogue/{id}"), &body).await;
+
+    assert!(
+        resp.get("city").is_none() || resp["city"].is_null(),
+        "revert must win over concurrent set — city must be null; body = {resp}"
+    );
+    let edited: Vec<&str> = resp["operator_edited_fields"]
+        .as_array()
+        .expect("operator_edited_fields is array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !edited.contains(&"City"),
+        "City must not be locked after revert-wins; got {edited:?}"
     );
 }

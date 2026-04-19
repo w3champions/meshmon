@@ -195,11 +195,16 @@ pub async fn find_by_ip(pool: &PgPool, ip: IpAddr) -> Result<Option<CatalogueEnt
 }
 
 /// Remove a row. Idempotent: missing rows are not an error.
-pub async fn delete(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query!("DELETE FROM ip_catalogue WHERE id = $1", id)
+///
+/// Returns the number of rows affected by the delete so callers can
+/// distinguish "removed a real row" from "no-op because the id was
+/// already absent" — used by the HTTP layer to suppress the SSE
+/// `Deleted` event on idempotent repeats.
+pub async fn delete(pool: &PgPool, id: Uuid) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query!("DELETE FROM ip_catalogue WHERE id = $1", id)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(result.rows_affected())
 }
 
 /// Apply an operator patch.

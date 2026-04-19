@@ -114,6 +114,8 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::paste))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::list))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::get_one))
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::patch))
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::delete))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

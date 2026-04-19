@@ -515,6 +515,109 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`DELETE /api/catalogue/{id}` — idempotent row removal.",
+        "description": "Returns 204 whether or not the row existed: [`repo::delete`] issues a\nplain `DELETE ... WHERE id = $1` and surfaces only the affected-row\ncount, so the HTTP surface always answers 204. The\n[`CatalogueEvent::Deleted`] event is broadcast only when a row was\nactually removed (`rows_affected > 0`) — redundant deletes against a\nmissing id complete silently to avoid waking SSE subscribers on a\nno-op.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalogue row id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`PATCH /api/catalogue/{id}` — partial update with revert-to-auto.",
+        "description": "Partial update with revert-to-auto support. If a field is present in both the body and `revert_to_auto`, the revert wins and the write is suppressed (matches repo::patch semantics).",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalogue row id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogueEntryDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Row not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/metrics/query": {
