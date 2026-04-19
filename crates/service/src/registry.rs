@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// One `agents` row, decoupled from sqlx types so handlers can clone it
-/// without borrowing the snapshot.
+/// without borrowing the snapshot. Geo coordinates are joined in from the
+/// IP catalogue — the `agents` table itself no longer carries them.
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
     /// Human-readable identifier (matches the agent's `AGENT_ID` env var).
@@ -30,10 +31,10 @@ pub struct AgentInfo {
     pub location: Option<String>,
     /// Source IP (CIDR-wrapped by Postgres' `INET` type).
     pub ip: IpNetwork,
-    /// Optional latitude.
-    pub lat: Option<f64>,
-    /// Optional longitude.
-    pub lon: Option<f64>,
+    /// Latitude joined from `ip_catalogue`, if present.
+    pub latitude: Option<f64>,
+    /// Longitude joined from `ip_catalogue`, if present.
+    pub longitude: Option<f64>,
     /// Optional `agent_version` string reported on register.
     pub agent_version: Option<String>,
     /// Advertised TCP echo-listener port (1-65535, enforced by DB CHECK).
@@ -133,8 +134,8 @@ struct AgentRow {
     display_name: String,
     location: Option<String>,
     ip: IpNetwork,
-    lat: Option<f64>,
-    lon: Option<f64>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     agent_version: Option<String>,
     tcp_probe_port: i32,
     udp_probe_port: i32,
@@ -142,17 +143,20 @@ struct AgentRow {
     last_seen_at: DateTime<Utc>,
 }
 
-/// Free function: read the current `agents` table into a snapshot.
+/// Free function: read the current `agents` table (joined with the IP
+/// catalogue for geo) into a snapshot.
 async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
     let rows = sqlx::query_as!(
         AgentRow,
         r#"
-        SELECT id, display_name, location,
-               ip as "ip: IpNetwork",
-               lat, lon, agent_version,
-               tcp_probe_port, udp_probe_port,
-               registered_at, last_seen_at
-        FROM agents
+        SELECT a.id, a.display_name, a.location,
+               a.ip AS "ip: IpNetwork",
+               c.latitude, c.longitude,
+               a.agent_version,
+               a.tcp_probe_port, a.udp_probe_port,
+               a.registered_at, a.last_seen_at
+        FROM agents a
+        LEFT JOIN ip_catalogue c ON c.ip = a.ip
         "#,
     )
     .fetch_all(pool)
@@ -194,8 +198,8 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
                 display_name: row.display_name,
                 location: row.location,
                 ip: row.ip,
-                lat: row.lat,
-                lon: row.lon,
+                latitude: row.latitude,
+                longitude: row.longitude,
                 agent_version: row.agent_version,
                 tcp_probe_port,
                 udp_probe_port,

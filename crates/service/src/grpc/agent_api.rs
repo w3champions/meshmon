@@ -188,7 +188,7 @@ impl AgentApi for AgentApiImpl {
             return Err(Status::invalid_argument("id and display_name required"));
         }
         // Reject non-finite or out-of-range coordinates before they enter
-        // the DB — the `agents.lat`/`lon` columns are `DOUBLE PRECISION`
+        // the DB — `ip_catalogue.latitude`/`longitude` are `DOUBLE PRECISION`
         // and happily store NaN/Inf, which would then leak through
         // `GetTargets` and break clients that assume real-world ranges.
         if !req.lat.is_finite() || !(-90.0..=90.0).contains(&req.lat) {
@@ -276,15 +276,13 @@ impl AgentApi for AgentApiImpl {
         let udp_port_i32 = req.udp_probe_port as i32;
         let upsert_row = sqlx::query!(
             r#"INSERT INTO agents
-                  (id, display_name, location, ip, lat, lon, agent_version,
+                  (id, display_name, location, ip, agent_version,
                    tcp_probe_port, udp_probe_port,
                    registered_at, last_seen_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
                ON CONFLICT (id) DO UPDATE SET
                    display_name   = EXCLUDED.display_name,
                    location       = EXCLUDED.location,
-                   lat            = EXCLUDED.lat,
-                   lon            = EXCLUDED.lon,
                    agent_version  = EXCLUDED.agent_version,
                    tcp_probe_port = EXCLUDED.tcp_probe_port,
                    udp_probe_port = EXCLUDED.udp_probe_port,
@@ -295,8 +293,6 @@ impl AgentApi for AgentApiImpl {
             req.display_name,
             location,
             claimed_ip_net,
-            req.lat,
-            req.lon,
             agent_version,
             tcp_port_i32,
             udp_port_i32,
@@ -318,7 +314,27 @@ impl AgentApi for AgentApiImpl {
             ));
         }
 
-        // Step 6: synchronous registry refresh so the next push sees it.
+        // Step 6: ensure the catalogue carries this agent's geo and marks
+        // Latitude/Longitude as operator-edited so enrichment providers
+        // never overwrite the agent's self-report.
+        if let Err(e) = crate::catalogue::repo::ensure_from_agent(
+            &self.state.pool,
+            claimed_ip,
+            req.lat,
+            req.lon,
+        )
+        .await
+        {
+            tracing::error!(
+                error = %e,
+                agent_id = %req.id,
+                claimed_ip = %claimed_ip,
+                "register: ip_catalogue ensure_from_agent failed",
+            );
+            return Err(Status::internal("register catalogue sync failed"));
+        }
+
+        // Step 7: synchronous registry refresh so the next push sees it.
         if let Err(e) = self.state.registry.force_refresh().await {
             tracing::warn!(
                 error = %e,
@@ -417,8 +433,8 @@ impl AgentApi for AgentApiImpl {
                 },
                 display_name: a.display_name,
                 location: a.location.unwrap_or_default(),
-                lat: a.lat.unwrap_or(0.0),
-                lon: a.lon.unwrap_or(0.0),
+                lat: a.latitude.unwrap_or(0.0),
+                lon: a.longitude.unwrap_or(0.0),
                 tcp_probe_port: u32::from(a.tcp_probe_port),
                 udp_probe_port: u32::from(a.udp_probe_port),
             })

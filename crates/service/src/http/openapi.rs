@@ -54,6 +54,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::http::path_overview::PathOverviewResponse,
         crate::http::path_overview::WindowBounds,
         crate::http::user_api::AgentSummary,
+        crate::http::user_api::CatalogueCoordinates,
         crate::http::user_api::RouteSnapshotDetail,
         crate::http::user_api::RouteSnapshotSummary,
         crate::http::user_api::RoutesPage,
