@@ -271,6 +271,7 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         the write is suppressed (matches repo::patch semantics).",
     responses(
         (status = 200, description = "Updated row", body = CatalogueEntryDto),
+        (status = 400, description = "Invalid payload", body = ErrorEnvelope),
         (status = 401, description = "No active session"),
         (status = 404, description = "Row not found", body = ErrorEnvelope),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
@@ -281,6 +282,46 @@ pub async fn patch(
     Path(id): Path<Uuid>,
     Json(req): Json<PatchRequest>,
 ) -> Response {
+    // Input validation — reject before we touch the DB so obvious
+    // client mistakes come back as 400 instead of either persisting
+    // garbage or leaking a Postgres type/length error as a 500.
+    //
+    // Only validate values the caller is *setting*
+    // (`Some(Some(_))` — outer Some = touched, inner Some = value).
+    // `Some(None)` (explicit NULL) and `None` (untouched) are always
+    // fine and pass through unchecked.
+    if let Some(Some(lat)) = req.latitude {
+        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_latitude" })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(Some(lon)) = req.longitude {
+        if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_longitude" })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(Some(code)) = req.country_code.as_ref() {
+        // `country_code` is `CHAR(2)` — a wrong length would otherwise
+        // surface as a Postgres error routed through `db_error` (500).
+        // Accept only ASCII alphabetic 2-character codes (upper- or
+        // lower-case) so the DB column stays well-formed.
+        if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_country_code" })),
+            )
+                .into_response();
+        }
+    }
+
     let revert_to_auto: Vec<Field> = req
         .revert_to_auto
         .iter()

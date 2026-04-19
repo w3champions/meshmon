@@ -21,6 +21,7 @@
 //! | `reenrich_sets_pending_and_returns_202`         | `198.51.100.101`     |
 //! | `reenrich_many_marks_all_known_ids_pending`     | `198.51.100.103–104` |
 //! | `ip_prefix_filter_matches_exact_host_and_cidr`  | `198.51.100.111–113` |
+//! | `patch_rejects_invalid_latitude_longitude_cc`   | `198.51.100.121`     |
 //! | `facets_response_has_expected_array_shape`      | (no seeded IPs)      |
 
 mod common;
@@ -545,6 +546,67 @@ async fn ip_prefix_filter_matches_exact_host_and_cidr() {
         assert!(
             ips.contains(&expected),
             "/24 CIDR filter must include {expected}; got {ips:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn patch_rejects_invalid_latitude_longitude_cc() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.121").await;
+
+    // Each invalid payload expects 400 + typed error code. `patch_json`
+    // asserts 200 so we dispatch through the axum `Service` directly.
+    use axum::http::{header, Request};
+    use tower::util::ServiceExt;
+    // JSON cannot represent NaN/Infinity (serde_json maps them to
+    // `null`, which is the PATCH's legal "set this column to NULL"
+    // form), so we don't test those cases — only out-of-range finite
+    // values can actually hit the handler's validation.
+    let cases: &[(&str, serde_json::Value)] = &[
+        (
+            "invalid_latitude",
+            serde_json::json!({ "latitude": 91.0 }),
+        ),
+        (
+            "invalid_latitude",
+            serde_json::json!({ "latitude": -90.5 }),
+        ),
+        (
+            "invalid_longitude",
+            serde_json::json!({ "longitude": -181.5 }),
+        ),
+        (
+            "invalid_country_code",
+            serde_json::json!({ "country_code": "USA" }),
+        ),
+        (
+            "invalid_country_code",
+            serde_json::json!({ "country_code": "1Z" }),
+        ),
+    ];
+
+    for (expected, body) in cases {
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/catalogue/{id}"))
+            .header(header::COOKIE, &h.cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("build PATCH request");
+        let resp = h.app.clone().oneshot(req).await.expect("dispatch");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "body = {body}, expected error = {expected}",
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(
+            parsed["error"], *expected,
+            "body = {body}, got response = {parsed}",
         );
     }
 }
