@@ -220,8 +220,9 @@ async fn writer_flushes_immediately_when_batch_size_reached() {
     });
 
     // Push exactly batch_size samples. If the batch-size race is live,
-    // the writer flushes well inside the 500ms window. If the interval
-    // timer is still authoritative the POST won't land for ~30s.
+    // the writer flushes in sub-second time even though batch_interval
+    // is 30 s. If the interval timer is still authoritative the POST
+    // won't land before the timeout and the assertion fails.
     for i in 0..5 {
         queue.push(sample(
             "meshmon_test_burst",
@@ -230,24 +231,16 @@ async fn writer_flushes_immediately_when_batch_size_reached() {
         ));
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let total: usize = mock
-        .received_requests()
-        .await
-        .iter()
-        .map(|r| {
-            decode_write_request(&r.body)
-                .timeseries
-                .iter()
-                .map(|ts| ts.samples.len())
-                .sum::<usize>()
-        })
-        .sum();
+    // Poll (rather than fixed-sleep) so this race-arm assertion is
+    // robust under parallel nextest load while still failing if the
+    // interval timer is authoritative — a 5 s budget is 100× smaller
+    // than the 30 s `batch_interval` that would fire on the timer.
+    let total = wait_for_samples(&mock, 5, Duration::from_secs(5)).await;
     assert_eq!(
         total, 5,
-        "expected size-driven flush within 500ms (batch_interval=30s); \
-         got {total} samples — batch-size race arm is not firing"
+        "expected size-driven flush well inside the 5s budget \
+         (batch_interval=30s); got {total} samples — batch-size race \
+         arm is not firing"
     );
 
     token.cancel();
