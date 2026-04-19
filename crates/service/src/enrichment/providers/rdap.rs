@@ -77,6 +77,17 @@ pub struct RdapProvider {
     /// start does not hit IANA five times in a row.
     #[allow(dead_code)]
     bootstrap: MemoryBootstrapStore,
+    /// Test-only override: when `Some`, the real Task-10 `lookup`
+    /// implementation will skip the IANA bootstrap fetch and issue a
+    /// direct `rdap_url_request` against `{base_url}/ip/{ip}`. Lets
+    /// the integration tests point the provider at a `wiremock`
+    /// [`MockServer`](wiremock::MockServer) without standing up a fake
+    /// bootstrap endpoint too. `None` in production paths — the
+    /// Task-10 `lookup` body routes through
+    /// [`icann_rdap_client::rdap::rdap_bootstrapped_request`] in that
+    /// case.
+    #[allow(dead_code)]
+    base_url_override: Option<String>,
 }
 
 impl RdapProvider {
@@ -95,6 +106,37 @@ impl RdapProvider {
         Ok(Self {
             client,
             bootstrap: MemoryBootstrapStore::new(),
+            base_url_override: None,
+        })
+    }
+
+    /// Test-only constructor that bypasses the IANA bootstrap step.
+    ///
+    /// The real production path resolves the RIR RDAP base URL via
+    /// [`icann_rdap_client::rdap::rdap_bootstrapped_request`], which
+    /// would require standing up a fake IANA bootstrap registry on top
+    /// of the mock server. Instead, tests pass the `wiremock`
+    /// [`MockServer`](wiremock::MockServer) base URL here and the
+    /// Task-10 `lookup` implementation short-circuits the bootstrap,
+    /// issuing `GET {base_url}/ip/{ip}` directly.
+    ///
+    /// The returned client is configured with `https_only(false)` so
+    /// the `http://` URL wiremock hands out is accepted — the default
+    /// `ClientConfig` refuses non-HTTPS requests.
+    // `dead_code` allow: only called from the in-file test module; no
+    // production caller today (Task 2 will leave this as a test-only
+    // seam even after wiring the real `lookup` body).
+    #[allow(dead_code)]
+    pub(crate) fn new_with_bootstrap_override(
+        base_url: impl Into<String>,
+    ) -> Result<Self, EnrichmentError> {
+        let config = ClientConfig::builder().https_only(false).build();
+        let client = create_client(&config)
+            .map_err(|e| EnrichmentError::Permanent(format!("rdap client init failed: {e}")))?;
+        Ok(Self {
+            client,
+            bootstrap: MemoryBootstrapStore::new(),
+            base_url_override: Some(base_url.into()),
         })
     }
 
@@ -164,6 +206,190 @@ impl EnrichmentProvider for RdapProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Minimal RFC-9083 `ip network` fixture for an IPv4 range.
+    ///
+    /// Trimmed to the fields [`RdapProvider::map_record`] consumes (ASN
+    /// via a network-object extension / name / country / an `entities[0]`
+    /// with a vCard `org` for the organisation). Task 2's real
+    /// `lookup` body destructures this shape into an
+    /// [`RdapRecordFixture`] before handing off to `map_record`. Kept
+    /// inline so the fixture stays colocated with the assertions — an
+    /// external JSON file would force a second lookup at review time to
+    /// confirm the contract.
+    fn ipv4_fixture_1_1_1_1() -> serde_json::Value {
+        json!({
+            "rdapConformance": ["rdap_level_0"],
+            "objectClassName": "ip network",
+            "handle": "NET-1-1-1-0-1",
+            "startAddress": "1.1.1.0",
+            "endAddress": "1.1.1.255",
+            "ipVersion": "v4",
+            "name": "CLOUDFLARENET",
+            "type": "DIRECT ALLOCATION",
+            "country": "US",
+            "status": ["active"],
+            "arin_originas0_originautnums": [13335],
+            "entities": [
+                {
+                    "objectClassName": "entity",
+                    "handle": "CLOUD14",
+                    "roles": ["registrant"],
+                    "vcardArray": [
+                        "vcard",
+                        [
+                            ["version", {}, "text", "4.0"],
+                            ["fn", {}, "text", "Cloudflare, Inc."],
+                            ["kind", {}, "text", "org"],
+                            ["org", {"type": "work"}, "text", "Cloudflare, Inc."]
+                        ]
+                    ]
+                }
+            ]
+        })
+    }
+
+    /// Minimal RFC-9083 `ip network` fixture for an IPv6 range.
+    ///
+    /// Same mapping contract as the IPv4 fixture — we just swap the
+    /// address range and `ipVersion` so Task 2's implementation cannot
+    /// hard-code an IPv4-only path and still pass both tests.
+    fn ipv6_fixture_2606_4700() -> serde_json::Value {
+        json!({
+            "rdapConformance": ["rdap_level_0"],
+            "objectClassName": "ip network",
+            "handle": "NET6-2606-4700-1",
+            "startAddress": "2606:4700::",
+            "endAddress": "2606:4700:ffff:ffff:ffff:ffff:ffff:ffff",
+            "ipVersion": "v6",
+            "name": "CLOUDFLARENET6",
+            "type": "DIRECT ALLOCATION",
+            "country": "US",
+            "status": ["active"],
+            "arin_originas0_originautnums": [13335],
+            "entities": [
+                {
+                    "objectClassName": "entity",
+                    "handle": "CLOUD14",
+                    "roles": ["registrant"],
+                    "vcardArray": [
+                        "vcard",
+                        [
+                            ["version", {}, "text", "4.0"],
+                            ["fn", {}, "text", "Cloudflare, Inc."],
+                            ["kind", {}, "text", "org"],
+                            ["org", {"type": "work"}, "text", "Cloudflare, Inc."]
+                        ]
+                    ]
+                }
+            ]
+        })
+    }
+
+    /// Stand up a `wiremock` server that answers `GET /ip/{ip}` with
+    /// the supplied RDAP JSON. Returns the running server so the test
+    /// can read its `.uri()` and keep it alive for the duration of the
+    /// assertions — dropping the handle would tear the mock down.
+    ///
+    /// We only stub the single `/ip/{ip}` path the provider is
+    /// expected to hit; any other request 404s by default, which makes
+    /// bootstrap-path regressions in Task 2 obvious (the test would
+    /// start failing with a "No match found" wiremock message rather
+    /// than silently succeeding against a permissive stub).
+    async fn start_rdap_fixture(ip: &str, body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/ip/{ip}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/rdap+json")
+                    .set_body_json(body),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn lookup_populates_fields_from_canned_rdap_response() {
+        // End-to-end contract: given a canned IPv4 RDAP response at a
+        // mock RIR endpoint, `lookup()` must parse the body and return
+        // ASN/NetworkOperator/CountryCode. This is the failing red
+        // test for Task 2 — the current stub returns `Permanent`, so
+        // the `.unwrap()` below will panic until Task 2 wires the real
+        // `rdap_url_request` call.
+        let server = start_rdap_fixture("1.1.1.1", ipv4_fixture_1_1_1_1()).await;
+        let provider = RdapProvider::new_with_bootstrap_override(server.uri())
+            .expect("rdap provider builds with bootstrap override");
+
+        let result = provider
+            .lookup("1.1.1.1".parse().unwrap())
+            .await
+            .expect("lookup should return Ok once Task 2 wires the real call");
+
+        assert!(
+            matches!(result.fields.get(&Field::Asn), Some(FieldValue::I32(13335))),
+            "Asn expected 13335, got {:?}",
+            result.fields.get(&Field::Asn),
+        );
+        assert!(
+            matches!(
+                result.fields.get(&Field::NetworkOperator),
+                Some(FieldValue::Text(s)) if s.contains("Cloudflare"),
+            ),
+            "NetworkOperator expected to contain 'Cloudflare', got {:?}",
+            result.fields.get(&Field::NetworkOperator),
+        );
+        assert!(
+            matches!(
+                result.fields.get(&Field::CountryCode),
+                Some(FieldValue::Text(s)) if s == "US",
+            ),
+            "CountryCode expected 'US', got {:?}",
+            result.fields.get(&Field::CountryCode),
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_populates_fields_from_canned_rdap_response_ipv6() {
+        // IPv6 mirror — guards against Task 2 hard-coding IPv4 in the
+        // URL builder or only handling `v4` `ipVersion` values. Same
+        // assertions as the IPv4 test so a single mapping bug fails
+        // both cases loudly.
+        let server = start_rdap_fixture("2606:4700::1111", ipv6_fixture_2606_4700()).await;
+        let provider = RdapProvider::new_with_bootstrap_override(server.uri())
+            .expect("rdap provider builds with bootstrap override");
+
+        let result = provider
+            .lookup("2606:4700::1111".parse().unwrap())
+            .await
+            .expect("lookup should return Ok once Task 2 wires the real call");
+
+        assert!(
+            matches!(result.fields.get(&Field::Asn), Some(FieldValue::I32(13335))),
+            "Asn expected 13335, got {:?}",
+            result.fields.get(&Field::Asn),
+        );
+        assert!(
+            matches!(
+                result.fields.get(&Field::NetworkOperator),
+                Some(FieldValue::Text(s)) if s.contains("Cloudflare"),
+            ),
+            "NetworkOperator expected to contain 'Cloudflare', got {:?}",
+            result.fields.get(&Field::NetworkOperator),
+        );
+        assert!(
+            matches!(
+                result.fields.get(&Field::CountryCode),
+                Some(FieldValue::Text(s)) if s == "US",
+            ),
+            "CountryCode expected 'US', got {:?}",
+            result.fields.get(&Field::CountryCode),
+        );
+    }
 
     #[test]
     fn maps_rdap_record_to_enrichment_result() {
