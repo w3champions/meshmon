@@ -1776,4 +1776,124 @@ mod tests {
             "truncate at first dest hit, any freq > 0"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Task 9: diff rules under per-probe denominator with silent hops
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn diff_rule1_fires_when_new_ip_crosses_20pct_of_all_probes() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
+        );
+        let mut t = tracker_with_last(Protocol::Icmp, last);
+        // Assign a target IP that is not present in any observed hop to prevent
+        // truncation from interfering with the assertion.
+        t.target_ip = ipv4(45, 248, 78, 119);
+
+        let now = Instant::now();
+        for _ in 0..8 {
+            t.observe(&[hop(3, Some(ipv4(10, 0, 0, 1)), Some(5_000))], now);
+        }
+        for _ in 0..2 {
+            t.observe(&[hop(3, Some(ipv4(10, 0, 0, 2)), Some(5_000))], now);
+        }
+        let new = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(
+            diff.reasons
+                .iter()
+                .any(|r| matches!(r, DiffReason::NewIp { position: 3, .. })),
+            "expected DiffReason::NewIp at pos 3: {:?}",
+            diff.reasons,
+        );
+    }
+
+    #[test]
+    fn diff_rule2_fires_when_dominant_ip_vanishes_at_lossy_hop() {
+        let last = snap(
+            Protocol::Icmp,
+            &[(3, vec![(ipv4(10, 0, 0, 1), 0.5)], 5_000)],
+        );
+        let mut t = tracker_with_last(Protocol::Icmp, last);
+        t.target_ip = ipv4(45, 248, 78, 119);
+
+        let now = Instant::now();
+        // Observe only silent (no-IP) hops at position 3 so the dominant IP
+        // from `last` now has frequency 0 — below missing_ip_max_freq (5%).
+        for _ in 0..10 {
+            t.observe(&[hop(3, None, None)], now);
+        }
+        let new = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let diff = t.diff_against(&new, &default_diff()).expect("diff");
+        assert!(
+            diff.reasons
+                .iter()
+                .any(|r| matches!(r, DiffReason::MissingIp { position: 3, .. })),
+            "expected DiffReason::MissingIp at pos 3: {:?}",
+            diff.reasons,
+        );
+    }
+
+    #[test]
+    fn diff_rule3_stable_across_silent_padded_snapshots() {
+        let target: IpAddr = ipv4(45, 248, 78, 119);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let mut now = Instant::now();
+
+        for _ in 0..30 {
+            t.observe(
+                &[
+                    hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000)),
+                    hop(2, None, None),
+                    hop(3, Some(target), Some(3_000)),
+                ],
+                now,
+            );
+            now += Duration::from_secs(1);
+        }
+        let first = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(first.hops.len(), 3, "silent pad keeps pos 2");
+        t.set_last_reported(first);
+
+        for _ in 0..60 {
+            t.observe(
+                &[
+                    hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000)),
+                    hop(2, None, None),
+                    hop(3, Some(target), Some(3_000)),
+                ],
+                now,
+            );
+            now += Duration::from_secs(1);
+        }
+        let second = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(t.diff_against(&second, &default_diff()), None);
+    }
+
+    #[test]
+    fn diff_rule4_unaffected_by_silent_samples() {
+        let target: IpAddr = ipv4(45, 248, 78, 119);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        for _ in 0..10 {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+        }
+        for _ in 0..10 {
+            t.observe(&[hop(1, None, None)], now);
+        }
+        let first = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        t.set_last_reported(first);
+        for _ in 0..10 {
+            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
+        }
+        for _ in 0..10 {
+            t.observe(&[hop(1, None, None)], now);
+        }
+        let second = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(t.diff_against(&second, &default_diff()), None);
+    }
 }
