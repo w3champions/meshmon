@@ -47,6 +47,38 @@ pub struct Config {
     pub probing: crate::probing::ProbingSection,
     /// Enrichment provider configuration for the IP catalogue.
     pub enrichment: EnrichmentSection,
+    /// Campaigns scheduler + size-preview configuration.
+    pub campaigns: CampaignsSection,
+}
+
+/// Campaigns scheduler, size-guard, and per-destination-rate-limit settings.
+#[derive(Debug, Clone)]
+pub struct CampaignsSection {
+    /// Soft warning threshold on the composer's expected-dispatch count.
+    /// Above this the frontend shows a confirm dialog. No hard cap.
+    pub size_warning_threshold: u32,
+    /// Scheduler tick interval in milliseconds. LISTEN/NOTIFY wakes the
+    /// scheduler early on state changes; the tick is the periodic
+    /// fallback.
+    pub scheduler_tick_ms: u32,
+    /// Maximum dispatch attempts per pair before it becomes `skipped`
+    /// with `last_error='agent_offline'`.
+    pub max_pair_attempts: u16,
+    /// Soft per-destination rate limit applied by the scheduler's token
+    /// bucket. T45 replaces this with the dispatch-transport's own
+    /// granularity; T44 uses it as the initial value.
+    pub per_destination_rps: u32,
+}
+
+impl Default for CampaignsSection {
+    fn default() -> Self {
+        Self {
+            size_warning_threshold: 1000,
+            scheduler_tick_ms: 500,
+            max_pair_attempts: 3,
+            per_destination_rps: 2,
+        }
+    }
 }
 
 /// Enrichment provider chain configuration.
@@ -326,6 +358,20 @@ struct RawConfig {
     probing: crate::probing::RawProbingSection,
     #[serde(default)]
     enrichment: RawEnrichmentSection,
+    #[serde(default)]
+    campaigns: RawCampaigns,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawCampaigns {
+    #[serde(default)]
+    size_warning_threshold: Option<u32>,
+    #[serde(default)]
+    scheduler_tick_ms: Option<u32>,
+    #[serde(default)]
+    max_pair_attempts: Option<u16>,
+    #[serde(default)]
+    per_destination_rps: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -712,6 +758,45 @@ impl Config {
         // --- enrichment section ---
         let enrichment = resolve_enrichment(raw.enrichment, path)?;
 
+        // --- campaigns section ---
+        let campaigns_defaults = CampaignsSection::default();
+        let campaigns = CampaignsSection {
+            size_warning_threshold: raw
+                .campaigns
+                .size_warning_threshold
+                .unwrap_or(campaigns_defaults.size_warning_threshold),
+            scheduler_tick_ms: match raw.campaigns.scheduler_tick_ms {
+                Some(0) => {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: "campaigns.scheduler_tick_ms must be > 0".to_string(),
+                    });
+                }
+                Some(n) => n,
+                None => campaigns_defaults.scheduler_tick_ms,
+            },
+            max_pair_attempts: match raw.campaigns.max_pair_attempts {
+                Some(0) => {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: "campaigns.max_pair_attempts must be > 0".to_string(),
+                    });
+                }
+                Some(n) => n,
+                None => campaigns_defaults.max_pair_attempts,
+            },
+            per_destination_rps: match raw.campaigns.per_destination_rps {
+                Some(0) => {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: "campaigns.per_destination_rps must be > 0".to_string(),
+                    });
+                }
+                Some(n) => n,
+                None => campaigns_defaults.per_destination_rps,
+            },
+        };
+
         Ok(Config {
             service,
             database,
@@ -722,6 +807,7 @@ impl Config {
             agents,
             probing,
             enrichment,
+            campaigns,
         })
     }
 }
@@ -1623,5 +1709,42 @@ acknowledged_tos = true
         assert!(!cfg.enrichment.rdap.enabled);
         assert!(!cfg.enrichment.maxmind.enabled);
         assert!(!cfg.enrichment.whois.enabled);
+    }
+
+    #[test]
+    fn campaigns_section_defaults_and_overrides() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[campaigns]
+size_warning_threshold = 500
+scheduler_tick_ms = 250
+max_pair_attempts = 5
+per_destination_rps = 4
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert_eq!(cfg.campaigns.size_warning_threshold, 500);
+        assert_eq!(cfg.campaigns.scheduler_tick_ms, 250);
+        assert_eq!(cfg.campaigns.max_pair_attempts, 5);
+        assert_eq!(cfg.campaigns.per_destination_rps, 4);
+
+        // Defaults apply when the section is omitted.
+        let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
+        assert_eq!(cfg.campaigns.size_warning_threshold, 1000);
+        assert_eq!(cfg.campaigns.scheduler_tick_ms, 500);
+        assert_eq!(cfg.campaigns.max_pair_attempts, 3);
+        assert_eq!(cfg.campaigns.per_destination_rps, 2);
+    }
+
+    #[test]
+    fn campaigns_rejects_zero_tick() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[campaigns]
+scheduler_tick_ms = 0
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").unwrap_err().to_string();
+        assert!(err.contains("scheduler_tick_ms"), "err = {err}");
     }
 }
