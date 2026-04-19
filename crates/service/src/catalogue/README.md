@@ -27,7 +27,9 @@ Two entry points create rows:
   `parse::parse_ip_tokens` → `repo::insert_many` → for each newly-
   created id, `AppState::enrichment_queue.enqueue(id)`.
 - **Agent Register** — `AgentApi::Register` →
-  `repo::ensure_from_agent(pool, ip, lat, lon)` → the row is created
+  `repo::ensure_from_agent(&mut *tx, ip, lat, lon)` (inside the same
+  transaction as the `agents` upsert so both writes commit atomically)
+  → the row is created
   (or latitude / longitude is refreshed) with `operator_edited_fields`
   union-merged to include `Latitude` and `Longitude`. The runner sweep
   later picks the `pending` row up for enrichment of the unlocked

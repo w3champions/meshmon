@@ -182,8 +182,11 @@ state rather than drift silently.
 
 ## Agent Register hook
 
-`AgentApi::Register` calls `catalogue::repo::ensure_from_agent(pool,
-ip, lat, lon)` after the agent row upsert:
+`AgentApi::Register` calls
+`catalogue::repo::ensure_from_agent(&mut *tx, ip, lat, lon)` inside
+the same transaction as the `agents` upsert, so a catalogue-sync
+failure rolls back the agent write too. SSE publish and enrichment
+enqueue happen after `tx.commit()`:
 
 - Missing catalogue row → `INSERT` with `source =
   'agent_registration'` and `operator_edited_fields =
