@@ -193,10 +193,8 @@ pub struct RouteTracker {
     position_probes: HashMap<u8, HopObservationsAcc>,
     /// Most-recently emitted snapshot, for the next `diff_against` call.
     last_reported: Option<RouteSnapshot>,
-    /// IP address of the probe target. Reserved for future tasks (Task 8:
-    /// truncation at destination). Stored now so the constructor signature
-    /// is stable; reads will land in later tasks.
-    #[allow(dead_code)]
+    /// IP address of the probe target. Used by `build_snapshot` to truncate
+    /// the hop list at the first position where the destination responded.
     target_ip: IpAddr,
 }
 
@@ -407,6 +405,18 @@ impl RouteTracker {
                 stddev_rtt_micros,
                 loss_pct,
             });
+        }
+
+        // Truncate at the first position whose observed_ips contains the
+        // target IP at any frequency > 0. Matches mtr's "stop at destination"
+        // semantics and drops trippy's over-probe replies where the
+        // destination responds to TTLs > the real hop count.
+        if let Some(idx) = hops_out.iter().position(|h| {
+            h.observed_ips
+                .iter()
+                .any(|o| o.ip == self.target_ip && o.frequency > 0.0)
+        }) {
+            hops_out.truncate(idx + 1);
         }
 
         if hops_out.is_empty() {
@@ -1693,5 +1703,77 @@ mod tests {
         // Final direct call for belt-and-suspenders.
         #[cfg(debug_assertions)]
         t.assert_consistency();
+    }
+
+    #[test]
+    fn build_snapshot_truncates_after_first_target_ip_hit() {
+        let target: IpAddr = ipv4(208, 83, 237, 164);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(100))], now);
+        t.observe(&[hop(13, Some(target), Some(260_000))], now);
+        t.observe(&[hop(14, Some(target), Some(260_000))], now);
+        t.observe(&[hop(15, Some(target), Some(260_000))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let positions: Vec<u8> = snap.hops.iter().map(|h| h.position).collect();
+        assert_eq!(positions, vec![1, 13], "positions past destination dropped");
+    }
+
+    #[test]
+    fn build_snapshot_keeps_silent_hops_before_destination() {
+        let target: IpAddr = ipv4(45, 248, 78, 119);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        t.observe(
+            &[
+                hop(1, Some(ipv4(10, 0, 0, 1)), Some(100)),
+                hop(5, None, None),
+                hop(13, Some(target), Some(260_000)),
+            ],
+            now,
+        );
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let positions: Vec<u8> = snap.hops.iter().map(|h| h.position).collect();
+        assert_eq!(positions, vec![1, 5, 13]);
+        assert!(
+            snap.hops[1].observed_ips.is_empty(),
+            "pos 5 silent retained"
+        );
+        assert_eq!(snap.hops[2].observed_ips[0].ip, target);
+    }
+
+    #[test]
+    fn build_snapshot_no_truncation_when_target_ip_absent() {
+        let target: IpAddr = ipv4(1, 1, 1, 1);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(100))], now);
+        t.observe(&[hop(2, Some(ipv4(10, 0, 0, 2)), Some(200))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(snap.hops.len(), 2, "no target IP → no truncation");
+    }
+
+    #[test]
+    fn build_snapshot_truncates_at_first_target_ip_even_at_very_low_freq() {
+        let target: IpAddr = ipv4(45, 248, 78, 119);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        for _ in 0..99 {
+            t.observe(&[hop(11, Some(ipv4(10, 0, 0, 99)), Some(1_000))], now);
+        }
+        t.observe(&[hop(11, Some(target), Some(1_000))], now);
+        t.observe(&[hop(12, Some(ipv4(10, 0, 0, 12)), Some(2_000))], now);
+        t.observe(&[hop(13, Some(ipv4(10, 0, 0, 13)), Some(3_000))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        let positions: Vec<u8> = snap.hops.iter().map(|h| h.position).collect();
+        assert_eq!(
+            positions,
+            vec![11],
+            "truncate at first dest hit, any freq > 0"
+        );
     }
 }
