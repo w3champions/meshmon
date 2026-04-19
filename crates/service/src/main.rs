@@ -258,8 +258,8 @@ async fn run() -> anyhow::Result<()> {
     // way missing `acknowledged_tos` does in the config loader. The
     // operator can disable the broken provider explicitly to return to
     // a healthy chain.
-    let enrichment_chain = build_chain(&initial_config.enrichment)
-        .context("build enrichment provider chain")?;
+    let enrichment_chain =
+        build_chain(&initial_config.enrichment).context("build enrichment provider chain")?;
     info!(
         providers = enrichment_chain.len(),
         "enrichment chain initialised",

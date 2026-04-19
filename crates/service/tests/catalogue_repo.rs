@@ -10,6 +10,7 @@ use meshmon_service::catalogue::{
     model::{CatalogueSource, EnrichmentStatus, Field},
     repo,
 };
+use meshmon_service::enrichment::MergedFields;
 use std::net::IpAddr;
 
 #[tokio::test]
@@ -277,6 +278,93 @@ async fn facets_aggregates_counts_per_column() {
     assert!(facets.asns.is_empty());
     assert!(facets.networks.is_empty());
     assert!(facets.cities.is_empty());
+
+    db.close().await;
+}
+
+/// Regression guard for the operator-lock race closed by the `CASE …
+/// ANY(operator_edited_fields)` guards in `apply_enrichment_result`.
+///
+/// Scenario: an operator PATCH adds `City` to the lock set *after* the
+/// runner snapshotted `operator_edited_fields` but *before* the runner
+/// writes its merged result. With only the runner-side snapshot check
+/// (the pre-fix code) the write would still overwrite the operator's
+/// City. With the DB-side write-time re-check, the UPDATE observes the
+/// freshly-committed lock and preserves the operator's value.
+///
+/// We simulate the race by calling `apply_enrichment_result` directly
+/// with a populated `city` AFTER seeding the row with
+/// `operator_edited_fields = ['City']` and a specific operator value.
+#[tokio::test]
+async fn apply_enrichment_respects_locks_committed_after_snapshot() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["10.9.9.9".parse().unwrap()];
+    let out = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = out.created[0].id;
+
+    // Seed the row to the state an operator PATCH would produce mid-
+    // lookup: `city` set + `City` lock present. No other fields locked.
+    sqlx::query(
+        "UPDATE ip_catalogue
+         SET city = 'OperatorCity',
+             operator_edited_fields = ARRAY['City']::text[]
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // Merged fields a provider might want to write — `city = FromProvider`
+    // must be IGNORED because `City` is now locked at DB level, even
+    // though the runner's pre-lookup snapshot was empty.
+    let mut merged = MergedFields::default();
+    merged.apply(
+        "test-provider",
+        meshmon_service::enrichment::EnrichmentResult {
+            fields: [
+                (
+                    Field::City,
+                    meshmon_service::enrichment::FieldValue::Text("FromProvider".into()),
+                ),
+                (
+                    Field::CountryCode,
+                    meshmon_service::enrichment::FieldValue::Text("US".into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        // empty locked set — the runner's pre-lookup snapshot.
+        &[],
+    );
+
+    repo::apply_enrichment_result(&db.pool, id, merged)
+        .await
+        .unwrap();
+
+    // Assert: city survived (write-time CASE saw the lock); country_code
+    // landed (not locked).
+    let row: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT city, country_code FROM ip_catalogue WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        row.0.as_deref(),
+        Some("OperatorCity"),
+        "operator lock added after snapshot must survive the write",
+    );
+    assert_eq!(
+        row.1.as_deref(),
+        Some("US"),
+        "unlocked field must still be written",
+    );
 
     db.close().await;
 }

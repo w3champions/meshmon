@@ -437,14 +437,21 @@ pub async fn mark_enrichment_start_bulk(pool: &PgPool, ids: &[Uuid]) -> Result<u
 /// Returns the terminal [`EnrichmentStatus`] that was just written, so the
 /// caller can publish a progress event without a second round-trip.
 ///
-/// The operator lock was already enforced by [`MergedFields::apply`]; this
-/// function does not re-check it.
+/// Lock enforcement happens at two points: [`MergedFields::apply`] skips
+/// provider writes against the locked set the *runner* snapshotted before
+/// lookup, and the `CASE … WHEN 'Foo' = ANY(operator_edited_fields)` guards
+/// below *re-check at write time* against the row's current lock set.
+/// The second check closes the race where an operator PATCH adds a lock
+/// mid-lookup: even if the runner's snapshot was pre-lock, the UPDATE
+/// observes the freshly-committed `operator_edited_fields` and preserves
+/// the operator's value.
 ///
 /// The operator-only columns `display_name`, `website`, and `notes` are
 /// intentionally not touched by this function — they are never populated
 /// by enrichment providers. Code adding a new enrichable field to
-/// [`MergedFields`] must also add the corresponding `SET` column here or
-/// the new field will silently fail to persist.
+/// [`MergedFields`] must also add the corresponding `CASE`-guarded `SET`
+/// column here (and mirror the lock name with [`Field::as_str`]) or the
+/// new field will silently fail to persist.
 pub async fn apply_enrichment_result(
     pool: &PgPool,
     id: Uuid,
@@ -458,13 +465,34 @@ pub async fn apply_enrichment_result(
     sqlx::query!(
         r#"
         UPDATE ip_catalogue SET
-            city             = COALESCE($2, city),
-            country_code     = COALESCE($3, country_code),
-            country_name     = COALESCE($4, country_name),
-            latitude         = COALESCE($5, latitude),
-            longitude        = COALESCE($6, longitude),
-            asn              = COALESCE($7, asn),
-            network_operator = COALESCE($8, network_operator),
+            city = CASE
+                WHEN 'City' = ANY(operator_edited_fields) THEN city
+                ELSE COALESCE($2, city)
+            END,
+            country_code = CASE
+                WHEN 'CountryCode' = ANY(operator_edited_fields) THEN country_code
+                ELSE COALESCE($3, country_code)
+            END,
+            country_name = CASE
+                WHEN 'CountryName' = ANY(operator_edited_fields) THEN country_name
+                ELSE COALESCE($4, country_name)
+            END,
+            latitude = CASE
+                WHEN 'Latitude' = ANY(operator_edited_fields) THEN latitude
+                ELSE COALESCE($5, latitude)
+            END,
+            longitude = CASE
+                WHEN 'Longitude' = ANY(operator_edited_fields) THEN longitude
+                ELSE COALESCE($6, longitude)
+            END,
+            asn = CASE
+                WHEN 'Asn' = ANY(operator_edited_fields) THEN asn
+                ELSE COALESCE($7, asn)
+            END,
+            network_operator = CASE
+                WHEN 'NetworkOperator' = ANY(operator_edited_fields) THEN network_operator
+                ELSE COALESCE($8, network_operator)
+            END,
             enrichment_status = $9::enrichment_status,
             enriched_at       = NOW()
         WHERE id = $1
