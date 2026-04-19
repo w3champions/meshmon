@@ -1,6 +1,7 @@
 //! Library surface of the meshmon service.
 //!
 //! Per-module responsibilities:
+//! - [`campaign`] — measurement-campaign data model, scheduler, and operator API.
 //! - [`catalogue`] — IP catalogue registry, paste parser, enrichment wiring.
 //! - [`config`] — `meshmon.toml` parsing + validation.
 //! - [`db`] — Postgres pool + migrations.
@@ -18,6 +19,7 @@
 #![deny(rust_2018_idioms, unused_must_use)]
 #![warn(missing_docs)]
 
+pub mod campaign;
 pub mod catalogue;
 pub mod commands;
 pub mod config;
