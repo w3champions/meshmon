@@ -29,6 +29,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 meshmon-protocol = { path = "../protocol" }
 meshmon-revtunnel = { path = "../revtunnel" }
+moka = { workspace = true }
 prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
 chrono = { workspace = true }
