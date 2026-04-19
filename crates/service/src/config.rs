@@ -363,7 +363,14 @@ impl Default for RawRdapSection {
 }
 
 fn rdap_enabled_default() -> bool {
-    true
+    // The RDAP provider is currently a stub — its `lookup()` returns a
+    // permanent error for every IP (the real `rdap_bootstrapped_request`
+    // wiring is scheduled for a follow-up task). Defaulting to `false`
+    // keeps the out-of-the-box enrichment chain from walking through a
+    // guaranteed-fail provider on every row. Operators who want to
+    // opt in to the live wiring can flip `[enrichment.rdap] enabled`
+    // to `true` once the provider ships.
+    false
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1604,11 +1611,12 @@ acknowledged_tos = true
 
     #[test]
     fn enrichment_defaults_when_section_absent() {
-        // No [enrichment] block at all → every provider is disabled
-        // except RDAP (free, registry-maintained — default on).
+        // No [enrichment] block at all → every provider is disabled.
+        // RDAP is default-off while its lookup remains a stub (see
+        // `rdap_enabled_default` for the reasoning).
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
         assert!(!cfg.enrichment.ipgeolocation.enabled);
-        assert!(cfg.enrichment.rdap.enabled);
+        assert!(!cfg.enrichment.rdap.enabled);
         assert!(!cfg.enrichment.maxmind.enabled);
         assert!(!cfg.enrichment.whois.enabled);
     }

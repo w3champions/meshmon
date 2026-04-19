@@ -480,8 +480,9 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_401_maps_to_unauthorized() {
-        // 401 → EnrichmentError::Unauthorized so the runner can disable
-        // this provider for the rest of the process.
+        // 401 → EnrichmentError::Unauthorized. The runner currently only
+        // logs this — a future enhancement may disable the provider for
+        // the remaining rows of the process.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/ipgeo"))

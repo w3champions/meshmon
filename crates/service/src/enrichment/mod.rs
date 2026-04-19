@@ -46,9 +46,10 @@ pub enum EnrichmentError {
         /// Suggested wait interval parsed from the provider response.
         retry_after: Option<Duration>,
     },
-    /// Credentials missing or rejected. The runner disables the provider
-    /// for the rest of the process to avoid hammering the upstream with
-    /// guaranteed-failing calls.
+    /// Credentials missing or rejected. The runner logs and skips this
+    /// provider for the current row; subsequent rows will retry. A
+    /// follow-up TODO may add per-process disable-on-401, but today the
+    /// runner does not carry that state.
     #[error("unauthorized — check API key")]
     Unauthorized,
     /// Provider confirmed the IP has no record. Treated as a terminal

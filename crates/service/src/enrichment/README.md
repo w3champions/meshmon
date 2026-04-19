@@ -46,7 +46,7 @@ in one place.
 | Variant | Runner reaction |
 |---|---|
 | `RateLimited { retry_after }` | Log and move on. Row stays `pending`; the 30-second sweep re-picks it. |
-| `Unauthorized` | Log at warn. Provider will keep 401-ing on subsequent calls; treat the provider as effectively dead until the credential is rotated. |
+| `Unauthorized` | Log at warn. The runner does not currently disable the provider — it will keep 401-ing until the credential is rotated, generating a warn log per attempt. A future patch may add per-process disable-on-401. |
 | `NotFound` | Terminal for this provider; runner falls through to the next one in the chain. |
 | `Transient(String)` | Log; continue the chain. If no provider wrote anything, the sweep re-picks the row. |
 | `Permanent(String)` | Log; continue the chain. Not retryable for this row. |
@@ -70,3 +70,12 @@ the feature compiled in is a boot-time error.
 
 `[enrichment.ipgeolocation] enabled = true` additionally requires
 `acknowledged_tos = true` — the loader aborts boot on violation.
+
+### RDAP default
+
+`[enrichment.rdap] enabled` defaults to `false` because the provider's
+`lookup()` is currently a TODO stub that returns a permanent error for
+every IP. Toggle to `true` only after the real `rdap_bootstrapped_request`
+wire-up ships (tracked separately), otherwise every row that reaches the
+RDAP slot walks through a guaranteed-fail path and spends log lines
+without producing fields.
