@@ -596,12 +596,23 @@ pub async fn expire_stale_attempts(pool: &PgPool, max_attempts: i16) -> Result<u
 /// Atomically flip a `running` campaign to `completed` iff no pair
 /// remains in `pending` or `dispatched`. Returns `true` if the flip
 /// happened. Safe to call repeatedly.
-pub async fn maybe_complete(_pool: &PgPool, _campaign_id: Uuid) -> Result<bool, RepoError> {
-    todo!(
-        "atomically check and flip using WHERE NOT EXISTS \
-         (SELECT 1 FROM campaign_pairs WHERE campaign_id=$1 \
-          AND resolution_state IN ('pending','dispatched'))"
+pub async fn maybe_complete(pool: &PgPool, campaign_id: Uuid) -> Result<bool, RepoError> {
+    let updated = sqlx::query_scalar!(
+        "UPDATE measurement_campaigns
+            SET state = 'completed', completed_at = now()
+          WHERE id = $1
+            AND state = 'running'
+            AND NOT EXISTS (
+                SELECT 1 FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND resolution_state IN ('pending','dispatched')
+            )
+         RETURNING id",
+        campaign_id
     )
+    .fetch_optional(pool)
+    .await?;
+    Ok(updated.is_some())
 }
 
 // ----- Helpers ----------------------------------------------------------
