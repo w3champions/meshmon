@@ -101,10 +101,9 @@ function splitCidr(token: string): CidrSplit | null {
 function parseSuffix(suffix: string): number | null {
   if (suffix.length === 0) return null;
   // Require pure digits — reject "+32", "0x20", "32 ", etc.
+  // The `\d+` guard guarantees `Number(suffix)` is a non-negative integer.
   if (!/^\d+$/.test(suffix)) return null;
-  const value = Number(suffix);
-  if (!Number.isInteger(value)) return null;
-  return value;
+  return Number(suffix);
 }
 
 type Classification =
@@ -120,8 +119,7 @@ function classifyToken(token: string): Classification {
       return { kind: "rejected", reason: "invalid_ip" };
     }
     const hostPrefix = parsed.family === "v4" ? IPV4_HOST_PREFIX : IPV6_HOST_PREFIX;
-    const maxPrefix = hostPrefix;
-    if (prefix > maxPrefix) {
+    if (prefix > hostPrefix) {
       return { kind: "rejected", reason: "invalid_ip" };
     }
     if (prefix !== hostPrefix) {

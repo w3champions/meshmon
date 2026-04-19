@@ -87,4 +87,15 @@ describe("parsePasteInput", () => {
     expect(out.accepted).toEqual([]);
     expect(out.rejected).toEqual([{ token: "1.1.1.1/abc", reason: "invalid_ip" }]);
   });
+
+  it("rejects IPv4 octets with leading zeros", () => {
+    const out = parsePasteInput("01.1.1.1");
+    expect(out.accepted).toEqual([]);
+    expect(out.rejected).toEqual([{ token: "01.1.1.1", reason: "invalid_ip" }]);
+  });
+
+  it("returns empty outcome for whitespace-only input", () => {
+    const out = parsePasteInput("   \n  ");
+    expect(out).toEqual({ accepted: [], rejected: [] });
+  });
 });
