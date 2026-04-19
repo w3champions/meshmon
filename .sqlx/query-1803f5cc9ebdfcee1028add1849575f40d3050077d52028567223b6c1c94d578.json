@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE campaign_pairs\n                        SET resolution_state = 'pending',\n                            dispatched_at    = NULL,\n                            attempt_count    = GREATEST(0, attempt_count - 1)\n                      WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1803f5cc9ebdfcee1028add1849575f40d3050077d52028567223b6c1c94d578"
+}
