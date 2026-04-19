@@ -53,6 +53,33 @@ impl PairResolutionState {
             Self::Reused | Self::Succeeded | Self::Unreachable | Self::Skipped
         )
     }
+
+    /// Stable lowercase label matching the Postgres enum value. Used as
+    /// the `state` label on `meshmon_campaign_pairs_total`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Dispatched => "dispatched",
+            Self::Reused => "reused",
+            Self::Succeeded => "succeeded",
+            Self::Unreachable => "unreachable",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+impl CampaignState {
+    /// Stable lowercase label matching the Postgres enum value. Used as
+    /// the `state` label on `meshmon_campaigns_total`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Evaluated => "evaluated",
+            Self::Stopped => "stopped",
+        }
+    }
 }
 
 /// The probe protocol an individual pair uses.
@@ -247,6 +274,25 @@ mod tests {
             CampaignState::Evaluated,
             CampaignState::Stopped
         ));
+    }
+
+    #[test]
+    fn campaign_state_as_str_matches_postgres_enum() {
+        assert_eq!(CampaignState::Draft.as_str(), "draft");
+        assert_eq!(CampaignState::Running.as_str(), "running");
+        assert_eq!(CampaignState::Completed.as_str(), "completed");
+        assert_eq!(CampaignState::Evaluated.as_str(), "evaluated");
+        assert_eq!(CampaignState::Stopped.as_str(), "stopped");
+    }
+
+    #[test]
+    fn pair_resolution_state_as_str_matches_postgres_enum() {
+        assert_eq!(PairResolutionState::Pending.as_str(), "pending");
+        assert_eq!(PairResolutionState::Dispatched.as_str(), "dispatched");
+        assert_eq!(PairResolutionState::Reused.as_str(), "reused");
+        assert_eq!(PairResolutionState::Succeeded.as_str(), "succeeded");
+        assert_eq!(PairResolutionState::Unreachable.as_str(), "unreachable");
+        assert_eq!(PairResolutionState::Skipped.as_str(), "skipped");
     }
 
     #[test]

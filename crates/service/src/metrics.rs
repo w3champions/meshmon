@@ -50,6 +50,22 @@ pub const TUNNEL_AGENTS: &str = "meshmon_service_tunnel_agents";
 /// Counter: service → agent command RPCs. Labels: `method`, `outcome`.
 pub const COMMAND_RPCS_TOTAL: &str = "meshmon_service_command_rpcs_total";
 
+// --- Campaign scheduler self-metrics (T44-13). -----------------------------
+// These carry `meshmon_campaigns_*` / `meshmon_campaign_*` /
+// `meshmon_scheduler_*` prefixes rather than `meshmon_service_*` because they
+// describe campaign-domain state (lifecycle counts, reuse efficacy, tick
+// latency) rather than service-process internals. Alert rules in
+// `deploy/alerts/rules.yaml` match on these names directly.
+
+/// Gauge: number of campaigns by lifecycle state. Label: `state`.
+pub const CAMPAIGNS_TOTAL: &str = "meshmon_campaigns_total";
+/// Gauge: number of campaign pairs by resolution state. Label: `state`.
+pub const CAMPAIGN_PAIRS_TOTAL: &str = "meshmon_campaign_pairs_total";
+/// Gauge: fraction of terminal pairs resolved via the 24 h reuse window.
+pub const CAMPAIGN_REUSE_RATIO: &str = "meshmon_campaign_reuse_ratio";
+/// Histogram: wall time of one scheduler tick (`Scheduler::tick_once`).
+pub const SCHEDULER_TICK_SECONDS: &str = "meshmon_scheduler_tick_seconds";
+
 // HTTP request counter names (`meshmon_service_http_requests_total`,
 // `..._duration_seconds`, `..._pending`) are not declared here — they
 // are renamed at compile time via the `AXUM_HTTP_*` env vars in
@@ -80,6 +96,10 @@ const ALL_METRIC_NAMES: &[&str] = &[
     REGISTRY_REFRESH_ERRORS_TOTAL,
     TUNNEL_AGENTS,
     COMMAND_RPCS_TOTAL,
+    CAMPAIGNS_TOTAL,
+    CAMPAIGN_PAIRS_TOTAL,
+    CAMPAIGN_REUSE_RATIO,
+    SCHEDULER_TICK_SECONDS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -231,6 +251,29 @@ pub fn command_rpcs(method: &'static str, outcome: CommandOutcome) -> Counter {
     counter!(COMMAND_RPCS_TOTAL, "method" => method, "outcome" => outcome.as_str())
 }
 
+/// Gauge handle for [`CAMPAIGNS_TOTAL`] with the given campaign state.
+///
+/// Accepts the stable lowercase label from [`crate::campaign::model::CampaignState::as_str`]
+/// so `metrics.rs` does not import the campaign module.
+pub fn campaigns_total(state: &'static str) -> Gauge {
+    gauge!(CAMPAIGNS_TOTAL, "state" => state)
+}
+
+/// Gauge handle for [`CAMPAIGN_PAIRS_TOTAL`] with the given pair resolution state.
+pub fn campaign_pairs_total(state: &'static str) -> Gauge {
+    gauge!(CAMPAIGN_PAIRS_TOTAL, "state" => state)
+}
+
+/// Gauge handle for [`CAMPAIGN_REUSE_RATIO`].
+pub fn campaign_reuse_ratio() -> Gauge {
+    gauge!(CAMPAIGN_REUSE_RATIO)
+}
+
+/// Histogram handle for [`SCHEDULER_TICK_SECONDS`].
+pub fn scheduler_tick_seconds() -> Histogram {
+    histogram!(SCHEDULER_TICK_SECONDS)
+}
+
 // ---------------------------------------------------------------------------
 // One-shot: emit build_info with its two static labels.
 // ---------------------------------------------------------------------------
@@ -313,9 +356,35 @@ pub fn describe_service_metrics() {
         Unit::Count,
         "Service-to-agent command RPCs. Labels: method, outcome"
     );
+    describe_campaign_metrics();
     // HTTP request metrics: described by axum-prometheus at layer-build
     // time. Metric names are renamed at compile time via
     // `AXUM_HTTP_*` env vars in `.cargo/config.toml`.
+}
+
+/// Describe campaign-scheduler self-metrics (T44-13). Called from
+/// [`describe_service_metrics`]; factored out so the campaign module
+/// owns its HELP/TYPE strings.
+pub fn describe_campaign_metrics() {
+    describe_gauge!(
+        CAMPAIGNS_TOTAL,
+        Unit::Count,
+        "Number of campaigns by lifecycle state. Label: state"
+    );
+    describe_gauge!(
+        CAMPAIGN_PAIRS_TOTAL,
+        Unit::Count,
+        "Number of campaign pairs by resolution state. Label: state"
+    );
+    describe_gauge!(
+        CAMPAIGN_REUSE_RATIO,
+        "Fraction of terminal pairs resolved via the 24 h reuse window (0.0 when no terminal pairs)"
+    );
+    describe_histogram!(
+        SCHEDULER_TICK_SECONDS,
+        Unit::Seconds,
+        "Wall time of one campaign-scheduler tick (Scheduler::tick_once)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +474,38 @@ mod tests {
     }
 
     #[test]
+    fn describe_campaign_metrics_is_idempotent_and_emits_help_lines() {
+        // Safety: describe_* is a no-op against a missing recorder and
+        // idempotent against the shared installed one (metrics crate only
+        // records the last HELP/TYPE). Call it standalone to prove the
+        // macro names + constants line up.
+        describe_campaign_metrics();
+        let h = shared_install();
+        // Touch each campaign-scope metric so render() includes it.
+        campaigns_total("running").set(2.0);
+        campaign_pairs_total("pending").set(4.0);
+        campaign_reuse_ratio().set(0.25);
+        scheduler_tick_seconds().record(0.01);
+
+        let body = h.render();
+        for name in [
+            CAMPAIGNS_TOTAL,
+            CAMPAIGN_PAIRS_TOTAL,
+            CAMPAIGN_REUSE_RATIO,
+            SCHEDULER_TICK_SECONDS,
+        ] {
+            assert!(
+                body.contains(&format!("# HELP {name}")),
+                "missing HELP for {name} in:\n{body}"
+            );
+            assert!(
+                body.contains(&format!("# TYPE {name}")),
+                "missing TYPE for {name} in:\n{body}"
+            );
+        }
+    }
+
+    #[test]
     fn describe_emits_help_and_type_for_every_metric() {
         let h = shared_install();
         // Touch each metric so render() includes it.
@@ -420,6 +521,10 @@ mod tests {
         registry_refresh_errors().increment(0);
         tunnel_agents().set(0.0);
         command_rpcs("refresh_config", CommandOutcome::Ok).increment(0);
+        campaigns_total("running").set(0.0);
+        campaign_pairs_total("pending").set(0.0);
+        campaign_reuse_ratio().set(0.0);
+        scheduler_tick_seconds().record(0.0);
         // BUILD_INFO is intentionally not in ALL_METRIC_NAMES (it's a
         // one-shot with non-enumerable labels). Exercise it separately so
         // this test's name ("every metric") doesn't lie.

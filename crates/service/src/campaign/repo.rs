@@ -768,6 +768,60 @@ pub async fn expire_stale_attempts(pool: &PgPool, max_attempts: i16) -> Result<u
     Ok(affected)
 }
 
+/// Summary statistics for scheduler self-metrics.
+///
+/// Returns counts per campaign state, counts per pair resolution state,
+/// and the fraction of terminal pairs resolved via the 24 h reuse window.
+#[derive(Debug, Default, Clone)]
+pub struct MetricsSnapshot {
+    /// `(state, count)` for every distinct `measurement_campaigns.state`.
+    pub campaigns: Vec<(CampaignState, i64)>,
+    /// `(state, count)` for every distinct `campaign_pairs.resolution_state`.
+    pub pairs: Vec<(PairResolutionState, i64)>,
+    /// Fraction of terminal pairs resolved via reuse; `0.0` when there
+    /// are no terminal pairs yet (SQL returns NULL in that case).
+    pub reuse_ratio: f64,
+}
+
+/// Aggregate the scheduler self-metrics into one [`MetricsSnapshot`].
+///
+/// Three aggregates over small indexed tables executed sequentially on
+/// the shared pool. Called once per scheduler tick — the cost is
+/// dominated by round-trip latency, not scan work. Uses runtime
+/// [`sqlx::query_as`] (typed tuple) rather than `query_as!` so the
+/// `.sqlx/` offline cache does not need regeneration.
+pub async fn metrics_snapshot(pool: &PgPool) -> Result<MetricsSnapshot, RepoError> {
+    let campaigns: Vec<(CampaignState, i64)> = sqlx::query_as::<_, (CampaignState, i64)>(
+        "SELECT state, COUNT(*) FROM measurement_campaigns GROUP BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let pairs: Vec<(PairResolutionState, i64)> =
+        sqlx::query_as::<_, (PairResolutionState, i64)>(
+            "SELECT resolution_state, COUNT(*) FROM campaign_pairs GROUP BY 1",
+        )
+        .fetch_all(pool)
+        .await?;
+
+    let reuse_ratio: Option<f64> = sqlx::query_scalar(
+        "SELECT CASE WHEN COUNT(*) = 0 THEN NULL \
+                ELSE COUNT(*) FILTER (WHERE resolution_state='reused')::float8 \
+                     / COUNT(*)::float8 \
+              END \
+           FROM campaign_pairs \
+          WHERE resolution_state IN ('reused','succeeded','unreachable','skipped')",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(MetricsSnapshot {
+        campaigns,
+        pairs,
+        reuse_ratio: reuse_ratio.unwrap_or(0.0),
+    })
+}
+
 /// Atomically flip a `running` campaign to `completed` iff no pair
 /// remains in `pending` or `dispatched`. Returns `true` if the flip
 /// happened. Safe to call repeatedly.

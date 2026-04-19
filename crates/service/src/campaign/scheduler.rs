@@ -15,6 +15,7 @@ use super::dispatch::{PairDispatcher, PendingPair};
 use super::events::NOTIFY_CHANNEL;
 use super::model::CampaignState;
 use super::repo::{self, RepoError};
+use crate::metrics;
 use crate::registry::AgentRegistry;
 use moka::future::Cache;
 use sqlx::postgres::PgListener;
@@ -198,6 +199,41 @@ impl Scheduler {
     }
 
     async fn tick_once(
+        &self,
+        buckets: &Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>>,
+        cursor: &mut usize,
+    ) -> Result<(), RepoError> {
+        // Stopwatch around the dispatch body. We record the histogram
+        // whether the inner loop returns Ok or Err so failed ticks still
+        // show up in SLOs; then sample the gauges once per tick.
+        let started = Instant::now();
+        let result = self.tick_once_inner(buckets, cursor).await;
+        metrics::scheduler_tick_seconds().record(started.elapsed().as_secs_f64());
+        self.sample_metrics().await;
+        result
+    }
+
+    /// One-shot snapshot of campaign/pair counts + reuse ratio. Any error
+    /// is swallowed with a warn — a tick that dispatched work should not
+    /// fail because the aggregate query misbehaved.
+    async fn sample_metrics(&self) {
+        match repo::metrics_snapshot(&self.pool).await {
+            Ok(snap) => {
+                for (state, n) in &snap.campaigns {
+                    metrics::campaigns_total(state.as_str()).set(*n as f64);
+                }
+                for (state, n) in &snap.pairs {
+                    metrics::campaign_pairs_total(state.as_str()).set(*n as f64);
+                }
+                metrics::campaign_reuse_ratio().set(snap.reuse_ratio);
+            }
+            Err(e) => {
+                warn!(error = %e, "scheduler: metrics snapshot failed");
+            }
+        }
+    }
+
+    async fn tick_once_inner(
         &self,
         buckets: &Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>>,
         cursor: &mut usize,
