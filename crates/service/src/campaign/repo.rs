@@ -453,12 +453,49 @@ pub async fn active_campaigns(pool: &PgPool) -> Result<Vec<Uuid>, RepoError> {
 /// incrementing `attempt_count`. Uses `SELECT ... FOR UPDATE SKIP LOCKED`
 /// so concurrent tick paths cannot double-claim a row.
 pub async fn take_pending_batch(
-    _pool: &PgPool,
-    _campaign_id: Uuid,
-    _source_agent_id: &str,
-    _chunk_size: i64,
+    pool: &PgPool,
+    campaign_id: Uuid,
+    source_agent_id: &str,
+    chunk_size: i64,
 ) -> Result<Vec<PairRow>, RepoError> {
-    todo!("implement WITH chosen AS (... FOR UPDATE SKIP LOCKED) UPDATE ... RETURNING ...")
+    let bounded = chunk_size.clamp(1, 10_000);
+    let raws = sqlx::query_as!(
+        PairRowRaw,
+        r#"
+        WITH chosen AS (
+            SELECT id
+              FROM campaign_pairs
+             WHERE campaign_id = $1
+               AND source_agent_id = $2
+               AND resolution_state = 'pending'
+             ORDER BY id
+             LIMIT $3
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE campaign_pairs
+           SET resolution_state = 'dispatched',
+               dispatched_at    = now(),
+               attempt_count    = campaign_pairs.attempt_count + 1
+          FROM chosen
+         WHERE campaign_pairs.id = chosen.id
+         RETURNING campaign_pairs.id,
+                   campaign_pairs.campaign_id,
+                   campaign_pairs.source_agent_id,
+                   campaign_pairs.destination_ip,
+                   campaign_pairs.resolution_state AS "resolution_state: PairResolutionState",
+                   campaign_pairs.measurement_id,
+                   campaign_pairs.dispatched_at,
+                   campaign_pairs.settled_at,
+                   campaign_pairs.attempt_count,
+                   campaign_pairs.last_error
+        "#,
+        campaign_id,
+        source_agent_id,
+        bounded,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(raws.into_iter().map(Into::into).collect())
 }
 
 /// Look up each pair in the 24 h reuse window. Returns the pairs that
