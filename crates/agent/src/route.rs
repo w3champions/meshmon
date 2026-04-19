@@ -1,27 +1,44 @@
 //! Per-target route state tracker.
 //!
-//! See spec 02 § "Route state tracker". Pure, clock-injected logic: no
-//! tokio runtime, no async, no mpsc — just a regular struct the
-//! per-target supervisor owns, mutates on every trippy probe via
-//! [`RouteTracker::observe`], and polls via [`RouteTracker::build_snapshot`] +
-//! [`RouteTracker::diff_against`] on its 60 s snapshot tick.
+//! Pure, clock-injected logic: no tokio runtime, no async, no mpsc — just a
+//! regular struct the per-target supervisor owns, mutates on every trippy probe
+//! via [`RouteTracker::observe`], and polls via [`RouteTracker::build_snapshot`]
+//! + [`RouteTracker::diff_against`] on its 60 s snapshot tick.
 //!
-//! The tracker records the [`Protocol`] it's currently accumulating for
-//! and a rolling window sized from `ProbeConfig.primary_window_sec` (via
-//! [`RouteTracker::set_window`] on config updates). On a primary swing
-//! the supervisor calls [`RouteTracker::reset_for_protocol`], which
-//! drops the accumulator and the cached `last_reported` snapshot; the
-//! first non-empty snapshot after the reset is emitted as the new
-//! baseline (same path as the first-after-startup emission).
+//! ## Dual accumulator model
 //!
-//! [`RouteTracker::set_last_reported`] is a deliberate mutation API
-//! separate from [`RouteTracker::diff_against`]: the diff is a
-//! read-only comparison, and the supervisor only advances `last_reported`
-//! after a successful emit on the snapshot channel. A send failure
-//! leaves the cached baseline untouched so the next tick retries the
-//! diff unchanged.
+//! Two rolling `HashMap`s drive the tracker:
 //!
-//! ## Complexity targets
+//! - `hops: HashMap<(u8, IpAddr), HopObservationsAcc>` — one entry per
+//!   observed (position, IP) pair over the current window.
+//! - `position_probes: HashMap<u8, HopObservationsAcc>` — one entry per
+//!   TTL position, counting every probe regardless of whether an IP responded.
+//!
+//! Every probe to TTL `p` lands in `position_probes[p]`; IP-bearing probes
+//! additionally populate `hops[(p, ip)]` at the same timestamp.
+//! Silent hops (no ICMP response) are retained in `position_probes` so
+//! hop-level loss can be computed accurately.
+//!
+//! ## Snapshot construction
+//!
+//! `build_snapshot` sorts positions, computes per-hop summaries, then truncates
+//! the list at the first position where `target_ip` appears among the observed
+//! IPs. This matches mtr's "stop at destination" semantics and eliminates
+//! trippy's over-probing artefacts where the target responds to TTLs beyond
+//! the real path length.
+//!
+//! - Hop-level loss: `loss_pct(p) = 1 - successful/seen` from `position_probes[p]`.
+//!   No per-IP loss attribution; silent probes are accounted at the position level.
+//! - IP frequency: `frequency(ip, p) = hops[(p, ip)].seen / position_probes[p].seen`.
+//!   Frequencies at a position sum to `1 - loss_pct(p)`.
+//!
+//! ## Diff detection
+//!
+//! `diff_against` compares a fresh snapshot against `last_reported`. The four
+//! rules (NewIp, MissingIp, HopCountChanged, RttShift) are unchanged in
+//! structure and all use the per-probe denominator from `position_probes`.
+//!
+//! ## Complexity
 //! - `observe(hops, now)`: O(H) per call where H = hops.len() (typically ≤ 30).
 //! - `build_snapshot(now, now_wall)`: O(P · H_total + P · log P) per call
 //!   (P = positions in window, H_total = total (pos,ip) entries).
@@ -36,6 +53,16 @@
 //! - The emitter owns the `Receiver` side of the snapshot channel and
 //!   the wall-clock → `i64` conversion at wire-encoding time; see
 //!   [`RouteSnapshot::observed_at_micros_i64`].
+//!
+//! The tracker is per-target and clock-injected: `RouteTracker::new` takes a
+//! window `Duration` and the target `IpAddr`; no tokio primitives are owned
+//! at construction time. The window size is updated live via
+//! [`RouteTracker::set_window`] when `ProbeConfig.primary_window_sec` changes.
+//! On a primary-protocol swing the supervisor calls
+//! [`RouteTracker::reset_for_protocol`], which drops both accumulators and
+//! `last_reported`; the first non-empty snapshot after the reset becomes the
+//! new baseline. [`RouteTracker::set_last_reported`] is a deliberate separate
+//! API so the supervisor only advances the baseline after a successful emit.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;

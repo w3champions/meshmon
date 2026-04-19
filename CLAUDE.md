@@ -55,6 +55,20 @@ Key patterns:
   than per-target sockets — O(1) fd count as targets grow
 - Trippy driver uses `spawn_blocking` + a global `Semaphore`
   (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32) to cap raw-socket + thread use
+- Each ICMP trippy round picks a unique non-zero 16-bit `trace_identifier`
+  (monotonic `AtomicU16`, skip 0) so concurrent tracers on the same host
+  stop cross-attributing each other's ICMP replies. TCP/UDP rounds leave
+  the default — trippy matches those on port/address.
+- After each round, hops are checked against the peer-IP allowlist
+  (sourced from `GetTargets`). If any hop carries a sibling target's IP,
+  the observation is discarded (not a timeout, not an error). A rate-
+  limited `tracing::warn!` (once per 60 s per process) reports which
+  sibling IP leaked.
+- The route tracker retains silent TTLs as padded `HopSummary`s (empty
+  `observed_ips`, `loss_pct = 1.0`) and truncates snapshots at the first
+  position where the target's own IP appears. This matches mtr's output
+  shape and stops trippy's over-probing from oscillating the reported
+  hop count.
 - Dedicated ICMP pinger (`surge-ping`, `probing/icmp.rs`) runs always-on alongside
   trippy so the state machine retains ICMP samples even when the primary protocol
   swings to TCP or UDP; requires `CAP_NET_RAW`

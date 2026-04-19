@@ -19,6 +19,34 @@
 //! `clear()`ing it between rounds does not save the raw-socket setup cost
 //! on every platform; keeping the code structure simple here is the better
 //! tradeoff.
+//!
+//! ## Trace-identifier allocation
+//!
+//! Each ICMP round picks a unique non-zero `u16` via `next_trace_id()`, drawn
+//! from a module-local `AtomicU16` (`NEXT_ICMP_TRACE_ID`) seeded randomly at
+//! first use so a restarted process doesn't replay the same sequence against
+//! stale in-flight replies. The counter wraps naturally; `0` is skipped on wrap
+//! because trippy-core treats `TraceId(0)` as a wildcard that accepts any
+//! matching reply — two concurrent ICMP tracers with `TraceId(0)` would
+//! cross-attribute each other's replies. TCP/UDP rounds leave the default
+//! trace identifier; trippy matches those on port/address, not ICMP identifier.
+//!
+//! ## Cross-contamination detection
+//!
+//! After each round, hops are checked against the peer-IP allowlist (a
+//! `watch::Receiver<Arc<HashSet<IpAddr>>>` fed by `GetTargets`). If any hop
+//! carries a peer IP that is not our own target's IP, the observation is
+//! discarded and `CROSS_CONTAMINATION_TOTAL` is incremented. The allowlist
+//! `borrow()` is scoped so the `watch::Ref` is released before any `.await`.
+//!
+//! ## Discard semantics
+//!
+//! Contaminated rounds are dropped silently — they are NOT emitted as
+//! `ProbeOutcome::Timeout` (which would inflate `PathPacketLoss`) and NOT as
+//! `ProbeOutcome::Error` (same reason). Rolling stats simply see one fewer
+//! sample that tick. A `tracing::warn!` fires at most once per 60 s per
+//! process (rate-limited via `LAST_CONTAMINATION_WARN_NANOS`) and names the
+//! sibling IP that leaked.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
