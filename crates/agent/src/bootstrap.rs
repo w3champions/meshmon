@@ -500,6 +500,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// Graceful shutdown: cancel all supervisors and await their completion,
     /// then close the emitter's input channels and await its drain.
     pub async fn shutdown(self) {
+        tracing::info!(
+            contamination_total = crate::probing::trippy::cross_contamination_total(),
+            "agent shutting down",
+        );
         self.cancel.cancel();
 
         for (id, handle) in self.supervisors {

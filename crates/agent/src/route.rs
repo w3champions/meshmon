@@ -104,7 +104,7 @@ pub struct HopSummary {
 }
 
 /// Canonical per-target route snapshot. Emitted by the tracker when a
-/// meaningful diff is detected; consumed by the T16 emitter.
+/// meaningful diff is detected; consumed by the emitter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteSnapshot {
     /// Protocol the snapshot was accumulated under (matches `RouteSnapshotRequest.protocol`).
@@ -117,7 +117,7 @@ pub struct RouteSnapshot {
 }
 
 impl RouteSnapshot {
-    /// Helper for T16: convert the snapshot timestamp to the `i64 micros`
+    /// Convert the snapshot timestamp to the `i64 micros`
     /// form required by `RouteSnapshotRequest.observed_at_micros`.
     /// Clamps to `i64::MAX` if the duration somehow overflows (it cannot
     /// in practice — Unix epoch → now is ~1.8e15 micros in 2026).
@@ -211,7 +211,7 @@ pub struct RouteTracker {
     /// Rolling window; primary_window_sec from `ProbeConfig` (default 300 s).
     window: Duration,
     /// `(position, ip)` → per-hop accumulator. Flat for cache locality.
-    /// Maintained by `observe`; consumed by `build_snapshot` (Task 4).
+    /// Maintained by `observe`; consumed by `build_snapshot`.
     hops: HashMap<(u8, IpAddr), HopObservationsAcc>,
     /// Per-position probe accumulator. Every probe to TTL `p` (silent or
     /// IP-bearing) lands here; IP-bearing probes additionally land in
@@ -373,6 +373,10 @@ impl RouteTracker {
         positions.sort();
 
         let mut hops_out: Vec<HopSummary> = Vec::with_capacity(positions.len());
+        // NOTE: scan is O(P · H_total). Fine at the hop counts meshmon sees
+        // (≤ 30 positions, typically < 5 IPs per position). If future paths
+        // need higher-ECMP support, pre-group `self.hops` by position before
+        // the outer loop to reduce to O(H_total + P·K).
         for position in positions {
             let Some(pos_acc) = self.position_probes.get(&position) else {
                 continue;
@@ -592,7 +596,7 @@ pub struct RouteSnapshotEnvelope {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — populated incrementally from Task 2 onward.
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1598,7 +1602,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Task 7: silent-hop emission and hop-level loss from position_probes
+    // silent-hop emission and hop-level loss from position_probes
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1805,7 +1809,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Task 9: diff rules under per-probe denominator with silent hops
+    // diff rules under per-probe denominator with silent hops
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -2024,5 +2028,26 @@ mod tests {
                 n + 2,
             );
         }
+    }
+
+    #[test]
+    fn build_snapshot_target_ip_at_pos_1_truncates_immediately() {
+        let target: IpAddr = ipv4(10, 0, 0, 1);
+        let mut t = RouteTracker::new(five_min(), target);
+        t.reset_for_protocol(Some(Protocol::Icmp));
+        let now = Instant::now();
+        // Target responds at pos 1; positions 2 and 3 also see responses
+        // but those are dropped because the destination was already reached.
+        t.observe(&[hop(1, Some(target), Some(50))], now);
+        t.observe(&[hop(2, Some(ipv4(10, 0, 0, 2)), Some(150))], now);
+        t.observe(&[hop(3, Some(ipv4(10, 0, 0, 3)), Some(250))], now);
+        let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
+        assert_eq!(
+            snap.hops.len(),
+            1,
+            "target at pos 1 truncates to single hop"
+        );
+        assert_eq!(snap.hops[0].position, 1);
+        assert_eq!(snap.hops[0].observed_ips[0].ip, target);
     }
 }

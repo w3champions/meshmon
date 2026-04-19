@@ -262,8 +262,9 @@ async fn run(
                     }
                     Err(join_err) => {
                         tracing::warn!(%join_err, "trippy blocking task panicked");
-                        // Preserve "one round tick → one observation" invariant
-                        // so downstream rolling-stats stay aligned with rate.
+                        // Preserve "one round tick → one observation" for panics so downstream
+                        // rolling-stats stay aligned with rate. Contamination discards
+                        // (above) intentionally break this invariant — see module docs.
                         let obs = ProbeObservation {
                             protocol: snapshot.protocol,
                             target_id: target_id.clone(),
@@ -826,7 +827,7 @@ mod tests {
         assert_eq!(hit.position, 2);
     }
 
-    // --- Task 5: warn rate-limiting tests ---
+    // --- warn rate-limiting tests ---
     //
     // All three tests use `#[tokio::test(start_paused = true)]` so the
     // process-wide `CONTAMINATION_WARN_EPOCH: LazyLock<Instant>` is captured
@@ -904,7 +905,7 @@ mod tests {
         );
     }
 
-    // --- Task 11: integration test — contaminated rounds never reach downstream ---
+    // --- integration test — contaminated rounds never reach downstream ---
 
     /// Scripted trippy-like task that replays pre-built `ProbeObservation` rounds
     /// through the same contamination-detection path used by the real `run()` loop:

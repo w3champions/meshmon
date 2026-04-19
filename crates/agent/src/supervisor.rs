@@ -76,7 +76,7 @@ const fn protocol_index(protocol: Protocol) -> Option<usize> {
 
 /// Per-protocol rolling stats, shared between the supervisor's run loop
 /// (which writes via `insert` / `purge_old`) and the snapshot accessor
-/// (which the T14 state machine and tests use to read `summary_fast`).
+/// (which the state machine and tests use to read `summary_fast`).
 type StatsArray = [Mutex<RollingStats>; PROTOCOL_COUNT];
 
 /// Snapshot of the last evaluated target state. Shared between the supervisor
@@ -96,11 +96,11 @@ pub struct SupervisorHandle {
     pub cancel: CancellationToken,
     /// Join handle for the supervisor's tokio task.
     pub join: tokio::task::JoinHandle<()>,
-    /// Sender side of the observation channel. Probers (T12) clone this to
+    /// Sender side of the observation channel. Probers clone this to
     /// push [`ProbeObservation`]s into the supervisor.
     pub observation_tx: mpsc::Sender<ProbeObservation>,
     /// Shared per-protocol stats, exposed via [`SupervisorHandle::snapshot`].
-    /// `pub(crate)` so T14's state machine can reach into the same array
+    /// `pub(crate)` so the state machine can reach into the same array
     /// from inside the agent crate; tests use [`SupervisorHandle::snapshot`].
     pub(crate) stats: Arc<StatsArray>,
     /// Join handles for the 4 per-target prober tasks. Private because the
@@ -119,8 +119,8 @@ impl SupervisorHandle {
     /// supervisor evaluates state every 10s anyway.
     ///
     /// Uses `try_lock` so this method never blocks. Crucial design choice:
-    /// T14 will call this from sync contexts where `blocking_lock` would
-    /// panic on a current-thread runtime. Tests that need fresh data may
+    /// the state machine calls this from sync contexts where `blocking_lock`
+    /// would panic on a current-thread runtime. Tests that need fresh data may
     /// poll cheaply (e.g. every 20ms) — the `try_lock` never blocks, so
     /// polling never interferes with the supervisor's run loop.
     pub fn snapshot(&self, protocol: Protocol) -> Option<FastSummary> {
@@ -187,9 +187,9 @@ pub fn spawn(
     let initial = config_rx.borrow().clone();
     let initial_window = Duration::from_secs(initial.diversity_window_sec as u64);
     // Per-target route tracker. Sized at the primary window; the supervisor
-    // resizes it on config changes / primary swings in Task 7. Starts with
-    // `protocol = None` so it silently drops incoming hops until T14 elects
-    // a primary and the supervisor calls `reset_for_protocol`.
+    // resizes it on config changes / primary swings. Starts with
+    // `protocol = None` so it silently drops incoming hops until a primary is
+    // elected and the supervisor calls `reset_for_protocol`.
     let initial_primary_window = Duration::from_secs(initial.primary_window_sec as u64);
     let target_ip = meshmon_protocol::ip::to_ipaddr(&target.ip)
         .expect("target.ip must decode to IpAddr (4-byte IPv4 or 16-byte IPv6 per proto contract)");
@@ -209,7 +209,7 @@ pub fn spawn(
     let (udp_rate_tx, udp_rate_rx) = watch::channel(ProbeRate(0.0));
     let (trippy_rate_tx, trippy_rate_rx) = watch::channel(TrippyRate::idle());
 
-    // Spawn all 4 probers. ICMP spawn is sync (Batch B), matching TCP's shape.
+    // Spawn all 4 probers. ICMP spawn is sync, matching TCP's shape.
     let target_for_icmp = target.clone();
     let icmp_join = icmp::spawn(
         target_for_icmp,
@@ -307,10 +307,10 @@ async fn run(
     let mut eval_interval = tokio::time::interval(Duration::from_secs(10));
     eval_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    // T15: separate 60 s cadence for route-snapshot builds. Independent
-    // of the eval tick because the diff thresholds themselves already
-    // gate emission — we do not need eager reset on config changes the
-    // way the rate-eval arm does.
+    // Separate 60 s cadence for route-snapshot builds. Independent of the
+    // eval tick because the diff thresholds themselves already gate emission —
+    // we do not need eager reset on config changes the way the rate-eval arm
+    // does.
     let mut snapshot_interval = tokio::time::interval(Duration::from_secs(60));
     snapshot_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -388,9 +388,9 @@ async fn run(
                     now,
                 );
 
-                // T15: first-eval seeding — if the tracker has never been
-                // assigned a protocol, adopt the current primary. Only then
-                // does `primary_transition.is_some()` drive subsequent resets.
+                // First-eval seeding — if the tracker has never been assigned
+                // a protocol, adopt the current primary. Only then does
+                // `primary_transition.is_some()` drive subsequent resets.
                 if route_tracker.protocol().is_none() {
                     if let Some(p) = change.primary {
                         tracing::info!(
@@ -408,8 +408,8 @@ async fn run(
                     );
                 }
 
-                // T15: keep the tracker window in sync with the primary
-                // window config. Cheap even if unchanged.
+                // Keep the tracker window in sync with the primary window
+                // config. Cheap even if unchanged.
                 route_tracker.set_window(Duration::from_secs(
                     config_snapshot.primary_window_sec as u64,
                 ));
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Task 8: integration test — state machine swings primary after ICMP fails
+    // integration test — state machine swings primary after ICMP fails
     // ---------------------------------------------------------------------------
 
     fn full_config_with_tight_hysteresis() -> ProbeConfig {
@@ -1449,7 +1449,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Task 8: route snapshot integration tests — drive the supervisor end-to-end
+    // route snapshot integration tests — drive the supervisor end-to-end
     // via the paused tokio clock.
     // ---------------------------------------------------------------------------
 
