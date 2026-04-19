@@ -255,10 +255,23 @@ impl<A: ServiceApi> AgentRuntime<A> {
             if target.id == env.identity.id || supervisors.contains_key(&target.id) {
                 continue;
             }
+            let target_ip = match meshmon_protocol::ip::to_ipaddr(&target.ip) {
+                Ok(ip) => ip.to_canonical(),
+                Err(_) => {
+                    tracing::warn!(
+                        target_id = %target.id,
+                        ip_bytes = ?target.ip,
+                        "target has malformed IP; skipping supervisor",
+                    );
+                    continue;
+                }
+            };
             let id = target.id.clone();
             let handle = supervisor::spawn(
                 target,
+                target_ip,
                 config_rx.clone(),
+                allowlist_tx.subscribe(),
                 Arc::clone(&udp_pool),
                 Arc::clone(&trippy_prober),
                 child.clone(),
@@ -480,10 +493,23 @@ impl<A: ServiceApi> AgentRuntime<A> {
             if self.supervisors.contains_key(&target.id) {
                 continue;
             }
+            let target_ip = match meshmon_protocol::ip::to_ipaddr(&target.ip) {
+                Ok(ip) => ip.to_canonical(),
+                Err(_) => {
+                    tracing::warn!(
+                        target_id = %target.id,
+                        ip_bytes = ?target.ip,
+                        "target has malformed IP; skipping supervisor",
+                    );
+                    continue;
+                }
+            };
             let id = target.id.clone();
             let handle = supervisor::spawn(
                 target,
+                target_ip,
                 self.config_rx.clone(),
+                self.allowlist_tx.subscribe(),
                 Arc::clone(&self.udp_pool),
                 Arc::clone(&self.trippy_prober),
                 self.cancel.clone(),
@@ -498,6 +524,10 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// Graceful shutdown: cancel all supervisors and await their completion,
     /// then close the emitter's input channels and await its drain.
     pub async fn shutdown(self) {
+        tracing::info!(
+            contamination_total = crate::probing::trippy::cross_contamination_total(),
+            "agent shutting down",
+        );
         self.cancel.cancel();
 
         for (id, handle) in self.supervisors {

@@ -68,7 +68,7 @@ pub struct ProbeObservation {
 }
 
 /// One hop observed during a traceroute probe.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HopObservation {
     /// 1-indexed hop position (TTL).
     pub position: u8,
