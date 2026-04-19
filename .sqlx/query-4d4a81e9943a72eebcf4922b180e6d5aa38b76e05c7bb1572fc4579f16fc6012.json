@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT city AS \"name!\", COUNT(*) AS \"count!\"\n        FROM ip_catalogue\n        WHERE city IS NOT NULL\n        GROUP BY city\n        ORDER BY COUNT(*) DESC\n        LIMIT 250\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "4d4a81e9943a72eebcf4922b180e6d5aa38b76e05c7bb1572fc4579f16fc6012"
+}

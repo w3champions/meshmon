@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT network_operator AS \"name!\", COUNT(*) AS \"count!\"\n        FROM ip_catalogue\n        WHERE network_operator IS NOT NULL\n        GROUP BY network_operator\n        ORDER BY COUNT(*) DESC\n        LIMIT 250\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "8073a05d1583daba21ed5a57af4458fe22a70172a2bb1a2a28e485003c8cf906"
+}
