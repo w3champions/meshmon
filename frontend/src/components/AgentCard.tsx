@@ -47,8 +47,7 @@ export function AgentCard({ agent, compact = false }: AgentCardProps) {
             <div>
               <span className="text-muted-foreground">Coordinates: </span>
               <span>
-                {agent.catalogue_coordinates.latitude},{" "}
-                {agent.catalogue_coordinates.longitude}
+                {agent.catalogue_coordinates.latitude}, {agent.catalogue_coordinates.longitude}
               </span>
             </div>
           )}

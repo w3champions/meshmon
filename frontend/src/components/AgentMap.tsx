@@ -65,9 +65,7 @@ type AgentWithCoords = AgentSummary & {
 };
 
 export function AgentMap({ agents, matrix, className, onMarkerClick }: AgentMapProps) {
-  const withCoords = agents.filter(
-    (a): a is AgentWithCoords => a.catalogue_coordinates != null,
-  );
+  const withCoords = agents.filter((a): a is AgentWithCoords => a.catalogue_coordinates != null);
   const points: Array<[number, number]> = withCoords.map((a) => [
     a.catalogue_coordinates.latitude,
     a.catalogue_coordinates.longitude,
