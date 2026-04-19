@@ -157,8 +157,25 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
 }
 
 /// Fetch a single campaign by id. Returns `Ok(None)` when the id is unknown.
-pub async fn get(_pool: &PgPool, _id: Uuid) -> Result<Option<CampaignRow>, RepoError> {
-    todo!("implement SELECT")
+pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoError> {
+    let raw = sqlx::query_as!(
+        CampaignRowRaw,
+        r#"
+        SELECT id, title, notes,
+               state AS "state: CampaignState",
+               protocol AS "protocol: ProbeProtocol",
+               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
+               force_measurement, loss_threshold_pct, stddev_weight,
+               evaluation_mode AS "evaluation_mode: EvaluationMode",
+               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
+          FROM measurement_campaigns
+         WHERE id = $1
+        "#,
+        id
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(raw.map(Into::into))
 }
 
 /// List campaigns filtered by a substring match on title/notes, state,
