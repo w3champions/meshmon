@@ -531,12 +531,21 @@ pub async fn apply_enrichment_result(
 /// overwrites latitude/longitude. In both cases, `Latitude` / `Longitude`
 /// are appended to `operator_edited_fields` so enrichment providers never
 /// replace the agent's self-report.
-pub async fn ensure_from_agent(
-    pool: &PgPool,
+///
+/// Accepts any sqlx executor so the caller can drive this from a pool or
+/// from inside an open transaction — the agent register path bundles it
+/// with the `agents` upsert in a single transaction to rule out a
+/// partial-commit where the agent row persists but the catalogue row
+/// fails to write.
+pub async fn ensure_from_agent<'e, E>(
+    executor: E,
     ip: IpAddr,
     lat: f64,
     lon: f64,
-) -> Result<CatalogueEntry, sqlx::Error> {
+) -> Result<CatalogueEntry, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let ipnet = IpNetwork::from(ip);
     let row = sqlx::query_as!(
         CatalogueEntryRow,
@@ -569,7 +578,7 @@ pub async fn ensure_from_agent(
         lat,
         lon,
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     Ok(row.into())
 }
