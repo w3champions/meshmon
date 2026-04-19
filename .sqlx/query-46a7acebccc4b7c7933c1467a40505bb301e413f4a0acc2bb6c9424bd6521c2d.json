@@ -1,0 +1,92 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH chosen AS (\n            SELECT id\n              FROM campaign_pairs\n             WHERE campaign_id = $1\n               AND source_agent_id = $2\n               AND resolution_state = 'pending'\n             ORDER BY id\n             LIMIT $3\n             FOR UPDATE SKIP LOCKED\n        )\n        UPDATE campaign_pairs\n           SET resolution_state = 'dispatched',\n               dispatched_at    = now(),\n               attempt_count    = campaign_pairs.attempt_count + 1\n          FROM chosen\n         WHERE campaign_pairs.id = chosen.id\n         RETURNING campaign_pairs.id,\n                   campaign_pairs.campaign_id,\n                   campaign_pairs.source_agent_id,\n                   campaign_pairs.destination_ip,\n                   campaign_pairs.resolution_state AS \"resolution_state: PairResolutionState\",\n                   campaign_pairs.measurement_id,\n                   campaign_pairs.dispatched_at,\n                   campaign_pairs.settled_at,\n                   campaign_pairs.attempt_count,\n                   campaign_pairs.last_error\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "campaign_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_agent_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 4,
+        "name": "resolution_state: PairResolutionState",
+        "type_info": {
+          "Custom": {
+            "name": "pair_resolution_state",
+            "kind": {
+              "Enum": [
+                "pending",
+                "dispatched",
+                "reused",
+                "succeeded",
+                "unreachable",
+                "skipped"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "measurement_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "dispatched_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "settled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "attempt_count",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 9,
+        "name": "last_error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "46a7acebccc4b7c7933c1467a40505bb301e413f4a0acc2bb6c9424bd6521c2d"
+}

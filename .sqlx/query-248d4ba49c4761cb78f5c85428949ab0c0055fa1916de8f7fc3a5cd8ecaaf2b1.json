@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM measurement_campaigns WHERE state='running' ORDER BY started_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "248d4ba49c4761cb78f5c85428949ab0c0055fa1916de8f7fc3a5cd8ecaaf2b1"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE campaign_pairs\n            SET resolution_state='skipped', last_error='campaign_stopped', settled_at=now()\n          WHERE campaign_id=$1 AND resolution_state='pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b56515f61de3ca1d17a56d50a4295686e8651edc34df95be1ef744d2466b6339"
+}

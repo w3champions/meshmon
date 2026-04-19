@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE measurement_campaigns SET force_measurement = TRUE WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dacd92641ff329d1c36f950d0e3f05969a721a3023a90e9fdea58d985ec76a92"
+}
