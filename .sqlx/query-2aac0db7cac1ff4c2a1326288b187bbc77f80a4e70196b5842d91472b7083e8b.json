@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT asn AS \"asn!\", COUNT(*) AS \"count!\"\n        FROM ip_catalogue\n        WHERE asn IS NOT NULL\n        GROUP BY asn\n        ORDER BY COUNT(*) DESC\n        LIMIT 250\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "asn!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "2aac0db7cac1ff4c2a1326288b187bbc77f80a4e70196b5842d91472b7083e8b"
+}

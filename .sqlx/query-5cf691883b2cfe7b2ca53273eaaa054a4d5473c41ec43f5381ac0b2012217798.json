@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT country_code AS \"code!\",\n               MAX(country_name) AS name,\n               COUNT(*) AS \"count!\"\n        FROM ip_catalogue\n        WHERE country_code IS NOT NULL\n        GROUP BY country_code\n        ORDER BY COUNT(*) DESC\n        LIMIT 250\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code!",
+        "type_info": "Bpchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "5cf691883b2cfe7b2ca53273eaaa054a4d5473c41ec43f5381ac0b2012217798"
+}

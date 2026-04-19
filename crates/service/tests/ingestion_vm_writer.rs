@@ -28,6 +28,65 @@ fn decode_write_request(body: &[u8]) -> WriteRequest {
     WriteRequest::decode(raw.as_slice()).expect("protobuf decode")
 }
 
+/// Sum the samples across every POST the mock has seen so far.
+fn total_samples(reqs: &[wiremock::Request]) -> usize {
+    reqs.iter()
+        .map(|r| {
+            decode_write_request(&r.body)
+                .timeseries
+                .iter()
+                .map(|ts| ts.samples.len())
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Poll `mock.received_requests()` until the sum of samples reaches
+/// `expected_min` or `timeout` elapses, then return the last observed
+/// total.
+///
+/// The writer task flushes asynchronously, so a fixed-duration sleep
+/// before `assert_eq!` made these tests flake under heavy parallel load
+/// (nextest running dozens of tests). Polling is robust to that.
+async fn wait_for_samples(
+    mock: &wiremock::MockGuard,
+    expected_min: usize,
+    timeout: Duration,
+) -> usize {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let total = total_samples(&mock.received_requests().await);
+        if total >= expected_min {
+            return total;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return total;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Poll `mock.received_requests().len()` until it reaches `expected_min`
+/// or `timeout` elapses. Used by tests that count requests rather than
+/// samples.
+async fn wait_for_request_count(
+    mock: &wiremock::MockGuard,
+    expected_min: usize,
+    timeout: Duration,
+) -> usize {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let count = mock.received_requests().await.len();
+        if count >= expected_min {
+            return count;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return count;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn samples_reach_fake_vm_in_a_batch() {
     let server = MockServer::start().await;
@@ -66,21 +125,11 @@ async fn samples_reach_fake_vm_in_a_batch() {
         ));
     }
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let reqs = mock.received_requests().await;
-    assert!(!reqs.is_empty(), "no POSTs landed");
-    let total_samples: usize = reqs
-        .iter()
-        .map(|r| {
-            decode_write_request(&r.body)
-                .timeseries
-                .iter()
-                .map(|ts| ts.samples.len())
-                .sum::<usize>()
-        })
-        .sum();
-    assert_eq!(total_samples, 3);
+    // Poll rather than fixed-sleep so the test is robust under load — a
+    // fixed 300ms was not enough when nextest ran this in parallel with
+    // the rest of the suite.
+    let total = wait_for_samples(&mock, 3, Duration::from_secs(5)).await;
+    assert_eq!(total, 3, "expected 3 samples flushed, got {total}");
 
     token.cancel();
     let _ = handle.await;
@@ -117,20 +166,10 @@ async fn flushes_when_batch_size_reached() {
     for i in 0..15 {
         queue.push(sample("meshmon_test", i as f64, 1_700_000_000_000));
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let total: usize = mock
-        .received_requests()
-        .await
-        .iter()
-        .map(|r| {
-            decode_write_request(&r.body)
-                .timeseries
-                .iter()
-                .map(|ts| ts.samples.len())
-                .sum::<usize>()
-        })
-        .sum();
+    // Poll until the size-driven flush landed (>=10 samples). A fixed
+    // 200ms sleep was not enough under parallel nextest load.
+    let total = wait_for_samples(&mock, 10, Duration::from_secs(5)).await;
     assert!(
         total >= 10,
         "expected size-driven flush of >=10 samples, got {total}"
@@ -181,8 +220,9 @@ async fn writer_flushes_immediately_when_batch_size_reached() {
     });
 
     // Push exactly batch_size samples. If the batch-size race is live,
-    // the writer flushes well inside the 500ms window. If the interval
-    // timer is still authoritative the POST won't land for ~30s.
+    // the writer flushes in sub-second time even though batch_interval
+    // is 30 s. If the interval timer is still authoritative the POST
+    // won't land before the timeout and the assertion fails.
     for i in 0..5 {
         queue.push(sample(
             "meshmon_test_burst",
@@ -191,24 +231,16 @@ async fn writer_flushes_immediately_when_batch_size_reached() {
         ));
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let total: usize = mock
-        .received_requests()
-        .await
-        .iter()
-        .map(|r| {
-            decode_write_request(&r.body)
-                .timeseries
-                .iter()
-                .map(|ts| ts.samples.len())
-                .sum::<usize>()
-        })
-        .sum();
+    // Poll (rather than fixed-sleep) so this race-arm assertion is
+    // robust under parallel nextest load while still failing if the
+    // interval timer is authoritative — a 5 s budget is 100× smaller
+    // than the 30 s `batch_interval` that would fire on the timer.
+    let total = wait_for_samples(&mock, 5, Duration::from_secs(5)).await;
     assert_eq!(
         total, 5,
-        "expected size-driven flush within 500ms (batch_interval=30s); \
-         got {total} samples — batch-size race arm is not firing"
+        "expected size-driven flush well inside the 5s budget \
+         (batch_interval=30s); got {total} samples — batch-size race \
+         arm is not firing"
     );
 
     token.cancel();
@@ -253,20 +285,13 @@ async fn retries_after_failure() {
     for i in 0..5 {
         queue.push(sample("meshmon_test", i as f64, 1_700_000_000_000));
     }
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let total: usize = success
-        .received_requests()
-        .await
-        .iter()
-        .map(|r| {
-            decode_write_request(&r.body)
-                .timeseries
-                .iter()
-                .map(|ts| ts.samples.len())
-                .sum::<usize>()
-        })
-        .sum();
+    // Poll the success-scope mock until the retry budget pays off —
+    // fixed 2 s sleep flaked under nextest parallel load when the first
+    // two 503s and the exponential backoffs consumed more wall time
+    // than the timeout allowed. 10 s is comfortably above the 5 s
+    // `max_retry` cap.
+    let total = wait_for_samples(&success, 5, Duration::from_secs(10)).await;
     assert_eq!(total, 5);
 
     token.cancel();
@@ -334,20 +359,21 @@ async fn retry_exhaustion_stops_after_first_attempt() {
         ));
     }
 
-    // Wait for batch_interval + a generous buffer for the single HTTP round-
-    // trip to complete. The writer makes exactly one attempt per the timing
-    // analysis above, then gives up.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    let count_after_exhaustion = mock.received_requests().await.len();
+    // Poll until the first POST lands. The writer makes exactly one
+    // attempt per the timing analysis above, then gives up. A fixed
+    // 400ms sleep here flaked under parallel nextest load because the
+    // batch-interval timer did not fire in time.
+    let count_after_exhaustion = wait_for_request_count(&mock, 1, Duration::from_secs(5)).await;
     assert_eq!(
         count_after_exhaustion, 1,
         "expected exactly 1 POST (retry exhaustion with 100ms deadline < 250ms backoff); \
          got {count_after_exhaustion}"
     );
 
-    // Wait an additional 600 ms (more than two backoff periods) to confirm
-    // the writer is not silently retrying in the background.
+    // Wait a further "two backoff periods" to confirm no late retries
+    // sneak in. This leg is fundamentally a hold-firm check, so a
+    // fixed sleep is correct — a poll would short-circuit on the
+    // existing single request and defeat the assertion.
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let count_after_wait = mock.received_requests().await.len();

@@ -207,6 +207,98 @@ async fn register_rejects_bad_ip_length() {
     assert_eq!(err.code(), Code::InvalidArgument);
 }
 
+/// Regression guard for T42/T14: `Register` must populate the catalogue
+/// row, publish an `Updated` event so UI subscribers see the new row in
+/// real time, and do so in a way that preserves prior operator edits on
+/// subsequent re-registers. The handler previously called
+/// `ensure_from_agent` and ignored the returned entry, which silently
+/// regressed both halves of the contract.
+#[tokio::test]
+async fn register_creates_catalogue_row_publishes_updated_and_preserves_operator_edits() {
+    use meshmon_service::catalogue::events::CatalogueEvent;
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool.clone()).await;
+    let state_for_check = state.clone();
+    // Subscribe *before* the RPC so we don't miss the fan-out.
+    let mut rx = state.catalogue_broker.subscribe();
+
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 42, 0, 1])).await;
+
+    let mut req = sample("agent-reg-catalogue-hook", [10, 42, 0, 1]);
+    req.lat = 37.7749;
+    req.lon = -122.4194;
+    let _ = client.register(req).await.expect("register");
+
+    // Event fan-out — must arrive promptly.
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("broker emitted event within 2s")
+        .expect("broker did not close");
+    match evt {
+        CatalogueEvent::Updated { id: _ } => {}
+        other => panic!("expected Updated, got {other:?}"),
+    }
+
+    // DB state — agent-derived row with Latitude/Longitude locked.
+    let row = sqlx::query(
+        "SELECT source::text, operator_edited_fields, latitude, longitude \
+         FROM ip_catalogue WHERE ip = '10.42.0.1'::inet",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("catalogue row exists");
+    let source: String = row.get(0);
+    let fields: Vec<String> = row.get(1);
+    let lat: f64 = row.get(2);
+    let lon: f64 = row.get(3);
+    assert_eq!(source, "agent_registration");
+    assert!(fields.iter().any(|f| f == "Latitude"));
+    assert!(fields.iter().any(|f| f == "Longitude"));
+    assert!((lat - 37.7749).abs() < 1e-9);
+    assert!((lon - (-122.4194)).abs() < 1e-9);
+
+    // Simulate an operator edit adding `City` to the lock set, then
+    // re-register — ensure_from_agent's array dedup must preserve the
+    // operator's `City` alongside the agent's lat/lon locks.
+    sqlx::query(
+        "UPDATE ip_catalogue
+         SET city = 'San Francisco',
+             operator_edited_fields = ARRAY['Latitude', 'Longitude', 'City']::text[]
+         WHERE ip = '10.42.0.1'::inet",
+    )
+    .execute(&pool)
+    .await
+    .expect("operator edit");
+
+    let mut client2 = common::grpc_harness::in_process_agent_client(
+        state_for_check,
+        IpAddr::from([10, 42, 0, 1]),
+    )
+    .await;
+    let mut req2 = sample("agent-reg-catalogue-hook", [10, 42, 0, 1]);
+    req2.lat = 40.0;
+    req2.lon = -75.0;
+    let _ = client2.register(req2).await.expect("re-register");
+
+    let row = sqlx::query(
+        "SELECT operator_edited_fields, city FROM ip_catalogue WHERE ip = '10.42.0.1'::inet",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("row");
+    let fields: Vec<String> = row.get(0);
+    let city: Option<String> = row.get(1);
+    assert!(fields.iter().any(|f| f == "Latitude"));
+    assert!(fields.iter().any(|f| f == "Longitude"));
+    assert!(
+        fields.iter().any(|f| f == "City"),
+        "operator City lock must survive re-register, got {fields:?}"
+    );
+    assert_eq!(city.as_deref(), Some("San Francisco"));
+}
+
 #[tokio::test]
 async fn concurrent_register_same_id_different_ip_yields_single_winner() {
     // Two callers race to claim the same fresh `id` from different peer IPs.

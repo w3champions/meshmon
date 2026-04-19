@@ -3,7 +3,10 @@
 //! Cheap to `Clone` — heavyweight fields are `Arc`-backed; `Instant` and
 //! `BuildInfo` are small `Copy` types (a few words each).
 
+use crate::catalogue::events::CatalogueBroker;
+use crate::catalogue::facets::FacetsCache;
 use crate::config::Config;
+use crate::enrichment::runner::EnrichmentQueue;
 use crate::ingestion::IngestionPipeline;
 use crate::metrics::Handle as PrometheusHandle;
 use crate::registry::AgentRegistry;
@@ -74,10 +77,52 @@ pub struct AppState {
     /// `source_id`. Populated by the `OpenTunnel` handler; consumed by
     /// `commands::spawn_config_watcher` to broadcast `RefreshConfig`.
     pub tunnel_manager: Arc<TunnelManager>,
+    /// In-process catalogue event broker. Every mutating catalogue
+    /// handler publishes here; the SSE handler in
+    /// [`crate::catalogue::sse`] forwards events to connected clients.
+    /// Capacity is fixed at [`crate::catalogue::events::DEFAULT_CAPACITY`]
+    /// — overflow surfaces to the client as a `lag` frame rather than
+    /// blocking the publisher.
+    pub catalogue_broker: CatalogueBroker,
+    /// Producer handle for the enrichment work queue. Paste and
+    /// agent-register handlers push newly-inserted ids here so the
+    /// runner picks them up ahead of the periodic sweep.
+    ///
+    /// Wrapped in `Arc` so `AppState::clone()` shares the single bounded
+    /// sender rather than requiring `EnrichmentQueue: Clone` (which the
+    /// runner module intentionally does not implement).
+    ///
+    /// Wired by `main.rs`: the binary constructs the `(queue, rx)` pair,
+    /// passes the producer to [`AppState::new`], and moves the receiver
+    /// into the spawned [`crate::enrichment::runner::Runner`]. Test call
+    /// sites that do not spawn a runner drop the receiver and rely on
+    /// the `TrySendError::Closed` arm of
+    /// [`crate::enrichment::runner::EnrichmentQueue::enqueue`] to
+    /// silently no-op.
+    pub enrichment_queue: Arc<EnrichmentQueue>,
+    /// TTL-cached facets snapshot. Backs `GET /api/catalogue/facets`,
+    /// absorbing repeated reads that would otherwise hit the
+    /// four-group-by aggregation on every request. Refreshes lazily on
+    /// access once the cached value ages past
+    /// [`FacetsCache::DEFAULT_TTL`] — facets are an advisory UI hint,
+    /// so a slightly stale snapshot is acceptable. All readers serialise
+    /// on the inner `tokio::sync::Mutex`. For warm-cache hits the
+    /// critical section is brief (elapsed-time check + clone). If a
+    /// concurrent caller is refreshing, other readers wait for the DB
+    /// round-trip to complete — acceptable for a 30 s-TTL UI hint
+    /// endpoint, not acceptable for hot paths.
+    pub facets_cache: Arc<FacetsCache>,
 }
 
 impl AppState {
     /// Construct an `AppState` in the "not yet ready" state.
+    ///
+    /// `enrichment_queue` is the producer half of the pair returned by
+    /// [`EnrichmentQueue::new`]; the caller is responsible for spawning
+    /// the [`crate::enrichment::runner::Runner`] against the paired
+    /// receiver (production binary) or dropping the receiver (tests
+    /// that do not exercise the runner — enqueues become no-ops via the
+    /// `TrySendError::Closed` arm).
     pub fn new(
         config: Arc<ArcSwap<Config>>,
         config_rx: watch::Receiver<Arc<Config>>,
@@ -85,6 +130,7 @@ impl AppState {
         ingestion: IngestionPipeline,
         registry: Arc<AgentRegistry>,
         prom: PrometheusHandle,
+        enrichment_queue: Arc<EnrichmentQueue>,
     ) -> Self {
         Self {
             config,
@@ -103,6 +149,14 @@ impl AppState {
             tunnel_manager: Arc::new(TunnelManager::with_observer(|len| {
                 crate::metrics::tunnel_agents().set(len as f64);
             })),
+            // Catalogue broker: single process-wide broadcast channel. The
+            // capacity is a fixed constant rather than a caller argument
+            // because tuning is driven by the paste-flow burst size, not by
+            // any deployment-specific knob. See
+            // [`crate::catalogue::events::DEFAULT_CAPACITY`].
+            catalogue_broker: CatalogueBroker::default(),
+            enrichment_queue,
+            facets_cache: Arc::new(FacetsCache::new(FacetsCache::DEFAULT_TTL)),
         }
     }
 

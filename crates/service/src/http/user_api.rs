@@ -22,6 +22,18 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 use utoipa::{IntoParams, ToSchema};
 
+/// Latitude / longitude pair sourced from the IP catalogue join.
+///
+/// Present only when both coordinates are known; otherwise the parent
+/// `AgentSummary.catalogue_coordinates` is `None`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CatalogueCoordinates {
+    /// Decimal latitude (-90..=90).
+    pub latitude: f64,
+    /// Decimal longitude (-180..=180).
+    pub longitude: f64,
+}
+
 /// Summary of a single agent, returned by the list and detail endpoints.
 ///
 /// Write-only on the server (constructed and serialized, never parsed) so
@@ -37,12 +49,10 @@ pub struct AgentSummary {
     pub location: Option<String>,
     /// Agent source IP (host address only, CIDR prefix stripped).
     pub ip: String,
-    /// Optional latitude.
+    /// Geo coordinates joined from the IP catalogue. Absent when the
+    /// agent's IP is not in the catalogue or neither coord is populated.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lat: Option<f64>,
-    /// Optional longitude.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lon: Option<f64>,
+    pub catalogue_coordinates: Option<CatalogueCoordinates>,
     /// Optional agent version string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_version: Option<String>,
@@ -54,13 +64,19 @@ pub struct AgentSummary {
 
 impl From<AgentInfo> for AgentSummary {
     fn from(a: AgentInfo) -> Self {
+        let catalogue_coordinates = match (a.latitude, a.longitude) {
+            (Some(latitude), Some(longitude)) => Some(CatalogueCoordinates {
+                latitude,
+                longitude,
+            }),
+            _ => None,
+        };
         Self {
             id: a.id,
             display_name: a.display_name,
             location: a.location,
             ip: a.ip.ip().to_string(),
-            lat: a.lat,
-            lon: a.lon,
+            catalogue_coordinates,
             agent_version: a.agent_version,
             registered_at: a.registered_at,
             last_seen_at: a.last_seen_at,

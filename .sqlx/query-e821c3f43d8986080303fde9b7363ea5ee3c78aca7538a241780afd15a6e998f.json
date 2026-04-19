@@ -1,0 +1,155 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            ip AS \"ip: IpNetwork\",\n            display_name, city, country_code, country_name,\n            latitude, longitude, asn, network_operator, website, notes,\n            enrichment_status AS \"enrichment_status: EnrichmentStatus\",\n            enriched_at,\n            operator_edited_fields,\n            source AS \"source: CatalogueSource\",\n            created_at, created_by\n        FROM ip_catalogue c\n        WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))\n          AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))\n          AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))\n          AND ($4::INET IS NULL OR c.ip <<= $4::INET)\n          AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)\n          AND (NOT $6::BOOL OR (\n                latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION\n            AND longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION\n          ))\n        ORDER BY created_at DESC, id DESC\n        LIMIT $11\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "ip: IpNetwork",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "country_code",
+        "type_info": "Bpchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "country_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "latitude",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "longitude",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "asn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "network_operator",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "notes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "enrichment_status: EnrichmentStatus",
+        "type_info": {
+          "Custom": {
+            "name": "enrichment_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "enriched",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "enriched_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "operator_edited_fields",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 15,
+        "name": "source: CatalogueSource",
+        "type_info": {
+          "Custom": {
+            "name": "catalogue_source",
+            "kind": {
+              "Enum": [
+                "operator",
+                "agent_registration"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "created_by",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int4Array",
+        "TextArray",
+        "Inet",
+        "Text",
+        "Bool",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e821c3f43d8986080303fde9b7363ea5ee3c78aca7538a241780afd15a6e998f"
+}

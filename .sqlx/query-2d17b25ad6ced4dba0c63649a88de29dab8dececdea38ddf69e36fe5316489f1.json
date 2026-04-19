@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE ip_catalogue SET\n            city = CASE\n                WHEN 'City' = ANY(operator_edited_fields) THEN city\n                ELSE COALESCE($2, city)\n            END,\n            country_code = CASE\n                WHEN 'CountryCode' = ANY(operator_edited_fields) THEN country_code\n                ELSE COALESCE($3, country_code)\n            END,\n            country_name = CASE\n                WHEN 'CountryName' = ANY(operator_edited_fields) THEN country_name\n                ELSE COALESCE($4, country_name)\n            END,\n            latitude = CASE\n                WHEN 'Latitude' = ANY(operator_edited_fields) THEN latitude\n                ELSE COALESCE($5, latitude)\n            END,\n            longitude = CASE\n                WHEN 'Longitude' = ANY(operator_edited_fields) THEN longitude\n                ELSE COALESCE($6, longitude)\n            END,\n            asn = CASE\n                WHEN 'Asn' = ANY(operator_edited_fields) THEN asn\n                ELSE COALESCE($7, asn)\n            END,\n            network_operator = CASE\n                WHEN 'NetworkOperator' = ANY(operator_edited_fields) THEN network_operator\n                ELSE COALESCE($8, network_operator)\n            END,\n            enrichment_status = $9::enrichment_status,\n            enriched_at       = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bpchar",
+        "Text",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Text",
+        {
+          "Custom": {
+            "name": "enrichment_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "enriched",
+                "failed"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d17b25ad6ced4dba0c63649a88de29dab8dececdea38ddf69e36fe5316489f1"
+}

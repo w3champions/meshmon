@@ -17,8 +17,7 @@ const agents: AgentSummary[] = [
     id: "a",
     display_name: "A",
     ip: "10.0.0.1",
-    lat: 48.14,
-    lon: 11.58,
+    catalogue_coordinates: { latitude: 48.14, longitude: 11.58 },
     registered_at: "2026-01-01T00:00:00Z",
     last_seen_at: "2026-04-16T11:59:00Z",
   },
@@ -26,8 +25,7 @@ const agents: AgentSummary[] = [
     id: "b",
     display_name: "B",
     ip: "10.0.0.2",
-    lat: 51.51,
-    lon: -0.13,
+    catalogue_coordinates: { latitude: 51.51, longitude: -0.13 },
     registered_at: "2026-01-01T00:00:00Z",
     last_seen_at: "2026-04-16T11:59:00Z",
   },
@@ -37,7 +35,7 @@ const agents: AgentSummary[] = [
     ip: "10.0.0.3",
     registered_at: "2026-01-01T00:00:00Z",
     last_seen_at: "2026-04-16T11:59:00Z",
-  }, // no lat/lon → skipped
+  }, // no catalogue_coordinates → skipped
 ];
 
 describe("AgentMap", () => {

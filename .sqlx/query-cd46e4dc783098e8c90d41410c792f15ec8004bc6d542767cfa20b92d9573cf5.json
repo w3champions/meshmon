@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE ip_catalogue SET\n            enrichment_status = 'pending'::enrichment_status,\n            enriched_at       = NULL\n        WHERE id = ANY($1::uuid[])\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd46e4dc783098e8c90d41410c792f15ec8004bc6d542767cfa20b92d9573cf5"
+}

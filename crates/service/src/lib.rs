@@ -1,10 +1,12 @@
 //! Library surface of the meshmon service.
 //!
-//! Modules added in T04 (service core — axum shell, config, logging):
+//! Per-module responsibilities:
+//! - [`catalogue`] — IP catalogue registry, paste parser, enrichment wiring.
 //! - [`config`] — `meshmon.toml` parsing + validation.
-//! - [`db`] — Postgres pool + migrations (shipped in T03).
+//! - [`db`] — Postgres pool + migrations.
+//! - [`enrichment`] — pluggable provider chain for catalogue enrichment.
 //! - [`error`] — boot/startup error types.
-//! - [`grpc`] — tonic gRPC service assembly (AgentApi stub, added T06).
+//! - [`grpc`] — tonic gRPC service assembly.
 //! - [`http`] — axum router assembly, health endpoints, OpenAPI serving.
 //! - [`logging`] — tracing-subscriber JSON initializer.
 //! - [`metrics`] — central metric registry (names + typed accessors + describe).
@@ -16,9 +18,11 @@
 #![deny(rust_2018_idioms, unused_must_use)]
 #![warn(missing_docs)]
 
+pub mod catalogue;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod enrichment;
 pub mod error;
 pub mod grpc;
 pub mod http;

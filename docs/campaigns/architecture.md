@@ -1,254 +1,273 @@
 # Campaigns — Architecture
 
-Architecture reference for the campaigns subsystem. Operator-facing usage lives in [`user-guide.md`](user-guide.md).
+Developer reference for the catalogue subsystem that backs the campaigns
+feature. Operator-facing workflow lives in [`user-guide.md`](user-guide.md).
 
-## Purpose
-
-Campaigns use the meshmon agent fleet to run **one-off** latency / loss / MTR measurements against arbitrary destination IPs, and rank those destinations as potential transit servers for the mesh. A campaign asks "given mesh agents A and B, is some candidate X such that `A → X → B` beats the route we already use?"
-
-Campaigns are orthogonal to continuous probing: they share the transport and the probe libraries, but never run on a schedule and never write to VictoriaMetrics.
-
-## Data flow
-
-```
-                 operator browser
-                        │
-           ┌────────────┼─────────────┐
-         /catalogue  /campaigns    /history/pair
-           │            │             │
-           ▼            ▼             ▼
-┌─────────────────────────────────────────────────┐
-│            meshmon-service (axum)               │
-│ ┌──────────────┐  ┌──────────────┐ ┌──────────┐ │
-│ │ catalogue/   │  │ campaign/    │ │ history  │ │
-│ │  enrichment  │  │  scheduler   │ │   api    │ │
-│ └──────┬───────┘  └───────┬──────┘ └────┬─────┘ │
-│        │                  ▼             │       │
-│        │         campaign/dispatch ────▶│       │
-│        ▼                  ▼             ▼       │
-│ ┌─────────────────────────────────────────────┐ │
-│ │ Postgres                                    │ │
-│ │   ip_catalogue                              │ │
-│ │   measurement_campaigns  campaign_pairs     │ │
-│ │   measurements  mtr_traces                  │ │
-│ │   campaign_evaluations                      │ │
-│ └─────────────────────────────────────────────┘ │
-└─────────────────────────┬───────────────────────┘
-                          │ reverse tunnel
-                          ▼
-                   ┌─────────────┐
-                   │ meshmon-    │
-                   │  agent      │
-                   │             │
-                   │  oneshot    │◀── AgentCommand.RunMeasurementBatch
-                   │  (trippy)   │──▶ stream<MeasurementResult>
-                   └─────────────┘
-```
-
-Dispatch rides on top of the existing reverse tunnel — campaigns add one server-streaming RPC to `AgentCommand` rather than opening a second long-lived stream.
+The campaigns layer (scheduler, dispatch, evaluator, one-off prober) is a
+later subsystem — this document covers the catalogue and the enrichment
+pipeline it depends on.
 
 ## IP catalogue
 
-`ip_catalogue` is the authoritative record for every IP the system knows about. Every agent registration and every catalogue paste lands here. Rows carry identity fields (`ip`, `display_name`, `website`, `notes`) and enrichment fields (`city`, `country_code`, `country_name`, `latitude`, `longitude`, `asn`, `network_operator`). `enrichment_status` is `pending`, `enriched`, or `failed`.
+`ip_catalogue` is the authoritative record for every IP meshmon knows
+about. Every agent registration and every operator paste lands here.
+
+### Table shape
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `UUID` | `gen_random_uuid()` default. |
+| `ip` | `INET` | Unique host address (never a wider CIDR). |
+| `display_name` | `TEXT` | Operator-facing label. |
+| `city`, `country_code`, `country_name` | `TEXT` / `CHAR(2)` / `TEXT` | Geography. |
+| `latitude`, `longitude` | `DOUBLE PRECISION` | Decimal degrees. |
+| `asn`, `network_operator` | `INTEGER` / `TEXT` | BGP identity. |
+| `website`, `notes` | `TEXT` | Free-form operator metadata. |
+| `enrichment_status` | `enrichment_status` enum | `pending`, `enriched`, `failed`. |
+| `enriched_at` | `TIMESTAMPTZ` | Last successful run. |
+| `operator_edited_fields` | `TEXT[]` | Lock set; see Overrides below. |
+| `source` | `catalogue_source` enum | `operator` or `agent_registration`. |
+| `created_at`, `created_by` | `TIMESTAMPTZ` / `TEXT` | Creation audit. |
+
+Indexes cover `country_code`, `asn`, and `(latitude, longitude)` for
+filter queries, plus a GIN full-text index (`to_tsvector('simple', …)`)
+over `display_name`, `city`, `country_name`, and `network_operator` that
+powers the free-text filter. Notes are deliberately excluded — they are
+operator memo, not search surface.
+
+### `agents_with_catalogue` view
+
+`agents` owns runtime fields only (`id`, `display_name`, `tcp_probe_port`,
+`udp_probe_port`, `agent_version`, `registered_at`, `last_seen_at`, `ip`,
+`location` free text). Geographic coordinates, city, country, ASN, and
+network operator live on `ip_catalogue`. The `agents_with_catalogue`
+`LEFT JOIN` view exposes the combined shape used by the agents page and
+the campaign source filter — agents without a catalogue row still appear,
+with null catalogue columns.
 
 ### Overrides
 
-`operator_edited_fields TEXT[]` marks fields that must never be overwritten by the enrichment chain. Both operator UI edits and agent self-report on `AgentApi.Register` append to this array: an agent's self-reported geo is authoritative because the agent's config was set by someone who knows where it physically lives.
+`operator_edited_fields TEXT[]` is the only override mechanism. Every
+field name stored in the array is the PascalCase `Field::as_str()`
+rendering (`Latitude`, `NetworkOperator`, …). The lock rule is:
 
-### Enrichment
+- **UI edits** append every touched field to the array (via the PATCH
+  handler and the repo `patch` write).
+- **Agent self-report** on `AgentApi.Register` appends `Latitude` and
+  `Longitude` — the agent's config was set by someone who knows where it
+  physically sits, and that value wins over any provider geo.
+- **Enrichment providers** skip any field listed in the array. The merge
+  layer (`enrichment::MergedFields::apply`) consults the lock set before
+  writing each column.
+- **Revert to auto** (PATCH `revert_to_auto: [field, …]`) NULLs the
+  column *and* removes the field name from the array, so the next
+  enrichment pass re-populates it.
 
-Enrichment is a background pipeline of pluggable providers, run in order and applying per-field first-writer-wins while skipping any field in `operator_edited_fields`:
+The field-name encoding is case-sensitive — `Latitude` is locked,
+`latitude` is not. A unit test pins the `as_str` / `FromStr` round-trip;
+divergence fails loudly.
 
-1. `ipgeolocation` — primary geo / ASN / network operator. Subject to the provider's free-tier quota.
-2. `rdap` — ASN / netname / country fallback via `icann-rdap-client`.
-3. `maxmind-geolite2` — self-hosted geo, opt-in.
-4. `whois` — legacy netname fallback, opt-in.
+## Enrichment pipeline
 
-A single job runner drains a bounded mpsc queue. Jobs arrive from catalogue creates, agent registrations, and operator-triggered re-enrich actions. The runner broadcasts `ip_catalogue_updated` events over SSE so the UI reflects live progress.
+Enrichment is a fixed chain of pluggable providers, composed at boot by
+[`enrichment::providers::build_chain`][chain] from the `[enrichment]`
+config section.
 
-### Agent cross-reference
+[chain]: ../../crates/service/src/enrichment/providers/mod.rs
 
-The `agents` table carries runtime fields only (`id`, `display_name`, `tcp_probe_port`, `udp_probe_port`, `agent_version`, `registered_at`, `last_seen_at`, `ip`, `location` free text). Geographic coordinates live in `ip_catalogue`. The `agents_with_catalogue` view left-joins the two tables on `ip`, feeding both the operator source filter and the agents page.
+### Provider chain
 
-## Measurements
+1. **`ipgeolocation`** — richest field coverage (city, country, lat/lon,
+   ASN, network operator). Default first in the chain. Subject to the
+   provider's free-tier quota.
+2. **`rdap`** (off by default while the in-tree lookup is a stub; flip
+   `[enrichment.rdap] enabled = true` once the real registry wiring
+   ships) — free, credential-less registry lookup via
+   `icann-rdap-client`. Fills registry-level fields (ASN, network
+   operator, country) that `ipgeolocation` did not already supply.
+3. **`maxmind-geolite2`** (feature `enrichment-maxmind`, off by default) —
+   local mmdb lookups; offline fallback for city / ASN.
+4. **`whois`** (feature `enrichment-whois`, off by default) — last-resort
+   network-operator fallback.
 
-`measurements` stores one row per observation: a `(source_agent_id, destination_ip, protocol, probe_count, measured_at)` with aggregated latency stats, `loss_pct`, an optional link to `mtr_traces(id)`, and a `kind` discriminator (`campaign`, `detail_ping`, `detail_mtr`). `mtr_traces` holds hops as JSONB.
+Each provider advertises the set of `Field`s it may populate via
+`EnrichmentProvider::supported()` and performs one async lookup per IP.
+Providers are pure — they compute fields and never touch the database.
 
-### 24-hour reuse
+### First-writer-wins
 
-Dispatch always checks for a prior measurement within the last 24 hours before sending probes:
+The runner walks the chain in declared order and merges each result into
+a `MergedFields` accumulator. A provider writes a field only when the
+destination slot is empty *and* the field is not locked. Earlier
+providers therefore win on conflicts — chain ordering is the only
+precedence knob.
 
-```sql
-SELECT id FROM measurements
- WHERE source_agent_id = $1 AND destination_ip = $2 AND protocol = $3
-   AND measured_at > now() - interval '24 hours'
- ORDER BY probe_count DESC, measured_at DESC
- LIMIT 1;
-```
+A single final write applies the merged result through
+`repo::apply_enrichment_result`, which uses `COALESCE` so existing
+values (locked or operator-written) are never clobbered even in the
+face of concurrent enrichment + PATCH.
 
-`probe_count DESC` is deliberate: detail measurements (250 probes) dominate regular measurements (10 probes) when both are present. A hit attributes the existing row to the campaign pair (`resolution_state='reused'`) and skips dispatch entirely. `force_measurement` at campaign or per-pair level bypasses the lookup.
+### Failure classification
 
-## Campaigns
+`EnrichmentError` variants drive runner behaviour:
 
-A `measurement_campaigns` row holds operator-facing metadata (`title`, `notes`) and every probing / evaluation knob that applies to the campaign: `protocol`, `probe_count`, `probe_count_detail`, `timeout_ms`, `probe_stagger_ms`, `loss_threshold_pct`, `stddev_weight`, `evaluation_mode`, `force_measurement`. No service-wide defaults shadow these — the DB column defaults are the only defaults.
+| Variant | Retryable | Runner reaction |
+|---|---|---|
+| `RateLimited { retry_after }` | yes | Log and move on; the row stays `pending` and the sweep re-picks it. |
+| `Unauthorized` | no | Log; the provider is effectively dead for the process because subsequent calls will 401 too. |
+| `NotFound` | no | Terminal for this provider; the runner falls through to the next one. |
+| `Transient(String)` | yes | Log; the chain continues, and the sweep re-picks the row if every provider failed. |
+| `Permanent(String)` | no | Log; the chain continues. |
 
-`campaign_pairs` contains one row per `(campaign × source_agent × destination_ip × kind)` with a `resolution_state` that moves through `pending → dispatched → succeeded | reused | unreachable | skipped`. `kind` is `campaign` (baseline measurements from the original dispatch), `detail_ping`, or `detail_mtr` (follow-up detail measurements).
+If every provider errored and `MergedFields::any_populated()` stays
+false, the repo writes terminal `enrichment_status = 'failed'`.
+Otherwise the row flips to `enriched`.
 
-### Lifecycle
+### ipgeolocation terms-of-service gate
 
-```
-  ┌─────────┐ Start   ┌─────────┐ all pairs     ┌──────────┐
-  │  Draft  │────────▶│ Running │───settled────▶│ Completed│
-  └─────────┘         └────┬────┘               └────┬─────┘
-                           │ Stop                    │ Evaluate
-                           ▼                         ▼
-                      ┌─────────┐               ┌───────────┐
-                      │ Stopped │               │ Evaluated │
-                      └─────────┘               └─────┬─────┘
-                                                      │ Edit (delta)
-                                                      ▼
-                                              (back to Running)
-```
+The config loader refuses to boot with `[enrichment.ipgeolocation]
+enabled = true` unless `acknowledged_tos = true`. The operator's
+explicit acknowledgement is the only way to activate the paid provider
+— a missing or `false` flag aborts startup with a clear error.
 
-Partial failures do not fail the campaign: offline sources and unreachable destinations simply terminate their individual pairs. Completion requires every pair to reach a terminal state, not every pair to succeed. Editing a terminal-state campaign computes the delta — added and removed pairs only — and returns the row to `Running`.
+## Runner
 
-## Scheduling and dispatch
+[`enrichment::runner::Runner`][runner] is a single long-lived task that
+drains work and persists merged results.
 
-The `campaign/scheduler` task runs a 500 ms tick augmented by `LISTEN` on Postgres NOTIFY for `campaign_pairs` state changes. On each wake:
+[runner]: ../../crates/service/src/enrichment/runner.rs
 
-1. Resolve active agents (`last_seen_at` within the registry's active window).
-2. Walk active campaigns in round-robin order (sorted by `started_at` with a monotonic cursor — new campaigns slot at the end, cursor does not reset).
-3. For each agent with free capacity, ask the next campaign for a batch via `take_next_batch`, which enforces three rate limits at once:
-   - Per-agent concurrency — the effective cap is the agent's `campaign_max_concurrency` (proto3 optional on `RegisterRequest`) or the cluster default.
-   - Per-destination ingress — token bucket keyed by `destination_ip`, default 2 req/s across all agents.
-   - Batch size — hard cap 50 pairs per RPC.
+- **Queue.** An `mpsc` channel fed by write-path handlers (paste,
+  agent register, re-enrich, bulk re-enrich). The producer
+  (`EnrichmentQueue::enqueue`) is non-blocking: `try_send` drops on
+  full with a `warn!` so a paste storm can't exhaust memory.
+- **Sweep.** A `tokio::time::interval` (30 s in production, shorter in
+  tests) scans for `enrichment_status = 'pending' AND created_at <
+  NOW() - INTERVAL '30 seconds'` rows and processes up to 128 per
+  cycle. The sweep is the safety net for queue-full drops and
+  restarted processes.
+- **Ordering.** A `biased` `tokio::select!` gives the queue priority
+  over the sweep tick so fresh work overtakes stale work.
+- **Per-row cycle.** Load the row → `mark_enrichment_start` → walk the
+  chain → `apply_enrichment_result` (which returns the terminal
+  `enriched`/`failed` status) → publish a single
+  `CatalogueEvent::EnrichmentProgress` on the broker.
 
-The `campaign/dispatch` worker owns one task per active agent. It calls `AgentCommandClient::run_measurement_batch` over the tunnel `Channel` registered by the reverse tunnel manager, consumes the server-streaming `MeasurementResult`s, and persists each into `measurements` + optionally `mtr_traces` with the `campaign_pairs.measurement_id` attribution in the same transaction.
+The runner is idempotent: provider output is stable and persistence
+goes through `COALESCE` + the lock check, so re-running on the same row
+produces the same state.
 
-Stop is implemented by flipping `state='stopped'`. The scheduler drops the campaign from the rotation on its next tick; in-flight batches drain naturally because tonic's stream lifetime keeps the probe work alive until results flush. Dropping the gRPC stream, in turn, propagates cancellation to the agent if needed.
+## Event broker and SSE
 
-## Agent one-off prober
+Every mutating catalogue operation publishes one `CatalogueEvent` on a
+process-wide `tokio::sync::broadcast` channel. Events are:
 
-`probing/oneshot.rs` serves every `RunMeasurementBatch` call. It is the single code path for campaign probing and uses `trippy-core` for all protocols — ICMP, TCP, UDP, MTR — because destinations are arbitrary third-party IPs without meshmon listeners. trippy reaches such destinations natively (ICMP echo for ICMP, TCP handshake for TCP, ICMP Port-Unreachable / service reply for UDP).
+- `Created { id, ip }`
+- `Updated { id }`
+- `Deleted { id }`
+- `EnrichmentProgress { id, status }`
 
-Per pair, the prober builds a `trippy_core::Tracer` from the batch's fields:
+Capacity is fixed at 512. Publishers fire-and-forget — `send` errors
+are ignored so a subscriber-less broker is still valid.
 
-- `max_rounds(probe_count)` controls repetition.
-- `min_round_duration(probe_stagger_ms)` controls intra-measurement pacing.
-- `max_round_duration(timeout_ms)` bounds per-probe wait.
-- `first_ttl(1) / max_ttl(32)` defines the TTL sweep (MTR takes all hops; latency takes only the destination-reached probe's RTT).
+`GET /api/catalogue/stream` translates a per-connection subscription
+into an SSE response. Events are serialised as JSON frames. A 15-second
+keep-alive comment prevents idle-timeout from intermediate proxies.
 
-Trace identifiers come from `probing::trippy::next_trace_id()` — a process-wide `AtomicU16` that hands out unique non-zero `u16`s across continuous and campaign tracers alike. No range carving, no partitioning.
+If the subscriber's receiver falls behind the 512-slot buffer, the
+stream wrapper surfaces `BroadcastStreamRecvError::Lagged(n)`. The
+handler translates that into a synthetic frame
+`{"kind":"lag","missed":N}` so clients can detect the gap and refetch
+state rather than drift silently.
 
-Campaign tracers run under `spawn_blocking` (trippy's round loop uses blocking raw-socket syscalls) with a dedicated `Semaphore` sized from the agent's effective concurrency cap. Continuous MTR has its own semaphore (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32). The two pools are independent so neither class can starve the other. The agent's tokio runtime sets `max_blocking_threads(64)`, so operators raising either cap must keep the combined ceiling under that budget.
+## Agent Register hook
 
-Loss semantics:
-- **ICMP** — success iff the destination's echo reply arrived within the timeout.
-- **TCP** — success iff the destination returned SYN/ACK or RST within the timeout (a closed port is still reachable; silent loss is the only failure mode contributing to `loss_pct`). A pair whose every probe was RST'd emits `MeasurementFailure { REFUSED }` instead of a summary.
-- **UDP** — success iff the destination replied (service response or ICMP Port-Unreachable from the destination IP) within the timeout. ICMP Time-Exceeded from intermediate hops does not count, matching trippy's destination-reached predicate.
+`AgentApi::Register` calls
+`catalogue::repo::ensure_from_agent(&mut *tx, ip, lat, lon)` inside
+the same transaction as the `agents` upsert, so a catalogue-sync
+failure rolls back the agent write too. SSE publish and enrichment
+enqueue happen after `tx.commit()`:
 
-## Evaluation
+- Missing catalogue row → `INSERT` with `source =
+  'agent_registration'` and `operator_edited_fields =
+  ARRAY['Latitude', 'Longitude']`.
+- Existing catalogue row → `UPDATE` latitude + longitude and
+  union-merge `Latitude` / `Longitude` into
+  `operator_edited_fields`.
 
-`campaign/evaluator` runs on demand (Evaluate button). For every `(A, B, X)` where A and B are meshmon agents with a direct measurement and X has measurements from both A and B:
-
-- `direct_rtt = mean(A→B)`, `transit_rtt = mean(A→X) + mean(X→B)`. Symmetry is assumed — the mesh never measures `X → A`, and cross-Atlantic asymmetry is a documented tradeoff.
-- `stddev_weight · stddev` is added as a penalty to both sides; unstable routes lose ground.
-- Compounded `axb_loss = 1 - (1 - loss(A→X))(1 - loss(X→B))` must be at or below `loss_threshold_pct`, as must `direct_loss`.
-- The qualifying predicate depends on `evaluation_mode`:
-  - `diversity` — transit beats direct.
-  - `optimization` — transit beats both direct and every other `A → Y → B` transit via existing mesh agents `Y` for which the campaign has the necessary measurements.
-
-Results are serialised into a single `campaign_evaluations` row per campaign (one-to-one, overwritten on every Evaluate). Per-candidate detail lives in a JSONB blob; the single-row shape keeps the table small and cache-friendly.
-
-Agents can appear as candidates. In `optimization` mode an agent Y naturally never qualifies against itself (it's already in the baseline); in `diversity` mode it can, badged "mesh member — no acquisition needed".
-
-## Detail measurements
-
-A detail measurement refines a specific pair with an MTR trace plus a 250-probe latency run in the campaign's protocol. Triggered from the results UI with three scopes (all pairs, good candidates only, individual pair), it inserts new `campaign_pairs` rows with `kind ∈ {detail_ping, detail_mtr}` and `force_measurement=true`, returning the campaign to `Running` until the new pairs settle.
-
-Detail rows never feed the evaluator's baseline/candidate matrix — that remains strict `kind=campaign`. They appear in the Raw tab and in the historic pair view, and they dominate regular measurements for the 24 h reuse cache.
+The agent's self-reported geo is therefore authoritative and the
+enrichment chain will never overwrite it. Other catalogue fields
+(`city`, `country_code`, ASN, network operator) remain open for
+providers to populate.
 
 ## HTTP surface
 
-All under `/api/`, all session-authenticated.
+All under `/api/catalogue`, all session-authenticated.
 
-- `catalogue` — CRUD, bulk paste, re-enrich (single and bulk), facets (for filter previews), SSE stream.
-- `campaigns` — CRUD, lifecycle transitions (`start`, `stop`, `edit`, `force_pair`), pair listing, `preview-dispatch-count`, `evaluate`, `detail`, `evaluation`, SSE stream.
-- `history/{sources,destinations,measurements}` — historic pair view.
+- `POST /api/catalogue` — operator paste; parses tokens, bulk-inserts
+  accepted IPs, enqueues each new id for enrichment.
+- `GET /api/catalogue` — filtered list (country, ASN, network, name,
+  IP prefix, bounding box). Capped at 500 rows.
+- `GET /api/catalogue/{id}` — single row.
+- `PATCH /api/catalogue/{id}` — partial update with `revert_to_auto`
+  support.
+- `DELETE /api/catalogue/{id}` — idempotent remove.
+- `POST /api/catalogue/{id}/reenrich` — enqueue one row (202
+  Accepted).
+- `POST /api/catalogue/reenrich` — bulk enqueue.
+- `GET /api/catalogue/facets` — cached filter facets (country, ASN,
+  city, network). 30-second TTL via `catalogue::facets::FacetsCache`.
+- `GET /api/catalogue/stream` — SSE event stream.
 
-All types flow through the `utoipa` → OpenAPI → `openapi-typescript` pipeline, so the frontend client is always in sync.
-
-## Frontend routes
-
-- `/catalogue` — browse and edit, with table and map views and the shared filter component.
-- `/campaigns` — list.
-- `/campaigns/new` — composer, with side-by-side staging and target panels, paste-many input, and live size preview.
-- `/campaigns/:id` — results browser. Four tabs: Candidates (default, candidate-first ranking), Pairs (pivoted), Raw, Evaluation settings.
-- `/history/pair` — pick a (source, destination), see latency / loss / MTR over time.
-
-The map uses the existing meshmon map integration; draw-and-select builds on top with `leaflet-geoman` plus `@turf/boolean-point-in-polygon`.
+Every DTO flows through the `utoipa` → OpenAPI → `openapi-typescript`
+pipeline so the frontend client stays in sync.
 
 ## Configuration
 
 ```toml
 [enrichment.ipgeolocation]
-enabled = true
-api_key_env = "IPGEOLOCATION_API_KEY"
-acknowledged_tos = false
+enabled          = true
+api_key_env      = "IPGEOLOCATION_API_KEY"
+acknowledged_tos = false  # must be true when enabled = true
 
 [enrichment.rdap]
-enabled = true
+# The in-tree provider is a stub today — leave disabled until the real
+# wire-up ships. See `rdap_enabled_default` for the reasoning.
+enabled = false
 
 [enrichment.maxmind]
-enabled = false
+enabled   = false
 city_mmdb = "/var/lib/meshmon/GeoLite2-City.mmdb"
 asn_mmdb  = "/var/lib/meshmon/GeoLite2-ASN.mmdb"
 
 [enrichment.whois]
 enabled = false
-
-[campaigns]
-size_warning_threshold = 1000
-scheduler_tick_ms      = 500
-max_pair_attempts      = 3
-
-[campaigns.rate_limits]
-default_agent_concurrency = 16
-per_destination_rps       = 2.0
-max_batch_size            = 50
-
-[agent]
-# campaign_max_concurrency = 32   # unset = follow cluster default
 ```
 
-Per-campaign knobs (`probe_count`, `probe_count_detail`, `timeout_ms`, `probe_stagger_ms`, `loss_threshold_pct`, `stddev_weight`, `evaluation_mode`, `force_measurement`) live on the campaign row. The service will refuse to start if `ipgeolocation.enabled` is true without `acknowledged_tos = true`.
-
-## Observability
-
-Exposed on the existing `/metrics/prometheus`:
-
-| Metric | Type | Purpose |
-|---|---|---|
-| `meshmon_campaigns_total{state}` | gauge | campaign count per state |
-| `meshmon_campaign_pairs_total{state}` | gauge | pair count per state |
-| `meshmon_campaign_reuse_ratio` | gauge | fraction of pairs satisfied by the 24 h cache |
-| `meshmon_scheduler_tick_seconds` | histogram | scheduler latency |
-| `meshmon_campaign_batches_total{agent,kind,outcome}` | counter | dispatched batches |
-| `meshmon_campaign_batch_duration_seconds{agent,kind}` | histogram | per-batch wall-clock |
-| `meshmon_campaign_pairs_inflight{agent}` | gauge | in-flight pairs per agent |
-| `meshmon_campaign_dest_bucket_wait_seconds` | histogram | time spent waiting for a per-destination token |
-| `meshmon_campaign_probe_collisions_total` | counter | replies observed outside their tracer's expected identifier; always zero in healthy deployments |
+An enabled `[enrichment.maxmind]` block with either mmdb path unset is
+treated as benign misconfiguration and skipped silently at chain build
+time — the operator has toggled the flag before staging the files.
+Every other enabled-but-unconstructible provider (missing API key,
+feature-gated-out) aborts boot.
 
 ## Invariants
 
-- **Continuous probing stays untouched.** Campaign code reuses the probe libraries and the shared trace-id allocator but does not alter continuous probers' state machines or emitters.
-- **One trace-id allocator.** Every trippy tracer in the process — continuous or campaign — draws from `probing::trippy::next_trace_id()`. There is no second allocator and no range partitioning.
-- **Campaign data lives in Postgres only.** VictoriaMetrics is for continuous time series; campaign measurements are one-off and stay out of the metrics pipeline.
-- **Overrides are per-field.** Any authoritative write appends to `operator_edited_fields`; re-enrichment always respects that list.
-- **Baseline evaluation requires agent-agent pairs.** A campaign with none returns an empty evaluation with a clear message. There are no synthetic baselines.
-- **Partial success is normal.** Offline sources and unreachable destinations fail pairs, not campaigns.
+- **Per-row overrides are honoured end-to-end.** Every authoritative
+  write appends to `operator_edited_fields`; enrichment reads it on
+  merge.
+- **Providers are pure.** Persistence happens only in the runner, so
+  the lock rule is enforced in one place.
+- **Chain order is precedence.** First-writer-wins, earlier beats
+  later.
+- **The broker never blocks publishers.** Slow SSE clients lag and
+  receive a synthetic `lag` frame; they don't backpressure writes.
+- **Agents flow through the catalogue.** Agent geo lives on
+  `ip_catalogue`; `agents_with_catalogue` resolves it for agent-facing
+  queries.
 
 ## See also
 
-- [User guide](user-guide.md) — operator workflow, plain language.
-- [Runbook](../runbook.md) — operational response, general.
+- [User guide](user-guide.md) — operator workflow.
+- [Runbook](../runbook.md) — operational response.
+- Campaigns scheduler, dispatch, evaluator, and one-off prober — later
+  subsystems; this doc is intentionally silent on those surfaces.

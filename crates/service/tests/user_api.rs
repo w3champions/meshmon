@@ -127,14 +127,25 @@ async fn agent_detail_returns_404_for_unknown_id() {
 async fn agent_detail_returns_registry_snapshot_fields() {
     let pool = common::shared_migrated_pool().await.clone();
 
-    // Seed an agent row directly in the DB.
+    // Seed an agent row directly in the DB. Geo lives on ip_catalogue; the
+    // LEFT JOIN in `registry::refresh_once` picks it up by matching `ip`.
     sqlx::query(
-        "INSERT INTO agents (id, display_name, location, ip, lat, lon, tcp_probe_port, udp_probe_port, agent_version)
-         VALUES ('brazil-north', 'Fortaleza', 'BR', '170.80.110.90', -3.7, -38.5, 3555, 3552, 'v0.1.0')",
+        "INSERT INTO agents (id, display_name, location, ip, tcp_probe_port, udp_probe_port, agent_version)
+         VALUES ('brazil-north', 'Fortaleza', 'BR', '170.80.110.90', 3555, 3552, 'v0.1.0')",
     )
     .execute(&pool)
     .await
     .expect("seed agent row");
+    sqlx::query(
+        "INSERT INTO ip_catalogue (ip, source, latitude, longitude, operator_edited_fields)
+         VALUES ('170.80.110.90'::inet, 'agent_registration', -3.7, -38.5,
+                 ARRAY['Latitude','Longitude']::text[])
+         ON CONFLICT (ip) DO UPDATE SET latitude = EXCLUDED.latitude,
+                                        longitude = EXCLUDED.longitude",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed catalogue row");
 
     let state = common::state_with_admin(pool.clone()).await;
 
@@ -172,17 +183,27 @@ async fn agent_detail_returns_registry_snapshot_fields() {
     assert_eq!(body["display_name"], "Fortaleza", "body = {body}");
     assert_eq!(body["location"], "BR", "body = {body}");
     assert_eq!(body["ip"], "170.80.110.90", "body = {body}");
-    assert_eq!(body["lat"], -3.7, "body = {body}");
-    assert_eq!(body["lon"], -38.5, "body = {body}");
+    assert_eq!(
+        body["catalogue_coordinates"]["latitude"], -3.7,
+        "body = {body}"
+    );
+    assert_eq!(
+        body["catalogue_coordinates"]["longitude"], -38.5,
+        "body = {body}"
+    );
     assert_eq!(body["agent_version"], "v0.1.0", "body = {body}");
     assert!(body["registered_at"].is_string(), "body = {body}");
     assert!(body["last_seen_at"].is_string(), "body = {body}");
 
-    // Cleanup: remove the seeded row so other tests aren't affected.
+    // Cleanup: remove the seeded rows so other tests aren't affected.
     sqlx::query("DELETE FROM agents WHERE id = 'brazil-north'")
         .execute(&pool)
         .await
         .expect("cleanup agent row");
+    sqlx::query("DELETE FROM ip_catalogue WHERE ip = '170.80.110.90'::inet")
+        .execute(&pool)
+        .await
+        .expect("cleanup catalogue row");
 }
 
 // ---------------------------------------------------------------------------

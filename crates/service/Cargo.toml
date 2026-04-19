@@ -18,6 +18,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 argon2 = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 axum-login = { workspace = true }
 axum-prometheus = { workspace = true }
@@ -31,8 +32,12 @@ meshmon-revtunnel = { path = "../revtunnel" }
 prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
 governor = { workspace = true }
 hyper = { workspace = true }
+icann-rdap-client = { workspace = true }
+maxminddb = { workspace = true, optional = true }
+whois-rust = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 password-hash = { workspace = true }
 reqwest = { workspace = true }
@@ -53,7 +58,7 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }
@@ -71,7 +76,12 @@ utoipa-swagger-ui = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
 ctor = { workspace = true }
+# `stream` feature (off by default in workspace) enables
+# `reqwest::Response::bytes_stream` for the SSE E2E harness. Kept as a
+# dev-only knob so the service binary's reqwest bundle stays minimal.
+reqwest = { workspace = true, features = ["stream"] }
 meshmon-agent = { path = "../agent" }
 meshmon-revtunnel = { path = "../revtunnel" }
 metrics-util = "0.20"
@@ -86,3 +96,8 @@ wiremock = { workspace = true }
 
 [build-dependencies]
 memory-serve = { workspace = true }
+
+[features]
+default = []
+enrichment-maxmind = ["maxminddb"]
+enrichment-whois = ["whois-rust"]

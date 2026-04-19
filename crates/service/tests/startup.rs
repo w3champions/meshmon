@@ -51,6 +51,7 @@ udp_probe_secret = "hex:0011223344556677"
         ingestion,
         registry,
         common::test_prometheus_handle().await,
+        common::test_enrichment_queue(),
     );
 
     let listener = TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
@@ -251,6 +252,7 @@ udp_probe_secret = "hex:0011223344556677"
         ingestion,
         registry,
         common::test_prometheus_handle().await,
+        common::test_enrichment_queue(),
     );
     state.mark_ready();
     assert!(state.is_ready());

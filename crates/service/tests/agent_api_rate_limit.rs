@@ -45,6 +45,7 @@ udp_probe_secret = "{secret}"
         ingestion,
         registry,
         common::test_prometheus_handle().await,
+        common::test_enrichment_queue(),
     )
 }
 

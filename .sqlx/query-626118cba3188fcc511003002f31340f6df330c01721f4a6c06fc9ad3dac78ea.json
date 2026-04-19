@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, display_name, location,\n               ip as \"ip: IpNetwork\",\n               lat, lon, agent_version,\n               tcp_probe_port, udp_probe_port,\n               registered_at, last_seen_at\n        FROM agents\n        ",
+  "query": "\n        SELECT a.id, a.display_name, a.location,\n               a.ip AS \"ip: IpNetwork\",\n               c.latitude, c.longitude,\n               a.agent_version,\n               a.tcp_probe_port, a.udp_probe_port,\n               a.registered_at, a.last_seen_at\n        FROM agents a\n        LEFT JOIN ip_catalogue c ON c.ip = a.ip\n        ",
   "describe": {
     "columns": [
       {
@@ -25,12 +25,12 @@
       },
       {
         "ordinal": 4,
-        "name": "lat",
+        "name": "latitude",
         "type_info": "Float8"
       },
       {
         "ordinal": 5,
-        "name": "lon",
+        "name": "longitude",
         "type_info": "Float8"
       },
       {
@@ -76,5 +76,5 @@
       false
     ]
   },
-  "hash": "c2cd641f5991a3642dad06ff0210f23c70e3d4b5e5add66095ada2786f443407"
+  "hash": "626118cba3188fcc511003002f31340f6df330c01721f4a6c06fc9ad3dac78ea"
 }

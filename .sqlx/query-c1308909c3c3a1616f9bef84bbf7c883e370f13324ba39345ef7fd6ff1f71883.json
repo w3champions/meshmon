@@ -1,0 +1,177 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE ip_catalogue SET\n            display_name = CASE\n                WHEN $2::bool THEN NULL\n                WHEN $3::bool THEN $4::text\n                ELSE display_name END,\n            city = CASE\n                WHEN $5::bool THEN NULL\n                WHEN $6::bool THEN $7::text\n                ELSE city END,\n            country_code = CASE\n                WHEN $8::bool THEN NULL\n                WHEN $9::bool THEN $10::char(2)\n                ELSE country_code END,\n            country_name = CASE\n                WHEN $11::bool THEN NULL\n                WHEN $12::bool THEN $13::text\n                ELSE country_name END,\n            latitude = CASE\n                WHEN $14::bool THEN NULL\n                WHEN $15::bool THEN $16::double precision\n                ELSE latitude END,\n            longitude = CASE\n                WHEN $17::bool THEN NULL\n                WHEN $18::bool THEN $19::double precision\n                ELSE longitude END,\n            asn = CASE\n                WHEN $20::bool THEN NULL\n                WHEN $21::bool THEN $22::integer\n                ELSE asn END,\n            network_operator = CASE\n                WHEN $23::bool THEN NULL\n                WHEN $24::bool THEN $25::text\n                ELSE network_operator END,\n            website = CASE\n                WHEN $26::bool THEN NULL\n                WHEN $27::bool THEN $28::text\n                ELSE website END,\n            notes = CASE\n                WHEN $29::bool THEN NULL\n                WHEN $30::bool THEN $31::text\n                ELSE notes END,\n            operator_edited_fields = ARRAY(\n                SELECT DISTINCT f\n                FROM UNNEST(\n                    ARRAY(SELECT UNNEST(operator_edited_fields) EXCEPT SELECT UNNEST($32::text[]))\n                    || $33::text[]\n                ) AS f\n            )\n        WHERE id = $1\n        RETURNING\n            id,\n            ip AS \"ip: IpNetwork\",\n            display_name, city, country_code, country_name,\n            latitude, longitude, asn, network_operator, website, notes,\n            enrichment_status AS \"enrichment_status: EnrichmentStatus\",\n            enriched_at,\n            operator_edited_fields,\n            source AS \"source: CatalogueSource\",\n            created_at, created_by\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "ip: IpNetwork",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "country_code",
+        "type_info": "Bpchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "country_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "latitude",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "longitude",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "asn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "network_operator",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "notes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "enrichment_status: EnrichmentStatus",
+        "type_info": {
+          "Custom": {
+            "name": "enrichment_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "enriched",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "enriched_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "operator_edited_fields",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 15,
+        "name": "source: CatalogueSource",
+        "type_info": {
+          "Custom": {
+            "name": "catalogue_source",
+            "kind": {
+              "Enum": [
+                "operator",
+                "agent_registration"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "created_by",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Bpchar",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Float8",
+        "Bool",
+        "Bool",
+        "Float8",
+        "Bool",
+        "Bool",
+        "Int4",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Text",
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c1308909c3c3a1616f9bef84bbf7c883e370f13324ba39345ef7fd6ff1f71883"
+}

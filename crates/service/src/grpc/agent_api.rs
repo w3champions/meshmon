@@ -188,7 +188,7 @@ impl AgentApi for AgentApiImpl {
             return Err(Status::invalid_argument("id and display_name required"));
         }
         // Reject non-finite or out-of-range coordinates before they enter
-        // the DB — the `agents.lat`/`lon` columns are `DOUBLE PRECISION`
+        // the DB — `ip_catalogue.latitude`/`longitude` are `DOUBLE PRECISION`
         // and happily store NaN/Inf, which would then leak through
         // `GetTargets` and break clients that assume real-world ranges.
         if !req.lat.is_finite() || !(-90.0..=90.0).contains(&req.lat) {
@@ -261,30 +261,41 @@ impl AgentApi for AgentApiImpl {
             }
         }
 
-        // Step 5: atomic upsert with IP guard. The `WHERE agents.ip = EXCLUDED.ip`
-        // clause on the conflict branch closes the race where two concurrent
-        // Register calls for the same `id` with different `ip` both pass the
-        // preflight (both see `None`) — PostgreSQL serializes the conflict,
-        // and the second caller's WHERE predicate evaluates against the
-        // already-inserted row's `ip`, which now differs. In that case the
-        // UPDATE is skipped, RETURNING yields zero rows, and we surface the
-        // same ALREADY_EXISTS status as the preflight path.
+        // Step 5: atomic upsert with IP guard, run inside a transaction
+        // shared with the catalogue sync below (step 6). Bundling both
+        // writes means a mid-sequence failure (e.g. catalogue DDL
+        // temporarily unavailable or transient DB error on the second
+        // query) rolls back the `agents` insert too — otherwise the
+        // client sees INTERNAL while the agent row is already committed,
+        // producing a partial-state view that a simple retry does not
+        // reconcile against the catalogue.
+        //
+        // The `WHERE agents.ip = EXCLUDED.ip` clause on the conflict
+        // branch closes the race where two concurrent Register calls
+        // for the same `id` with different `ip` both pass the preflight
+        // (both see `None`) — PostgreSQL serializes the conflict, and
+        // the second caller's WHERE predicate evaluates against the
+        // already-inserted row's `ip`, which now differs. In that case
+        // the UPDATE is skipped, RETURNING yields zero rows, and we
+        // surface the same ALREADY_EXISTS status as the preflight path.
         let location = (!req.location.is_empty()).then(|| req.location.clone());
         let agent_version = (!req.agent_version.is_empty()).then(|| req.agent_version.clone());
         // Validated to be in [1, 65535] above; narrow to the DB's i32 column.
         let tcp_port_i32 = req.tcp_probe_port as i32;
         let udp_port_i32 = req.udp_probe_port as i32;
+        let mut tx = self.state.pool.begin().await.map_err(|e| {
+            tracing::error!(error = %e, "register: open transaction failed");
+            Status::internal("register: open transaction failed")
+        })?;
         let upsert_row = sqlx::query!(
             r#"INSERT INTO agents
-                  (id, display_name, location, ip, lat, lon, agent_version,
+                  (id, display_name, location, ip, agent_version,
                    tcp_probe_port, udp_probe_port,
                    registered_at, last_seen_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
                ON CONFLICT (id) DO UPDATE SET
                    display_name   = EXCLUDED.display_name,
                    location       = EXCLUDED.location,
-                   lat            = EXCLUDED.lat,
-                   lon            = EXCLUDED.lon,
                    agent_version  = EXCLUDED.agent_version,
                    tcp_probe_port = EXCLUDED.tcp_probe_port,
                    udp_probe_port = EXCLUDED.udp_probe_port,
@@ -295,19 +306,22 @@ impl AgentApi for AgentApiImpl {
             req.display_name,
             location,
             claimed_ip_net,
-            req.lat,
-            req.lon,
             agent_version,
             tcp_port_i32,
             udp_port_i32,
         )
-        .fetch_optional(&self.state.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "register upsert failed");
             Status::internal("register upsert failed")
         })?;
         if upsert_row.is_none() {
+            // Drop the transaction without committing; the agents upsert
+            // above had no effect (UPDATE ... WHERE evaluated false), so
+            // there is nothing to roll back but we must not leave the
+            // connection holding an open BEGIN.
+            let _ = tx.rollback().await;
             tracing::warn!(
                 agent_id = %req.id,
                 claimed_ip = %claimed_ip,
@@ -318,7 +332,46 @@ impl AgentApi for AgentApiImpl {
             ));
         }
 
-        // Step 6: synchronous registry refresh so the next push sees it.
+        // Step 6: ensure the catalogue carries this agent's geo and marks
+        // Latitude/Longitude as operator-edited so enrichment providers
+        // never overwrite the agent's self-report. Runs against the same
+        // transaction as the agents upsert; if this fails, the rollback
+        // below also discards the `agents` write. SSE publish + enrichment
+        // enqueue happen only after the transaction commits, so clients
+        // never see a row that the DB will ultimately discard.
+        let catalogue_entry =
+            match crate::catalogue::repo::ensure_from_agent(&mut *tx, claimed_ip, req.lat, req.lon)
+                .await
+            {
+                Ok(entry) => entry,
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    tracing::error!(
+                        error = %e,
+                        agent_id = %req.id,
+                        claimed_ip = %claimed_ip,
+                        "register: ip_catalogue ensure_from_agent failed",
+                    );
+                    return Err(Status::internal("register catalogue sync failed"));
+                }
+            };
+        tx.commit().await.map_err(|e| {
+            tracing::error!(error = %e, "register: commit transaction failed");
+            Status::internal("register: commit transaction failed")
+        })?;
+        self.state
+            .catalogue_broker
+            .publish(crate::catalogue::events::CatalogueEvent::Updated {
+                id: catalogue_entry.id,
+            });
+        if catalogue_entry.enrichment_status == crate::catalogue::model::EnrichmentStatus::Pending {
+            // Bounded queue: a `false` return means the runner is busy
+            // and the row will be picked up by the sweep instead — the
+            // same safety net the paste path relies on.
+            let _ = self.state.enrichment_queue.enqueue(catalogue_entry.id);
+        }
+
+        // Step 7: synchronous registry refresh so the next push sees it.
         if let Err(e) = self.state.registry.force_refresh().await {
             tracing::warn!(
                 error = %e,
@@ -417,8 +470,8 @@ impl AgentApi for AgentApiImpl {
                 },
                 display_name: a.display_name,
                 location: a.location.unwrap_or_default(),
-                lat: a.lat.unwrap_or(0.0),
-                lon: a.lon.unwrap_or(0.0),
+                lat: a.latitude.unwrap_or(0.0),
+                lon: a.longitude.unwrap_or(0.0),
                 tcp_probe_port: u32::from(a.tcp_probe_port),
                 udp_probe_port: u32::from(a.udp_probe_port),
             })

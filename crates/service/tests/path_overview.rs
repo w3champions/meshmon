@@ -41,7 +41,9 @@ mod common;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Insert an agents row with rich metadata (lat/lon, display name, version).
+/// Insert an agents row with rich metadata (display name, version) plus a
+/// matching `ip_catalogue` entry carrying the lat/lon (catalogue is the
+/// single authority for geo; the `agents` table no longer stores it).
 async fn insert_agent_detailed(
     pool: &PgPool,
     id: &str,
@@ -52,19 +54,30 @@ async fn insert_agent_detailed(
     lon: f64,
 ) {
     sqlx::query(
-        "INSERT INTO agents (id, display_name, location, ip, lat, lon, tcp_probe_port, udp_probe_port, agent_version) \
-         VALUES ($1, $2, $3, $4::inet, $5, $6, 3555, 3552, 'v0.1.0') \
+        "INSERT INTO agents (id, display_name, location, ip, tcp_probe_port, udp_probe_port, agent_version) \
+         VALUES ($1, $2, $3, $4::inet, 3555, 3552, 'v0.1.0') \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(id)
     .bind(display_name)
     .bind(location)
     .bind(ip)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("insert_agent_detailed({id}) failed: {e}"));
+
+    sqlx::query(
+        "INSERT INTO ip_catalogue (ip, source, latitude, longitude, operator_edited_fields) \
+         VALUES ($1::inet, 'agent_registration', $2, $3, ARRAY['Latitude','Longitude']::text[]) \
+         ON CONFLICT (ip) DO UPDATE SET latitude = EXCLUDED.latitude, \
+                                        longitude = EXCLUDED.longitude",
+    )
+    .bind(ip)
     .bind(lat)
     .bind(lon)
     .execute(pool)
     .await
-    .unwrap_or_else(|e| panic!("insert_agent_detailed({id}) failed: {e}"));
+    .unwrap_or_else(|e| panic!("insert_agent_detailed catalogue({id}) failed: {e}"));
 }
 
 /// Insert a single route_snapshot row at the supplied timestamp.

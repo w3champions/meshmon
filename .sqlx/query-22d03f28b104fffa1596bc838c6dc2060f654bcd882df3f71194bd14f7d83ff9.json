@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE ip_catalogue SET\n            enrichment_status = 'pending'::enrichment_status,\n            enriched_at       = NULL\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "22d03f28b104fffa1596bc838c6dc2060f654bcd882df3f71194bd14f7d83ff9"
+}

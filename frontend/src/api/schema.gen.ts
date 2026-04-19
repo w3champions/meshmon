@@ -139,6 +139,190 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalogue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue` — filtered, size-bounded list.
+         * @description The handler converts [`ListQuery`] straight into [`repo::ListFilter`]
+         *     and returns a [`ListResponse`]. Cursor pagination is accepted on the
+         *     wire but ignored until T13 — the repo implementation clamps the
+         *     response to the first `limit.min(500)` rows in
+         *     `(created_at DESC, id DESC)` order.
+         */
+        get: operations["list"];
+        put?: never;
+        /**
+         * `POST /api/catalogue` — operator paste flow.
+         * @description Tokens are concatenated with spaces and run through
+         *     [`parse_ip_tokens`]; accepted IPs become catalogue rows via
+         *     [`repo::insert_many`], and each newly-created id is enqueued for
+         *     enrichment. Existing rows come back under `existing` so the UI can
+         *     surface their current enrichment state without a follow-up fetch.
+         *     Rejected tokens land in `invalid`.
+         */
+        post: operations["paste"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/facets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue/facets` — cached aggregate facets for the
+         *     filter UI.
+         * @description Serves [`FacetsResponse`] from the TTL cache on
+         *     [`crate::state::AppState::facets_cache`] so the four-group-by
+         *     aggregation runs at most once per cache window per process. The
+         *     cache refreshes lazily on access; a DB error during refresh is
+         *     surfaced as 500 without polluting the cached value.
+         */
+        get: operations["facets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/reenrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/catalogue/reenrich` — bulk re-enrichment.
+         * @description Each id in [`BulkReenrichRequest::ids`] is flipped back to
+         *     `enrichment_status = 'pending'` in a single
+         *     [`repo::mark_enrichment_start_bulk`] call and then pushed onto the
+         *     enrichment queue. Unknown ids silently no-op at both layers (the
+         *     bulk UPDATE matches zero rows and the runner tolerates missing ids
+         *     on dequeue), so callers may include speculative ids without
+         *     surfacing a per-id error path.
+         *
+         *     The prior mark-`pending` step makes the sweep a true safety net:
+         *     queue drops (backpressure or closed channel) no longer silently lose
+         *     re-enrich requests because the row is already `pending` with an
+         *     older `created_at`, so the runner's 30-second sweep will pick it up
+         *     on the next tick.
+         *
+         *     Returns 400 when `ids.len() > MAX_BULK_REENRICH_IDS` and 202 on
+         *     success (including the empty-`ids` case).
+         */
+        post: operations["reenrich_many"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * SSE stream of catalogue lifecycle events.
+         * @description Requires an authenticated session (the enclosing router applies
+         *     `login_required!`). The response never ends on its own — the server
+         *     closes it on shutdown or when the client disconnects.
+         */
+        get: operations["catalogue_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue/{id}` — single-row lookup.
+         * @description Returns 404 with a JSON error body when the id is absent. Keeping
+         *     the 404 body parallel to [`crate::http::user_api::get_agent`] so
+         *     SPA error handling stays uniform across catalogue + registry.
+         */
+        get: operations["get_one"];
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/catalogue/{id}` — idempotent row removal.
+         * @description Returns 204 whether or not the row existed: [`repo::delete`] issues a
+         *     plain `DELETE ... WHERE id = $1` and surfaces only the affected-row
+         *     count, so the HTTP surface always answers 204. The
+         *     [`CatalogueEvent::Deleted`] event is broadcast only when a row was
+         *     actually removed (`rows_affected > 0`) — redundant deletes against a
+         *     missing id complete silently to avoid waking SSE subscribers on a
+         *     no-op.
+         */
+        delete: operations["delete"];
+        options?: never;
+        head?: never;
+        /**
+         * `PATCH /api/catalogue/{id}` — partial update with revert-to-auto.
+         * @description Partial update with revert-to-auto support. If a field is present in both the body and `revert_to_auto`, the revert wins and the write is suppressed (matches repo::patch semantics).
+         */
+        patch: operations["patch"];
+        trace?: never;
+    };
+    "/api/catalogue/{id}/reenrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/catalogue/{id}/reenrich` — enqueue a single row for a
+         *     fresh enrichment pass.
+         * @description Returns 202 Accepted when the id exists (the enrichment runner will
+         *     pick the row up asynchronously) and 404 when the id is unknown. The
+         *     existence check runs synchronously because a 404 is cheap to surface
+         *     and spares callers from an "accepted then silently dropped" UX.
+         *
+         *     Before enqueuing, the row is flipped back to `enrichment_status =
+         *     'pending'` via [`repo::mark_enrichment_start`]. This makes the sweep
+         *     a true safety net: if the bounded queue is full (or its receiver is
+         *     gone) and the enqueue drops, the row is already `pending` with an
+         *     older `created_at`, so the runner's 30-second sweep will pick it up
+         *     on the next tick instead of leaving the re-enrich request silently
+         *     stranded (sweep only scans rows in `pending`, so a still-`enriched`
+         *     row would otherwise never be retried).
+         */
+        post: operations["reenrich_one"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/metrics/query": {
         parameters: {
             query?: never;
@@ -326,6 +510,7 @@ export interface components {
         AgentSummary: {
             /** @description Optional agent version string. */
             agent_version?: string | null;
+            catalogue_coordinates?: null | components["schemas"]["CatalogueCoordinates"];
             /** @description Human-readable display label. */
             display_name: string;
             /** @description Unique agent identifier (matches the agent's `AGENT_ID` env var). */
@@ -337,18 +522,8 @@ export interface components {
              * @description Last successful push (register/metrics/snapshot).
              */
             last_seen_at: string;
-            /**
-             * Format: double
-             * @description Optional latitude.
-             */
-            lat?: number | null;
             /** @description Optional free-form location string. */
             location?: string | null;
-            /**
-             * Format: double
-             * @description Optional longitude.
-             */
-            lon?: number | null;
             /**
              * Format: date-time
              * @description When this agent first registered.
@@ -382,6 +557,227 @@ export interface components {
             state: string;
             /** @description Short human-readable summary from the `summary` annotation. */
             summary?: string | null;
+        };
+        /** @description Per-ASN occurrence count. */
+        AsnFacet: {
+            /**
+             * Format: int32
+             * @description Autonomous system number.
+             */
+            asn: number;
+            /**
+             * Format: int64
+             * @description Number of rows with this ASN.
+             */
+            count: number;
+        };
+        /**
+         * @description Request body for `POST /api/catalogue/reenrich`.
+         *
+         *     Best-effort bulk enqueue: each id is pushed onto the enrichment
+         *     queue without a prior existence check. Unknown ids resolve to a
+         *     no-op inside the runner (the row lookup simply returns none), so
+         *     callers may include speculative ids without surfacing a per-id
+         *     error path.
+         */
+        BulkReenrichRequest: {
+            /**
+             * @description Catalogue row ids the operator wants to re-run through the
+             *     enrichment pipeline.
+             */
+            ids: string[];
+        };
+        /**
+         * @description Latitude / longitude pair sourced from the IP catalogue join.
+         *
+         *     Present only when both coordinates are known; otherwise the parent
+         *     `AgentSummary.catalogue_coordinates` is `None`.
+         */
+        CatalogueCoordinates: {
+            /**
+             * Format: double
+             * @description Decimal latitude (-90..=90).
+             */
+            latitude: number;
+            /**
+             * Format: double
+             * @description Decimal longitude (-180..=180).
+             */
+            longitude: number;
+        };
+        /**
+         * @description Operator-facing view of a single catalogue row.
+         *
+         *     This is the wire shape returned by `GET /api/catalogue/{id}` and
+         *     embedded in [`ListResponse::entries`] / [`PasteResponse::created`].
+         */
+        CatalogueEntryDto: {
+            /**
+             * Format: int32
+             * @description Autonomous system number.
+             */
+            asn?: number | null;
+            /** @description City name. */
+            city?: string | null;
+            /** @description ISO 3166-1 alpha-2 country code. */
+            country_code?: string | null;
+            /** @description Country human-readable name. */
+            country_name?: string | null;
+            /**
+             * Format: date-time
+             * @description Row creation timestamp.
+             */
+            created_at: string;
+            /** @description Operator principal (session username) that created the row. */
+            created_by?: string | null;
+            /** @description Operator-supplied display label. Absent when unset. */
+            display_name?: string | null;
+            /**
+             * Format: date-time
+             * @description Timestamp of the most recent successful enrichment run.
+             */
+            enriched_at?: string | null;
+            /** @description Current enrichment pipeline status. */
+            enrichment_status: components["schemas"]["EnrichmentStatus"];
+            /**
+             * Format: uuid
+             * @description Primary key (UUID v4).
+             */
+            id: string;
+            /**
+             * @description Catalogued IP, rendered via `IpAddr::to_string()` (no CIDR
+             *     prefix — the row is always a host address).
+             */
+            ip: string;
+            /**
+             * Format: double
+             * @description Decimal latitude.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Decimal longitude.
+             */
+            longitude?: number | null;
+            /** @description Network operator / ISP name. */
+            network_operator?: string | null;
+            /** @description Free-form operator notes. */
+            notes?: string | null;
+            /**
+             * @description Columns the operator has explicitly edited. PascalCase strings
+             *     matching [`super::model::Field::as_str`].
+             */
+            operator_edited_fields: string[];
+            /** @description Where the row originated. */
+            source: components["schemas"]["CatalogueSource"];
+            /** @description Operator-supplied external link. */
+            website?: string | null;
+        };
+        /**
+         * @description Catalogue lifecycle event delivered to every SSE subscriber.
+         *
+         *     The `tag = "kind"` serde representation matches the wire shape the
+         *     frontend expects: one top-level `kind` discriminant plus flat
+         *     per-variant fields. Keep variant names in `snake_case` on the wire —
+         *     `utoipa` and serde both honour `rename_all = "snake_case"`.
+         */
+        CatalogueEvent: {
+            /**
+             * Format: uuid
+             * @description Primary key of the newly-inserted row.
+             */
+            id: string;
+            /**
+             * @description Textual rendering of the catalogued IP for convenient client-side
+             *     display without a second fetch.
+             */
+            ip: string;
+            /** @enum {string} */
+            kind: "created";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the updated row.
+             */
+            id: string;
+            /** @enum {string} */
+            kind: "updated";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the row that was removed.
+             */
+            id: string;
+            /** @enum {string} */
+            kind: "deleted";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the row whose enrichment status changed.
+             */
+            id: string;
+            /** @enum {string} */
+            kind: "enrichment_progress";
+            /** @description New enrichment status. */
+            status: components["schemas"]["EnrichmentStatus"];
+        };
+        /**
+         * @description Where a catalogue row originated.
+         * @enum {string}
+         */
+        CatalogueSource: "operator" | "agent_registration";
+        /** @description Per-city occurrence count. */
+        CityFacet: {
+            /**
+             * Format: int64
+             * @description Number of rows with this city.
+             */
+            count: number;
+            /** @description City name. */
+            name: string;
+        };
+        /** @description Per-country occurrence count. */
+        CountryFacet: {
+            /** @description ISO 3166-1 alpha-2 country code. */
+            code: string;
+            /**
+             * Format: int64
+             * @description Number of rows with this country_code.
+             */
+            count: number;
+            /** @description Human-readable country name when available. */
+            name?: string | null;
+        };
+        /**
+         * @description Current status of the enrichment pipeline for a row.
+         * @enum {string}
+         */
+        EnrichmentStatus: "pending" | "enriched" | "failed";
+        /**
+         * @description Error envelope used by every non-2xx catalogue response.
+         *
+         *     The single `error` field carries a stable, machine-parseable
+         *     snake_case code (e.g. `not_found`, `database_error`). Matches the
+         *     gateway-level JSON 404 emitted by `crate::http::backend_path_404`
+         *     so clients can use one shape for every `/api` error.
+         */
+        ErrorEnvelope: {
+            /**
+             * @description Stable error code. Clients should match on this string, not on
+             *     the HTTP status alone.
+             */
+            error: string;
+        };
+        /** @description Aggregate facets used by the catalogue's filter UI. */
+        FacetsResponse: {
+            /** @description Top 250 ASN buckets, descending by count. */
+            asns: components["schemas"]["AsnFacet"][];
+            /** @description Top 250 city buckets, descending by count. */
+            cities: components["schemas"]["CityFacet"][];
+            /** @description Top 250 country buckets, descending by count. */
+            countries: components["schemas"]["CountryFacet"][];
+            /** @description Top 250 operator buckets, descending by count. */
+            networks: components["schemas"]["NetworkFacet"][];
         };
         /** @description JSON representation of an observed IP at a hop. */
         HopIpJson: {
@@ -437,6 +833,16 @@ export interface components {
             tcp?: null | components["schemas"]["RouteSnapshotDetail"];
             udp?: null | components["schemas"]["RouteSnapshotDetail"];
         };
+        /** @description Response body for `GET /api/catalogue`. */
+        ListResponse: {
+            /** @description Matching rows in `created_at DESC, id DESC` order. */
+            entries: components["schemas"]["CatalogueEntryDto"][];
+            /**
+             * Format: int64
+             * @description Count of all rows matching the filter (ignores `limit`).
+             */
+            total: number;
+        };
         /** @description POST body for `/api/auth/login`. */
         LoginRequest: {
             /**
@@ -451,6 +857,94 @@ export interface components {
         LoginResponse: {
             /** @description Echoed username on success. */
             username: string;
+        };
+        /** @description Per-network-operator occurrence count. */
+        NetworkFacet: {
+            /**
+             * Format: int64
+             * @description Number of rows with this operator.
+             */
+            count: number;
+            /** @description Network operator / ISP name. */
+            name: string;
+        };
+        /** @description Per-token rejection surfaced by [`PasteResponse::invalid`]. */
+        PasteInvalid: {
+            /** @description Short human-readable reason — intended for immediate UI display. */
+            reason: string;
+            /** @description The exact token as received from the client. */
+            token: string;
+        };
+        /**
+         * @description Paste payload — a raw list of IP tokens. Each token is parsed by
+         *     [`super::parse::parse_ip_tokens`]; tokens may be bare IPs or host
+         *     CIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable
+         *     tokens fall into [`PasteResponse::invalid`] instead of aborting the
+         *     whole request.
+         */
+        PasteRequest: {
+            /** @description Raw tokens to parse and (when valid) insert into the catalogue. */
+            ips: string[];
+        };
+        /**
+         * @description Response body for `POST /api/catalogue` — a three-way split of the
+         *     paste outcome.
+         */
+        PasteResponse: {
+            /** @description Rows newly inserted by this call. */
+            created: components["schemas"]["CatalogueEntryDto"][];
+            /**
+             * @description Rows already present in the catalogue. Surfaces the existing
+             *     enrichment state without a follow-up fetch.
+             */
+            existing: components["schemas"]["CatalogueEntryDto"][];
+            /** @description Tokens rejected during parse. */
+            invalid: components["schemas"]["PasteInvalid"][];
+        };
+        /**
+         * @description PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12
+         *     so all catalogue wire shapes live in one module).
+         *
+         *     Triple-state field encoding (outer `Option` = touched?, inner
+         *     `Option` = NULL?) mirrors [`super::repo::PatchValue`]. Callers omit
+         *     the JSON key for "leave untouched", send `null` for "set NULL",
+         *     and send a concrete value for "set to this".
+         */
+        PatchRequest: {
+            /**
+             * Format: int32
+             * @description New ASN.
+             */
+            asn?: number | null;
+            /** @description New city. */
+            city?: string | null;
+            /** @description New ISO 3166-1 alpha-2 country code. */
+            country_code?: string | null;
+            /** @description New country human-readable name. */
+            country_name?: string | null;
+            /** @description New display name. See the struct doc for triple-state encoding. */
+            display_name?: string | null;
+            /**
+             * Format: double
+             * @description New latitude.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description New longitude.
+             */
+            longitude?: number | null;
+            /** @description New network operator. */
+            network_operator?: string | null;
+            /** @description New notes. */
+            notes?: string | null;
+            /**
+             * @description Names of fields the operator wants reverted to automatic
+             *     enrichment. Values must match [`super::model::Field::as_str`].
+             */
+            revert_to_auto?: string[];
+            /** @description New website URL. */
+            website?: string | null;
         };
         /** @description VictoriaMetrics-sourced RTT / loss series for the primary protocol. */
         PathMetrics: {
@@ -858,6 +1352,434 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics.
+                 *
+                 *     CSV string; e.g. `?country_code=US,DE`. Repeat-key form
+                 *     (`?country_code=US&country_code=DE`) is NOT supported — axum's
+                 *     default `Query` extractor is `serde_urlencoded`, which does not
+                 *     deserialize repeated keys into `Vec<T>`.
+                 */
+                country_code?: string[];
+                /**
+                 * @description Zero-or-more ASN numbers. ANY semantics.
+                 *
+                 *     CSV string; e.g. `?asn=64500,64501`. See `country_code` for
+                 *     rationale; repeat-key form is not accepted.
+                 */
+                asn?: number[];
+                /**
+                 * @description Zero-or-more `network_operator` ILIKE patterns. ANY semantics.
+                 *     Wildcards are the caller's responsibility.
+                 *
+                 *     CSV string; e.g. `?network=foo,bar`. See `country_code` for
+                 *     rationale; repeat-key form is not accepted.
+                 */
+                network?: string[];
+                /**
+                 * @description Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`
+                 *     (contained-or-equal) when parseable so bare-host queries match
+                 *     their own `/32` / `/128` row as well as CIDR prefixes; an
+                 *     unparseable value is silently dropped.
+                 */
+                ip_prefix?: string;
+                /**
+                 * @description Optional `display_name` substring. Passed verbatim to the
+                 *     handler, which wraps it with `%…%` before running an `ILIKE`
+                 *     match, so callers send the literal substring they want to find
+                 *     (e.g. `?name=Fastly`). `%` / `_` characters in the input are
+                 *     intentionally not escaped — they behave as ILIKE wildcards.
+                 */
+                name?: string;
+                /**
+                 * @description Optional bounding box as a CSV string; exactly four floats
+                 *     `minLat,minLon,maxLat,maxLon`. Permissive parse — malformed
+                 *     values silently yield no filter, matching `ip_prefix` semantics.
+                 */
+                bbox?: number[];
+                /** @description TODO(T13): cursor pagination by `created_at`. */
+                cursor_created_at?: string;
+                /** @description TODO(T13): cursor pagination by `id` (tie-breaker). */
+                cursor_id?: string;
+                /** @description Page size. Clamped to `1..=500` internally; default 100. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalogue page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    paste: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasteRequest"];
+            };
+        };
+        responses: {
+            /** @description Paste outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasteResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    facets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Facet buckets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacetsResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reenrich_many: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkReenrichRequest"];
+            };
+        };
+        responses: {
+            /** @description Bulk re-enrichment enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many ids */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    catalogue_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE stream of catalogue changes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalogue row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogueEntryDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Row not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogueEntryDto"];
+                };
+            };
+            /** @description Invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Row not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reenrich_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Re-enrichment enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Row not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };
