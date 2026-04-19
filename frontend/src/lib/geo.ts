@@ -6,6 +6,12 @@
  * returned in GeoJSON bbox order `[minLng, minLat, maxLng, maxLat]`.
  * Consumers that interoperate with Leaflet must convert explicitly —
  * Leaflet's `LatLngBounds` uses `[south, west]` / `[north, east]` pairs.
+ *
+ * @remarks
+ * Antimeridian-wrapping shapes (a rectangle straddling ±180°, a polygon
+ * crossing the dateline) are not supported. The helpers assume all rings
+ * are single-segment on a continuous lng range. This is a turf limitation,
+ * not a meshmon one.
  */
 
 import booleanPointInPolygon from "@turf/boolean-point-in-polygon";
@@ -39,6 +45,11 @@ function closeRing(ring: Position[]): Position[] {
 function rectangleToPolygon(sw: [number, number], ne: [number, number]): Feature<Polygon> {
   const [swLng, swLat] = sw;
   const [neLng, neLat] = ne;
+  if (swLng >= neLng || swLat >= neLat) {
+    throw new Error(
+      `rectangle sw must be strictly south-west of ne; got sw=[${swLng},${swLat}] ne=[${neLng},${neLat}]`,
+    );
+  }
   const coordinates: Position[] = [
     [swLng, swLat],
     [neLng, swLat],
@@ -54,7 +65,10 @@ function rectangleToPolygon(sw: [number, number], ne: [number, number]): Feature
 }
 
 function polygonToFeature(coordinates: [number, number][]): Feature<Polygon> {
-  const ring = closeRing(coordinates.map(([lng, lat]) => [lng, lat]));
+  if (coordinates.length < 3) {
+    throw new Error(`polygon requires at least 3 vertices; got ${coordinates.length}`);
+  }
+  const ring = closeRing(coordinates);
   return {
     type: "Feature",
     properties: {},
@@ -78,6 +92,9 @@ function shapeToPolygon(shape: GeoShape): Feature<Polygon> {
     case "polygon":
       return polygonToFeature(shape.coordinates);
     case "circle":
+      if (shape.radiusMeters <= 0) {
+        throw new Error(`circle radius must be positive; got ${shape.radiusMeters}`);
+      }
       return circleToPolygon(shape.center, shape.radiusMeters);
   }
 }

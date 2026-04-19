@@ -99,6 +99,32 @@ describe("pointInShapes", () => {
     expect(pointInShapes(0, 0, [])).toBe(false);
     expect(pointInShapes(47.3, 8.5, [])).toBe(false);
   });
+
+  test("polygon with fewer than 3 vertices throws", () => {
+    expect(() =>
+      pointInShapes(0, 0, [
+        {
+          kind: "polygon",
+          coordinates: [
+            [0, 0],
+            [1, 1],
+          ],
+        },
+      ]),
+    ).toThrow(/3 vertices/);
+  });
+
+  test("rectangle with inverted sw/ne throws", () => {
+    expect(() => pointInShapes(0, 0, [{ kind: "rectangle", sw: [30, 40], ne: [10, 20] }])).toThrow(
+      /south-west/,
+    );
+  });
+
+  test("circle with non-positive radius throws", () => {
+    expect(() =>
+      pointInShapes(0, 0, [{ kind: "circle", center: [0, 0], radiusMeters: 0 }]),
+    ).toThrow(/positive/);
+  });
 });
 
 describe("boundingBoxOf", () => {
@@ -126,6 +152,28 @@ describe("boundingBoxOf", () => {
       },
     ];
     expect(boundingBoxOf(shapes)).toEqual([-5, -2, 7, 3]);
+  });
+
+  test("boundingBoxOf a circle returns symmetric bounds around the center", () => {
+    // 100km radius circle at (0, 0). Expected half-extent in degrees is
+    // (radius in metres) / (earth radius) / (π / 180) ≈ 100000 / 111000 ≈ 0.9°.
+    // Latitude extent is exactly symmetric in principle; longitude extent at
+    // the equator (cos(lat) = 1) matches. The turf polygon discretization
+    // introduces a small approximation error, so use a generous tolerance.
+    const expectedHalfExtent = 100_000 / 111_000; // ~0.9009 degrees
+    const tolerance = 0.1;
+    const shapes: GeoShape[] = [{ kind: "circle", center: [0, 0], radiusMeters: 100_000 }];
+    const bbox = boundingBoxOf(shapes);
+    expect(bbox).not.toBeNull();
+    if (bbox === null) return;
+    const [minLng, minLat, maxLng, maxLat] = bbox;
+    expect(minLng).toBeCloseTo(-expectedHalfExtent, 0);
+    expect(maxLng).toBeCloseTo(expectedHalfExtent, 0);
+    expect(minLat).toBeCloseTo(-expectedHalfExtent, 0);
+    expect(maxLat).toBeCloseTo(expectedHalfExtent, 0);
+    // Symmetry assertions within tolerance
+    expect(Math.abs(minLng + maxLng)).toBeLessThan(tolerance);
+    expect(Math.abs(minLat + maxLat)).toBeLessThan(tolerance);
   });
 
   test("union of rect + circle returns the enclosing bbox", () => {
