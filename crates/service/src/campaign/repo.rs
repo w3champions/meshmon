@@ -376,12 +376,63 @@ pub async fn list_pairs(
 /// split between ones resolvable from the 24 h reuse window and ones
 /// the scheduler would dispatch fresh. Never writes.
 pub async fn preview_dispatch_count(
-    _pool: &PgPool,
-    _protocol: ProbeProtocol,
-    _sources: &[String],
-    _destinations: &[IpAddr],
+    pool: &PgPool,
+    protocol: ProbeProtocol,
+    sources: &[String],
+    destinations: &[IpAddr],
 ) -> Result<PreviewCounts, RepoError> {
-    todo!("implement size-preview query; see design notes above")
+    // Expand the cross product client-side so we feed two parallel
+    // arrays to the single UNNEST query the design note spells out.
+    // `destination_ip::text` sidesteps IpNetwork's canonical form,
+    // which would carry a trailing `/32` and defeat equality against
+    // the IpAddr strings we receive here.
+    let n = sources.len() * destinations.len();
+    let mut expanded_sources: Vec<&str> = Vec::with_capacity(n);
+    let mut expanded_dests: Vec<String> = Vec::with_capacity(n);
+    for s in sources {
+        for d in destinations {
+            expanded_sources.push(s.as_str());
+            expanded_dests.push(d.to_string());
+        }
+    }
+
+    let row = sqlx::query!(
+        r#"
+        WITH pairs AS (
+            SELECT src AS source_agent_id,
+                   dst AS destination_ip_str
+              FROM UNNEST($1::text[], $2::text[]) AS p(src, dst)
+        ),
+        reusable AS (
+            SELECT DISTINCT ON (p.source_agent_id, p.destination_ip_str)
+                   p.source_agent_id, p.destination_ip_str
+              FROM pairs p
+              JOIN measurements m
+                ON m.source_agent_id = p.source_agent_id
+               AND m.destination_ip = p.destination_ip_str::inet
+               AND m.protocol = $3::probe_protocol
+               AND m.measured_at > now() - interval '24 hours'
+             ORDER BY p.source_agent_id, p.destination_ip_str,
+                      m.probe_count DESC, m.measured_at DESC
+        )
+        SELECT
+            (SELECT COUNT(*) FROM pairs)    AS "total!",
+            (SELECT COUNT(*) FROM reusable) AS "reusable!"
+        "#,
+        &expanded_sources as &[&str],
+        &expanded_dests as &[String],
+        protocol as ProbeProtocol,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let total = row.total;
+    let reusable = row.reusable;
+    Ok(PreviewCounts {
+        total,
+        reusable,
+        fresh: total - reusable,
+    })
 }
 
 // ----- Scheduler-facing repo helpers ------------------------------------
