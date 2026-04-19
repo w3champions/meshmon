@@ -523,6 +523,24 @@
         }
       }
     },
+    "/api/catalogue/stream": {
+      "get": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "SSE stream of catalogue lifecycle events.",
+        "description": "Requires an authenticated session (the enclosing router applies\n`login_required!`). The response never ends on its own — the server\ncloses it on shutdown or when the client disconnects.",
+        "operationId": "catalogue_stream",
+        "responses": {
+          "200": {
+            "description": "SSE stream of catalogue changes"
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
     "/api/catalogue/{id}": {
       "get": {
         "tags": [
@@ -1531,6 +1549,105 @@
             "description": "Operator-supplied external link."
           }
         }
+      },
+      "CatalogueEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A new catalogue row was inserted.",
+            "required": [
+              "id",
+              "ip",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the newly-inserted row."
+              },
+              "ip": {
+                "type": "string",
+                "description": "Textual rendering of the catalogued IP for convenient client-side\ndisplay without a second fetch."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "created"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An existing row's columns changed (operator edit or enrichment write).",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the updated row."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A row was deleted.",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the row that was removed."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "deleted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Enrichment pipeline advanced for a row.",
+            "required": [
+              "id",
+              "status",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the row whose enrichment status changed."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "enrichment_progress"
+                ]
+              },
+              "status": {
+                "$ref": "#/components/schemas/EnrichmentStatus",
+                "description": "New enrichment status."
+              }
+            }
+          }
+        ],
+        "description": "Catalogue lifecycle event delivered to every SSE subscriber.\n\nThe `tag = \"kind\"` serde representation matches the wire shape the\nfrontend expects: one top-level `kind` discriminant plus flat\nper-variant fields. Keep variant names in `snake_case` on the wire —\n`utoipa` and serde both honour `rename_all = \"snake_case\"`."
       },
       "CatalogueSource": {
         "type": "string",

@@ -52,6 +52,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::catalogue::dto::PasteRequest,
         crate::catalogue::dto::PasteResponse,
         crate::catalogue::dto::PatchRequest,
+        crate::catalogue::events::CatalogueEvent,
         crate::catalogue::model::CatalogueSource,
         crate::catalogue::model::EnrichmentStatus,
         crate::catalogue::repo::AsnFacet,
@@ -124,6 +125,12 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         // regardless of insertion order; registering `/api/catalogue/facets`
         // before `/api/catalogue/{id}` here is a readability convention.
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::facets))
+        // SSE stream lives alongside the other catalogue routes. The static
+        // `/stream` segment is matched before the `{id}` path param by
+        // `matchit`; registering it here keeps the readability convention.
+        .routes(utoipa_axum::routes!(
+            crate::catalogue::sse::catalogue_stream
+        ))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::get_one))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::patch))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::delete))

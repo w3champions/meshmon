@@ -24,15 +24,25 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use meshmon_service::config::{Config, DEFAULT_CONFIG_PATH};
+use meshmon_service::enrichment::providers::build_chain;
+use meshmon_service::enrichment::runner::{EnrichmentQueue, Runner};
 use meshmon_service::state::AppState;
 use meshmon_service::{db, http, logging, shutdown};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+/// Periodic sweep interval for the enrichment runner. Matches the 30 s
+/// staleness window enforced by `Runner::sweep`.
+const ENRICHMENT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// Bounded capacity for the enrichment work queue. Sized so a short
+/// paste burst can enqueue without back-pressure while bounding memory.
+const ENRICHMENT_QUEUE_CAPACITY: usize = 1024;
 
 fn main() -> anyhow::Result<()> {
     // The tokio runtime is created here (not via `#[tokio::main]`) so that
@@ -231,15 +241,61 @@ async fn run() -> anyhow::Result<()> {
         ingestion_token.clone(),
     );
 
+    // Enrichment chain: construct the provider chain from config. A
+    // misconfigured section (e.g. `ipgeolocation.enabled = true` without
+    // a resolved API key) is logged rather than aborting boot — the
+    // service still serves the rest of the API, and the runner keeps
+    // running against an empty chain so the sweep still moves
+    // `pending` rows to `enriched` via whichever providers did resolve.
+    // Other fallible startup steps (database, listener, registry) use
+    // fail-fast semantics; enrichment is a best-effort enrichment
+    // pipeline and its failure mode is "rows stay `pending`" — not a
+    // service outage — so we log-and-continue.
+    let enrichment_chain = match build_chain(&initial_config.enrichment) {
+        Ok(chain) => {
+            info!(providers = chain.len(), "enrichment chain initialised");
+            chain
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "enrichment chain construction failed; continuing with empty chain",
+            );
+            Vec::new()
+        }
+    };
+    let (enrichment_queue_raw, enrichment_rx) = EnrichmentQueue::new(ENRICHMENT_QUEUE_CAPACITY);
+    let enrichment_queue = Arc::new(enrichment_queue_raw);
+
     let state = AppState::new(
         config_handle,
         config_rx,
-        pool,
+        pool.clone(),
         ingestion.clone(),
         registry.clone(),
         prom.clone(),
+        enrichment_queue,
     );
     state.mark_ready();
+
+    // Spawn the enrichment runner. The runner terminates when the last
+    // sender clone is dropped — `AppState` holds one via
+    // `enrichment_queue`, so shutdown naturally drains: after the HTTP
+    // server finishes, `state` drops, the sender is released, and the
+    // runner's `rx.recv()` returns `None`. No shutdown token plumbing
+    // needed; tracking the `JoinHandle` so the main task can await it
+    // during the drain phase below.
+    let enrichment_runner_handle = tokio::spawn(
+        Runner::new(
+            pool.clone(),
+            enrichment_chain,
+            state.catalogue_broker.clone(),
+            enrichment_rx,
+            ENRICHMENT_SWEEP_INTERVAL,
+        )
+        .run(),
+    );
+
     let registry_refresh = registry.clone().spawn_refresh(shutdown_token.clone());
     let upkeep_handle =
         meshmon_service::metrics::spawn_upkeep(prom.clone(), shutdown_token.clone());
@@ -428,6 +484,22 @@ async fn run() -> anyhow::Result<()> {
         ),
     }
     info!("command watcher drained");
+
+    // Drop the last stack-held `AppState` clones so the `Arc<EnrichmentQueue>`
+    // sender count reaches zero. The runner's `rx.recv()` then returns `None`
+    // and the task exits cleanly. Any handler clones of state were released
+    // when the HTTP drain loop above finished, so this drop is the final one.
+    drop(graceful_state);
+    drop(state);
+    match tokio::time::timeout(deadline, enrichment_runner_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "enrichment runner task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "enrichment runner did not drain within shutdown_deadline; aborting",
+        ),
+    }
+    info!("enrichment runner drained");
 
     serve_result.context("HTTP server")?;
 

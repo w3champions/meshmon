@@ -35,10 +35,10 @@ use tokio_stream::wrappers::BroadcastStream;
         (status = 401, description = "No active session"),
     ),
 )]
-// Router wiring lives in Task 16; until then the handler has no in-crate
-// caller, so dead_code would fire with `pub(crate)` visibility.
-#[allow(dead_code)]
-pub(crate) async fn catalogue_stream(
+// Wired into `api_router()` in [`crate::http::openapi`]; `pub` is required
+// so the `utoipa_axum::routes!` macro can reference the handler across
+// modules.
+pub async fn catalogue_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.catalogue_broker.subscribe();

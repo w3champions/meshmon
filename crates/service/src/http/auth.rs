@@ -859,6 +859,7 @@ udp_probe_secret = "hex:6d73686d6e2d7631"
             Duration::from_secs(10),
             Duration::from_secs(300),
         ));
+        let (queue, _rx) = crate::enrichment::runner::EnrichmentQueue::new(1024);
         AppState::new(
             swap,
             rx,
@@ -866,6 +867,7 @@ udp_probe_secret = "hex:6d73686d6e2d7631"
             ingestion,
             registry,
             crate::metrics::test_install(),
+            Arc::new(queue),
         )
     }
 

@@ -383,9 +383,10 @@ async fn reenrich_sets_pending_and_returns_202() {
 
     // `POST /api/catalogue/{id}/reenrich` has no body — 202 Accepted on
     // success. The endpoint does a synchronous existence check, enqueues
-    // on the bounded channel (current T13 wiring drops the receiver in
-    // `AppState::new`, so the enqueue is a no-op — verified by T16), and
-    // returns without waiting for the runner.
+    // on the bounded channel (this test harness drops the receiver via
+    // `common::test_enrichment_queue`, so the enqueue silently no-ops
+    // and no runner is spawned), and returns without waiting for the
+    // runner.
     let (status, body) = h.post_empty(&format!("/api/catalogue/{id}/reenrich")).await;
     assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
     assert!(body.is_empty(), "202 body must be empty, got {body:?}");

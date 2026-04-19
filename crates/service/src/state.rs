@@ -92,13 +92,13 @@ pub struct AppState {
     /// sender rather than requiring `EnrichmentQueue: Clone` (which the
     /// runner module intentionally does not implement).
     ///
-    /// TODO(T16): wire the paired receiver into the spawned runner.
-    /// Until then `AppState::new` constructs a queue and immediately
-    /// drops the receiver, which means every `enqueue` call lands on a
-    /// closed channel and returns `false` silently (the queue treats
-    /// `Closed` as a no-op by design, logging only on `Full`). Rows
-    /// still get enriched because the sweep sees them once their
-    /// `created_at` crosses the 30 s staleness threshold.
+    /// Wired by `main.rs`: the binary constructs the `(queue, rx)` pair,
+    /// passes the producer to [`AppState::new`], and moves the receiver
+    /// into the spawned [`crate::enrichment::runner::Runner`]. Test call
+    /// sites that do not spawn a runner drop the receiver and rely on
+    /// the `TrySendError::Closed` arm of
+    /// [`crate::enrichment::runner::EnrichmentQueue::enqueue`] to
+    /// silently no-op.
     pub enrichment_queue: Arc<EnrichmentQueue>,
     /// TTL-cached facets snapshot. Backs `GET /api/catalogue/facets`,
     /// absorbing repeated reads that would otherwise hit the
@@ -116,6 +116,13 @@ pub struct AppState {
 
 impl AppState {
     /// Construct an `AppState` in the "not yet ready" state.
+    ///
+    /// `enrichment_queue` is the producer half of the pair returned by
+    /// [`EnrichmentQueue::new`]; the caller is responsible for spawning
+    /// the [`crate::enrichment::runner::Runner`] against the paired
+    /// receiver (production binary) or dropping the receiver (tests
+    /// that do not exercise the runner — enqueues become no-ops via the
+    /// `TrySendError::Closed` arm).
     pub fn new(
         config: Arc<ArcSwap<Config>>,
         config_rx: watch::Receiver<Arc<Config>>,
@@ -123,13 +130,8 @@ impl AppState {
         ingestion: IngestionPipeline,
         registry: Arc<AgentRegistry>,
         prom: PrometheusHandle,
+        enrichment_queue: Arc<EnrichmentQueue>,
     ) -> Self {
-        // Construct the queue producer here and drop the paired receiver.
-        // T16 will replace this with a real wiring that spawns the runner
-        // task against the receiver; until then `enqueue` silently no-ops
-        // (`TrySendError::Closed` arm in `EnrichmentQueue::enqueue` does
-        // not log) and the sweep picks up unprocessed rows.
-        let (queue, _rx) = EnrichmentQueue::new(1024);
         Self {
             config,
             config_rx,
@@ -153,7 +155,7 @@ impl AppState {
             // any deployment-specific knob. See
             // [`crate::catalogue::events::DEFAULT_CAPACITY`].
             catalogue_broker: CatalogueBroker::default(),
-            enrichment_queue: Arc::new(queue),
+            enrichment_queue,
             facets_cache: Arc::new(FacetsCache::new(FacetsCache::DEFAULT_TTL)),
         }
     }

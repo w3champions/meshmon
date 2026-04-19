@@ -1143,6 +1143,7 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
         Duration::from_secs(300),
     ));
 
+    let (queue, _rx) = crate::enrichment::runner::EnrichmentQueue::new(1024);
     AppState::new(
         swap,
         rx,
@@ -1150,6 +1151,7 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
         ingestion,
         registry,
         crate::metrics::test_install(),
+        Arc::new(queue),
     )
 }
 

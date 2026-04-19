@@ -92,6 +92,7 @@ primary_sec = 120
         ingestion,
         registry,
         common::test_prometheus_handle().await,
+        common::test_enrichment_queue(),
     );
 
     let mut client =

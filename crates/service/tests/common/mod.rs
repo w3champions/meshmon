@@ -512,6 +512,17 @@ pub fn dummy_registry(
     ))
 }
 
+/// Producer for an enrichment queue whose receiver is immediately
+/// dropped. Tests that construct an `AppState` but do not spawn a
+/// [`meshmon_service::enrichment::runner::Runner`] use this helper so
+/// enqueues silently no-op via the `TrySendError::Closed` branch rather
+/// than panicking or blocking.
+pub fn test_enrichment_queue(
+) -> std::sync::Arc<meshmon_service::enrichment::runner::EnrichmentQueue> {
+    let (queue, _rx) = meshmon_service::enrichment::runner::EnrichmentQueue::new(1024);
+    std::sync::Arc::new(queue)
+}
+
 /// Fixed synthetic UDP probe secret used by every `state_with_*` helper.
 /// `[probing].udp_probe_secret` is required at config parse time (T12); the
 /// exact bytes don't matter for these tests because no probing is exercised.
@@ -543,6 +554,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -579,6 +591,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -620,6 +633,7 @@ password_hash = "{AUTH_TEST_HASH}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -657,6 +671,7 @@ alertmanager_url = "{alertmanager_url}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -694,6 +709,7 @@ grafana_url = "{grafana_url}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -731,6 +747,7 @@ vm_url = "{vm_url}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -764,6 +781,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
@@ -808,6 +826,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         ingestion,
         registry,
         test_prometheus_handle().await,
+        test_enrichment_queue(),
     )
 }
 
