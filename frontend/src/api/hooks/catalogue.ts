@@ -129,9 +129,18 @@ export function usePatchCatalogueEntry(): UseMutationResult<
       await queryClient.cancelQueries({ queryKey: key });
       const previous = queryClient.getQueryData<CatalogueEntry>(key);
       if (previous) {
+        // Optimistic update: apply only the fields that actually live on
+        // CatalogueEntryDto. `revert_to_auto` is a PatchRequest-only control
+        // field (a list of PascalCase field names to reset to automatic
+        // enrichment) — it must not leak onto the cached entry. We leave
+        // `operator_edited_fields` alone here and rely on the server echo in
+        // `onSuccess` to deliver the authoritative lock state; the extra
+        // one-render lag on that single chip is preferable to duplicating
+        // the server's PascalCase field-lock bookkeeping on the client.
+        const { revert_to_auto: _revertToAuto, ...applicable } = patch;
         queryClient.setQueryData<CatalogueEntry>(key, {
           ...previous,
-          ...patch,
+          ...applicable,
         });
       }
       return { previous };
@@ -178,6 +187,7 @@ export function useReenrichOne(): UseMutationResult<void, Error, string> {
     onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: catalogueEntryKey(id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
 }
@@ -194,6 +204,7 @@ export function useReenrichMany(): UseMutationResult<void, Error, CatalogueBulkR
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
 }

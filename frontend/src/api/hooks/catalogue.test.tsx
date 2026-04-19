@@ -5,9 +5,11 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   type CatalogueEntry,
   type CatalogueListResponse,
+  type CataloguePasteResponse,
   useCatalogueEntry,
   useCatalogueList,
   useDeleteCatalogueEntry,
+  usePasteCatalogue,
   usePatchCatalogueEntry,
   useReenrichMany,
   useReenrichOne,
@@ -125,6 +127,69 @@ describe("usePatchCatalogueEntry", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const cached = qc.getQueryData<CatalogueEntry>(["catalogue", "entry", ENTRY.id]);
     expect(cached).toEqual(patched);
+  });
+
+  test("rolls back the optimistic update on 500", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "boom" }), { status: 500 }),
+    );
+    const qc = makeQueryClient();
+    qc.setQueryData(["catalogue", "entry", ENTRY.id], ENTRY);
+
+    const { result } = renderHook(() => usePatchCatalogueEntry(), {
+      wrapper: wrapWith(qc),
+    });
+
+    await act(async () => {
+      result.current.mutate({ id: ENTRY.id, patch: { display_name: "oops" } });
+    });
+
+    // After failure, the cache must contain the original entry — not the
+    // optimistic patch that was briefly written by onMutate.
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    const cached = qc.getQueryData<CatalogueEntry>(["catalogue", "entry", ENTRY.id]);
+    expect(cached).toEqual(ENTRY);
+    expect(cached?.display_name).toBe("Alpha");
+  });
+});
+
+describe("usePasteCatalogue", () => {
+  test("POSTs to /api/catalogue and invalidates list + facets caches on success", async () => {
+    const pasteResponse: CataloguePasteResponse = {
+      created: [],
+      existing: [],
+      invalid: [],
+    };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify(pasteResponse), { status: 200 }));
+    const qc = makeQueryClient();
+    // Prime both caches so we can verify they are marked stale after mutate.
+    qc.setQueryData(["catalogue", "list"], { entries: [], total: 0 });
+    qc.setQueryData(["catalogue", "facets"], { country_code: [], enrichment_status: [] });
+
+    const { result } = renderHook(() => usePasteCatalogue(), { wrapper: wrapWith(qc) });
+
+    await act(async () => {
+      result.current.mutate({ ips: ["1.1.1.1"] });
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // Verify outgoing HTTP request shape.
+    const call = fetchSpy.mock.calls[0]?.[0];
+    const request = call instanceof Request ? call : null;
+    expect(request).not.toBeNull();
+    expect(request?.method).toBe("POST");
+    expect(request?.url).toContain("/api/catalogue");
+    const body = request ? await request.json() : null;
+    expect(body).toEqual({ ips: ["1.1.1.1"] });
+
+    // Both primed caches should be flagged stale by the invalidateQueries call.
+    const listState = qc.getQueryState(["catalogue", "list"]);
+    const facetsState = qc.getQueryState(["catalogue", "facets"]);
+    expect(listState?.isInvalidated).toBe(true);
+    expect(facetsState?.isInvalidated).toBe(true);
   });
 });
 
