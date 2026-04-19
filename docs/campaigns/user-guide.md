@@ -76,6 +76,10 @@ The composer exposes every knob as a per-campaign setting:
 - **Evaluation mode** — `diversity` or `optimization` (see below).
 - **Force measurement** (off by default) — skip the 24 h cache and probe every pair fresh.
 
+### MTR as a campaign protocol
+
+Picking MTR at campaign creation turns every pair into a full traceroute instead of a 10-probe latency test. That's considerably more expensive per pair (every hop is measured) and rarely the right choice for broad sweeps. Prefer running your campaign in ICMP/TCP/UDP first and then using the per-pair **Detail measurement** action on the interesting rows — that gets you the MTR you care about without exploding cost.
+
 ### Starting
 
 Click **Start campaign**. If the campaign will dispatch more than the configured size threshold (1,000 new measurements by default), a confirm dialog appears. Otherwise dispatch begins immediately.
