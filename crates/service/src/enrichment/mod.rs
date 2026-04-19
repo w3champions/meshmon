@@ -158,6 +158,37 @@ impl MergedFields {
             || self.network_operator.is_some()
     }
 
+    /// True iff the enrichable slot for `field` has already been filled.
+    ///
+    /// Operator-only fields (`DisplayName`, `Website`, `Notes`) are never
+    /// provider-writable and return `true` so the short-circuit in
+    /// [`Self::needs_provider`] ignores them when deciding if a provider
+    /// still has useful work to do.
+    pub fn contains(&self, field: Field) -> bool {
+        match field {
+            Field::City => self.city.is_some(),
+            Field::CountryCode => self.country_code.is_some(),
+            Field::CountryName => self.country_name.is_some(),
+            Field::Latitude => self.latitude.is_some(),
+            Field::Longitude => self.longitude.is_some(),
+            Field::Asn => self.asn.is_some(),
+            Field::NetworkOperator => self.network_operator.is_some(),
+            Field::DisplayName | Field::Website | Field::Notes => true,
+        }
+    }
+
+    /// Runner short-circuit: `false` when every field the provider *could*
+    /// populate is already filled or locked — in which case calling
+    /// `lookup()` would burn a network request and quota for no merge
+    /// write. Mirrors the logic in [`Self::apply`]: a field that is
+    /// already `Some` (first-writer-wins) or listed in `locked` (operator
+    /// override) is never written regardless of the provider's output.
+    pub fn needs_provider(&self, supported: &[Field], locked: &[String]) -> bool {
+        supported
+            .iter()
+            .any(|f| !self.contains(*f) && !locked.iter().any(|lf| lf == f.as_str()))
+    }
+
     /// Merge one provider's output. Tracks the provider id, skips any
     /// field that is already populated (first-writer-wins), and skips
     /// any field listed in `locked` (operator / agent override).
@@ -286,6 +317,56 @@ mod tests {
         );
         assert_eq!(merged.city, None);
         assert_eq!(merged.providers_tried, vec!["p"]);
+    }
+
+    #[test]
+    fn needs_provider_false_when_every_supported_field_filled() {
+        // Short-circuit contract: a provider whose `supported` set is a
+        // subset of the already-filled slots has nothing left to do.
+        let merged = MergedFields {
+            city: Some("Berlin".into()),
+            country_code: Some("DE".into()),
+            ..Default::default()
+        };
+
+        assert!(
+            !merged.needs_provider(&[Field::City, Field::CountryCode], &[]),
+            "all supported fields already filled → skip provider"
+        );
+        assert!(
+            merged.needs_provider(&[Field::City, Field::Asn], &[]),
+            "at least one unfilled field → still call provider"
+        );
+    }
+
+    #[test]
+    fn needs_provider_false_when_every_supported_field_locked() {
+        // Locked fields count as "settled" for short-circuit purposes —
+        // the runner would not write them even if the provider returned
+        // a value, so making the network call is pure waste.
+        let merged = MergedFields::default();
+        let locked = vec!["City".to_string(), "CountryCode".to_string()];
+
+        assert!(
+            !merged.needs_provider(&[Field::City, Field::CountryCode], &locked),
+            "all supported fields locked → skip provider"
+        );
+        assert!(
+            merged.needs_provider(&[Field::City, Field::Asn], &locked),
+            "unlocked + unfilled field present → still call provider"
+        );
+    }
+
+    #[test]
+    fn contains_treats_operator_only_fields_as_settled() {
+        // DisplayName/Website/Notes are never provider-writable — a
+        // provider that lists them in `supported()` would incorrectly
+        // look permanently-useful without this carve-out.
+        let merged = MergedFields::default();
+        assert!(merged.contains(Field::DisplayName));
+        assert!(merged.contains(Field::Website));
+        assert!(merged.contains(Field::Notes));
+        assert!(!merged.contains(Field::City));
     }
 
     #[test]

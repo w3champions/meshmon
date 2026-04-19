@@ -564,14 +564,8 @@ async fn patch_rejects_invalid_latitude_longitude_cc() {
     // form), so we don't test those cases — only out-of-range finite
     // values can actually hit the handler's validation.
     let cases: &[(&str, serde_json::Value)] = &[
-        (
-            "invalid_latitude",
-            serde_json::json!({ "latitude": 91.0 }),
-        ),
-        (
-            "invalid_latitude",
-            serde_json::json!({ "latitude": -90.5 }),
-        ),
+        ("invalid_latitude", serde_json::json!({ "latitude": 91.0 })),
+        ("invalid_latitude", serde_json::json!({ "latitude": -90.5 })),
         (
             "invalid_longitude",
             serde_json::json!({ "longitude": -181.5 }),

@@ -170,6 +170,14 @@ impl Runner {
         let locked = entry.operator_edited_fields.clone();
         let mut merged = MergedFields::default();
         for provider in &self.chain {
+            // Skip providers whose entire `supported()` set is already
+            // settled (filled by an earlier provider or locked by the
+            // operator). Without this, a chain like ipgeo → rdap makes
+            // an RDAP call for every row even when ipgeo already filled
+            // ASN and NetworkOperator — wasted quota and latency.
+            if !merged.needs_provider(provider.supported(), &locked) {
+                continue;
+            }
             match provider.lookup(entry.ip).await {
                 Ok(res) => merged.apply(provider.id(), res, &locked),
                 Err(e) => {
