@@ -18,6 +18,8 @@
 //! | `delete_removes_entry`                          | `198.51.100.81`      |
 //! | `delete_missing_row_is_idempotent_no_event`     | (random UUID only)   |
 //! | `patch_revert_wins_over_concurrent_set`         | `198.51.100.91`      |
+//! | `reenrich_sets_pending_and_returns_202`         | `198.51.100.101`     |
+//! | `facets_response_has_expected_array_shape`      | (no seeded IPs)      |
 
 mod common;
 
@@ -372,6 +374,50 @@ async fn delete_missing_row_is_idempotent_no_event() {
         "delete of a missing row must not publish any event; observed {:?}",
         res
     );
+}
+
+#[tokio::test]
+async fn reenrich_sets_pending_and_returns_202() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.101").await;
+
+    // `POST /api/catalogue/{id}/reenrich` has no body — 202 Accepted on
+    // success. The endpoint does a synchronous existence check, enqueues
+    // on the bounded channel (current T13 wiring drops the receiver in
+    // `AppState::new`, so the enqueue is a no-op — verified by T16), and
+    // returns without waiting for the runner.
+    let (status, body) = h.post_empty(&format!("/api/catalogue/{id}/reenrich")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
+    assert!(body.is_empty(), "202 body must be empty, got {body:?}");
+
+    // Unknown id → 404 with `{"error": "not_found"}`.
+    let unknown = uuid::Uuid::new_v4();
+    let (status, body) = h
+        .post_empty(&format!("/api/catalogue/{unknown}/reenrich"))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body = {body}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).expect("404 body must be JSON envelope");
+    assert_eq!(parsed["error"], "not_found", "body = {parsed}");
+}
+
+#[tokio::test]
+async fn facets_response_has_expected_array_shape() {
+    let h = common::HttpHarness::start().await;
+
+    // Shape-only assertion: the catalogue table is shared across tests in
+    // this binary, so the DB may contain rows seeded by earlier tests. We
+    // assert on the SHAPE of the response (every bucket is a JSON array)
+    // rather than on emptiness; the four keys must always be present and
+    // array-typed regardless of the concrete row count. This matches the
+    // facets-as-UI-hint contract — clients render whatever comes back.
+    let body: serde_json::Value = h.get_json("/api/catalogue/facets").await;
+    for key in ["countries", "asns", "networks", "cities"] {
+        assert!(
+            body[key].is_array(),
+            "facets response must expose {key} as array; body = {body}"
+        );
+    }
 }
 
 #[tokio::test]

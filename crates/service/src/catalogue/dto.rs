@@ -327,6 +327,20 @@ pub struct PatchRequest {
     pub revert_to_auto: Vec<String>,
 }
 
+/// Request body for `POST /api/catalogue/reenrich`.
+///
+/// Best-effort bulk enqueue: each id is pushed onto the enrichment
+/// queue without a prior existence check. Unknown ids resolve to a
+/// no-op inside the runner (the row lookup simply returns none), so
+/// callers may include speculative ids without surfacing a per-id
+/// error path.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BulkReenrichRequest {
+    /// Catalogue row ids the operator wants to re-run through the
+    /// enrichment pipeline.
+    pub ids: Vec<Uuid>,
+}
+
 /// Deserialize a triple-state field: absent → `None`,
 /// `null` → `Some(None)`, value → `Some(Some(v))`.
 ///

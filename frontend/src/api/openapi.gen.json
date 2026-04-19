@@ -460,6 +460,69 @@
         }
       }
     },
+    "/api/catalogue/facets": {
+      "get": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`GET /api/catalogue/facets` — cached aggregate facets for the\nfilter UI.",
+        "description": "Serves [`FacetsResponse`] from the TTL cache on\n[`crate::state::AppState::facets_cache`] so the four-group-by\naggregation runs at most once per cache window per process. The\ncache refreshes lazily on access; a DB error during refresh is\nsurfaced as 500 without polluting the cached value.",
+        "operationId": "facets",
+        "responses": {
+          "200": {
+            "description": "Facet buckets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FacetsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalogue/reenrich": {
+      "post": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`POST /api/catalogue/reenrich` — bulk re-enrichment.",
+        "description": "Each id in [`BulkReenrichRequest::ids`] is pushed onto the\nenrichment queue without a prior existence check. Unknown ids\nresolve to a no-op inside the runner (the row lookup returns\nnone), so callers may include speculative ids without surfacing a\nper-id error path.\n\nReturns 202 Accepted unconditionally — bulk re-enrich is\nbest-effort. A `false` from the enqueue call is intentionally\ndropped (queue-full or closed-channel conditions are handled by\nthe runner's periodic sweep, same as the single-id path).",
+        "operationId": "reenrich_many",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkReenrichRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Bulk re-enrichment enqueued"
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
     "/api/catalogue/{id}": {
       "get": {
         "tags": [
@@ -593,6 +656,56 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Row not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalogue/{id}/reenrich": {
+      "post": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`POST /api/catalogue/{id}/reenrich` — enqueue a single row for a\nfresh enrichment pass.",
+        "description": "Returns 202 Accepted when the id exists (the enrichment runner will\npick the row up asynchronously) and 404 when the id is unknown. The\nexistence check runs synchronously because a 404 is cheap to surface\nand spares callers from an \"accepted then silently dropped\" UX.\n\nThe enqueue return value is intentionally discarded — a `false`\nfrom [`crate::enrichment::runner::EnrichmentQueue::enqueue`] means\nthe bounded channel is full (or — under current wiring — that the\npaired receiver has been dropped; see the T16 TODO on\n[`crate::state::AppState::enrichment_queue`]). In both cases the\nrow's `created_at`-driven sweep is the safety net.",
+        "operationId": "reenrich_one",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalogue row id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Re-enrichment enqueued"
           },
           "401": {
             "description": "No active session"
@@ -1231,6 +1344,43 @@
           }
         }
       },
+      "AsnFacet": {
+        "type": "object",
+        "description": "Per-ASN occurrence count.",
+        "required": [
+          "asn",
+          "count"
+        ],
+        "properties": {
+          "asn": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Autonomous system number."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of rows with this ASN."
+          }
+        }
+      },
+      "BulkReenrichRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/catalogue/reenrich`.\n\nBest-effort bulk enqueue: each id is pushed onto the enrichment\nqueue without a prior existence check. Unknown ids resolve to a\nno-op inside the runner (the row lookup simply returns none), so\ncallers may include speculative ids without surfacing a per-id\nerror path.",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Catalogue row ids the operator wants to re-run through the\nenrichment pipeline."
+          }
+        }
+      },
       "CatalogueCoordinates": {
         "type": "object",
         "description": "Latitude / longitude pair sourced from the IP catalogue join.\n\nPresent only when both coordinates are known; otherwise the parent\n`AgentSummary.catalogue_coordinates` is `None`.",
@@ -1390,6 +1540,51 @@
           "agent_registration"
         ]
       },
+      "CityFacet": {
+        "type": "object",
+        "description": "Per-city occurrence count.",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of rows with this city."
+          },
+          "name": {
+            "type": "string",
+            "description": "City name."
+          }
+        }
+      },
+      "CountryFacet": {
+        "type": "object",
+        "description": "Per-country occurrence count.",
+        "required": [
+          "code",
+          "count"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "ISO 3166-1 alpha-2 country code."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of rows with this country_code."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable country name when available."
+          }
+        }
+      },
       "EnrichmentStatus": {
         "type": "string",
         "description": "Current status of the enrichment pipeline for a row.",
@@ -1409,6 +1604,46 @@
           "error": {
             "type": "string",
             "description": "Stable error code. Clients should match on this string, not on\nthe HTTP status alone."
+          }
+        }
+      },
+      "FacetsResponse": {
+        "type": "object",
+        "description": "Aggregate facets used by the catalogue's filter UI.",
+        "required": [
+          "countries",
+          "asns",
+          "networks",
+          "cities"
+        ],
+        "properties": {
+          "asns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AsnFacet"
+            },
+            "description": "Top 250 ASN buckets, descending by count."
+          },
+          "cities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CityFacet"
+            },
+            "description": "Top 250 city buckets, descending by count."
+          },
+          "countries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CountryFacet"
+            },
+            "description": "Top 250 country buckets, descending by count."
+          },
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkFacet"
+            },
+            "description": "Top 250 operator buckets, descending by count."
           }
         }
       },
@@ -1583,6 +1818,25 @@
           "username": {
             "type": "string",
             "description": "Echoed username on success."
+          }
+        }
+      },
+      "NetworkFacet": {
+        "type": "object",
+        "description": "Per-network-operator occurrence count.",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of rows with this operator."
+          },
+          "name": {
+            "type": "string",
+            "description": "Network operator / ISP name."
           }
         }
       },

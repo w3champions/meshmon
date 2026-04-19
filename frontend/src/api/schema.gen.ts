@@ -172,6 +172,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalogue/facets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue/facets` — cached aggregate facets for the
+         *     filter UI.
+         * @description Serves [`FacetsResponse`] from the TTL cache on
+         *     [`crate::state::AppState::facets_cache`] so the four-group-by
+         *     aggregation runs at most once per cache window per process. The
+         *     cache refreshes lazily on access; a DB error during refresh is
+         *     surfaced as 500 without polluting the cached value.
+         */
+        get: operations["facets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/reenrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/catalogue/reenrich` — bulk re-enrichment.
+         * @description Each id in [`BulkReenrichRequest::ids`] is pushed onto the
+         *     enrichment queue without a prior existence check. Unknown ids
+         *     resolve to a no-op inside the runner (the row lookup returns
+         *     none), so callers may include speculative ids without surfacing a
+         *     per-id error path.
+         *
+         *     Returns 202 Accepted unconditionally — bulk re-enrich is
+         *     best-effort. A `false` from the enqueue call is intentionally
+         *     dropped (queue-full or closed-channel conditions are handled by
+         *     the runner's periodic sweep, same as the single-id path).
+         */
+        post: operations["reenrich_many"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalogue/{id}": {
         parameters: {
             query?: never;
@@ -206,6 +260,37 @@ export interface paths {
          * @description Partial update with revert-to-auto support. If a field is present in both the body and `revert_to_auto`, the revert wins and the write is suppressed (matches repo::patch semantics).
          */
         patch: operations["patch"];
+        trace?: never;
+    };
+    "/api/catalogue/{id}/reenrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/catalogue/{id}/reenrich` — enqueue a single row for a
+         *     fresh enrichment pass.
+         * @description Returns 202 Accepted when the id exists (the enrichment runner will
+         *     pick the row up asynchronously) and 404 when the id is unknown. The
+         *     existence check runs synchronously because a 404 is cheap to surface
+         *     and spares callers from an "accepted then silently dropped" UX.
+         *
+         *     The enqueue return value is intentionally discarded — a `false`
+         *     from [`crate::enrichment::runner::EnrichmentQueue::enqueue`] means
+         *     the bounded channel is full (or — under current wiring — that the
+         *     paired receiver has been dropped; see the T16 TODO on
+         *     [`crate::state::AppState::enrichment_queue`]). In both cases the
+         *     row's `created_at`-driven sweep is the safety net.
+         */
+        post: operations["reenrich_one"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/metrics/query": {
@@ -443,6 +528,35 @@ export interface components {
             /** @description Short human-readable summary from the `summary` annotation. */
             summary?: string | null;
         };
+        /** @description Per-ASN occurrence count. */
+        AsnFacet: {
+            /**
+             * Format: int32
+             * @description Autonomous system number.
+             */
+            asn: number;
+            /**
+             * Format: int64
+             * @description Number of rows with this ASN.
+             */
+            count: number;
+        };
+        /**
+         * @description Request body for `POST /api/catalogue/reenrich`.
+         *
+         *     Best-effort bulk enqueue: each id is pushed onto the enrichment
+         *     queue without a prior existence check. Unknown ids resolve to a
+         *     no-op inside the runner (the row lookup simply returns none), so
+         *     callers may include speculative ids without surfacing a per-id
+         *     error path.
+         */
+        BulkReenrichRequest: {
+            /**
+             * @description Catalogue row ids the operator wants to re-run through the
+             *     enrichment pipeline.
+             */
+            ids: string[];
+        };
         /**
          * @description Latitude / longitude pair sourced from the IP catalogue join.
          *
@@ -534,6 +648,28 @@ export interface components {
          * @enum {string}
          */
         CatalogueSource: "operator" | "agent_registration";
+        /** @description Per-city occurrence count. */
+        CityFacet: {
+            /**
+             * Format: int64
+             * @description Number of rows with this city.
+             */
+            count: number;
+            /** @description City name. */
+            name: string;
+        };
+        /** @description Per-country occurrence count. */
+        CountryFacet: {
+            /** @description ISO 3166-1 alpha-2 country code. */
+            code: string;
+            /**
+             * Format: int64
+             * @description Number of rows with this country_code.
+             */
+            count: number;
+            /** @description Human-readable country name when available. */
+            name?: string | null;
+        };
         /**
          * @description Current status of the enrichment pipeline for a row.
          * @enum {string}
@@ -553,6 +689,17 @@ export interface components {
              *     the HTTP status alone.
              */
             error: string;
+        };
+        /** @description Aggregate facets used by the catalogue's filter UI. */
+        FacetsResponse: {
+            /** @description Top 250 ASN buckets, descending by count. */
+            asns: components["schemas"]["AsnFacet"][];
+            /** @description Top 250 city buckets, descending by count. */
+            cities: components["schemas"]["CityFacet"][];
+            /** @description Top 250 country buckets, descending by count. */
+            countries: components["schemas"]["CountryFacet"][];
+            /** @description Top 250 operator buckets, descending by count. */
+            networks: components["schemas"]["NetworkFacet"][];
         };
         /** @description JSON representation of an observed IP at a hop. */
         HopIpJson: {
@@ -632,6 +779,16 @@ export interface components {
         LoginResponse: {
             /** @description Echoed username on success. */
             username: string;
+        };
+        /** @description Per-network-operator occurrence count. */
+        NetworkFacet: {
+            /**
+             * Format: int64
+             * @description Number of rows with this operator.
+             */
+            count: number;
+            /** @description Network operator / ISP name. */
+            name: string;
         };
         /** @description Per-token rejection surfaced by [`PasteResponse::invalid`]. */
         PasteInvalid: {
@@ -1243,6 +1400,71 @@ export interface operations {
             };
         };
     };
+    facets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Facet buckets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacetsResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reenrich_many: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkReenrichRequest"];
+            };
+        };
+        responses: {
+            /** @description Bulk re-enrichment enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_one: {
         parameters: {
             query?: never;
@@ -1352,6 +1574,52 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CatalogueEntryDto"];
                 };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Row not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reenrich_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalogue row id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Re-enrichment enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description No active session */
             401: {

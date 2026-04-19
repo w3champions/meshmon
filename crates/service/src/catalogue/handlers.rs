@@ -12,20 +12,28 @@
 //!   listed in `revert_to_auto` are NULLed and removed from the lock
 //!   set so the next enrichment run re-populates them.
 //! - `DELETE /api/catalogue/{id}` — idempotent removal.
+//! - `POST /api/catalogue/{id}/reenrich` — enqueue a single row for a
+//!   fresh enrichment pass.
+//! - `POST /api/catalogue/reenrich` — bulk re-enrichment of the given
+//!   id list (best-effort; unknown ids are silently dropped by the
+//!   runner).
+//! - `GET /api/catalogue/facets` — cached facet buckets driving the
+//!   filter UI.
 //!
 //! Every handler lives behind the `login_required!` gate via
 //! [`crate::http::openapi::api_router`] wiring; anonymous callers
-//! short-circuit with 401 before the handler runs. Re-enrich + facets
-//! land in T13; the SSE route + OpenAPI registration consolidate in T16.
+//! short-circuit with 401 before the handler runs. The SSE route +
+//! OpenAPI registration consolidate in T16.
 
 use super::dto::{
-    CatalogueEntryDto, ErrorEnvelope, ListQuery, ListResponse, PasteInvalid, PasteRequest,
-    PasteResponse, PatchRequest,
+    BulkReenrichRequest, CatalogueEntryDto, ErrorEnvelope, ListQuery, ListResponse, PasteInvalid,
+    PasteRequest, PasteResponse, PatchRequest,
 };
 use super::events::CatalogueEvent;
 use super::model::{CatalogueSource, Field};
 use super::parse::{parse_ip_tokens, ParseReason};
 use super::repo;
+use super::repo::FacetsResponse;
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -350,5 +358,107 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resp
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => db_error("catalogue delete: repo::delete failed", e),
+    }
+}
+
+/// `POST /api/catalogue/{id}/reenrich` — enqueue a single row for a
+/// fresh enrichment pass.
+///
+/// Returns 202 Accepted when the id exists (the enrichment runner will
+/// pick the row up asynchronously) and 404 when the id is unknown. The
+/// existence check runs synchronously because a 404 is cheap to surface
+/// and spares callers from an "accepted then silently dropped" UX.
+///
+/// The enqueue return value is intentionally discarded — a `false`
+/// from [`crate::enrichment::runner::EnrichmentQueue::enqueue`] means
+/// the bounded channel is full (or — under current wiring — that the
+/// paired receiver has been dropped; see the T16 TODO on
+/// [`crate::state::AppState::enrichment_queue`]). In both cases the
+/// row's `created_at`-driven sweep is the safety net.
+#[utoipa::path(
+    post,
+    path = "/api/catalogue/{id}/reenrich",
+    tag = "catalogue",
+    params(
+        ("id" = Uuid, Path, description = "Catalogue row id"),
+    ),
+    responses(
+        (status = 202, description = "Re-enrichment enqueued"),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Row not found", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn reenrich_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+    match repo::find_by_id(&state.pool, id).await {
+        Ok(Some(_)) => {
+            // If the row is deleted between the lookup and the enqueue, the
+            // enrichment runner handles the now-missing row gracefully —
+            // benign race.
+            let _ = state.enrichment_queue.enqueue(id);
+            StatusCode::ACCEPTED.into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),
+        Err(e) => db_error("catalogue reenrich_one: find_by_id failed", e),
+    }
+}
+
+/// `POST /api/catalogue/reenrich` — bulk re-enrichment.
+///
+/// Each id in [`BulkReenrichRequest::ids`] is pushed onto the
+/// enrichment queue without a prior existence check. Unknown ids
+/// resolve to a no-op inside the runner (the row lookup returns
+/// none), so callers may include speculative ids without surfacing a
+/// per-id error path.
+///
+/// Returns 202 Accepted unconditionally — bulk re-enrich is
+/// best-effort. A `false` from the enqueue call is intentionally
+/// dropped (queue-full or closed-channel conditions are handled by
+/// the runner's periodic sweep, same as the single-id path).
+#[utoipa::path(
+    post,
+    path = "/api/catalogue/reenrich",
+    tag = "catalogue",
+    request_body = BulkReenrichRequest,
+    responses(
+        (status = 202, description = "Bulk re-enrichment enqueued"),
+        (status = 401, description = "No active session"),
+    ),
+)]
+pub async fn reenrich_many(
+    State(state): State<AppState>,
+    Json(body): Json<BulkReenrichRequest>,
+) -> Response {
+    // No 500 path: the handler issues only non-fallible enqueues (try_send
+    // swallows Full/Closed) and never touches the DB. If future changes add a
+    // fallible operation, extend the responses list accordingly.
+    for id in body.ids {
+        let _ = state.enrichment_queue.enqueue(id);
+    }
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// `GET /api/catalogue/facets` — cached aggregate facets for the
+/// filter UI.
+///
+/// Serves [`FacetsResponse`] from the TTL cache on
+/// [`crate::state::AppState::facets_cache`] so the four-group-by
+/// aggregation runs at most once per cache window per process. The
+/// cache refreshes lazily on access; a DB error during refresh is
+/// surfaced as 500 without polluting the cached value.
+#[utoipa::path(
+    get,
+    path = "/api/catalogue/facets",
+    tag = "catalogue",
+    responses(
+        (status = 200, description = "Facet buckets", body = FacetsResponse),
+        (status = 401, description = "No active session"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn facets(State(state): State<AppState>) -> Response {
+    match state.facets_cache.get(&state.pool).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => db_error("catalogue facets: FacetsCache::get failed", e),
     }
 }

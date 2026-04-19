@@ -44,6 +44,7 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     paths(crate::http::auth::login, crate::http::auth::logout),
     components(schemas(
+        crate::catalogue::dto::BulkReenrichRequest,
         crate::catalogue::dto::CatalogueEntryDto,
         crate::catalogue::dto::ErrorEnvelope,
         crate::catalogue::dto::ListResponse,
@@ -53,6 +54,11 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::catalogue::dto::PatchRequest,
         crate::catalogue::model::CatalogueSource,
         crate::catalogue::model::EnrichmentStatus,
+        crate::catalogue::repo::AsnFacet,
+        crate::catalogue::repo::CityFacet,
+        crate::catalogue::repo::CountryFacet,
+        crate::catalogue::repo::FacetsResponse,
+        crate::catalogue::repo::NetworkFacet,
         crate::http::alerts_proxy::AlertSummary,
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
@@ -89,8 +95,9 @@ pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::<AppState>::with_openapi(ApiDoc::openapi())
         .routes(utoipa_axum::routes!(crate::http::user_api::list_agents))
         .routes(utoipa_axum::routes!(crate::http::user_api::get_agent))
-        // routes/latest MUST come before routes/{snapshot_id} so the static
-        // segment "latest" is matched before the catch-all path parameter.
+        // Static segments are matched before `{id}` path params by `matchit`
+        // regardless of insertion order; registering routes/latest first here
+        // is a readability convention.
         .routes(utoipa_axum::routes!(
             crate::http::user_api::get_route_latest
         ))
@@ -113,9 +120,22 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         ))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::paste))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::list))
+        // Static segments are matched before `{id}` path params by `matchit`
+        // regardless of insertion order; registering `/api/catalogue/facets`
+        // before `/api/catalogue/{id}` here is a readability convention.
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::facets))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::get_one))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::patch))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::delete))
+        // Static `/api/catalogue/reenrich` listed before `/{id}/reenrich` as
+        // the same readability convention; `matchit` would prefer the static
+        // segment regardless.
+        .routes(utoipa_axum::routes!(
+            crate::catalogue::handlers::reenrich_many
+        ))
+        .routes(utoipa_axum::routes!(
+            crate::catalogue::handlers::reenrich_one
+        ))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

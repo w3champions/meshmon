@@ -4,6 +4,7 @@
 //! `BuildInfo` are small `Copy` types (a few words each).
 
 use crate::catalogue::events::CatalogueBroker;
+use crate::catalogue::facets::FacetsCache;
 use crate::config::Config;
 use crate::enrichment::runner::EnrichmentQueue;
 use crate::ingestion::IngestionPipeline;
@@ -99,6 +100,18 @@ pub struct AppState {
     /// still get enriched because the sweep sees them once their
     /// `created_at` crosses the 30 s staleness threshold.
     pub enrichment_queue: Arc<EnrichmentQueue>,
+    /// TTL-cached facets snapshot. Backs `GET /api/catalogue/facets`,
+    /// absorbing repeated reads that would otherwise hit the
+    /// four-group-by aggregation on every request. Refreshes lazily on
+    /// access once the cached value ages past
+    /// [`FacetsCache::DEFAULT_TTL`] — facets are an advisory UI hint,
+    /// so a slightly stale snapshot is acceptable. All readers serialise
+    /// on the inner `tokio::sync::Mutex`. For warm-cache hits the
+    /// critical section is brief (elapsed-time check + clone). If a
+    /// concurrent caller is refreshing, other readers wait for the DB
+    /// round-trip to complete — acceptable for a 30 s-TTL UI hint
+    /// endpoint, not acceptable for hot paths.
+    pub facets_cache: Arc<FacetsCache>,
 }
 
 impl AppState {
@@ -141,6 +154,7 @@ impl AppState {
             // [`crate::catalogue::events::DEFAULT_CAPACITY`].
             catalogue_broker: CatalogueBroker::default(),
             enrichment_queue: Arc::new(queue),
+            facets_cache: Arc::new(FacetsCache::new(FacetsCache::DEFAULT_TTL)),
         }
     }
 

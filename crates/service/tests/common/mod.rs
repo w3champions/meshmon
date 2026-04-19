@@ -1025,6 +1025,72 @@ impl HttpHarness {
             .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
     }
 
+    /// Fire a body-less `POST` and return the raw status + body string.
+    /// Used by tests that assert on 202 responses with no JSON body
+    /// (e.g. the re-enrichment endpoints) without needing a content
+    /// type or a request payload. Suitable only for routes that do not
+    /// extract a request body — no `Content-Type` or `Content-Length`
+    /// header is sent.
+    pub async fn post_empty(&self, path: &str) -> (axum::http::StatusCode, String) {
+        use axum::http::{header, Request};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .body(axum::body::Body::empty())
+            .expect("build POST request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        // Fail loudly on binary responses — the harness only serves
+        // JSON / text handlers today, so any non-UTF-8 body is a test
+        // bug worth seeing rather than silently replacing with U+FFFD.
+        let body = String::from_utf8(bytes.to_vec()).expect("response body must be valid UTF-8");
+        (status, body)
+    }
+
+    /// Fire a `GET` and deserialize the response body into `T`. Panics
+    /// on non-200 status — callers use this when they expect success
+    /// and want the parsed body; for status-specific assertions (404
+    /// bodies, etc.) use [`Self::get`] and assert on the raw shape.
+    pub async fn get_json<T: for<'de> serde::Deserialize<'de>>(&self, path: &str) -> T {
+        use axum::http::{header, Request, StatusCode};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .body(axum::body::Body::empty())
+            .expect("build GET request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "GET {path} expected 200, got {}",
+            resp.status()
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        serde_json::from_slice::<T>(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
+    }
+
     /// Fire a `DELETE` and return the raw status + body string. The raw
     /// surface mirrors `get()` so tests can assert on `204 No Content`
     /// bodies (empty) or error shapes without duplicating cookie wiring.

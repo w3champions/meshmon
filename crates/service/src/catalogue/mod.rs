@@ -5,6 +5,7 @@
 
 pub mod dto;
 pub mod events;
+pub mod facets;
 pub mod handlers;
 pub mod model;
 pub mod parse;
