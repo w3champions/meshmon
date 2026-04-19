@@ -341,14 +341,21 @@ fn map_rdap_client_err(err: RdapClientError) -> EnrichmentError {
     // `RdapClientError::Client` and `IoError` wrap transport-level
     // failures (TCP reset, DNS miss, TLS handshake, timeout) —
     // transient. Bootstrap-registry fetch failures are also transient
-    // (IANA hiccups shouldn't black-list us permanently). Everything
-    // else — parsing, malformed JSON, invalid query, unknown response
-    // variant — is permanent: retrying does not change the answer.
+    // (IANA hiccups shouldn't black-list us permanently).
+    // `IanaResponse` wraps `IanaResponseError` which only has two
+    // cases — `Reqwest` (transport failure fetching the IANA registry)
+    // and `SerdeJson` (IANA served a malformed bootstrap payload) —
+    // both are transient: momentary IANA outages or bad responses
+    // should trigger retry, not permanently disable the provider.
+    // Everything else — parsing, malformed RDAP JSON, invalid query,
+    // unknown response variant — is permanent: retrying does not
+    // change the answer.
     match err {
         RdapClientError::Client(_)
         | RdapClientError::IoError(_)
         | RdapClientError::BootstrapUnavailable
-        | RdapClientError::BootstrapError(_) => EnrichmentError::Transient(err.to_string()),
+        | RdapClientError::BootstrapError(_)
+        | RdapClientError::IanaResponse(_) => EnrichmentError::Transient(err.to_string()),
         _ => EnrichmentError::Permanent(err.to_string()),
     }
 }
@@ -450,14 +457,25 @@ mod tests {
     /// start failing with a "No match found" wiremock message rather
     /// than silently succeeding against a permissive stub).
     async fn start_rdap_fixture(ip: &str, body: serde_json::Value) -> MockServer {
+        start_rdap_fixture_with_response(
+            ip,
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/rdap+json")
+                .set_body_json(body),
+        )
+        .await
+    }
+
+    /// Variant that mounts an arbitrary [`ResponseTemplate`] so error-
+    /// case tests can exercise status-code → [`EnrichmentError`]
+    /// classification end-to-end. The `.expect(1)` guard still applies,
+    /// so each error test asserts the provider actually hit the
+    /// endpoint once (no silent skips).
+    async fn start_rdap_fixture_with_response(ip: &str, response: ResponseTemplate) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/ip/{ip}")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/rdap+json")
-                    .set_body_json(body),
-            )
+            .respond_with(response)
             .expect(1)
             .mount(&server)
             .await;
@@ -539,6 +557,88 @@ mod tests {
             ),
             "CountryCode expected 'US', got {:?}",
             result.fields.get(&Field::CountryCode),
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_not_found_on_http_404() {
+        // Status-code mapping contract: an RDAP endpoint answering 404
+        // (no RIR has this IP) must surface as `EnrichmentError::NotFound`
+        // so the runner can record a negative result without retrying.
+        // Body is an empty `{}` — the provider should decide from status
+        // alone, before touching the body.
+        let server = start_rdap_fixture_with_response(
+            "1.1.1.1",
+            ResponseTemplate::new(404)
+                .insert_header("content-type", "application/rdap+json")
+                .set_body_json(json!({})),
+        )
+        .await;
+        let provider = RdapProvider::new_with_bootstrap_override(server.uri())
+            .expect("rdap provider builds with bootstrap override");
+
+        let err = provider
+            .lookup("1.1.1.1".parse().unwrap())
+            .await
+            .expect_err("404 must surface as an error");
+
+        assert!(
+            matches!(err, EnrichmentError::NotFound),
+            "expected NotFound, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_rate_limited_on_http_429() {
+        // 429 must map to `RateLimited { retry_after: None }` — the
+        // override path does not currently parse `Retry-After`, so
+        // `None` is the contract. The runner's back-off layer applies
+        // its own default when the field is `None`.
+        let server = start_rdap_fixture_with_response(
+            "1.1.1.1",
+            ResponseTemplate::new(429)
+                .insert_header("content-type", "application/rdap+json")
+                .set_body_json(json!({})),
+        )
+        .await;
+        let provider = RdapProvider::new_with_bootstrap_override(server.uri())
+            .expect("rdap provider builds with bootstrap override");
+
+        let err = provider
+            .lookup("1.1.1.1".parse().unwrap())
+            .await
+            .expect_err("429 must surface as an error");
+
+        assert!(
+            matches!(err, EnrichmentError::RateLimited { retry_after: None }),
+            "expected RateLimited{{retry_after:None}}, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_transient_on_http_503() {
+        // 5xx from the RIR endpoint (e.g. maintenance, upstream outage)
+        // must classify as `Transient` so the runner retries. A
+        // permanent classification here would blacklist the provider on
+        // a momentary hiccup.
+        let server = start_rdap_fixture_with_response(
+            "1.1.1.1",
+            ResponseTemplate::new(503)
+                .insert_header("content-type", "application/rdap+json")
+                .set_body_json(json!({})),
+        )
+        .await;
+        let provider = RdapProvider::new_with_bootstrap_override(server.uri())
+            .expect("rdap provider builds with bootstrap override");
+
+        let err = provider
+            .lookup("1.1.1.1".parse().unwrap())
+            .await
+            .expect_err("503 must surface as an error");
+
+        assert!(
+            matches!(err, EnrichmentError::Transient(_)),
+            "expected Transient, got {err:?}",
         );
     }
 
