@@ -76,7 +76,12 @@ utoipa-swagger-ui = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
 ctor = { workspace = true }
+# `stream` feature (off by default in workspace) enables
+# `reqwest::Response::bytes_stream` for the SSE E2E harness. Kept as a
+# dev-only knob so the service binary's reqwest bundle stays minimal.
+reqwest = { workspace = true, features = ["stream"] }
 meshmon-agent = { path = "../agent" }
 meshmon-revtunnel = { path = "../revtunnel" }
 metrics-util = "0.20"

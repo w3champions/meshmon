@@ -117,18 +117,31 @@
 
 pub mod grpc_harness;
 
+use async_trait::async_trait;
 use ctor::dtor;
+use futures::Stream;
+use meshmon_service::catalogue::model::Field;
 use meshmon_service::config::Config;
+use meshmon_service::enrichment::runner::{EnrichmentQueue, Runner};
+use meshmon_service::enrichment::{
+    EnrichmentError, EnrichmentProvider, EnrichmentResult, FieldValue,
+};
 use meshmon_service::metrics::Handle as PrometheusHandle;
 use meshmon_service::state::AppState;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::Executor;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::Duration;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::{watch, OnceCell};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 static TEST_PROM: OnceCell<PrometheusHandle> = OnceCell::const_new();
@@ -923,6 +936,63 @@ pub struct HttpHarness {
     /// reach the shared Postgres pool (or broker / state helpers added
     /// later).
     pub state: meshmon_service::state::AppState,
+    /// Populated only when the harness was started via
+    /// [`Self::start_with_providers`]. Tests that hold one of these
+    /// also get a real HTTP listener, a `reqwest::Client`, and an
+    /// enrichment runner driving the paired receiver; the inner
+    /// [`LiveHarness`] owns every task so drop cleanup cancels them.
+    live: Option<LiveHarness>,
+}
+
+/// Handles owned by a harness started via
+/// [`HttpHarness::start_with_providers`]. Exists so the base
+/// `HttpHarness::start()` path (oneshot-only, no runner, no listener)
+/// keeps paying nothing for the E2E-specific plumbing.
+///
+/// The struct's fields stay private: every access path goes through
+/// [`HttpHarness`] methods so test code never reaches across a shutdown
+/// boundary (e.g. hitting the reqwest client after `Drop` has cancelled
+/// the server task).
+struct LiveHarness {
+    /// `127.0.0.1:<assigned>` — resolved from the OS-bound port so
+    /// parallel tests never collide on a fixed port.
+    addr: SocketAddr,
+    /// Long-lived `reqwest::Client`. Reused across every live call to
+    /// avoid TLS handshake setup (there is none, but the connection
+    /// pool still saves one round-trip per request).
+    client: reqwest::Client,
+    /// Cancels the `axum::serve` future on drop so the server socket
+    /// releases before the next test acquires its port range.
+    shutdown: CancellationToken,
+    /// Owns the `axum::serve` task. Aborted on drop as a second-line
+    /// safety net if graceful shutdown stalls.
+    server_task: JoinHandle<()>,
+    /// Owns the enrichment runner. Aborted on drop to prevent the
+    /// runner from outliving the test process and leaking pg connections.
+    runner_task: JoinHandle<()>,
+    /// Per-test throwaway Postgres database. Owned here so `Drop`
+    /// closes it synchronously via [`TestDb::close`]; a panic in the
+    /// test body will orphan the database inside the shared container,
+    /// which is acceptable (container teardown reaps everything) but
+    /// not ideal — tests that finish cleanly release their DB name.
+    db: Option<TestDb>,
+}
+
+impl Drop for LiveHarness {
+    fn drop(&mut self) {
+        // Order matters: cancel FIRST so the graceful-shutdown branch
+        // of `axum::serve` gets a chance to flush in-flight responses
+        // before the hard abort fires.
+        self.shutdown.cancel();
+        self.server_task.abort();
+        self.runner_task.abort();
+        // Note: no `block_on` DB close here — a synchronous `Drop` can
+        // deadlock on a single-threaded runtime. The throwaway DB is
+        // reaped when the shared container exits at process end.
+        // Callers that want deterministic cleanup can invoke
+        // [`HttpHarness::shutdown`] before the harness drops.
+        let _ = self.db.take();
+    }
 }
 
 impl HttpHarness {
@@ -935,7 +1005,160 @@ impl HttpHarness {
         let state = state_with_admin(pool).await;
         let app = meshmon_service::http::router(state.clone());
         let cookie = login_as_admin(&app, "203.0.113.42").await;
-        Self { app, cookie, state }
+        Self {
+            app,
+            cookie,
+            state,
+            live: None,
+        }
+    }
+
+    /// Start a harness that binds a real TCP listener, spawns an
+    /// enrichment runner against `providers` with a **50 ms** sweep
+    /// interval, and issues a session cookie for the default `admin`
+    /// principal.
+    ///
+    /// Unlike [`Self::start`], this variant uses a per-test fresh
+    /// Postgres database (via [`acquire`]) so E2E assertions on
+    /// "every row in the catalogue" do not race other test binaries
+    /// that share the migrated pool.
+    ///
+    /// The returned harness keeps the server and runner alive for the
+    /// duration of its lifetime; dropping it cancels both and releases
+    /// the socket.
+    pub async fn start_with_providers(providers: Vec<Arc<dyn EnrichmentProvider>>) -> Self {
+        let db = acquire(false).await;
+        meshmon_service::db::run_migrations(&db.pool)
+            .await
+            .expect("run migrations for e2e harness");
+
+        // Build the enrichment queue pair directly — we need the
+        // receiver to drive the runner. `state_with_admin` always
+        // installs a throwaway closed-receiver queue; recreate the
+        // AppState by hand so the producer on state matches the
+        // receiver the runner drains.
+        let (queue, rx) = EnrichmentQueue::new(1024);
+        let queue = Arc::new(queue);
+
+        let toml = format!(
+            r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[service]
+trust_forwarded_headers = true
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+
+[probing]
+udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
+"#
+        );
+        let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+        let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+        let (_cfg_tx, cfg_rx) = watch::channel(cfg);
+        let ingestion = dummy_ingestion(db.pool.clone());
+        let registry = dummy_registry(db.pool.clone());
+        let state = AppState::new(
+            swap,
+            cfg_rx,
+            db.pool.clone(),
+            ingestion,
+            registry,
+            test_prometheus_handle().await,
+            queue,
+        );
+        state.mark_ready();
+
+        // 50 ms sweep — production is 30 s, but tests need tight
+        // loops so a missed queue enqueue (unlikely, but possible
+        // under CI load) still resolves inside the 5 s deadline.
+        let runner = Runner::new(
+            db.pool.clone(),
+            providers,
+            state.catalogue_broker.clone(),
+            rx,
+            Duration::from_millis(50),
+        );
+        let runner_task = tokio::spawn(runner.run());
+
+        let app = meshmon_service::http::router(state.clone());
+        let cookie = login_as_admin(&app, "203.0.113.43").await;
+
+        // Bind ephemeral port on localhost so parallel tests never
+        // collide. `tokio::net::TcpListener::bind(("127.0.0.1", 0))`
+        // asks the OS for a free port.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind e2e TCP listener");
+        let addr = listener.local_addr().expect("resolve local addr");
+
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server_app = app.clone();
+        let server_task = tokio::spawn(async move {
+            // Ignore serve result — the only meaningful outcome for
+            // tests is "stopped" and the drop handler already knows.
+            let _ = axum::serve(listener, server_app)
+                .with_graceful_shutdown(async move { server_shutdown.cancelled().await })
+                .await;
+        });
+
+        let client = reqwest::Client::builder()
+            // Keep the client tight so a hanging response surfaces as
+            // a test failure rather than a timeout against the harness.
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("build reqwest client");
+
+        Self {
+            app,
+            cookie,
+            state,
+            live: Some(LiveHarness {
+                addr,
+                client,
+                shutdown,
+                server_task,
+                runner_task,
+                db: Some(db),
+            }),
+        }
+    }
+
+    /// Open a long-lived SSE connection to `path` and return a stream
+    /// of parsed JSON payloads. Only usable from a harness created via
+    /// [`Self::start_with_providers`] — the oneshot path cannot stream.
+    ///
+    /// Frames are parsed from `data:` lines with `\n\n` delimiters per
+    /// the SSE spec. Keep-alive comments (`:keep-alive\n\n`) and other
+    /// non-data lines are ignored.
+    pub async fn sse(&self, path: &str) -> SseStream {
+        let live = self
+            .live
+            .as_ref()
+            .expect("HttpHarness::sse requires start_with_providers — oneshot cannot stream");
+        let url = format!("http://{}{path}", live.addr);
+        let resp = live
+            .client
+            .get(&url)
+            .header(reqwest::header::COOKIE, &self.cookie)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            // Override the client-level timeout for the streaming
+            // request: SSE connections may legitimately idle for tens
+            // of seconds between events.
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("SSE connect to {url} failed: {e}"));
+        assert!(
+            resp.status().is_success(),
+            "SSE open expected 2xx, got {} at {url}",
+            resp.status()
+        );
+        SseStream::new(resp.bytes_stream())
     }
 
     /// Fire a `POST` with a JSON body and deserialize the response body
@@ -949,6 +1172,37 @@ impl HttpHarness {
     ) -> T {
         use axum::http::{header, Request, StatusCode};
         use tower::util::ServiceExt;
+
+        // Route through the real listener when the harness has one —
+        // SSE tests rely on the same server-side state, and mixing
+        // `oneshot` with a live server would create two independent
+        // `AppState` clones for the same test. That can't happen today
+        // (we share `state` across both paths) but the coupling is
+        // load-bearing for future wiring and cheaper to preserve now.
+        if let Some(live) = &self.live {
+            let url = format!("http://{}{path}", live.addr);
+            let resp = live
+                .client
+                .post(&url)
+                .header(reqwest::header::COOKIE, &self.cookie)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_string())
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("POST {url} dispatch: {e}"));
+            let status = resp.status();
+            let bytes = resp
+                .bytes()
+                .await
+                .unwrap_or_else(|e| panic!("POST {url} body read: {e}"));
+            assert!(
+                status.as_u16() == StatusCode::OK.as_u16(),
+                "POST {path} expected 200, got {status}; body = {:?}",
+                String::from_utf8_lossy(&bytes),
+            );
+            return serde_json::from_slice::<T>(&bytes)
+                .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", bytes));
+        }
 
         let req = Request::builder()
             .method("POST")
@@ -1085,6 +1339,29 @@ impl HttpHarness {
         use axum::http::{header, Request, StatusCode};
         use tower::util::ServiceExt;
 
+        if let Some(live) = &self.live {
+            let url = format!("http://{}{path}", live.addr);
+            let resp = live
+                .client
+                .get(&url)
+                .header(reqwest::header::COOKIE, &self.cookie)
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("GET {url} dispatch: {e}"));
+            let status = resp.status();
+            let bytes = resp
+                .bytes()
+                .await
+                .unwrap_or_else(|e| panic!("GET {url} body read: {e}"));
+            assert!(
+                status.as_u16() == StatusCode::OK.as_u16(),
+                "GET {path} expected 200, got {status}; body = {:?}",
+                String::from_utf8_lossy(&bytes),
+            );
+            return serde_json::from_slice::<T>(&bytes)
+                .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", bytes));
+        }
+
         let req = Request::builder()
             .method("GET")
             .uri(path)
@@ -1165,4 +1442,173 @@ pub async fn login_as_admin(app: &axum::Router, client_ip: &str) -> String {
         .to_str()
         .expect("session cookie is valid utf-8")
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end helpers: deterministic enrichment providers + SSE parser.
+//
+// Everything below is consumed only by `catalogue_paste_e2e.rs` today. Kept
+// in `common/mod.rs` rather than a standalone module because each test
+// binary compiles its own copy of this module and `grpc_harness` already
+// establishes the single-file precedent.
+// ---------------------------------------------------------------------------
+
+/// Factory namespace for deterministic [`EnrichmentProvider`] chains
+/// used by E2E tests.
+///
+/// The type is zero-sized and exists only to give call sites a readable
+/// grouping (`TestProviders::deterministic_city()`) without introducing
+/// a free-function name that could collide with production code.
+pub struct TestProviders;
+
+impl TestProviders {
+    /// Provider chain that always writes `City = "TestCity"` for every
+    /// IP. Sufficient to drive [`MergedFields::any_populated`] to
+    /// `true`, which transitions the row to `enriched` — the terminal
+    /// status the E2E test asserts on.
+    pub fn deterministic_city() -> Vec<Arc<dyn EnrichmentProvider>> {
+        vec![Arc::new(DeterministicCityProvider)]
+    }
+}
+
+/// Fixed-output provider used by [`TestProviders::deterministic_city`].
+///
+/// Private (module-local) so production code can't accidentally depend
+/// on this test double. The `id()` string is stable so any future
+/// metrics assertion on the E2E run can join on a known label.
+struct DeterministicCityProvider;
+
+#[async_trait]
+impl EnrichmentProvider for DeterministicCityProvider {
+    fn id(&self) -> &'static str {
+        "e2e-deterministic-city"
+    }
+
+    fn supported(&self) -> &'static [Field] {
+        &[Field::City]
+    }
+
+    async fn lookup(&self, _ip: IpAddr) -> Result<EnrichmentResult, EnrichmentError> {
+        let mut r = EnrichmentResult::default();
+        r.fields
+            .insert(Field::City, FieldValue::Text("TestCity".to_string()));
+        Ok(r)
+    }
+}
+
+/// Byte-stream-backed Server-Sent Events parser.
+///
+/// Wraps the bytes stream returned by `reqwest::Response::bytes_stream()`
+/// and yields one `serde_json::Value` per `data:` frame. Every other
+/// SSE field (`event:`, `id:`, `retry:`, comments) is ignored — the
+/// catalogue SSE handler only emits data frames plus keep-alive
+/// comments.
+///
+/// # Framing
+///
+/// Per SSE spec: events are separated by a blank line (`\n\n` or
+/// `\r\n\r\n`). Inside an event, `data:` lines are concatenated with
+/// `\n`. This implementation only exercises the single-line case
+/// (the service always emits one-line data frames) but respects the
+/// spec framing to stay robust.
+pub struct SseStream {
+    inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
+    buffer: String,
+}
+
+impl SseStream {
+    fn new(
+        inner: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    ) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            buffer: String::new(),
+        }
+    }
+
+    /// Extract the next complete event from the internal buffer, if any.
+    ///
+    /// Returns `Some(Ok(json))` when a `data:` line was parsed,
+    /// `Some(Err(_))` when the JSON failed to parse (a test bug — the
+    /// server only emits valid JSON), or `None` when no complete event
+    /// has arrived yet.
+    fn extract_event(
+        &mut self,
+    ) -> Option<Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>> {
+        loop {
+            // Look for SSE frame boundaries in the buffer. Accept
+            // both `\n\n` (server's actual output) and `\r\n\r\n`
+            // (spec-compliant alternative) so a future transport
+            // change can't break the parser silently.
+            let (pos, boundary_len) = self
+                .buffer
+                .find("\n\n")
+                .map(|i| (i, 2))
+                .or_else(|| self.buffer.find("\r\n\r\n").map(|i| (i, 4)))?;
+            let frame: String = self.buffer.drain(..pos + boundary_len).collect();
+            // Collect every `data:` line in the frame. Most frames are
+            // a single line; the spec allows multi-line values (join
+            // with `\n`), so honour that.
+            let mut data_lines: Vec<&str> = Vec::new();
+            for line in frame.lines() {
+                // Skip comments (`:` prefix) and non-data fields.
+                if let Some(rest) = line.strip_prefix("data:") {
+                    // One optional leading space per spec.
+                    let trimmed = rest.strip_prefix(' ').unwrap_or(rest);
+                    data_lines.push(trimmed);
+                }
+            }
+            if data_lines.is_empty() {
+                // Keep-alive comment or unrelated frame — drop and
+                // wait for the next one.
+                continue;
+            }
+            let joined = data_lines.join("\n");
+            return Some(
+                serde_json::from_str::<serde_json::Value>(&joined)
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }),
+            );
+        }
+    }
+}
+
+impl Stream for SseStream {
+    type Item = Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(ev) = self.extract_event() {
+                return Poll::Ready(Some(ev));
+            }
+            match self.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    // Server closed the stream — if a partial frame is
+                    // pending, surface it by draining; otherwise end
+                    // the stream cleanly.
+                    if self.buffer.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    // Partial trailing frame without a boundary —
+                    // treat as end-of-stream rather than erroring,
+                    // matching `eventsource-stream`'s behaviour.
+                    self.buffer.clear();
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(Box::new(e))));
+                }
+                Poll::Ready(Some(Ok(chunk))) => {
+                    // Server guarantees UTF-8 for SSE frames; a
+                    // non-UTF-8 chunk would be a protocol violation.
+                    match std::str::from_utf8(&chunk) {
+                        Ok(s) => self.buffer.push_str(s),
+                        Err(e) => {
+                            return Poll::Ready(Some(Err(Box::new(e))));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
