@@ -169,22 +169,11 @@ impl RpcDispatcher {
             .max(1)
     }
 
-    /// Return an `Arc<Semaphore>` sized for `effective`. Rebuilds the
-    /// cached entry when the requested size changes so a runtime cap
-    /// tweak takes effect on the next dispatch.
+    /// Return an `Arc<Semaphore>` sized for `effective`. See
+    /// [`resize_or_init_agent_semaphore`] for the grow-but-don't-shrink
+    /// rationale.
     fn semaphore_for(&self, agent_id: &str, effective: u32) -> Arc<Semaphore> {
-        if let Some(existing) = self.agent_semaphores.get(agent_id) {
-            if existing.permits == effective {
-                return existing.semaphore.clone();
-            }
-        }
-        let fresh = AgentSemaphore {
-            semaphore: Arc::new(Semaphore::new(effective as usize)),
-            permits: effective,
-        };
-        let semaphore = fresh.semaphore.clone();
-        self.agent_semaphores.insert(agent_id.to_string(), fresh);
-        semaphore
+        resize_or_init_agent_semaphore(&self.agent_semaphores, agent_id, effective)
     }
 
     /// Apply the per-destination rate limit.
@@ -271,6 +260,42 @@ fn ip_to_bytes(ip: IpAddr) -> Vec<u8> {
     match ip {
         IpAddr::V4(v) => v.octets().to_vec(),
         IpAddr::V6(v) => v.octets().to_vec(),
+    }
+}
+
+/// Return the per-agent semaphore sized for `effective`, growing the
+/// existing entry via `Semaphore::add_permits` when the cap widens but
+/// never shrinking it. Replacing the semaphore on shrink would leak
+/// accounting for permits held by in-flight dispatches and briefly let
+/// total concurrency exceed the new cap — `tokio::sync::Semaphore`
+/// offers no safe way to revoke already-issued permits. Shrinks
+/// therefore take effect only on service restart; that tradeoff is
+/// documented in the agent concurrency section of the campaigns docs.
+fn resize_or_init_agent_semaphore(
+    semaphores: &DashMap<String, AgentSemaphore>,
+    agent_id: &str,
+    effective: u32,
+) -> Arc<Semaphore> {
+    use dashmap::mapref::entry::Entry;
+    match semaphores.entry(agent_id.to_string()) {
+        Entry::Occupied(mut e) => {
+            let slot = e.get_mut();
+            if effective > slot.permits {
+                slot.semaphore
+                    .add_permits((effective - slot.permits) as usize);
+                slot.permits = effective;
+            }
+            slot.semaphore.clone()
+        }
+        Entry::Vacant(e) => {
+            let fresh = AgentSemaphore {
+                semaphore: Arc::new(Semaphore::new(effective as usize)),
+                permits: effective,
+            };
+            let semaphore = fresh.semaphore.clone();
+            e.insert(fresh);
+            semaphore
+        }
     }
 }
 
@@ -506,5 +531,60 @@ mod tests {
     fn ip_to_bytes_produces_canonical_width() {
         assert_eq!(ip_to_bytes("10.0.0.1".parse().unwrap()).len(), 4);
         assert_eq!(ip_to_bytes("::1".parse().unwrap()).len(), 16);
+    }
+
+    #[test]
+    fn semaphore_cache_initializes_at_requested_cap() {
+        let cache = DashMap::new();
+        let sem = resize_or_init_agent_semaphore(&cache, "a", 3);
+        assert_eq!(sem.available_permits(), 3);
+        assert_eq!(cache.get("a").unwrap().permits, 3);
+    }
+
+    #[test]
+    fn semaphore_cache_grows_on_widened_cap() {
+        let cache = DashMap::new();
+        let first = resize_or_init_agent_semaphore(&cache, "a", 2);
+        let second = resize_or_init_agent_semaphore(&cache, "a", 5);
+        // Same Arc — the semaphore was grown in place, not replaced.
+        // Crucial: held permits on `first` remain valid.
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.available_permits(), 5);
+        assert_eq!(cache.get("a").unwrap().permits, 5);
+    }
+
+    #[test]
+    fn semaphore_cache_ignores_shrink_requests() {
+        // A shrink would leak accounting for any in-flight batch still
+        // holding permits on the old semaphore, so we keep the old
+        // instance. Operators wanting to shrink the cap restart.
+        let cache = DashMap::new();
+        let first = resize_or_init_agent_semaphore(&cache, "a", 4);
+        let second = resize_or_init_agent_semaphore(&cache, "a", 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.available_permits(), 4, "shrink must be ignored");
+        assert_eq!(cache.get("a").unwrap().permits, 4);
+    }
+
+    #[tokio::test]
+    async fn semaphore_cache_grow_preserves_held_permits() {
+        // Simulate the real race: acquire permits on the small
+        // semaphore, then the operator raises the cap. Outstanding
+        // permits must still count — total in-flight cannot exceed
+        // the new cap.
+        let cache = DashMap::new();
+        let sem = resize_or_init_agent_semaphore(&cache, "a", 2);
+        let held1 = sem.clone().acquire_owned().await.unwrap();
+        let held2 = sem.clone().acquire_owned().await.unwrap();
+        assert_eq!(sem.available_permits(), 0);
+
+        let _grown = resize_or_init_agent_semaphore(&cache, "a", 4);
+        // The old two permits are still outstanding; only two fresh
+        // permits are issuable. Taking three would block the third.
+        assert_eq!(sem.available_permits(), 2);
+
+        drop(held1);
+        drop(held2);
+        assert_eq!(sem.available_permits(), 4);
     }
 }

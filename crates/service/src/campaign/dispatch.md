@@ -18,9 +18,13 @@ clone (interior state is `Arc`-owned) and holds references to:
 2. **Acquire a per-agent semaphore permit.** Effective concurrency is
    `registry.snapshot().get(agent).campaign_max_concurrency
      .unwrap_or(default_agent_concurrency).max(1)`. The semaphore is
-   cached in a `DashMap<agent_id, AgentSemaphore>` and rebuilt when
-   the effective value changes (operator concurrency tweak takes
-   effect on the next dispatch).
+   cached in a `DashMap<agent_id, AgentSemaphore>`. When the effective
+   cap widens at runtime the cached entry is grown via
+   `Semaphore::add_permits`; widening takes effect on the next
+   dispatch. A cap shrink at runtime is *ignored* — replacing the
+   semaphore would leak accounting for permits held by in-flight
+   batches and let total concurrency briefly exceed the new cap.
+   Operators who need to shrink restart the service.
 3. **Reserve per-destination tokens.** A process-wide
    `moka::future::Cache<IpAddr, Arc<Mutex<Bucket>>>` holds a leaky
    bucket per destination. `reserve_tokens` draws one token per pair;

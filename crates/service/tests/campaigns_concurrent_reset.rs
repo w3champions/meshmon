@@ -307,38 +307,39 @@ async fn scheduler_revert_does_not_clobber_concurrent_reset() {
     // so the scheduler runs the revert UPDATE.
     release_tx.send(()).expect("release dispatcher");
 
-    // Poll for the race to resolve. The revert must NOT clobber the
-    // `skipped` state — the gate on `resolution_state = 'dispatched'`
-    // makes the UPDATE a no-op for the now-non-dispatched row.
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let mut final_state = String::new();
-    while std::time::Instant::now() < deadline {
-        final_state = sqlx::query_scalar::<_, String>(
-            "SELECT resolution_state::text FROM campaign_pairs WHERE id = $1",
-        )
-        .bind(pair_id)
-        .fetch_one(&pool)
-        .await
-        .expect("read state");
-        if final_state != "dispatched" {
-            // Either the race has fully played out to `skipped` (good)
-            // or it clobbered to `pending` (bad) — break and assert.
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            final_state = sqlx::query_scalar::<_, String>(
-                "SELECT resolution_state::text FROM campaign_pairs WHERE id = $1",
-            )
-            .bind(pair_id)
-            .fetch_one(&pool)
-            .await
-            .expect("read state");
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Wait long enough for the revert to have definitely landed. The
+    // scheduler's revert is a single UPDATE that runs synchronously
+    // after the dispatcher returns — `release_tx.send(())` →
+    // dispatcher continues → returns → scheduler runs UPDATE. The 1 s
+    // ceiling gives a loaded CI runner ample headroom; under normal
+    // conditions the UPDATE completes in single-digit ms. If the
+    // revert were ungated, it would have clobbered `skipped` back to
+    // `pending` well before we sample.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
+    let final_state: String = sqlx::query_scalar::<_, String>(
+        "SELECT resolution_state::text FROM campaign_pairs WHERE id = $1",
+    )
+    .bind(pair_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read state");
+    let last_error: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT last_error FROM campaign_pairs WHERE id = $1",
+    )
+    .bind(pair_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read last_error");
     assert_eq!(
         final_state, "skipped",
-        "scheduler revert must not clobber the concurrent operator reset",
+        "scheduler revert must not clobber the concurrent operator reset \
+         (last_error = {last_error:?})",
+    );
+    assert_eq!(
+        last_error.as_deref(),
+        Some("operator-reset-marker"),
+        "operator's `last_error` tag must survive the race",
     );
 
     cancel.cancel();
