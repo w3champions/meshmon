@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -521,87 +521,104 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent
-        className="w-[95vw] sm:max-w-3xl max-h-[90vh] overflow-y-auto"
+        // `!grid` overrides the Radix `DialogContent` default so the
+        // outer content box stacks header / scroll-area / footer as a
+        // flex column. The footer stays on-screen while the middle
+        // section owns the `overflow-y-auto`, so Save / Re-enrich /
+        // Delete never get hidden under the dialog chrome.
+        className="w-[95vw] sm:max-w-3xl max-h-[90vh] !grid-rows-none !grid-cols-none !grid-flow-row !gap-0 flex flex-col p-0"
         aria-label="Catalogue entry editor"
       >
-        <DialogHeader>
+        <DialogHeader className="px-6 pt-6 pb-2">
           <DialogTitle>Edit catalogue entry</DialogTitle>
           <DialogDescription>
             Operator edits lock individual fields against automatic enrichment.
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={onSubmit} className="mt-4 space-y-4">
-          <section className="rounded-md border bg-muted/30 p-3">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
-              <ReadonlyRow label="IP">{entry.ip}</ReadonlyRow>
-              <ReadonlyRow label="Created">{formatTimestamp(entry.created_at)}</ReadonlyRow>
-              <ReadonlyRow label="Status">
-                <StatusChip status={entry.enrichment_status} />
-              </ReadonlyRow>
-              <ReadonlyRow label="Created by">{entry.created_by ?? "—"}</ReadonlyRow>
-              <ReadonlyRow label="Source">{entry.source}</ReadonlyRow>
-              <ReadonlyRow label="Enriched at">{formatTimestamp(entry.enriched_at)}</ReadonlyRow>
-            </div>
-          </section>
+        <form onSubmit={onSubmit} className="flex flex-col min-h-0 flex-1">
+          <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-4 space-y-4">
+            <section className="rounded-md border bg-muted/30 p-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+                <ReadonlyRow label="IP">{entry.ip}</ReadonlyRow>
+                <ReadonlyRow label="Created">{formatTimestamp(entry.created_at)}</ReadonlyRow>
+                <ReadonlyRow label="Status">
+                  <StatusChip status={entry.enrichment_status} />
+                </ReadonlyRow>
+                <ReadonlyRow label="Created by">{entry.created_by ?? "—"}</ReadonlyRow>
+                <ReadonlyRow label="Source">{entry.source}</ReadonlyRow>
+                <ReadonlyRow label="Enriched at">{formatTimestamp(entry.enriched_at)}</ReadonlyRow>
+              </div>
+            </section>
 
-          {lockedFields.size > 0 && (
-            <p className="text-xs text-muted-foreground">
-              Operator-edited fields override automatic enrichment.
-            </p>
-          )}
-
-          <LocationSection
-            control={control}
-            locked={lockedFields.has("Latitude") || lockedFields.has("Longitude")}
-            isPending={patchMutation.isPending}
-            onRevert={handleRevertLocation}
-          />
-
-          <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {EDITABLE_FIELD_CONFIGS.map(
-              ({ field, label, colSpan, multiline, countrySelect, extraProps }) =>
-                countrySelect ? (
-                  <Controller
-                    key={field}
-                    name={field as "country_code"}
-                    control={control}
-                    render={({ field: controllerField }) => (
-                      <EditableFieldRow
-                        field={field}
-                        label={label}
-                        colSpan={colSpan}
-                        countrySelect
-                        locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
+            <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {EDITABLE_FIELD_CONFIGS.map(
+                ({ field, label, colSpan, multiline, countrySelect, extraProps }) => {
+                  // Notes is the last field in the config; render the
+                  // composite Location row immediately before it so the
+                  // big map lives near the bottom of the form where it
+                  // doesn't push the quick text fields below the fold.
+                  const locationBeforeNotes =
+                    field === "notes" ? (
+                      <LocationSection
+                        key="location-section"
+                        control={control}
+                        locked={lockedFields.has("Latitude") || lockedFields.has("Longitude")}
                         isPending={patchMutation.isPending}
-                        errorMessage={errors[field]?.message}
-                        inputProps={{}}
-                        countryValue={
-                          typeof controllerField.value === "string" ? controllerField.value : ""
-                        }
-                        onCountryChange={controllerField.onChange}
-                        onRevert={handleRevert}
+                        onRevert={handleRevertLocation}
                       />
-                    )}
-                  />
-                ) : (
-                  <EditableFieldRow
-                    key={field}
-                    field={field}
-                    label={label}
-                    colSpan={colSpan}
-                    multiline={multiline}
-                    locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
-                    isPending={patchMutation.isPending}
-                    errorMessage={errors[field]?.message}
-                    inputProps={{ ...(extraProps ?? {}), ...register(field) }}
-                    onRevert={handleRevert}
-                  />
-                ),
-            )}
-          </section>
+                    ) : null;
+                  const row = countrySelect ? (
+                    <Controller
+                      key={field}
+                      name={field as "country_code"}
+                      control={control}
+                      render={({ field: controllerField }) => (
+                        <EditableFieldRow
+                          field={field}
+                          label={label}
+                          colSpan={colSpan}
+                          countrySelect
+                          locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
+                          isPending={patchMutation.isPending}
+                          errorMessage={errors[field]?.message}
+                          inputProps={{}}
+                          countryValue={
+                            typeof controllerField.value === "string" ? controllerField.value : ""
+                          }
+                          onCountryChange={controllerField.onChange}
+                          onRevert={handleRevert}
+                        />
+                      )}
+                    />
+                  ) : (
+                    <EditableFieldRow
+                      key={field}
+                      field={field}
+                      label={label}
+                      colSpan={colSpan}
+                      multiline={multiline}
+                      locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
+                      isPending={patchMutation.isPending}
+                      errorMessage={errors[field]?.message}
+                      inputProps={{ ...(extraProps ?? {}), ...register(field) }}
+                      onRevert={handleRevert}
+                    />
+                  );
+                  return locationBeforeNotes ? (
+                    <Fragment key={`${field}-with-location`}>
+                      {locationBeforeNotes}
+                      {row}
+                    </Fragment>
+                  ) : (
+                    row
+                  );
+                },
+              )}
+            </section>
+          </div>
 
-          <DialogFooter className="flex flex-col gap-2 sm:flex-row sm:justify-between">
+          <DialogFooter className="flex flex-col gap-2 sm:flex-row sm:justify-between border-t bg-background px-6 py-4">
             <div className="flex gap-2">
               <Button
                 type="button"
@@ -670,7 +687,7 @@ interface LocationSectionProps {
  */
 function LocationSection({ control, locked, isPending, onRevert }: LocationSectionProps) {
   return (
-    <section className="space-y-1">
+    <section className="space-y-1 sm:col-span-2">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Location</span>
