@@ -20,6 +20,8 @@ export type CataloguePatchRequest = components["schemas"]["PatchRequest"];
 export type CatalogueBulkReenrichRequest = components["schemas"]["BulkReenrichRequest"];
 export type CatalogueMapResponse = components["schemas"]["MapResponse"];
 export type CatalogueMapBucket = components["schemas"]["MapBucket"];
+export type CatalogueSortBy = components["schemas"]["SortBy"];
+export type CatalogueSortDir = components["schemas"]["SortDir"];
 
 /**
  * Query shape for `GET /api/catalogue`, minus the `after` cursor and `limit`

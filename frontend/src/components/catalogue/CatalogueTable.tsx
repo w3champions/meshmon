@@ -5,9 +5,10 @@ import {
   useReactTable,
   type VisibilityState,
 } from "@tanstack/react-table";
-import { RefreshCw, Settings2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ChevronDown, ChevronsUpDown, ChevronUp, RefreshCw, Settings2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CatalogueEntry, CatalogueSortBy, CatalogueSortDir } from "@/api/hooks/catalogue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -42,6 +43,21 @@ export function formatWebsiteHost(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Sort types
+// ---------------------------------------------------------------------------
+
+export type CatalogueSortCol = CatalogueSortBy;
+
+/**
+ * Table sort state. `col`/`dir` are both `null` only together (unsorted —
+ * the server falls back to `created_at DESC` tiebroken on `id DESC`).
+ */
+export interface CatalogueTableSort {
+  col: CatalogueSortCol | null;
+  dir: CatalogueSortDir | null;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -62,12 +78,68 @@ const DEFAULT_VISIBLE: string[] = [
 /** All optional (hideable) columns — off by default. */
 const OPTIONAL_COLUMNS: string[] = ["location", "website", "notes"];
 
+/**
+ * Map from UI column id to backend `SortBy`. Only columns whose id differs
+ * from the backend column name appear here; sortable columns whose id
+ * already matches the backend variant are handled by the identity fallback
+ * in {@link columnToSortBy}. Columns absent from this surface entirely
+ * (e.g. `notes`, `actions`) yield `null` and render as plain headers.
+ */
+const COLUMN_TO_SORT_BY: Record<string, CatalogueSortCol> = {
+  ip: "ip",
+  display_name: "display_name",
+  city: "city",
+  country: "country_code",
+  asn: "asn",
+  network: "network_operator",
+  status: "enrichment_status",
+  website: "website",
+  location: "location",
+};
+
+function columnToSortBy(columnId: string): CatalogueSortCol | null {
+  return COLUMN_TO_SORT_BY[columnId] ?? null;
+}
+
+/** Estimated row height in px — matches the shadcn `TableRow` default. */
+const ROW_HEIGHT_ESTIMATE = 44;
+
+/** Max height of the virtualized scroll container. */
+const SCROLL_MAX_HEIGHT = "70vh";
+
+/**
+ * Initial viewport rect fed to the virtualizer before the ResizeObserver
+ * fires its first callback. jsdom never measures layout, so a zero rect
+ * would leave the virtualizer with nothing to render under tests. Picking
+ * a generous window here keeps production correct (the observer
+ * supersedes this value within a frame) while giving jsdom enough
+ * virtual items to commit rows on the first render pass.
+ */
+const INITIAL_SCROLL_RECT = { width: 1024, height: 800 };
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
 
 export interface CatalogueTableProps {
-  entries: CatalogueEntry[];
+  /** Flattened rows across every page of the infinite query. */
+  rows: CatalogueEntry[];
+  /** Server-reported total for the active filter (pre-page). */
+  total: number;
+  /** True while the next-page fetch can be triggered. */
+  hasNextPage: boolean;
+  /** True while a next-page fetch is in flight. */
+  isFetchingNextPage: boolean;
+  /** Trigger the next-page fetch. */
+  fetchNextPage: () => void;
+  /** Active sort state (parent-owned — URL round-trip happens upstream). */
+  sort: CatalogueTableSort;
+  /**
+   * Called when the operator cycles a sort header. Fires with
+   * `(col, dir)` for `asc`/`desc`, or `(null, null)` when the cycle
+   * returns to unsorted.
+   */
+  onSortChange: (col: CatalogueSortCol | null, dir: CatalogueSortDir | null) => void;
   onRowClick: (id: string) => void;
   onReenrich: (id: string) => void;
   className?: string;
@@ -122,6 +194,77 @@ function getInitialVisibility(): VisibilityState {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// SortIcon / SortableHeader
+// ---------------------------------------------------------------------------
+
+interface SortIconProps {
+  active: CatalogueSortDir | null;
+}
+
+function SortIcon({ active }: SortIconProps) {
+  if (active === "asc") return <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />;
+  if (active === "desc") return <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />;
+  return <ChevronsUpDown className="h-3.5 w-3.5 opacity-50" aria-hidden="true" />;
+}
+
+interface SortableHeaderProps {
+  col: CatalogueSortCol;
+  label: string;
+  sort: CatalogueTableSort;
+  onSortChange: CatalogueTableProps["onSortChange"];
+}
+
+/**
+ * Returns the next sort tuple in the three-state cycle
+ * `none → asc → desc → none` for the given column.
+ */
+function nextSort(
+  col: CatalogueSortCol,
+  active: CatalogueSortDir | null,
+): [CatalogueSortCol | null, CatalogueSortDir | null] {
+  if (active === null) return [col, "asc"];
+  if (active === "asc") return [col, "desc"];
+  return [null, null];
+}
+
+/**
+ * Interactive header contents. `aria-sort` lives on the enclosing `<th>`
+ * (see call site) so assistive tech tracks the active column; this button
+ * only owns the click + focus ring. Negative left margin lines the
+ * chevron up with plain-text column titles.
+ */
+function SortableHeader({ col, label, sort, onSortChange }: SortableHeaderProps) {
+  const active = sort.col === col ? sort.dir : null;
+  const [nextCol, nextDir] = nextSort(col, active);
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSortChange(nextCol, nextDir)}
+      className="-ml-1 flex items-center gap-1 rounded-sm px-1 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {label}
+      <SortIcon active={active} />
+    </button>
+  );
+}
+
+/**
+ * `aria-sort` value for a header cell given the active column and direction.
+ * `ascending` / `descending` only on the currently-sorted column; every
+ * other sortable header reports `none`.
+ */
+function ariaSortForColumn(
+  col: CatalogueSortCol,
+  sort: CatalogueTableSort,
+): "ascending" | "descending" | "none" {
+  if (sort.col !== col) return "none";
+  if (sort.dir === "asc") return "ascending";
+  if (sort.dir === "desc") return "descending";
+  return "none";
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +416,13 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
 // ---------------------------------------------------------------------------
 
 export function CatalogueTable({
-  entries,
+  rows,
+  total,
+  hasNextPage,
+  isFetchingNextPage,
+  fetchNextPage,
+  sort,
+  onSortChange,
   onRowClick,
   onReenrich,
   className,
@@ -288,15 +437,36 @@ export function CatalogueTable({
   const columns = useMemo(() => buildColumns(onReenrich), [onReenrich]);
 
   const table = useReactTable({
-    data: entries,
+    data: rows,
     columns,
     state: { columnVisibility },
     onColumnVisibilityChange: setColumnVisibility,
     getCoreRowModel: getCoreRowModel(),
   });
 
-  // All toggleable columns (default visible + optional)
+  // Visible columns in the configured order. react-table owns column
+  // definitions + visibility here; we drive row rendering ourselves via the
+  // virtualizer so the existing column-chooser plumbing is preserved.
+  const visibleColumns = table.getVisibleLeafColumns();
+  // All toggleable columns (default visible + optional) — feeds the chooser.
   const toggleableColumns = table.getAllLeafColumns();
+  // react-table's core row model, indexable by the virtualizer's `index`.
+  const tableRows = table.getRowModel().rows;
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: tableRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT_ESTIMATE,
+    overscan: 8,
+    // jsdom-friendly fallback: the ResizeObserver replaces this with the
+    // real element rect once layout runs in a browser. See constant
+    // docstring for rationale.
+    initialRect: INITIAL_SCROLL_RECT,
+  });
+
+  const virtualItems = virtualizer.getVirtualItems();
+  const totalSize = virtualizer.getTotalSize();
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -334,47 +504,101 @@ export function CatalogueTable({
         </Popover>
       </div>
 
-      {/* Table */}
-      <Table>
-        <TableHeader>
-          {table.getHeaderGroups().map((hg) => (
-            <TableRow key={hg.id}>
-              {hg.headers.map((h) => (
-                <TableHead key={h.id}>
-                  {flexRender(h.column.columnDef.header, h.getContext())}
-                </TableHead>
-              ))}
+      {/* Table — header lives outside the scrollable body so the column
+          titles stay pinned and don't virtualize. */}
+      <div className="overflow-hidden rounded-md border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              {visibleColumns.map((col) => {
+                const sortCol = columnToSortBy(col.id);
+                const header = col.columnDef.header;
+                const label = typeof header === "string" ? header : col.id;
+                return (
+                  <TableHead
+                    key={col.id}
+                    aria-sort={sortCol ? ariaSortForColumn(sortCol, sort) : undefined}
+                  >
+                    {sortCol ? (
+                      <SortableHeader
+                        col={sortCol}
+                        label={label}
+                        sort={sort}
+                        onSortChange={onSortChange}
+                      />
+                    ) : (
+                      label
+                    )}
+                  </TableHead>
+                );
+              })}
             </TableRow>
-          ))}
-        </TableHeader>
-        <TableBody>
-          {table.getRowModel().rows.map((row) => {
-            const handleClick = () => onRowClick(row.original.id);
-            return (
-              <TableRow
-                key={row.id}
-                role="button"
-                tabIndex={0}
-                aria-label={`Open entry ${row.original.ip}`}
-                onClick={handleClick}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    handleClick();
-                  }
-                }}
-                className="cursor-pointer hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
-              >
-                {row.getVisibleCells().map((cell) => (
-                  <TableCell key={cell.id}>
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </TableCell>
-                ))}
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
+          </TableHeader>
+        </Table>
+        <div
+          ref={scrollRef}
+          className="relative overflow-auto"
+          style={{ maxHeight: SCROLL_MAX_HEIGHT }}
+        >
+          <Table>
+            <TableBody
+              style={{
+                display: "block",
+                position: "relative",
+                height: `${totalSize}px`,
+              }}
+            >
+              {virtualItems.map((virtualItem) => {
+                const row = tableRows[virtualItem.index];
+                if (!row) return null;
+                const handleClick = () => onRowClick(row.original.id);
+                return (
+                  <TableRow
+                    key={row.original.id}
+                    data-index={virtualItem.index}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open entry ${row.original.ip}`}
+                    onClick={handleClick}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleClick();
+                      }
+                    }}
+                    className="absolute top-0 left-0 flex w-full cursor-pointer hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+                    style={{
+                      transform: `translateY(${virtualItem.start}px)`,
+                      height: `${virtualItem.size}px`,
+                    }}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id} className="flex-1">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+        {/* Load-more + total counter */}
+        <div className="flex items-center justify-between border-t bg-muted/20 px-4 py-3 text-sm">
+          <span className="text-muted-foreground">
+            {rows.length} of {total} entries
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!hasNextPage || isFetchingNextPage}
+            onClick={() => fetchNextPage()}
+          >
+            {isFetchingNextPage ? "Loading…" : hasNextPage ? "Load more" : "All loaded"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
