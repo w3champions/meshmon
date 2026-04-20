@@ -345,10 +345,9 @@ impl Scheduler {
         // `expire_stale_attempts` only targets `pending` rows with a
         // high attempt_count. Recovery surfaces for a stranded row:
         // operator `force_pair`, `apply_edit{force_measurement=true}`
-        // (provided its filter is extended to include `dispatched` —
-        // currently it is not — or a targeted re-run), or a process
-        // restart followed by adding a `dispatched`-TTL sweeper. Tick
-        // panics are logged, so the failure is observable.
+        // (which resets every non-pending pair including `dispatched`),
+        // or a process restart followed by adding a `dispatched`-TTL
+        // sweeper. Tick panics are logged, so the failure is observable.
         let mut allowed: Vec<PendingPair> = Vec::with_capacity(batch.len());
         let mut rate_limited: Vec<i64> = Vec::new();
         for p in batch {

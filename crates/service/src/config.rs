@@ -54,6 +54,12 @@ pub struct Config {
 /// Campaigns scheduler, size-guard, and per-destination-rate-limit settings.
 #[derive(Debug, Clone)]
 pub struct CampaignsSection {
+    /// Enable the background scheduler. Defaults to `false` until T45
+    /// wires the real RPC dispatcher — with the T44 `NoopDispatcher`
+    /// active, pairs flip `pending → dispatched` but never settle, so
+    /// production must keep the scheduler off until a real transport
+    /// is available. HTTP CRUD and pair preview work regardless.
+    pub enabled: bool,
     /// Soft warning threshold on the composer's expected-dispatch count.
     /// Above this the frontend shows a confirm dialog. No hard cap.
     pub size_warning_threshold: u32,
@@ -73,6 +79,7 @@ pub struct CampaignsSection {
 impl Default for CampaignsSection {
     fn default() -> Self {
         Self {
+            enabled: false,
             size_warning_threshold: 1000,
             scheduler_tick_ms: 500,
             max_pair_attempts: 3,
@@ -364,6 +371,8 @@ struct RawConfig {
 
 #[derive(Debug, Deserialize, Default)]
 struct RawCampaigns {
+    #[serde(default)]
+    enabled: Option<bool>,
     #[serde(default)]
     size_warning_threshold: Option<u32>,
     #[serde(default)]
@@ -761,6 +770,7 @@ impl Config {
         // --- campaigns section ---
         let campaigns_defaults = CampaignsSection::default();
         let campaigns = CampaignsSection {
+            enabled: raw.campaigns.enabled.unwrap_or(campaigns_defaults.enabled),
             size_warning_threshold: raw
                 .campaigns
                 .size_warning_threshold
@@ -1716,6 +1726,7 @@ acknowledged_tos = true
         let toml = format!(
             r#"{MIN_TOML}
 [campaigns]
+enabled = true
 size_warning_threshold = 500
 scheduler_tick_ms = 250
 max_pair_attempts = 5
@@ -1723,6 +1734,7 @@ per_destination_rps = 4
 "#
         );
         let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert!(cfg.campaigns.enabled);
         assert_eq!(cfg.campaigns.size_warning_threshold, 500);
         assert_eq!(cfg.campaigns.scheduler_tick_ms, 250);
         assert_eq!(cfg.campaigns.max_pair_attempts, 5);
@@ -1730,6 +1742,10 @@ per_destination_rps = 4
 
         // Defaults apply when the section is omitted.
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
+        assert!(
+            !cfg.campaigns.enabled,
+            "scheduler off by default until T45 real dispatcher lands"
+        );
         assert_eq!(cfg.campaigns.size_warning_threshold, 1000);
         assert_eq!(cfg.campaigns.scheduler_tick_ms, 500);
         assert_eq!(cfg.campaigns.max_pair_attempts, 3);

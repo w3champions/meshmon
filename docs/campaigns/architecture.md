@@ -606,6 +606,11 @@ catalogue surface. `RepoError::NotFound` → 404 `not_found`,
 
 ```toml
 [campaigns]
+# Spawn the background scheduler. Default: false. Keep it off until a
+# real dispatcher is wired (T45) — the T44 NoopDispatcher flips pairs
+# pending→dispatched but never settles them. HTTP CRUD + preview work
+# regardless of this flag.
+enabled = false
 # Composer confirm-dialog threshold on expected dispatch count.
 # Advisory only — no hard cap.
 size_warning_threshold = 1000

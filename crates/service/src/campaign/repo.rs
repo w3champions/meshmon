@@ -399,6 +399,13 @@ pub async fn apply_edit(
         )
         .execute(&mut *tx)
         .await?;
+        // Reset every non-pending pair. `stop()` keeps `dispatched` rows
+        // as-is (they may still settle from an in-flight agent call),
+        // so force_measurement after stop must include `dispatched` or
+        // those pairs stay stuck once the campaign re-enters running.
+        // A late settle response arriving after this reset finds
+        // `pending` and updates the row — the worst case is a slightly
+        // stale reading, not a stuck campaign.
         sqlx::query!(
             "UPDATE campaign_pairs
                 SET resolution_state = 'pending',
@@ -408,7 +415,7 @@ pub async fn apply_edit(
                     attempt_count    = 0,
                     last_error       = NULL
               WHERE campaign_id = $1
-                AND resolution_state IN ('reused','succeeded','unreachable','skipped')",
+                AND resolution_state IN ('dispatched','reused','succeeded','unreachable','skipped')",
             id
         )
         .execute(&mut *tx)
@@ -902,12 +909,11 @@ pub async fn metrics_snapshot(pool: &PgPool) -> Result<MetricsSnapshot, RepoErro
     .fetch_all(pool)
     .await?;
 
-    let pairs: Vec<(PairResolutionState, i64)> =
-        sqlx::query_as::<_, (PairResolutionState, i64)>(
-            "SELECT resolution_state, COUNT(*) FROM campaign_pairs GROUP BY 1",
-        )
-        .fetch_all(pool)
-        .await?;
+    let pairs: Vec<(PairResolutionState, i64)> = sqlx::query_as::<_, (PairResolutionState, i64)>(
+        "SELECT resolution_state, COUNT(*) FROM campaign_pairs GROUP BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
 
     let reuse_ratio: Option<f64> = sqlx::query_scalar(
         "SELECT CASE WHEN COUNT(*) = 0 THEN NULL \

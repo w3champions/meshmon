@@ -269,28 +269,36 @@ async fn run() -> anyhow::Result<()> {
 
     // Campaign scheduler: single tokio task, driven by a dedicated cancel
     // token so it can be shut down AFTER the HTTP drain completes (in-flight
-    // handlers may still publish NOTIFY wake-ups until they finish). T44
-    // ships the `NoopDispatcher`; T45 swaps in the real RPC-backed
-    // dispatcher without changing this wiring.
-    let campaign_cancel = CancellationToken::new();
-    let campaign_dispatcher: Arc<dyn meshmon_service::campaign::dispatch::PairDispatcher> =
-        Arc::new(meshmon_service::campaign::dispatch::NoopDispatcher::default());
-    let campaign_scheduler = meshmon_service::campaign::scheduler::Scheduler::new(
-        pool.clone(),
-        registry.clone(),
-        campaign_dispatcher,
-        initial_config.campaigns.scheduler_tick_ms,
-        /* chunk_size = */ 64,
-        initial_config.campaigns.per_destination_rps,
-        // `max_pair_attempts` is `u16` in config but `i16` at the DB edge;
-        // both map onto the same non-negative range in practice. Clamp
-        // explicitly so a misconfigured `65535` can't wrap to a negative
-        // attempts threshold.
-        std::cmp::min(initial_config.campaigns.max_pair_attempts, i16::MAX as u16) as i16,
-        registry_active_window,
-    );
-    let campaign_scheduler_handle = tokio::spawn(campaign_scheduler.run(campaign_cancel.clone()));
-    info!("campaign scheduler spawned");
+    // handlers may still publish NOTIFY wake-ups until they finish). Gated
+    // on `[campaigns] enabled` — default is off until T45 wires a real
+    // dispatcher, because the T44 `NoopDispatcher` would flip pairs
+    // `pending → dispatched` and never settle them. HTTP CRUD + preview
+    // still function without the scheduler.
+    let (campaign_cancel, campaign_scheduler_handle) = if initial_config.campaigns.enabled {
+        let cancel = CancellationToken::new();
+        let dispatcher: Arc<dyn meshmon_service::campaign::dispatch::PairDispatcher> =
+            Arc::new(meshmon_service::campaign::dispatch::NoopDispatcher::default());
+        let scheduler = meshmon_service::campaign::scheduler::Scheduler::new(
+            pool.clone(),
+            registry.clone(),
+            dispatcher,
+            initial_config.campaigns.scheduler_tick_ms,
+            /* chunk_size = */ 64,
+            initial_config.campaigns.per_destination_rps,
+            // `max_pair_attempts` is `u16` in config but `i16` at the DB edge;
+            // both map onto the same non-negative range in practice. Clamp
+            // explicitly so a misconfigured `65535` can't wrap to a negative
+            // attempts threshold.
+            std::cmp::min(initial_config.campaigns.max_pair_attempts, i16::MAX as u16) as i16,
+            registry_active_window,
+        );
+        let handle = tokio::spawn(scheduler.run(cancel.clone()));
+        info!("campaign scheduler spawned");
+        (Some(cancel), Some(handle))
+    } else {
+        info!("campaign scheduler disabled (set [campaigns] enabled = true to start)");
+        (None, None)
+    };
 
     let state = {
         let mut s = AppState::new(
@@ -302,7 +310,7 @@ async fn run() -> anyhow::Result<()> {
             prom.clone(),
             enrichment_queue,
         );
-        s.campaign_cancel = Some(campaign_cancel.clone());
+        s.campaign_cancel = campaign_cancel.clone();
         s
     };
     state.mark_ready();
@@ -479,17 +487,21 @@ async fn run() -> anyhow::Result<()> {
     // can still publish NOTIFY wake-ups while serving their final
     // responses. The scheduler's `run` loop observes the cancel token on
     // every select arm and exits promptly; the `timeout` is a backstop
-    // for a stuck Postgres query, not the expected path.
-    campaign_cancel.cancel();
-    match tokio::time::timeout(deadline, campaign_scheduler_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!(error = %e, "campaign scheduler task ended abnormally"),
-        Err(_) => warn!(
-            deadline_ms = deadline.as_millis() as u64,
-            "campaign scheduler did not drain within shutdown_deadline; aborting",
-        ),
+    // for a stuck Postgres query, not the expected path. Both `cancel`
+    // and `handle` are `None` when the scheduler was never spawned
+    // (`[campaigns] enabled = false`).
+    if let (Some(cancel), Some(handle)) = (campaign_cancel, campaign_scheduler_handle) {
+        cancel.cancel();
+        match tokio::time::timeout(deadline, handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(error = %e, "campaign scheduler task ended abnormally"),
+            Err(_) => warn!(
+                deadline_ms = deadline.as_millis() as u64,
+                "campaign scheduler did not drain within shutdown_deadline; aborting",
+            ),
+        }
+        info!("campaign scheduler drained");
     }
-    info!("campaign scheduler drained");
 
     // Registry refresh loop: cancelled by `shutdown_token`. The loop checks
     // the token after each `refresh_once` completes, so an in-flight refresh

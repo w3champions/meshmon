@@ -409,9 +409,11 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
         .unwrap();
     assert!(!batch.is_empty(), "batch carries at least one pair");
     assert!(
-        batch.iter().all(|p| p.resolution_state == PairResolutionState::Dispatched
-            && p.dispatched_at.is_some()
-            && p.attempt_count == 1),
+        batch
+            .iter()
+            .all(|p| p.resolution_state == PairResolutionState::Dispatched
+                && p.dispatched_at.is_some()
+                && p.attempt_count == 1),
         "take_pending_batch flips to dispatched and bumps attempt_count"
     );
 
@@ -689,6 +691,74 @@ async fn force_pair_preserves_started_at_on_running_campaign() {
         Some(original_started_at),
         "started_at preserved for Running campaign"
     );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_edit_force_measurement_resets_dispatched_pairs() {
+    // `stop()` preserves `dispatched` pairs — they may still settle
+    // from an in-flight agent call. When a stopped campaign is edited
+    // with force_measurement=true, those dispatched rows must also
+    // reset or they stay stuck once the campaign re-enters running.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-edit-dispatched"))
+        .await
+        .unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+
+    // Simulate an in-flight dispatch: take_pending_batch flips one pair
+    // to `dispatched` with dispatched_at stamped and attempt_count=1.
+    let batch = repo::take_pending_batch(&pool, row.id, "agent-a", 1)
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 1, "one pair claimed");
+    let dispatched_id = batch[0].id;
+
+    repo::stop(&pool, row.id).await.unwrap();
+
+    // After stop: one dispatched row survives, the rest are skipped.
+    let dispatched_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+         WHERE campaign_id = $1 AND resolution_state = 'dispatched'",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        dispatched_before, 1,
+        "stop() preserves in-flight dispatched"
+    );
+
+    repo::apply_edit(
+        &pool,
+        row.id,
+        EditInput {
+            force_measurement: Some(true),
+            ..EditInput::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // After force_measurement: every pair is pending, including the
+    // dispatched one — and its dispatched_at/attempt_count are cleared.
+    let reset: PairResolutionState = sqlx::query_scalar::<_, PairResolutionState>(
+        "SELECT resolution_state FROM campaign_pairs WHERE id = $1",
+    )
+    .bind(dispatched_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reset, PairResolutionState::Pending);
+    let attempt_count: i16 =
+        sqlx::query_scalar("SELECT attempt_count FROM campaign_pairs WHERE id = $1")
+            .bind(dispatched_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attempt_count, 0, "force_measurement clears attempt_count");
 
     repo::delete(&pool, row.id).await.unwrap();
 }
