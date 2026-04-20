@@ -7,7 +7,7 @@ import {
   type CatalogueListResponse,
   type CataloguePasteResponse,
   useCatalogueEntry,
-  useCatalogueList,
+  useCatalogueListInfinite,
   useDeleteCatalogueEntry,
   usePasteCatalogue,
   usePatchCatalogueEntry,
@@ -51,21 +51,25 @@ function wrap() {
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("useCatalogueList", () => {
-  test("returns the list body on 200", async () => {
+describe("useCatalogueListInfinite", () => {
+  test("returns the first page body on 200", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify(LIST_OK), { status: 200 }),
     );
-    const { result } = renderHook(() => useCatalogueList(), { wrapper: wrap() });
+    const { result } = renderHook(() => useCatalogueListInfinite(), { wrapper: wrap() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual(LIST_OK);
+    // `data` is now `InfiniteData<CatalogueListResponse>` — first fetch lands
+    // in `pages[0]`; subsequent `fetchNextPage()` calls append additional
+    // entries to the `pages` array.
+    expect(result.current.data?.pages).toHaveLength(1);
+    expect(result.current.data?.pages[0]).toEqual(LIST_OK);
   });
 
   test("surfaces 500 as an error", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ error: "boom" }), { status: 500 }),
     );
-    const { result } = renderHook(() => useCatalogueList(), { wrapper: wrap() });
+    const { result } = renderHook(() => useCatalogueListInfinite(), { wrapper: wrap() });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.error?.message).toContain("failed to fetch catalogue");
   });
@@ -75,7 +79,7 @@ describe("useCatalogueList", () => {
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify(LIST_OK), { status: 200 }));
     const { result } = renderHook(
-      () => useCatalogueList({ country_code: ["US", "DE"], limit: 25 }),
+      () => useCatalogueListInfinite({ country_code: ["US", "DE"] }, { pageSize: 25 }),
       { wrapper: wrap() },
     );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -86,7 +90,10 @@ describe("useCatalogueList", () => {
     // repeated keys into `Vec<T>`, so the client sends a single comma-joined
     // value instead of `country_code=US&country_code=DE`.
     expect(url).toContain("country_code=US,DE");
+    // Page size comes in via the `pageSize` option, not the filter object.
     expect(url).toContain("limit=25");
+    // First page has no `after` cursor.
+    expect(url).not.toContain("after=");
   });
 });
 

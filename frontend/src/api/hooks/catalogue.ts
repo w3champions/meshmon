@@ -1,6 +1,9 @@
 import {
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -15,30 +18,119 @@ export type CataloguePasteRequest = components["schemas"]["PasteRequest"];
 export type CataloguePasteResponse = components["schemas"]["PasteResponse"];
 export type CataloguePatchRequest = components["schemas"]["PatchRequest"];
 export type CatalogueBulkReenrichRequest = components["schemas"]["BulkReenrichRequest"];
+export type CatalogueMapResponse = components["schemas"]["MapResponse"];
+export type CatalogueMapBucket = components["schemas"]["MapBucket"];
 
 /**
- * Query shape for `GET /api/catalogue`, sourced directly from the generated
- * OpenAPI spec so there is a single source of truth for supported filters.
+ * Query shape for `GET /api/catalogue`, minus the `after` cursor and `limit`
+ * (both are owned by `useCatalogueListInfinite`). Sourced directly from the
+ * generated OpenAPI spec so there is a single source of truth for supported
+ * filters.
  */
-export type CatalogueListQuery = NonNullable<operations["list"]["parameters"]["query"]>;
+export type CatalogueListQuery = Omit<
+  NonNullable<operations["list"]["parameters"]["query"]>,
+  "after" | "limit"
+>;
+
+/**
+ * Query shape for `GET /api/catalogue/map`, minus the viewport (`bbox`) and
+ * `zoom` — those are always supplied at call sites because the map is
+ * viewport-driven. `shapes`, `sort`, `sort_dir`, `after`, `city` are not part
+ * of the map surface server-side, so they do not appear here either.
+ */
+export type CatalogueMapQuery = Omit<
+  NonNullable<operations["map"]["parameters"]["query"]>,
+  "bbox" | "zoom"
+>;
 
 export const CATALOGUE_LIST_KEY = ["catalogue", "list"] as const;
+export const CATALOGUE_MAP_KEY = ["catalogue", "map"] as const;
 export const CATALOGUE_FACETS_KEY = ["catalogue", "facets"] as const;
 
 export function catalogueEntryKey(id: string) {
   return ["catalogue", "entry", id] as const;
 }
 
-export function useCatalogueList(
+export interface CatalogueListInfiniteOptions {
+  /** Page size; clamped server-side to `1..=500`. Default 100. */
+  pageSize?: number;
+}
+
+/** Default `limit` used when no `pageSize` option is supplied. */
+const DEFAULT_PAGE_SIZE = 100;
+
+/**
+ * Cursor through `GET /api/catalogue` using keyset paging.
+ *
+ * Each page's `next_cursor` is fed back in as the `after` query param of the
+ * following page; a `null` cursor terminates the sequence. The query key
+ * embeds the full filter object plus `pageSize`, so a filter change spawns a
+ * fresh cursor chain rather than polluting the previous one's pages.
+ */
+export function useCatalogueListInfinite(
   query: CatalogueListQuery = {},
-): UseQueryResult<CatalogueListResponse, Error> {
-  return useQuery({
-    queryKey: [...CATALOGUE_LIST_KEY, query],
-    queryFn: async (): Promise<CatalogueListResponse> => {
+  options: CatalogueListInfiniteOptions = {},
+): UseInfiniteQueryResult<InfiniteData<CatalogueListResponse>, Error> {
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
+  return useInfiniteQuery<
+    CatalogueListResponse,
+    Error,
+    InfiniteData<CatalogueListResponse>,
+    readonly unknown[],
+    string | undefined
+  >({
+    queryKey: [...CATALOGUE_LIST_KEY, query, pageSize],
+    initialPageParam: undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    queryFn: async ({ pageParam }): Promise<CatalogueListResponse> => {
       const { data, error } = await api.GET("/api/catalogue", {
-        params: { query },
+        params: {
+          query: {
+            ...query,
+            limit: pageSize,
+            after: pageParam,
+          },
+        },
       });
       if (error) throw new Error("failed to fetch catalogue", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data;
+    },
+  });
+}
+
+/**
+ * Fetch the adaptive map response for a given viewport.
+ *
+ * Disabled while `bbox` is absent so a just-mounted map doesn't emit a bad
+ * `bbox=` query (the backend treats missing/malformed `bbox` as a 400).
+ * Once `bbox` is defined, the query refires whenever the viewport, zoom, or
+ * any filter changes — query-key equality handles it automatically.
+ *
+ * The backend picks detail-vs-cluster internally; consumers branch on
+ * `data.kind` which narrows the union to the right shape.
+ */
+export function useCatalogueMap(
+  bbox: readonly [number, number, number, number] | undefined,
+  zoom: number,
+  filters: CatalogueMapQuery = {},
+): UseQueryResult<CatalogueMapResponse, Error> {
+  return useQuery({
+    queryKey: [...CATALOGUE_MAP_KEY, bbox, zoom, filters],
+    enabled: bbox !== undefined,
+    queryFn: async (): Promise<CatalogueMapResponse> => {
+      // queryFn only runs when enabled → bbox is defined.
+      const bboxValue = bbox as readonly [number, number, number, number];
+      const { data, error } = await api.GET("/api/catalogue/map", {
+        params: {
+          query: {
+            ...filters,
+            bbox: [...bboxValue],
+            zoom,
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch catalogue map", { cause: error });
       if (!data) throw new Error("empty response");
       return data;
     },
@@ -93,6 +185,7 @@ export function usePasteCatalogue(): UseMutationResult<
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -153,6 +246,7 @@ export function usePatchCatalogueEntry(): UseMutationResult<
     onSuccess: (data, { id }) => {
       queryClient.setQueryData(catalogueEntryKey(id), data);
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -170,6 +264,7 @@ export function useDeleteCatalogueEntry(): UseMutationResult<void, Error, string
     onSuccess: (_data, id) => {
       queryClient.removeQueries({ queryKey: catalogueEntryKey(id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -187,6 +282,7 @@ export function useReenrichOne(): UseMutationResult<void, Error, string> {
     onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: catalogueEntryKey(id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -204,6 +300,7 @@ export function useReenrichMany(): UseMutationResult<void, Error, CatalogueBulkR
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
