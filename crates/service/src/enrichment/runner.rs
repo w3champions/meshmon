@@ -33,7 +33,7 @@ use crate::catalogue::{
 use sqlx::PgPool;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Producer handle for the runner's enrichment work queue.
@@ -175,13 +175,6 @@ impl Runner {
                 return;
             }
         };
-        debug!(
-            %id,
-            ip = %entry.ip,
-            locked_fields = ?entry.operator_edited_fields,
-            provider_count = self.chain.len(),
-            "enrichment: starting row"
-        );
         if let Err(e) = repo::mark_enrichment_start(&self.pool, id).await {
             warn!(%id, error = %e, "enrichment: mark_start failed");
             return;
@@ -204,22 +197,20 @@ impl Runner {
             // an RDAP call for every row even when ipgeo already filled
             // ASN and NetworkOperator — wasted quota and latency.
             if !merged.needs_provider(provider.supported(), &locked) {
-                debug!(
-                    %id,
-                    provider = provider.id(),
-                    "enrichment: skipping provider (nothing left to fill)"
-                );
                 continue;
             }
             match provider.lookup(entry.ip).await {
                 Ok(res) => {
-                    debug!(
-                        %id,
-                        provider = provider.id(),
-                        returned_fields = ?res.fields.keys().collect::<Vec<_>>(),
-                        "enrichment: provider returned fields"
-                    );
+                    let before = filled_field_names(&merged);
                     merged.apply(provider.id(), res, &locked);
+                    let contributed = new_fields(&before, &filled_field_names(&merged));
+                    info!(
+                        %id,
+                        ip = %entry.ip,
+                        provider = provider.id(),
+                        contributed = ?contributed,
+                        "enrichment: provider contributed"
+                    );
                 }
                 Err(e) => {
                     if e.is_retryable() {
@@ -229,17 +220,6 @@ impl Runner {
                 }
             }
         }
-        debug!(
-            %id,
-            ip = %entry.ip,
-            providers_tried = ?merged.providers_tried,
-            has_city = merged.city.is_some(),
-            has_country_code = merged.country_code.is_some(),
-            has_asn = merged.asn.is_some(),
-            has_network_operator = merged.network_operator.is_some(),
-            has_latlon = merged.latitude.is_some() && merged.longitude.is_some(),
-            "enrichment: merge complete"
-        );
         // Pick the terminal status the DB will record when `merged` is
         // empty: `Pending` keeps the row in the sweep's queue for a
         // retry, `Failed` is the end state when every provider gave a
@@ -251,6 +231,11 @@ impl Runner {
         } else {
             EnrichmentStatus::Failed
         };
+        // Snapshot the per-row resolution before `merged` is consumed by
+        // the persist call, so the summary log below can show which
+        // providers ran and which fields ended up populated.
+        let providers_tried: Vec<&'static str> = merged.providers_tried.clone();
+        let resolved: Vec<&'static str> = filled_field_names(&merged);
         let status = match repo::apply_enrichment_result(&self.pool, id, merged, empty_status).await
         {
             // `None` means the row was concurrently deleted between
@@ -263,6 +248,14 @@ impl Runner {
                 return;
             }
         };
+        info!(
+            %id,
+            ip = %entry.ip,
+            status = ?status,
+            providers_tried = ?providers_tried,
+            resolved = ?resolved,
+            "enrichment: resolved"
+        );
         self.broker
             .publish(CatalogueEvent::EnrichmentProgress { id, status });
         // Invalidate the facets cache on terminal transitions only.
@@ -319,4 +312,43 @@ impl Runner {
             self.process_one(id).await;
         }
     }
+}
+
+/// Snapshot the set of data fields that are currently populated on
+/// `merged`. Used around the per-provider apply call to compute the
+/// provider's contribution and in the per-row summary log.
+fn filled_field_names(merged: &MergedFields) -> Vec<&'static str> {
+    let mut out = Vec::with_capacity(7);
+    if merged.city.is_some() {
+        out.push("city");
+    }
+    if merged.country_code.is_some() {
+        out.push("country_code");
+    }
+    if merged.country_name.is_some() {
+        out.push("country_name");
+    }
+    if merged.latitude.is_some() {
+        out.push("latitude");
+    }
+    if merged.longitude.is_some() {
+        out.push("longitude");
+    }
+    if merged.asn.is_some() {
+        out.push("asn");
+    }
+    if merged.network_operator.is_some() {
+        out.push("network_operator");
+    }
+    out
+}
+
+/// Names present in `after` but not `before` — the set of fields a
+/// provider won when its result was merged.
+fn new_fields(before: &[&'static str], after: &[&'static str]) -> Vec<&'static str> {
+    after
+        .iter()
+        .copied()
+        .filter(|name| !before.contains(name))
+        .collect()
 }
