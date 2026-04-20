@@ -117,10 +117,10 @@ DATABASE_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=dis
 echo "[dev.sh] seeding agents + route snapshots"
 docker exec -e PGPASSWORD="$PG_PASSWORD" meshmon-db \
     psql -U meshmon -d meshmon -c "$(cat <<'SQL'
-INSERT INTO agents (id, display_name, location, ip, lat, lon, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
+INSERT INTO agents (id, display_name, location, ip, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
 VALUES
-    ('dev-a', 'Dev A', 'Local', '10.0.0.1', 0, 0, now(), 'dev', 3555, 3552),
-    ('dev-b', 'Dev B', 'Local', '10.0.0.2', 0, 0, now(), 'dev', 3555, 3552)
+    ('dev-a', 'Dev A', 'Local', '10.0.0.1', now(), 'dev', 3555, 3552),
+    ('dev-b', 'Dev B', 'Local', '10.0.0.2', now(), 'dev', 3555, 3552)
 ON CONFLICT (id) DO UPDATE SET last_seen_at = now();
 SQL
 )"
