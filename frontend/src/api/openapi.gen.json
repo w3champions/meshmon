@@ -1332,7 +1332,7 @@
           {
             "name": "zoom",
             "in": "query",
-            "description": "Zoom level (0..=20). Controls the grid cell size for\ncluster aggregation when the filtered count crosses\n[`super::repo::MAP_DETAIL_THRESHOLD`]. See\n[`super::repo::cell_size_for_zoom`] for the mapping.",
+            "description": "Zoom level (0..=20). Controls the grid cell size for\ncluster aggregation when the filtered count crosses\n[`super::repo::MAP_DETAIL_THRESHOLD`]. See\n[`super::repo::cell_size_for_zoom`] for the mapping.\nValues above 20 surface as 400 — leaflet doesn't advertise\nzooms beyond that on any of our tile backends.",
             "required": true,
             "schema": {
               "type": "integer",

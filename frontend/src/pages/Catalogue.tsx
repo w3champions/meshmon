@@ -281,12 +281,9 @@ export default function Catalogue() {
   // Without this gate, SSE invalidations keep triggering hidden
   // `/api/catalogue/map` refetches after the operator switches to
   // the table — extra backend load the user can't see.
-  const mapInfinite = useCatalogueMap(
-    mapViewport?.bbox,
-    mapViewport?.zoom ?? 2,
-    mapQuery,
-    { enabled: view === "map" },
-  );
+  const mapInfinite = useCatalogueMap(mapViewport?.bbox, mapViewport?.zoom ?? 2, mapQuery, {
+    enabled: view === "map",
+  });
 
   // -----------------------------------------------------------------------
   // Cluster dialog filters: must match the map endpoint's filter set
