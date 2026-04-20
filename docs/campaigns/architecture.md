@@ -471,7 +471,7 @@ consumes both paths without a second deserialiser.
 |---|---|---|
 | `id` | `BIGSERIAL` | Primary key. |
 | `hops` | `JSONB` | Array of `{position, observed_ips, avg_rtt_micros, stddev_rtt_micros, loss_pct}`. |
-| `created_at` | `TIMESTAMPTZ` | `now()` default. |
+| `captured_at` | `TIMESTAMPTZ` | `now()` default — when the trace was persisted. |
 
 The writer inserts the trace first, captures the ID, then inserts the
 `measurements` row with `mtr_id` set — all inside one transaction so a

@@ -21,8 +21,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meshmon_protocol::pb::measurement_result::Outcome;
 use meshmon_protocol::{
-    AgentCommand, MeasurementResult, MeasurementSummary, RefreshConfigRequest,
-    RefreshConfigResponse, RunMeasurementBatchRequest,
+    AgentCommand, MeasurementKind, MeasurementResult, MeasurementSummary, Protocol,
+    RefreshConfigRequest, RefreshConfigResponse, RunMeasurementBatchRequest,
 };
 use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio_stream::Stream;
@@ -156,6 +156,18 @@ impl<P: CampaignProber> AgentCommand for AgentCommandService<P> {
             // consuming a semaphore permit for a no-op.
             let empty = tokio_stream::empty();
             return Ok(Response::new(Box::pin(empty)));
+        }
+
+        // Reject `UNSPECIFIED` enum values up front. Protobuf decodes
+        // unknown variants to the zero-value (`UNSPECIFIED`) when the
+        // sender omits the field — treating that as a valid probe kind
+        // would make a version-skewed service silently run the wrong
+        // probe. Every real prober can safely assume validated enums.
+        if req.kind == MeasurementKind::Unspecified as i32 {
+            return Err(Status::invalid_argument("kind must not be UNSPECIFIED"));
+        }
+        if req.protocol == Protocol::Unspecified as i32 {
+            return Err(Status::invalid_argument("protocol must not be UNSPECIFIED"));
         }
 
         // Per-agent cap: reject when the agent is already saturated.
@@ -334,6 +346,33 @@ mod tests {
     }
 
     // -- AgentCommandService --------------------------------------------------
+
+    #[tokio::test]
+    async fn run_measurement_batch_rejects_unspecified_kind() {
+        let svc = AgentCommandService::new(Arc::new(Notify::new()), Arc::new(StubProber), 4);
+        let mut req = latency_request(1);
+        req.kind = MeasurementKind::Unspecified as i32;
+
+        // `Response<Self::RunMeasurementBatchStream>` doesn't derive
+        // Debug (trait-object stream inside), so `.expect_err` is not
+        // available — match instead.
+        match svc.run_measurement_batch(Request::new(req)).await {
+            Err(status) => assert_eq!(status.code(), tonic::Code::InvalidArgument),
+            Ok(_) => panic!("unspecified kind must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_measurement_batch_rejects_unspecified_protocol() {
+        let svc = AgentCommandService::new(Arc::new(Notify::new()), Arc::new(StubProber), 4);
+        let mut req = latency_request(1);
+        req.protocol = Protocol::Unspecified as i32;
+
+        match svc.run_measurement_batch(Request::new(req)).await {
+            Err(status) => assert_eq!(status.code(), tonic::Code::InvalidArgument),
+            Ok(_) => panic!("unspecified protocol must be rejected"),
+        }
+    }
 
     #[tokio::test]
     async fn run_measurement_batch_empty_targets_returns_empty_stream() {
