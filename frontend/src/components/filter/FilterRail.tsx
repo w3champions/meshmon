@@ -135,7 +135,7 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
 
       <FreeTextGroup
         title="IP prefix"
-        placeholder="e.g. 10.0.0."
+        placeholder="e.g. 10.0.0. or 10.0.0.0/24"
         value={value.ipPrefix ?? ""}
         onCommit={(next) => onChange({ ...value, ipPrefix: next })}
       />
