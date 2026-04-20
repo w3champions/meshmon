@@ -4,6 +4,7 @@ import {
   CATALOGUE_FACETS_KEY,
   CATALOGUE_LIST_KEY,
   type CatalogueEntry,
+  type CatalogueListResponse,
   catalogueEntryKey,
 } from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
@@ -73,6 +74,21 @@ function applyEvent(queryClient: QueryClient, event: CatalogueStreamEvent): void
           enrichment_status: event.status,
         });
       }
+      // Also walk every cached list query and patch the matching entry in
+      // place. Returning the same `old` reference when no entry matches
+      // prevents unnecessary re-renders in consumers that don't show this IP.
+      queryClient.setQueriesData<CatalogueListResponse>({ queryKey: CATALOGUE_LIST_KEY }, (old) => {
+        if (!old) return old;
+        let changed = false;
+        const entries = old.entries.map((e) => {
+          if (e.id === event.id) {
+            changed = true;
+            return { ...e, enrichment_status: event.status };
+          }
+          return e;
+        });
+        return changed ? { ...old, entries } : old;
+      });
       // `enrichment_status` drives a facet bucket — counts change.
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
       return;

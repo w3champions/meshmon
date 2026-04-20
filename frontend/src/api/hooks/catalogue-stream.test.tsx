@@ -119,6 +119,51 @@ describe("useCatalogueStream", () => {
     expect(qc.getQueryState(["catalogue", "facets"])?.isInvalidated).toBe(true);
   });
 
+  test("patches the list cache in place on `enrichment_progress`", () => {
+    const qc = makeQueryClient();
+    // Seed a list cache keyed by the full [CATALOGUE_LIST_KEY, query] shape
+    qc.setQueryData(["catalogue", "list", {}], { entries: [ENTRY], total: 1 });
+    qc.setQueryData(["catalogue", "facets"], { enrichment_status: [] });
+
+    renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
+    act(() => {
+      MockEventSource.instances[0]?.emit({
+        kind: "enrichment_progress",
+        id: ENTRY.id,
+        status: "enriched",
+      });
+    });
+
+    const list = qc.getQueryData<{ entries: CatalogueEntry[]; total: number }>([
+      "catalogue",
+      "list",
+      {},
+    ]);
+    expect(list?.entries[0]?.enrichment_status).toBe("enriched");
+    // In-place patch — the list cache must NOT be flagged stale.
+    expect(qc.getQueryState(["catalogue", "list", {}])?.isInvalidated).toBe(false);
+  });
+
+  test("list cache is untouched when no entry matches `enrichment_progress`", () => {
+    const qc = makeQueryClient();
+    const otherEntry: CatalogueEntry = { ...ENTRY, id: "22222222-2222-2222-2222-222222222222" };
+    qc.setQueryData(["catalogue", "list", {}], { entries: [otherEntry], total: 1 });
+
+    renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
+    const beforeRef = qc.getQueryData(["catalogue", "list", {}]);
+    act(() => {
+      MockEventSource.instances[0]?.emit({
+        kind: "enrichment_progress",
+        id: ENTRY.id, // different from otherEntry.id
+        status: "enriched",
+      });
+    });
+
+    // Same reference — updater must return the original object when no entry matched
+    const afterRef = qc.getQueryData(["catalogue", "list", {}]);
+    expect(afterRef).toBe(beforeRef);
+  });
+
   test("removes entry + invalidates list on `deleted`", () => {
     const qc = makeQueryClient();
     qc.setQueryData(["catalogue", "entry", ENTRY.id], ENTRY);
