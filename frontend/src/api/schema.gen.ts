@@ -344,12 +344,20 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/catalogue` — filtered, size-bounded list.
+         * `GET /api/catalogue` — filtered, size-bounded, keyset-paginated list.
          * @description The handler converts [`ListQuery`] straight into [`repo::ListFilter`]
-         *     and returns a [`ListResponse`]. Cursor pagination is accepted on the
-         *     wire but ignored until T13 — the repo implementation clamps the
-         *     response to the first `limit.min(500)` rows in
-         *     `(created_at DESC, id DESC)` order.
+         *     and returns a [`ListResponse`]. The repo layer orders by the selected
+         *     `(sort, sort_dir)` with `id DESC` as the invariant tiebreaker and
+         *     `NULLS LAST` for every column; `shapes` run a cheap bbox pre-filter
+         *     in SQL plus exact point-in-polygon in Rust over the returned page
+         *     (see [`super::repo::list`] for the `total`-is-approximate caveat).
+         *
+         *     The wire `after` string is decoded via [`super::sort::Cursor::decode`].
+         *     A decode error (malformed base64 or JSON) silently degrades to "no
+         *     cursor" — the handler serves the first page rather than returning a
+         *     400. The repo additionally discards a decoded cursor whose
+         *     `(sort, dir)` disagrees with the request's `(sort, dir)`, so a sort
+         *     change on the client naturally invalidates stale cursors.
          */
         get: operations["list"];
         put?: never;
@@ -386,6 +394,36 @@ export interface paths {
          *     surfaced as 500 without polluting the cached value.
          */
         get: operations["facets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalogue/map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalogue/map` — adaptive map view.
+         * @description Returns raw rows when the filtered viewport count is at or below
+         *     [`repo::MAP_DETAIL_THRESHOLD`]; otherwise returns grid-aggregated
+         *     cluster buckets sized by [`repo::cell_size_for_zoom`]. The wire body
+         *     carries a `kind` discriminator so the client can branch on a single
+         *     field.
+         *
+         *     Differences from [`list`]:
+         *     - `bbox` is required — missing/malformed is a 400 via
+         *       [`super::dto::MapQuery::bbox`]'s strict deserializer.
+         *     - `shapes`/`sort`/`sort_dir`/`after`/`city` are intentionally not
+         *       part of the filter surface — see [`super::dto::MapQuery`].
+         */
+        get: operations["map"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1199,11 +1237,30 @@ export interface components {
         };
         /** @description Response body for `GET /api/catalogue`. */
         ListResponse: {
-            /** @description Matching rows in `created_at DESC, id DESC` order. */
+            /**
+             * @description Matching rows ordered by the request's `sort` / `sort_dir` with
+             *     `id DESC` as the tiebreaker; nullable sort columns place NULLs
+             *     at the tail regardless of direction.
+             */
             entries: components["schemas"]["CatalogueEntryDto"][];
+            /**
+             * @description Forward-paging token. `Some` when the server filled `limit`
+             *     rows and a subsequent page may exist; `None` when the end of
+             *     the result set has been reached. See [`super::sort::Cursor`]
+             *     for the wire format.
+             */
+            next_cursor?: string | null;
             /**
              * Format: int64
              * @description Count of all rows matching the filter (ignores `limit`).
+             *
+             *     When the `shapes` filter is non-empty, `total` is an upper-
+             *     bound approximation: SQL can only pre-filter by the shapes'
+             *     union bounding box, so rows inside the bbox but outside every
+             *     polygon are counted here while the corresponding point-in-
+             *     polygon pass drops them from `entries`. Clients that need an
+             *     exact post-shape count must sum `entries.len()` across every
+             *     page.
              */
             total: number;
         };
@@ -1221,6 +1278,71 @@ export interface components {
         LoginResponse: {
             /** @description Echoed username on success. */
             username: string;
+        };
+        /** @description One grid-aggregated cluster cell surfaced by [`MapResponse::Clusters`]. */
+        MapBucket: {
+            /** @description Cell bounding box as `[min_lat, min_lng, max_lat, max_lng]`. */
+            bbox: number[];
+            /**
+             * Format: int64
+             * @description Rows inside the cell.
+             */
+            count: number;
+            /**
+             * Format: double
+             * @description Cell center latitude.
+             */
+            lat: number;
+            /**
+             * Format: double
+             * @description Cell center longitude.
+             */
+            lng: number;
+            /**
+             * Format: uuid
+             * @description A deterministically-chosen row id from inside the cell — useful
+             *     for client-side drill-down without re-querying the whole cell.
+             */
+            sample_id: string;
+        };
+        /**
+         * @description Adaptive response for `GET /api/catalogue/map`.
+         *
+         *     - `detail` — raw rows — when the filtered count in the request bbox
+         *       is at or below [`super::repo::MAP_DETAIL_THRESHOLD`].
+         *     - `clusters` — grid-aggregated buckets — when above the threshold.
+         *
+         *     The wire form carries a `kind` discriminator (`"detail"` /
+         *     `"clusters"`) so clients can branch without inspecting the variant's
+         *     fields. See [`super::repo::map_detail_or_clusters`] for the
+         *     server-side selection logic.
+         */
+        MapResponse: {
+            /** @enum {string} */
+            kind: "detail";
+            /** @description Matching rows, ordered by `(created_at DESC, id DESC)`. */
+            rows: components["schemas"]["CatalogueEntryDto"][];
+            /**
+             * Format: int64
+             * @description Count of all rows matching the filter within the viewport.
+             */
+            total: number;
+        } | {
+            /** @description One bucket per occupied grid cell. */
+            buckets: components["schemas"]["MapBucket"][];
+            /**
+             * Format: double
+             * @description Grid cell size in degrees; matches
+             *     [`super::repo::cell_size_for_zoom`] for the request's `zoom`.
+             */
+            cell_size: number;
+            /** @enum {string} */
+            kind: "clusters";
+            /**
+             * Format: int64
+             * @description Total row count in the viewport before aggregation.
+             */
+            total: number;
         };
         /**
          * @description Kind of measurement row stored in `measurements`. `campaign` is the
@@ -1460,6 +1582,18 @@ export interface components {
              */
             loss_pct: number;
         };
+        /**
+         * @description GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.
+         *
+         *     The ring is implicitly closed — the `TryFrom` impl below does not
+         *     require an explicit closing vertex. A minimum of three *distinct*
+         *     points is required; shorter rings (two vertices or all-identical
+         *     points) are rejected as [`ShapeError::TooFewPoints`].
+         *
+         *     The `[lng, lat]` order matches GeoJSON and `@turf/helpers`, so the
+         *     frontend can feed Turf outputs straight through without reordering.
+         */
+        Polygon: number[][];
         /** @description Response body for `POST /api/campaigns/preview`. */
         PreviewDispatchResponse: {
             /**
@@ -1569,6 +1703,22 @@ export interface components {
              */
             version: string;
         };
+        /**
+         * @description Sort columns accepted by `GET /api/catalogue`.
+         *
+         *     The list handler always appends `id DESC` as the tiebreaker so the
+         *     ordering is total even when multiple rows share the same sort
+         *     value, and every variant treats nullable columns as `NULLS LAST`
+         *     regardless of direction. Both invariants are load-bearing for the
+         *     keyset cursor — see [`super::sort::Cursor`].
+         * @enum {string}
+         */
+        SortBy: "created_at" | "ip" | "display_name" | "city" | "country_code" | "asn" | "network_operator" | "enrichment_status" | "website" | "location";
+        /**
+         * @description Sort direction for [`SortBy`]. `NULLS LAST` applies to both arms.
+         * @enum {string}
+         */
+        SortDir: "asc" | "desc";
         /** @description Inclusive time window bounds echoed back to the caller. */
         WindowBounds: {
             /**
@@ -2435,10 +2585,41 @@ export interface operations {
                  *     values silently yield no filter, matching `ip_prefix` semantics.
                  */
                 bbox?: number[];
-                /** @description TODO(T13): cursor pagination by `created_at`. */
-                cursor_created_at?: string;
-                /** @description TODO(T13): cursor pagination by `id` (tie-breaker). */
-                cursor_id?: string;
+                /**
+                 * @description Zero-or-more city names. ANY semantics; exact match.
+                 *
+                 *     CSV string; e.g. `?city=Berlin,Paris`. See `country_code` for
+                 *     rationale; repeat-key form is not accepted.
+                 */
+                city?: string[];
+                /**
+                 * @description Zero-or-more polygon shapes (point-in-any OR semantics).
+                 *
+                 *     Accepts an inline JSON array of `[[lng, lat], ...]` rings, URL-
+                 *     encoded into the query string. The server computes the union
+                 *     bbox as a cheap SQL pre-filter and then runs exact point-in-
+                 *     polygon over the returned page — see [`super::shapes`] (Task 2).
+                 *
+                 *     Malformed JSON is rejected with a 400 via
+                 *     [`serde::de::Error::custom`], matching the `asn` CSV-of-ints
+                 *     behaviour: filter *values* may be advisory elsewhere, but once a
+                 *     value is present and structurally typed, a parse failure is a
+                 *     caller bug we surface rather than silently drop.
+                 */
+                shapes?: string;
+                /**
+                 * @description Sort column — defaults to [`SortBy::CreatedAt`]. `NULLS LAST`
+                 *     applies; `id DESC` is the invariant tiebreaker.
+                 */
+                sort?: components["schemas"]["SortBy"];
+                /** @description Sort direction — defaults to [`SortDir::Desc`]. */
+                sort_dir?: components["schemas"]["SortDir"];
+                /**
+                 * @description Opaque keyset cursor returned by a prior call's `next_cursor`.
+                 *     Absent for the first page. See [`super::sort::Cursor`] for the
+                 *     wire format and the server-side revalidation rules.
+                 */
+                after?: string;
                 /** @description Page size. Clamped to `1..=500` internally; default 100. */
                 limit?: number;
             };
@@ -2531,6 +2712,88 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FacetsResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    map: {
+        parameters: {
+            query: {
+                /**
+                 * @description Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics. CSV form
+                 *     (`?country_code=US,DE`) — see [`ListQuery::country_code`] for the
+                 *     rationale; repeat-key form is not accepted.
+                 */
+                country_code?: string[];
+                /** @description Zero-or-more ASN numbers. ANY semantics. CSV form. */
+                asn?: number[];
+                /**
+                 * @description Zero-or-more `network_operator` ILIKE patterns. ANY semantics.
+                 *     CSV form.
+                 */
+                network?: string[];
+                /**
+                 * @description Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`;
+                 *     unparseable values are silently dropped (mirrors [`ListQuery`]).
+                 */
+                ip_prefix?: string;
+                /**
+                 * @description Optional `display_name` substring. Same `%…%` wrap happens in
+                 *     the handler before it hits the repo.
+                 */
+                name?: string;
+                /**
+                 * @description Viewport bounds — `minLat,minLon,maxLat,maxLon`. **Required.**
+                 *     A malformed or missing value surfaces as a 400 via serde, unlike
+                 *     [`ListQuery::bbox`] which permissively drops the filter.
+                 */
+                bbox: number[];
+                /**
+                 * @description Zoom level (0..=20). Controls the grid cell size for
+                 *     cluster aggregation when the filtered count crosses
+                 *     [`super::repo::MAP_DETAIL_THRESHOLD`]. See
+                 *     [`super::repo::cell_size_for_zoom`] for the mapping.
+                 */
+                zoom: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalogue map view */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapResponse"];
+                };
+            };
+            /** @description Missing/malformed bbox or zoom */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description No active session */
