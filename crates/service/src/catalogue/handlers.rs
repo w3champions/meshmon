@@ -213,10 +213,21 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     // first page. This matches the wire-contract note in the
     // `super::sort` module-level docs and keeps the client-side state
     // machine simple.
+    //
+    // A malformed cursor is a user-supplied-token failure, not a server
+    // bug, so we log at `debug!` rather than `warn!` / `error!` — the
+    // operator-facing behaviour is to serve the fresh page, and the
+    // debug line only surfaces when someone is actively investigating.
     let after = q
         .after
         .as_deref()
-        .and_then(|raw| super::sort::Cursor::decode(raw).ok());
+        .and_then(|raw| match super::sort::Cursor::decode(raw) {
+            Ok(c) => Some(c),
+            Err(err) => {
+                tracing::debug!(error = %err, "discarding malformed catalogue cursor");
+                None
+            }
+        });
 
     let filter = repo::ListFilter {
         country_code: q.country_code,

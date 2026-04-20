@@ -727,22 +727,30 @@ pub async fn list(
     let network: &[String] = &filter.network;
     let city: &[String] = &filter.city;
 
-    // Cursor is silently discarded when the `(sort, dir)` doesn't agree
-    // with the request — a sort change invalidates in-flight cursors and
-    // the request is served as a fresh page. This keeps the client-side
-    // state machine simple: flip the sort, forget the cursor.
+    // Cursor is silently discarded through three gates in sequence:
     //
-    // A second gate rejects cursors whose `value` JSON type doesn't match
-    // what the sort column expects (e.g. `value: "Berlin"` arrives with
-    // `sort = Asn`). Without this, the typed decode below collapses to
-    // `Option::None`, which Postgres reduces to `col IS NULL` — silently
-    // jumping the client to the NULLS LAST tail instead of serving a
-    // fresh page. Same posture as a sort-mismatched cursor.
+    //   1. `(sort, dir)` match       — a sort change on the client
+    //      invalidates in-flight cursors.
+    //   2. JSON value shape match    — rejects cross-shape payloads
+    //      (e.g. `"Berlin"` on `sort = Asn`). Without this, the typed
+    //      decode collapses to `None` and Postgres reduces
+    //      `col > NULL OR (col = NULL AND …)` to `col IS NULL`,
+    //      silently jumping the client to the NULLS LAST tail.
+    //   3. Typed decode success      — rejects wrong-value-inside-
+    //      correct-shape payloads (`1.5` on `Asn` — valid Number but
+    //      doesn't fit i32; `"not a date"` on `CreatedAt` — valid
+    //      String but fails RFC3339). Same NULL-tail leak posture as
+    //      gate 2 if skipped.
+    //
+    // All three failure modes collapse to "no cursor → fresh page";
+    // the handler already treats a malformed on-the-wire cursor the
+    // same way, so the client-side state machine stays simple.
     let effective_after: Option<&super::sort::Cursor> = filter
         .after
         .as_ref()
         .filter(|c| c.sort == filter.sort && c.dir == filter.sort_dir)
-        .filter(|c| cursor_value_matches_sort(&c.value, filter.sort));
+        .filter(|c| cursor_value_matches_sort(&c.value, filter.sort))
+        .filter(|c| cursor_value_decodes_for_sort(&c.value, filter.sort));
 
     let after_set = effective_after.is_some();
     let after_null = effective_after.map(|c| c.value.is_null()).unwrap_or(false);
@@ -772,6 +780,38 @@ pub async fn list(
     // enrichment_status, created_at, location) render the `col IS NULL`
     // branches dead; they stay in the template for uniformity — the
     // planner removes them.
+    //
+    // Rendered example for `(SortBy::City, SortDir::Asc)`:
+    //
+    // ```sql
+    // SELECT c.id, c.ip AS "ip: IpNetwork", c.display_name, c.city,
+    //        c.country_code, c.country_name, c.latitude, c.longitude,
+    //        c.asn, c.network_operator, c.website, c.notes,
+    //        c.enrichment_status AS "enrichment_status: EnrichmentStatus",
+    //        c.enriched_at, c.operator_edited_fields,
+    //        c.source AS "source: CatalogueSource",
+    //        c.created_at, c.created_by
+    // FROM ip_catalogue c
+    // WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))
+    //   AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))
+    //   AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))
+    //   AND ($4::INET IS NULL OR c.ip <<= $4::INET)
+    //   AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)
+    //   AND (NOT $6::BOOL OR (
+    //         c.latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+    //     AND c.longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION
+    //   ))
+    //   AND ($11::TEXT[] = '{}' OR c.city = ANY($11::TEXT[]))
+    //   AND ($12::BOOL = FALSE OR (
+    //         ($13::BOOL AND c.city IS NULL AND c.id < $15::UUID)
+    //      OR (NOT $13::BOOL AND (
+    //             c.city > $14::TEXT
+    //          OR (c.city = $14::TEXT AND c.id < $15::UUID)
+    //          OR c.city IS NULL))
+    //   ))
+    // ORDER BY c.city ASC NULLS LAST, c.id DESC
+    // LIMIT $16
+    // ```
     macro_rules! list_variant {
         (
             sort_col   = $sort_col_sql:literal,
@@ -828,10 +868,11 @@ pub async fn list(
     }
 
     // Decode the cursor's `value` into the type the current sort column
-    // expects. Shape-incoherent cursors (wrong JSON type for the column)
-    // are treated as "no cursor" — same posture as a sort-mismatched
-    // cursor. Keeps the client-side state machine simple and keeps
-    // malformed inputs from reaching the query layer.
+    // expects. The three-gate chain on `effective_after` above already
+    // guarantees the decode succeeds for the *current* sort; the
+    // `effective_after.and_then(..)` calls below are shaped defensively
+    // so a cursor whose shape or typed decode would have failed still
+    // collapses to `None` (same posture as the gate itself).
     let val_i32: Option<i32> = effective_after
         .and_then(|c| c.value.as_i64())
         .and_then(|n| i32::try_from(n).ok());
@@ -842,6 +883,14 @@ pub async fn list(
         .and_then(|c| c.value.as_str())
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc));
+    // `SortBy::Ip` sorts on the native `inet` column so Postgres gives
+    // network-aware (not lexicographic) ordering — `10.0.0.1` sorts
+    // after `9.0.0.1`, not before. The keyset binds `$14::INET`, so the
+    // Rust-side value must be `IpNetwork`; the cursor's wire form stays
+    // a JSON string (canonical ip form) for stability across releases.
+    let val_ipnet: Option<IpNetwork> = effective_after
+        .and_then(|c| c.value.as_str())
+        .and_then(|s| s.parse::<IpNetwork>().ok());
 
     let rows_sql = match (filter.sort, filter.sort_dir) {
         (SortBy::CreatedAt, SortDir::Desc) => list_variant!(
@@ -860,21 +909,26 @@ pub async fn list(
             value_ty   = DateTime<Utc>,
             after_val  = val_ts,
         )?,
+        // `SortBy::Ip` uses native `inet` ordering (network-aware), not
+        // `host(c.ip)` text ordering — `10.0.0.1 > 9.0.0.1` under inet,
+        // but `"10.0.0.1" < "9.0.0.1"` lexicographically. Native inet
+        // also keeps the column index-usable (`idx_ip_catalogue_*`) if
+        // a future migration adds a btree on `ip`.
         (SortBy::Ip, SortDir::Desc) => list_variant!(
-            sort_col = "host(c.ip)",
+            sort_col = "c.ip",
             dir = "DESC",
             cmp_op = "<",
-            value_cast = "TEXT",
-            value_ty = String,
-            after_val = val_str,
+            value_cast = "INET",
+            value_ty = IpNetwork,
+            after_val = val_ipnet,
         )?,
         (SortBy::Ip, SortDir::Asc) => list_variant!(
-            sort_col = "host(c.ip)",
+            sort_col = "c.ip",
             dir = "ASC",
             cmp_op = ">",
-            value_cast = "TEXT",
-            value_ty = String,
-            after_val = val_str,
+            value_cast = "INET",
+            value_ty = IpNetwork,
+            after_val = val_ipnet,
         )?,
         (SortBy::DisplayName, SortDir::Desc) => list_variant!(
             sort_col = "c.display_name",
@@ -993,6 +1047,11 @@ pub async fn list(
             value_ty = String,
             after_val = val_str,
         )?,
+        // `SortBy::Location` is a derived `BOOL` expression that is
+        // never NULL — so `NULLS LAST` in ORDER BY and the `col IS NULL`
+        // branches of the keyset are no-ops here. They stay in the
+        // macro template for uniformity with the nullable columns; the
+        // Postgres planner eliminates them.
         (SortBy::Location, SortDir::Desc) => list_variant!(
             sort_col = "(c.latitude IS NOT NULL AND c.longitude IS NOT NULL)",
             dir = "DESC",
@@ -1054,6 +1113,11 @@ pub async fn list(
     // filter surface (including the shapes bbox pre-filter) so it lines
     // up with the entries returned, modulo the PIP post-filter (see the
     // struct doc for the "approximate when shapes is non-empty" caveat).
+    //
+    // KEEP IN SYNC with the `list_variant!` SQL template: when a new
+    // non-cursor filter column lands on `ListFilter` and gets a clause
+    // in the list query, the same clause must be mirrored into this
+    // COUNT so `entries.len() > 0 → total > 0` stays invariant.
     let total = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*) AS "total!"
@@ -1134,17 +1198,12 @@ fn cursor_value_for_sort(row: &CatalogueEntryRow, sort: super::dto::SortBy) -> s
     }
 }
 
-/// True when a cursor's `value` JSON type is coherent with the sort
-/// column. `Value::Null` is always accepted — it signals the NULLS LAST
-/// tail and is valid for every column. The accepted non-null types
-/// mirror the output of [`cursor_value_for_sort`]:
-///
-/// | Sort column                                                   | Expected `value` type |
-/// |---------------------------------------------------------------|-----------------------|
-/// | `CreatedAt`, `Ip`, `DisplayName`, `City`, `CountryCode`,      | `String`              |
-/// | `NetworkOperator`, `EnrichmentStatus`, `Website`              |                       |
-/// | `Asn`                                                         | `Number`              |
-/// | `Location`                                                    | `Bool`                |
+/// True when a cursor's `value` JSON type matches the shape expected
+/// for the sort column. `Value::Null` is always accepted — it signals
+/// the NULLS LAST tail and is valid for every column. Non-null values
+/// defer to the single source of truth on
+/// [`super::sort::SortBy::cursor_value_shape`], which pairs every
+/// column with exactly one JSON shape.
 ///
 /// A mismatch (e.g. `value: "Berlin"` sent against `sort = Asn`)
 /// returns `false` so the repo layer can discard the cursor and serve
@@ -1153,20 +1212,52 @@ fn cursor_value_for_sort(row: &CatalogueEntryRow, sort: super::dto::SortBy) -> s
 /// reduces to `col IS NULL`, silently jumping the client to the NULLS
 /// LAST tail instead of resetting to the first page.
 fn cursor_value_matches_sort(value: &serde_json::Value, sort: super::dto::SortBy) -> bool {
+    use super::sort::CursorValueShape;
+    if value.is_null() {
+        return true;
+    }
+    match sort.cursor_value_shape() {
+        CursorValueShape::String => value.is_string(),
+        CursorValueShape::Number => value.is_number(),
+        CursorValueShape::Bool => value.is_boolean(),
+    }
+}
+
+/// True when a cursor's non-null `value` successfully decodes into the
+/// typed Rust value the sort column's SQL binding expects. Catches the
+/// wrong-value-inside-correct-shape case that [`cursor_value_matches_sort`]
+/// doesn't: e.g. `Asn` with `Value::Number(1.5)` (valid Number shape but
+/// `as_i64()` returns `None`), `CreatedAt` with `Value::String("not a date")`
+/// (valid String shape but `DateTime::parse_from_rfc3339` fails), `Ip`
+/// with `Value::String("not-an-ip")` (valid String but `IpNetwork::parse`
+/// fails).
+///
+/// Returns `true` for `Value::Null` since the caller handles NULL-tail
+/// cursors on a separate SQL branch that never reads the typed value.
+/// The repo layer gates `effective_after` on this function's result —
+/// a `false` here folds into the same silent-discard path as the shape
+/// and `(sort, dir)` mismatches.
+fn cursor_value_decodes_for_sort(value: &serde_json::Value, sort: super::dto::SortBy) -> bool {
     use super::dto::SortBy;
     if value.is_null() {
         return true;
     }
     match sort {
-        SortBy::CreatedAt
-        | SortBy::Ip
-        | SortBy::DisplayName
+        SortBy::CreatedAt => value
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_some(),
+        SortBy::Ip => value
+            .as_str()
+            .and_then(|s| s.parse::<IpNetwork>().ok())
+            .is_some(),
+        SortBy::Asn => value.as_i64().and_then(|n| i32::try_from(n).ok()).is_some(),
+        SortBy::DisplayName
         | SortBy::City
         | SortBy::CountryCode
         | SortBy::NetworkOperator
         | SortBy::EnrichmentStatus
         | SortBy::Website => value.is_string(),
-        SortBy::Asn => value.is_number(),
         SortBy::Location => value.is_boolean(),
     }
 }
@@ -1438,6 +1529,96 @@ mod tests {
         assert!(cursor_value_matches_sort(
             &serde_json::Value::Null,
             SortBy::Asn
+        ));
+    }
+
+    /// Symmetry: a JSON number against `Location` is rejected. Fills
+    /// the asymmetry the prior round of tests left in — every sort
+    /// column already had at least one rejection case, but `Location`
+    /// versus `Number` and `CreatedAt` versus `Bool` were implicit.
+    #[test]
+    fn cursor_value_matches_sort_location_rejects_number() {
+        assert!(!cursor_value_matches_sort(&json!(42), SortBy::Location));
+        assert!(!cursor_value_matches_sort(&json!(0.5), SortBy::Location));
+    }
+
+    /// Symmetry: a JSON boolean against `CreatedAt` is rejected. See
+    /// `cursor_value_matches_sort_location_rejects_number`.
+    #[test]
+    fn cursor_value_matches_sort_created_at_rejects_bool() {
+        assert!(!cursor_value_matches_sort(&json!(true), SortBy::CreatedAt));
+        assert!(!cursor_value_matches_sort(&json!(false), SortBy::CreatedAt));
+    }
+
+    /// Wrong-value-inside-correct-shape: a `Value::Number(1.5)` passes
+    /// the shape gate for `Asn` (it *is* a number) but overflows /
+    /// under-resolves an `i32` at `as_i64().and_then(i32::try_from)`.
+    /// Without `cursor_value_decodes_for_sort`, `val_i32` would be
+    /// `None`, SQL would see `$14 = NULL`, and the keyset would
+    /// collapse to `col IS NULL` — silent NULL-tail leak. With the
+    /// decode gate, the whole cursor is discarded and the client
+    /// gets a fresh page.
+    #[test]
+    fn cursor_value_decodes_for_sort_asn_rejects_out_of_range_number() {
+        // Fractional: passes `as_i64` as None (not an integer).
+        assert!(!cursor_value_decodes_for_sort(&json!(1.5), SortBy::Asn));
+        // Beyond u64::MAX can't even parse into serde_json::Number as
+        // a positive integer; exercise `i64::MAX + 1` via `u64::MAX`
+        // which overflows `i32::try_from` even if `as_i64` succeeds.
+        assert!(!cursor_value_decodes_for_sort(
+            &json!(u64::MAX),
+            SortBy::Asn
+        ));
+        // Valid in-range i32 still decodes.
+        assert!(cursor_value_decodes_for_sort(&json!(64500), SortBy::Asn));
+    }
+
+    /// Wrong-value-inside-correct-shape: `"not-a-date"` is a `String`
+    /// (passes the shape gate for `CreatedAt`) but fails
+    /// `DateTime::parse_from_rfc3339`. Same silent-leak hazard as the
+    /// `Asn` case above; same silent-discard treatment.
+    #[test]
+    fn cursor_value_decodes_for_sort_created_at_rejects_bad_rfc3339() {
+        assert!(!cursor_value_decodes_for_sort(
+            &json!("not-a-date"),
+            SortBy::CreatedAt
+        ));
+        // A well-formed RFC3339 timestamp still decodes.
+        assert!(cursor_value_decodes_for_sort(
+            &json!("2026-04-20T12:00:00Z"),
+            SortBy::CreatedAt
+        ));
+    }
+
+    /// `SortBy::Ip` decodes its cursor value as `IpNetwork` so Postgres
+    /// sees native `inet` ordering (network-aware). A valid IP literal
+    /// round-trips; a bare string that isn't an IP is rejected by the
+    /// decode gate. This pins the difference between lexicographic
+    /// ordering (`"10.0.0.1" < "9.0.0.1"`) and inet ordering
+    /// (`10.0.0.1 > 9.0.0.1`) — a cursor pinned at `10.0.0.1` paginates
+    /// to `10.0.0.2` next, not to `2.0.0.1` (which would happen under
+    /// lexicographic sort).
+    #[test]
+    fn cursor_value_decodes_for_sort_ip_parses_inet() {
+        // The cursor's value is the canonical string form; the decode
+        // gate parses it as `IpNetwork`. `10.0.0.1` parses fine and
+        // becomes the inet keyset's `$14` bind.
+        assert!(cursor_value_decodes_for_sort(
+            &json!("10.0.0.1"),
+            SortBy::Ip
+        ));
+        // `10.0.0.2` parses and compares as inet: `10.0.0.2 > 10.0.0.1`
+        // under native inet ordering. This is the ordering the repo
+        // layer now relies on (SQL column `c.ip`, not `host(c.ip)`).
+        let a: IpNetwork = "10.0.0.1".parse().unwrap();
+        let b: IpNetwork = "10.0.0.2".parse().unwrap();
+        let c: IpNetwork = "2.0.0.1".parse().unwrap();
+        assert!(b > a, "inet ordering: 10.0.0.2 > 10.0.0.1");
+        assert!(a > c, "inet ordering: 10.0.0.1 > 2.0.0.1");
+        // Non-IP strings are rejected.
+        assert!(!cursor_value_decodes_for_sort(
+            &json!("not-an-ip"),
+            SortBy::Ip
         ));
     }
 }

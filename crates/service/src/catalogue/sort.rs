@@ -73,6 +73,50 @@ pub enum CursorError {
     Json(#[from] serde_json::Error),
 }
 
+/// JSON shape a cursor's `value` must take for a given sort column.
+///
+/// The repo layer's `cursor_value_for_sort` produces these shapes when
+/// minting a cursor; the handler / repo revalidates them on the way
+/// back in so a cursor with the wrong shape for the requested sort can
+/// be dropped before any typed decode runs. Keeping the mapping in one
+/// place — on [`SortBy::cursor_value_shape`] — prevents the producer
+/// and the validator from drifting out of sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorValueShape {
+    /// A JSON string — used by text-like columns and the ISO-8601
+    /// rendering of `created_at` / `ip`.
+    String,
+    /// A JSON number — used by `asn` (i32 at the DB layer).
+    Number,
+    /// A JSON boolean — used by the derived `location` sort column.
+    Bool,
+}
+
+impl SortBy {
+    /// The JSON shape the cursor `value` must take for this sort column.
+    ///
+    /// `Value::Null` is always additionally accepted by callers as "this
+    /// row was in the NULLS LAST tail" — this function returns the
+    /// *non-null* shape. The mapping is the single source of truth for
+    /// both `cursor_value_for_sort` (the producer) and
+    /// `cursor_value_matches_sort` (the validator) in
+    /// [`super::repo`].
+    pub fn cursor_value_shape(self) -> CursorValueShape {
+        match self {
+            Self::CreatedAt
+            | Self::Ip
+            | Self::DisplayName
+            | Self::City
+            | Self::CountryCode
+            | Self::NetworkOperator
+            | Self::Website
+            | Self::EnrichmentStatus => CursorValueShape::String,
+            Self::Asn => CursorValueShape::Number,
+            Self::Location => CursorValueShape::Bool,
+        }
+    }
+}
+
 impl Cursor {
     /// Encode to the wire form: `base64(URL_SAFE_NO_PAD, json(self))`.
     ///
