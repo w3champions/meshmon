@@ -66,6 +66,18 @@ pub const CAMPAIGN_REUSE_RATIO: &str = "meshmon_campaign_reuse_ratio";
 /// Histogram: wall time of one scheduler tick (`Scheduler::tick_once`).
 pub const SCHEDULER_TICK_SECONDS: &str = "meshmon_scheduler_tick_seconds";
 
+// --- Campaign dispatch self-metrics (T45-08). ------------------------------
+// Populated by the RPC-backed `PairDispatcher`. Task 12 extends the set
+// with in-flight gauges and bucket-wait histograms; the two below are
+// what `RpcDispatcher::dispatch` emits directly.
+
+/// Counter: `RunMeasurementBatch` RPCs by outcome.
+/// Labels: `agent`, `kind` (`latency`|`mtr`), `outcome` (`ok`|`partial`|`rpc_error`).
+pub const CAMPAIGN_BATCHES_TOTAL: &str = "meshmon_campaign_batches_total";
+/// Histogram: `RunMeasurementBatch` RPC latency in seconds.
+/// Labels: `agent`, `kind`.
+pub const CAMPAIGN_BATCH_DURATION_SECONDS: &str = "meshmon_campaign_batch_duration_seconds";
+
 // HTTP request counter names (`meshmon_service_http_requests_total`,
 // `..._duration_seconds`, `..._pending`) are not declared here — they
 // are renamed at compile time via the `AXUM_HTTP_*` env vars in
@@ -100,6 +112,8 @@ const ALL_METRIC_NAMES: &[&str] = &[
     CAMPAIGN_PAIRS_TOTAL,
     CAMPAIGN_REUSE_RATIO,
     SCHEDULER_TICK_SECONDS,
+    CAMPAIGN_BATCHES_TOTAL,
+    CAMPAIGN_BATCH_DURATION_SECONDS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -274,6 +288,30 @@ pub fn scheduler_tick_seconds() -> Histogram {
     histogram!(SCHEDULER_TICK_SECONDS)
 }
 
+/// Counter handle for [`CAMPAIGN_BATCHES_TOTAL`].
+///
+/// Accepts the agent id plus two short static labels. Task 12 adds the
+/// HELP/TYPE descriptor; here the counter is registered the first time
+/// the dispatcher emits, and Prometheus discovery picks it up without
+/// a description until then.
+pub fn campaign_batches_total(agent: &str, kind: &'static str, outcome: &'static str) -> Counter {
+    counter!(
+        CAMPAIGN_BATCHES_TOTAL,
+        "agent" => agent.to_string(),
+        "kind" => kind,
+        "outcome" => outcome,
+    )
+}
+
+/// Histogram handle for [`CAMPAIGN_BATCH_DURATION_SECONDS`].
+pub fn campaign_batch_duration_seconds(agent: &str, kind: &'static str) -> Histogram {
+    histogram!(
+        CAMPAIGN_BATCH_DURATION_SECONDS,
+        "agent" => agent.to_string(),
+        "kind" => kind,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // One-shot: emit build_info with its two static labels.
 // ---------------------------------------------------------------------------
@@ -384,6 +422,16 @@ pub fn describe_campaign_metrics() {
         SCHEDULER_TICK_SECONDS,
         Unit::Seconds,
         "Wall time of one campaign-scheduler tick (Scheduler::tick_once)"
+    );
+    describe_counter!(
+        CAMPAIGN_BATCHES_TOTAL,
+        Unit::Count,
+        "Count of RunMeasurementBatch RPCs by outcome. Labels: agent, kind, outcome"
+    );
+    describe_histogram!(
+        CAMPAIGN_BATCH_DURATION_SECONDS,
+        Unit::Seconds,
+        "RunMeasurementBatch RPC latency in seconds. Labels: agent, kind"
     );
 }
 

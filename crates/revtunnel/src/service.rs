@@ -113,6 +113,33 @@ impl TunnelManager {
         }
     }
 
+    /// Test-only seam: build a manager pre-populated with the given
+    /// `(source_id, Channel)` entries, bypassing the real yamux
+    /// handshake. Every entry gets a fresh `driver_cancel` token (not
+    /// connected to any driver, so cancellation is a no-op) and a
+    /// distinct generation.
+    ///
+    /// Used by integration tests that need a real `TunnelManager` with
+    /// working `channel_for(...)` lookups but no live agent connection
+    /// — typically a loopback tonic server stands in for the agent and
+    /// the raw `tonic::transport::Channel` is wired in directly.
+    #[doc(hidden)]
+    pub fn new_for_test(entries: Vec<(String, Channel)>) -> Self {
+        let manager = Self::new();
+        {
+            let mut map = manager.tunnels.lock().unwrap_or_else(|p| p.into_inner());
+            for (source_id, channel) in entries {
+                let entry = TunnelEntry {
+                    channel,
+                    driver_cancel: CancellationToken::new(),
+                    generation: NEXT_GEN.fetch_add(1, Ordering::Relaxed),
+                };
+                map.insert(source_id, entry);
+            }
+        }
+        manager
+    }
+
     /// Accept an incoming `OpenTunnel` RPC. Returns the response body
     /// stream tonic will drive. Spawns a driver task that exits when any of:
     /// * this entry's `driver_cancel` is fired (`close_all()` for a live
