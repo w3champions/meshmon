@@ -297,13 +297,13 @@ describe("CatalogueTable", () => {
       expect(screen.queryByRole("columnheader", { name: "City" })).not.toBeInTheDocument();
     });
 
-    test("optional columns are off by default (Latitude not visible initially)", async () => {
+    test("optional columns are off by default (Location not visible initially)", async () => {
       renderWithProviders(
         <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
       );
 
       await screen.findByRole("columnheader", { name: "IP" });
-      expect(screen.queryByRole("columnheader", { name: "Latitude" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("columnheader", { name: "Location" })).not.toBeInTheDocument();
     });
 
     test("optional column can be toggled on via chooser", async () => {
@@ -315,12 +315,37 @@ describe("CatalogueTable", () => {
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
 
-      const latCheckbox = screen.getByRole("checkbox", { name: /latitude/i });
-      expect(latCheckbox).not.toBeChecked();
-      await user.click(latCheckbox);
+      const locationCheckbox = screen.getByRole("checkbox", { name: /location/i });
+      expect(locationCheckbox).not.toBeChecked();
+      await user.click(locationCheckbox);
 
-      // Now Latitude header should be visible
-      expect(screen.getByRole("columnheader", { name: "Latitude" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Location" })).toBeInTheDocument();
+    });
+
+    test("Location cell renders Present when both lat and lon exist, Unset otherwise", async () => {
+      const user = userEvent.setup();
+      const entryWithCoords = ENTRY_A;
+      const entryWithoutCoords: CatalogueEntry = {
+        ...ENTRY_A,
+        id: "fixture-id-c",
+        ip: "9.9.9.9",
+        latitude: null,
+        longitude: null,
+      };
+      renderWithProviders(
+        <CatalogueTable
+          entries={[entryWithCoords, entryWithoutCoords]}
+          onRowClick={vi.fn()}
+          onReenrich={vi.fn()}
+        />,
+      );
+
+      const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+      await user.click(chooserBtn);
+      await user.click(screen.getByRole("checkbox", { name: /location/i }));
+
+      expect(screen.getByText("Present")).toBeInTheDocument();
+      expect(screen.getByText("Unset")).toBeInTheDocument();
     });
 
     test("first-time users (no stored preferences) see compile-time default columns", async () => {
@@ -405,7 +430,7 @@ describe("CatalogueTable", () => {
       // Enable all optional columns via the chooser
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
-      for (const label of ["Latitude", "Longitude", "Website", "Notes"]) {
+      for (const label of ["Location", "Website", "Notes"]) {
         const checkbox = screen.getByRole("checkbox", { name: new RegExp(label, "i") });
         if (!checkbox.hasAttribute("checked") && !(checkbox as HTMLInputElement).checked) {
           await user.click(checkbox);

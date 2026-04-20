@@ -8,6 +8,7 @@ import {
 import { RefreshCw, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -59,7 +60,7 @@ const DEFAULT_VISIBLE: string[] = [
 ];
 
 /** All optional (hideable) columns — off by default. */
-const OPTIONAL_COLUMNS: string[] = ["latitude", "longitude", "website", "notes"];
+const OPTIONAL_COLUMNS: string[] = ["location", "website", "notes"];
 
 // ---------------------------------------------------------------------------
 // Props
@@ -185,16 +186,16 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
     },
     // Optional columns — off by default
     {
-      id: "latitude",
-      accessorKey: "latitude",
-      header: "Latitude",
-      cell: ({ row }) => (row.original.latitude != null ? String(row.original.latitude) : "—"),
-    },
-    {
-      id: "longitude",
-      accessorKey: "longitude",
-      header: "Longitude",
-      cell: ({ row }) => (row.original.longitude != null ? String(row.original.longitude) : "—"),
+      id: "location",
+      header: "Location",
+      cell: ({ row }) => {
+        const hasCoords = row.original.latitude != null && row.original.longitude != null;
+        return (
+          <Badge variant={hasCoords ? "secondary" : "outline"}>
+            {hasCoords ? "Present" : "Unset"}
+          </Badge>
+        );
+      },
     },
     {
       id: "website",
