@@ -15,6 +15,65 @@ vi.mock("@/api/hooks/catalogue", async (importOriginal) => {
   };
 });
 
+// Stub the Leaflet-backed picker — jsdom cannot render real Leaflet
+// and the bulk-metadata tests only care about the prop wiring. The
+// button exposes both a "pick" and a "clear" surface; the rendered
+// coordinates make the effect visible in the DOM.
+vi.mock("@/components/map/LocationPicker", () => ({
+  LocationPicker: ({
+    value,
+    onChange,
+  }: {
+    value: { latitude: number; longitude: number } | null;
+    onChange(next: { latitude: number; longitude: number } | null): void;
+  }) => (
+    <div data-testid="location-picker-stub">
+      <button
+        type="button"
+        aria-label="test pick location"
+        onClick={() => onChange({ latitude: 37.7749, longitude: -122.4194 })}
+      >
+        Pick
+      </button>
+      <button
+        type="button"
+        aria-label="test clear location"
+        onClick={() => onChange(null)}
+      >
+        Clear
+      </button>
+      <span data-testid="location-picker-value">
+        {value ? `${value.latitude},${value.longitude}` : "null"}
+      </span>
+    </div>
+  ),
+}));
+
+// Stub the country picker so tests can emit {code, name} atomically
+// without driving the real Radix Select under jsdom.
+vi.mock("@/components/catalogue/CountryPicker", () => ({
+  CountryPicker: ({
+    value,
+    onChange,
+  }: {
+    value: { code: string; name: string } | null;
+    onChange(next: { code: string; name: string } | null): void;
+  }) => (
+    <div data-testid="country-picker-stub">
+      <button
+        type="button"
+        aria-label="test pick country"
+        onClick={() => onChange({ code: "US", name: "United States" })}
+      >
+        Pick
+      </button>
+      <span data-testid="country-picker-value">
+        {value ? `${value.code}:${value.name}` : "null"}
+      </span>
+    </div>
+  ),
+}));
+
 type MutationShape = {
   mutate: ReturnType<typeof vi.fn>;
   mutateAsync: ReturnType<typeof vi.fn>;
@@ -154,6 +213,140 @@ describe("PasteStaging", () => {
     const dialog = within(document.body).getByRole("dialog");
     expect(dialog).toBeInTheDocument();
     expect(within(document.body).getByText("Add IPs")).toBeInTheDocument();
+  });
+
+  test("metadata panel is collapsed by default and expands on click", async () => {
+    const user = userEvent.setup();
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+
+    // Collapsed: the toggle exists but the inner fields are hidden.
+    const toggle = within(document.body).getByRole("button", {
+      name: /default metadata/i,
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(within(document.body).queryByTestId("location-picker-stub")).toBeNull();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(document.body).getByTestId("location-picker-stub")).toBeInTheDocument();
+    expect(within(document.body).getByTestId("country-picker-stub")).toBeInTheDocument();
+  });
+
+  test("Add with no metadata omits the metadata key from the wire body", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      created: [ENTRY],
+      existing: [],
+      invalid: [],
+    } satisfies CataloguePasteResponse);
+    vi.mocked(usePasteCatalogue).mockReturnValue(
+      makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
+    );
+
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
+    await user.type(textarea, "1.2.3.4");
+    await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
+
+    const body = mutateAsync.mock.calls[0][0];
+    expect(body).not.toHaveProperty("metadata");
+  });
+
+  test("filled metadata + Add sends metadata in the wire body", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      created: [ENTRY],
+      existing: [],
+      invalid: [],
+      skipped_summary: { rows_with_skips: 0, skipped_field_counts: {} },
+    } satisfies CataloguePasteResponse);
+    vi.mocked(usePasteCatalogue).mockReturnValue(
+      makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
+    );
+
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
+    await user.type(textarea, "1.2.3.4");
+
+    // Expand panel and fill fields.
+    await user.click(
+      within(document.body).getByRole("button", { name: /default metadata/i }),
+    );
+    await user.type(
+      within(document.body).getByRole("textbox", { name: /display name/i }),
+      "fastly-sfo",
+    );
+    await user.type(within(document.body).getByRole("textbox", { name: /^city$/i }), "SF");
+    await user.click(
+      within(document.body).getByRole("button", { name: /test pick country/i }),
+    );
+    await user.click(
+      within(document.body).getByRole("button", { name: /test pick location/i }),
+    );
+    await user.type(
+      within(document.body).getByRole("textbox", { name: /website/i }),
+      "https://example.com",
+    );
+    await user.type(
+      within(document.body).getByRole("textbox", { name: /^notes$/i }),
+      "seeded",
+    );
+
+    await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
+
+    const body = mutateAsync.mock.calls[0][0];
+    expect(body.ips).toEqual(["1.2.3.4"]);
+    expect(body.metadata).toEqual({
+      display_name: "fastly-sfo",
+      city: "SF",
+      country_code: "US",
+      country_name: "United States",
+      latitude: 37.7749,
+      longitude: -122.4194,
+      website: "https://example.com",
+      notes: "seeded",
+    });
+  });
+
+  test("surfaces a skipped notice when skipped_summary has rows_with_skips", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      created: [],
+      existing: [
+        { ...ENTRY, id: "cccccccc-cccc-cccc-cccc-cccccccccccc", ip: "1.2.3.4" },
+        { ...ENTRY, id: "dddddddd-dddd-dddd-dddd-dddddddddddd", ip: "5.6.7.8" },
+      ],
+      invalid: [],
+      skipped_summary: {
+        rows_with_skips: 2,
+        skipped_field_counts: { Location: 2 },
+      },
+    } satisfies CataloguePasteResponse);
+    vi.mocked(usePasteCatalogue).mockReturnValue(
+      makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
+    );
+
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
+    await user.type(textarea, "1.2.3.4\n5.6.7.8");
+    // Expand + pick location so `metadata` is sent.
+    await user.click(
+      within(document.body).getByRole("button", { name: /default metadata/i }),
+    );
+    await user.click(
+      within(document.body).getByRole("button", { name: /test pick location/i }),
+    );
+    await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
+
+    // Notice carries the row count and the skipped field label.
+    await waitFor(() => {
+      const notice = within(document.body).getByRole("status", {
+        name: /metadata skip summary/i,
+      });
+      expect(notice.textContent).toMatch(/2/);
+      expect(notice.textContent).toMatch(/Location/);
+    });
   });
 
   test("chip flips to enriched when SSE enrichment_progress updates the query cache", async () => {
