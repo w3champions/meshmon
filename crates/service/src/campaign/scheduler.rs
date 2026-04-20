@@ -318,8 +318,13 @@ impl Scheduler {
             }
         }
 
-        // Per-destination rate limit.
+        // Per-destination rate limit. Pairs that can't draw a token are
+        // queued for a single batched revert so a cancel/panic between
+        // the claim (already committed by `take_pending_batch`) and the
+        // revert has at most one open pair to reconcile — the
+        // `expire_stale_attempts` sweep will reclaim it regardless.
         let mut allowed: Vec<PendingPair> = Vec::with_capacity(batch.len());
+        let mut rate_limited: Vec<i64> = Vec::new();
         for p in batch {
             let dest: IpAddr = match p.destination_ip {
                 sqlx::types::ipnetwork::IpNetwork::V4(n) => IpAddr::V4(n.ip()),
@@ -349,21 +354,23 @@ impl Scheduler {
                     protocol: camp.protocol,
                 });
             } else {
-                // Rate-limit hit: put the pair back to pending so a later
-                // tick retries. `take_pending_batch` flipped it to
-                // dispatched and bumped attempt_count; revert both.
-                sqlx::query!(
-                    "UPDATE campaign_pairs
-                        SET resolution_state = 'pending',
-                            dispatched_at    = NULL,
-                            attempt_count    = GREATEST(0, attempt_count - 1)
-                      WHERE id = $1",
-                    p.id
-                )
-                .execute(&self.pool)
-                .await
-                .map_err(RepoError::from)?;
+                rate_limited.push(p.id);
             }
+        }
+        if !rate_limited.is_empty() {
+            // `take_pending_batch` flipped these to dispatched and bumped
+            // attempt_count; revert both in a single statement.
+            sqlx::query!(
+                "UPDATE campaign_pairs
+                    SET resolution_state = 'pending',
+                        dispatched_at    = NULL,
+                        attempt_count    = GREATEST(0, attempt_count - 1)
+                  WHERE id = ANY($1::bigint[])",
+                &rate_limited as &[i64],
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(RepoError::from)?;
         }
 
         if allowed.is_empty() {

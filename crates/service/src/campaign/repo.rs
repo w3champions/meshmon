@@ -471,8 +471,13 @@ pub async fn force_pair(
     // need a fresh started_at so the scheduler picks them up; a Running
     // campaign's rotation order is started_at-anchored (see
     // `active_campaigns`), and force_pair must not disturb it.
+    //
+    // `FOR UPDATE` locks the campaign row so a concurrent writer can't
+    // flip the state between the SELECT and the gated UPDATE inside
+    // `transition_state_in_tx` — mirrors the pattern `apply_edit` uses.
     let current: Option<CampaignState> = sqlx::query_scalar!(
-        r#"SELECT state AS "state: CampaignState" FROM measurement_campaigns WHERE id = $1"#,
+        r#"SELECT state AS "state: CampaignState"
+             FROM measurement_campaigns WHERE id = $1 FOR UPDATE"#,
         id
     )
     .fetch_optional(&mut *tx)
@@ -793,6 +798,12 @@ pub async fn resolve_reuse(
 }
 
 /// Mark each `(pair_id, measurement_id)` pair as `reused`.
+///
+/// Reused pairs never actually reached an agent, so this also clears
+/// the `dispatched_at` stamp and rolls back the `attempt_count` bump
+/// that `take_pending_batch` applied while claiming the row. Otherwise
+/// the API and operator tooling would report the pair as having been
+/// dispatched, which is false.
 pub async fn apply_reuse(pool: &PgPool, decisions: &[(i64, i64)]) -> Result<(), RepoError> {
     if decisions.is_empty() {
         return Ok(());
@@ -803,7 +814,9 @@ pub async fn apply_reuse(pool: &PgPool, decisions: &[(i64, i64)]) -> Result<(), 
         "UPDATE campaign_pairs AS cp
             SET resolution_state = 'reused',
                 measurement_id   = d.measurement_id,
-                settled_at       = now()
+                settled_at       = now(),
+                dispatched_at    = NULL,
+                attempt_count    = GREATEST(0, cp.attempt_count - 1)
            FROM UNNEST($1::bigint[], $2::bigint[]) AS d(pair_id, measurement_id)
           WHERE cp.id = d.pair_id",
         &ids as &[i64],

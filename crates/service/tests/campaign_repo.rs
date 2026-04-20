@@ -399,8 +399,23 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
     .await
     .unwrap();
 
-    let pairs = repo::list_pairs(&pool, row.id, &[], 100).await.unwrap();
-    let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
+    // Simulate the scheduler path: claim first (flipping to dispatched
+    // and bumping attempt_count), then apply_reuse. The invariant under
+    // test is that `apply_reuse` rolls back the dispatch metadata for
+    // reused pairs — they never actually reached an agent.
+    repo::start(&pool, row.id).await.unwrap();
+    let batch = repo::take_pending_batch(&pool, row.id, &agent, 100)
+        .await
+        .unwrap();
+    assert!(!batch.is_empty(), "batch carries at least one pair");
+    assert!(
+        batch.iter().all(|p| p.resolution_state == PairResolutionState::Dispatched
+            && p.dispatched_at.is_some()
+            && p.attempt_count == 1),
+        "take_pending_batch flips to dispatched and bumps attempt_count"
+    );
+
+    let decisions = repo::resolve_reuse(&pool, &batch, ProbeProtocol::Icmp)
         .await
         .unwrap();
     assert_eq!(decisions.len(), 1, "exactly one pair has reuse data");
@@ -416,6 +431,14 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
     assert_eq!(reused.resolution_state, PairResolutionState::Reused);
     assert_eq!(reused.measurement_id, Some(measurement_id));
     assert!(reused.settled_at.is_some());
+    assert!(
+        reused.dispatched_at.is_none(),
+        "apply_reuse clears dispatched_at since the pair never reached an agent"
+    );
+    assert_eq!(
+        reused.attempt_count, 0,
+        "apply_reuse rolls back the attempt_count bump from take_pending_batch"
+    );
 
     repo::delete(&pool, row.id).await.unwrap();
     sqlx::query("DELETE FROM measurements WHERE id = $1")
