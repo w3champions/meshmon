@@ -1,7 +1,11 @@
-import { screen, within } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import type {
+  CatalogueEntry,
+  CatalogueMapBucket,
+  CatalogueMapResponse,
+} from "@/api/hooks/catalogue";
 
 vi.mock("react-leaflet", async () => {
   const { LeafletMock } = await import("@/test/leaflet-mock");
@@ -19,7 +23,7 @@ vi.mock("react-leaflet-cluster", async () => {
 });
 
 import { CatalogueMap, EntryPopup } from "@/components/catalogue/CatalogueMap";
-import { fireClusterClick, resetLeafletMock } from "@/test/leaflet-mock";
+import { getLeafletMock, resetLeafletMock } from "@/test/leaflet-mock";
 import { renderWithProviders, renderWithQuery } from "@/test/query-wrapper";
 
 function makeEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry {
@@ -38,11 +42,30 @@ function makeEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry {
   };
 }
 
-const defaultProps = {
-  entries: [],
-  shapes: [],
+function detailResponse(rows: CatalogueEntry[]): CatalogueMapResponse {
+  return { kind: "detail", rows, total: rows.length };
+}
+
+function clusterBucket(overrides: Partial<CatalogueMapBucket> = {}): CatalogueMapBucket {
+  return {
+    bbox: [-1, -1, 1, 1],
+    count: 10,
+    lat: 0,
+    lng: 0,
+    sample_id: "00000000-0000-0000-0000-000000000000",
+    ...overrides,
+  };
+}
+
+function clustersResponse(buckets: CatalogueMapBucket[]): CatalogueMapResponse {
+  return { kind: "clusters", buckets, cell_size: 1, total: 999 };
+}
+
+const noopHandlers = {
   onShapesChange: () => {},
   onRowClick: () => {},
+  onClusterOpen: () => {},
+  onViewportChange: () => {},
 };
 
 describe("CatalogueMap", () => {
@@ -50,36 +73,170 @@ describe("CatalogueMap", () => {
     resetLeafletMock();
   });
 
-  test("renders without crashing with an empty entries array", async () => {
-    renderWithProviders(<CatalogueMap {...defaultProps} />);
+  test("renders the DrawMap shell without a response", async () => {
+    renderWithProviders(
+      <CatalogueMap
+        response={undefined}
+        isLoading={true}
+        isError={false}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
     expect(await screen.findByTestId("draw-map-shell")).toBeInTheDocument();
+    // No pins render while loading.
+    expect(screen.queryAllByTestId("marker")).toHaveLength(0);
   });
 
-  test("entries with null lat/lon are filtered out", async () => {
-    const entries = [
-      makeEntry({ id: "e1", latitude: null, longitude: null }),
-      makeEntry({ id: "e2", latitude: 51.5, longitude: null }),
-      makeEntry({ id: "e3", latitude: null, longitude: -0.13 }),
-    ];
-    renderWithProviders(<CatalogueMap {...defaultProps} entries={entries} />);
-    await screen.findByTestId("draw-map-shell");
-    const markers = screen.queryAllByTestId("marker");
-    expect(markers).toHaveLength(0);
-  });
-
-  test("entries with valid coordinates produce the correct number of pins", async () => {
+  test("detail-kind response renders one pin per row with lat/lon", async () => {
     const entries = [
       makeEntry({ id: "e1", latitude: 48.14, longitude: 11.58 }),
       makeEntry({ id: "e2", latitude: 51.51, longitude: -0.13 }),
       makeEntry({ id: "e3", latitude: null, longitude: null }),
     ];
-    renderWithProviders(<CatalogueMap {...defaultProps} entries={entries} />);
+    renderWithProviders(
+      <CatalogueMap
+        response={detailResponse(entries)}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
     await screen.findByTestId("draw-map-shell");
     const markers = screen.queryAllByTestId("marker");
     expect(markers).toHaveLength(2);
   });
 
-  test("clicking the popup button fires onRowClick with the correct id", async () => {
+  test("clusters-kind response renders one marker per bucket with count label", async () => {
+    const buckets = [
+      clusterBucket({ count: 5, lat: 10, lng: 20, sample_id: "s1" }),
+      clusterBucket({ count: 13, lat: 11, lng: 21, sample_id: "s2" }),
+      clusterBucket({ count: 42, lat: 12, lng: 22, sample_id: "s3" }),
+    ];
+    renderWithProviders(
+      <CatalogueMap
+        response={clustersResponse(buckets)}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    const markers = screen.queryAllByTestId("marker");
+    expect(markers).toHaveLength(3);
+    // Cluster markers carry a DivIcon; detail pins don't.
+    for (const marker of markers) {
+      expect(marker).toHaveAttribute("data-has-icon", "true");
+    }
+  });
+
+  test("clicking a cluster marker fires onClusterOpen with its bbox", async () => {
+    const onClusterOpen = vi.fn();
+    const bucket = clusterBucket({
+      count: 5,
+      lat: 10,
+      lng: 20,
+      bbox: [9, 19, 11, 21],
+      sample_id: "s1",
+    });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <CatalogueMap
+        response={clustersResponse([bucket])}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        onShapesChange={() => {}}
+        onRowClick={() => {}}
+        onClusterOpen={onClusterOpen}
+        onViewportChange={() => {}}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    const marker = screen.getByTestId("marker");
+    await user.click(marker);
+    expect(onClusterOpen).toHaveBeenCalledWith([9, 19, 11, 21]);
+  });
+
+  test("clusters-mode bypasses MarkerClusterGroup (server already aggregated)", async () => {
+    const buckets = [clusterBucket({ count: 5 })];
+    renderWithProviders(
+      <CatalogueMap
+        response={clustersResponse(buckets)}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    // `clusterMode` short-circuits `react-leaflet-cluster` — the wrapper
+    // never mounts.
+    expect(screen.queryByTestId("marker-cluster-group")).not.toBeInTheDocument();
+  });
+
+  test("detail-mode renders through the MarkerClusterGroup wrapper", async () => {
+    const entries = [makeEntry({ id: "e1", latitude: 1, longitude: 2 })];
+    renderWithProviders(
+      <CatalogueMap
+        response={detailResponse(entries)}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    expect(screen.getByTestId("marker-cluster-group")).toBeInTheDocument();
+  });
+
+  test("isError shows an error banner and suppresses the map", async () => {
+    renderWithProviders(
+      <CatalogueMap
+        response={undefined}
+        isLoading={false}
+        isError={true}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/failed to load/i);
+    expect(screen.queryByTestId("draw-map-shell")).not.toBeInTheDocument();
+  });
+
+  test("viewport change emits bbox and zoom on moveend", async () => {
+    const onViewportChange = vi.fn();
+    renderWithProviders(
+      <CatalogueMap
+        response={undefined}
+        isLoading={true}
+        isError={false}
+        shapes={[]}
+        onShapesChange={() => {}}
+        onRowClick={() => {}}
+        onClusterOpen={() => {}}
+        onViewportChange={onViewportChange}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+
+    // ViewportController emits the initial viewport on mount. Seed
+    // `__bounds` and fire `moveend` to verify the published payload.
+    const map = getLeafletMock();
+    map.__bounds = [10, 20, 30, 40];
+    map.__zoom = 5;
+    map.__fire("moveend");
+
+    expect(onViewportChange).toHaveBeenCalled();
+    const [bbox, zoom] = onViewportChange.mock.calls.at(-1) ?? [];
+    expect(bbox).toEqual([10, 20, 30, 40]);
+    expect(zoom).toBe(5);
+  });
+
+  test("clicking EntryPopup 'Open details' button fires the supplied callback", async () => {
     const onRowClick = vi.fn();
     const entry = makeEntry({ id: "target-id", ip: "10.0.0.1" });
     renderWithQuery(<EntryPopup entry={entry} onOpen={onRowClick} />);
@@ -88,20 +245,22 @@ describe("CatalogueMap", () => {
     expect(onRowClick).toHaveBeenCalledTimes(1);
   });
 
-  test("integration: clicking pin popup button fires onRowClick with entry id", async () => {
+  test("integration: detail popup button fires onRowClick with the entry id", async () => {
     const onRowClick = vi.fn();
     const entries = [makeEntry({ id: "entry-42", ip: "1.2.3.4", latitude: 10, longitude: 20 })];
     const user = userEvent.setup();
     renderWithProviders(
       <CatalogueMap
-        entries={entries}
+        response={detailResponse(entries)}
+        isLoading={false}
+        isError={false}
         shapes={[]}
         onShapesChange={vi.fn()}
         onRowClick={onRowClick}
+        onClusterOpen={() => {}}
+        onViewportChange={() => {}}
       />,
     );
-    // The leaflet mock renders Popup children inline within the marker tree,
-    // so the popup's button is reachable via a normal role query.
     const button = await screen.findByRole("button", {
       name: /open details for 1\.2\.3\.4/i,
     });
@@ -122,10 +281,7 @@ describe("CatalogueMap", () => {
       notes: null,
     });
     renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
-    // Header falls back to the IP address when display_name is absent.
     expect(screen.getByText("192.168.1.1")).toBeInTheDocument();
-    // Optional rows are hidden entirely when their source field is absent.
-    // No location/network "—" placeholder rows should appear.
     expect(screen.queryByText(/AS\s*—/i)).not.toBeInTheDocument();
   });
 
@@ -144,7 +300,6 @@ describe("CatalogueMap", () => {
     expect(screen.getByText("10.1.2.3")).toBeInTheDocument();
     expect(screen.getByText("Hong Kong, Hong Kong")).toBeInTheDocument();
     expect(screen.getByText("AS13335 · Cloudflare")).toBeInTheDocument();
-    // Website is rendered as hostname-only link with target=_blank.
     const link = screen.getByRole("link", { name: "cloudflare.com" });
     expect(link).toHaveAttribute("href", "https://cloudflare.com/about");
     expect(link).toHaveAttribute("target", "_blank");
@@ -168,61 +323,5 @@ describe("CatalogueMap", () => {
     renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
     expect(screen.getByText("first line of the note")).toBeInTheDocument();
     expect(screen.queryByText("second line that must be hidden")).not.toBeInTheDocument();
-  });
-
-  test("cluster click opens the cluster dialog listing the cluster's members", async () => {
-    const entries = [
-      makeEntry({ id: "e1", ip: "1.1.1.1", display_name: "Alpha", latitude: 10, longitude: 20 }),
-      makeEntry({ id: "e2", ip: "2.2.2.2", display_name: "Beta", latitude: 11, longitude: 21 }),
-      makeEntry({ id: "e3", ip: "3.3.3.3", display_name: "Gamma", latitude: 12, longitude: 22 }),
-    ];
-    renderWithProviders(
-      <CatalogueMap
-        entries={entries}
-        shapes={[]}
-        onShapesChange={() => {}}
-        onRowClick={() => {}}
-      />,
-    );
-    await screen.findByTestId("draw-map-shell");
-    // Before the click the dialog should not be rendered.
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-
-    // Simulate the cluster click: the user clicked a cluster that contains
-    // e1 and e3 (but not e2).
-    fireClusterClick(["e1", "e3"]);
-
-    const dialog = await screen.findByRole("dialog");
-    const dialogUtils = within(dialog);
-    expect(dialogUtils.getByText("2 pins in this area")).toBeInTheDocument();
-    expect(dialogUtils.getByText("Alpha")).toBeInTheDocument();
-    expect(dialogUtils.getByText("Gamma")).toBeInTheDocument();
-    expect(dialogUtils.queryByText("Beta")).not.toBeInTheDocument();
-  });
-
-  test("clicking a row in the cluster dialog fires onRowClick with that entry's id", async () => {
-    const onRowClick = vi.fn();
-    const entries = [
-      makeEntry({ id: "e1", ip: "1.1.1.1", display_name: "Alpha", latitude: 10, longitude: 20 }),
-      makeEntry({ id: "e2", ip: "2.2.2.2", display_name: "Beta", latitude: 11, longitude: 21 }),
-    ];
-    const user = userEvent.setup();
-    renderWithProviders(
-      <CatalogueMap
-        entries={entries}
-        shapes={[]}
-        onShapesChange={() => {}}
-        onRowClick={onRowClick}
-      />,
-    );
-    await screen.findByTestId("draw-map-shell");
-    fireClusterClick(["e1", "e2"]);
-
-    const dialog = await screen.findByRole("dialog");
-    const betaButton = within(dialog).getByRole("button", {
-      name: /open details for Beta/i,
-    });
-    await user.click(betaButton);
-    expect(onRowClick).toHaveBeenCalledWith("e2");
   });
 });

@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import MarkerClusterGroup from "react-leaflet-cluster";
-import type { GeoShape } from "@/lib/geo";
+import type { Bbox, GeoShape } from "@/lib/geo";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
@@ -18,6 +18,18 @@ export interface DrawMapPin {
   lat: number;
   lon: number;
   popup?: ReactNode;
+  /**
+   * Custom Leaflet marker icon — typically a `L.DivIcon` used by the
+   * catalogue map's server-side cluster bubbles. When omitted the pin
+   * renders with Leaflet's default icon.
+   */
+  icon?: L.DivIcon | L.Icon;
+  /**
+   * Optional click handler fired from Leaflet's `click` event. Used by
+   * server-aggregated cluster markers to open the cluster dialog; regular
+   * pins rely on their popup for interaction.
+   */
+  onClick?(): void;
 }
 
 export interface DrawMapProps {
@@ -28,9 +40,23 @@ export interface DrawMapProps {
    * Invoked when the operator clicks a cluster. Receives the ids of every
    * pin contained in the clicked cluster, in the order Leaflet reports
    * them. When omitted, `MarkerClusterGroup` falls back to the default
-   * zoom-to-bounds behavior.
+   * zoom-to-bounds behavior. Ignored while `clusterMode` is `true`
+   * because the `MarkerClusterGroup` is bypassed.
    */
   onClusterClick?(pinIds: string[]): void;
+  /**
+   * Emitted on `moveend` — fires with the current viewport bbox
+   * `[minLat, minLng, maxLat, maxLng]` and the current zoom level.
+   * Used by `CatalogueMap` to drive `useCatalogueMap(bbox, zoom, filters)`.
+   */
+  onViewportChange?(bbox: Bbox, zoom: number): void;
+  /**
+   * When `true`, bypass `react-leaflet-cluster` entirely and render `pins`
+   * as plain markers. The catalogue map sets this while the server
+   * returns pre-aggregated cluster buckets so the client doesn't re-
+   * cluster them.
+   */
+  clusterMode?: boolean;
   className?: string;
 }
 
@@ -240,6 +266,45 @@ function GeomanController({ shapes, onShapesChange }: GeomanControllerProps) {
   return null;
 }
 
+interface ViewportControllerProps {
+  onViewportChange: NonNullable<DrawMapProps["onViewportChange"]>;
+}
+
+/**
+ * Bridges Leaflet's `moveend` event to the parent's `onViewportChange`
+ * callback. `moveend` fires for both pan and zoom, so a single listener
+ * keeps the emitted `(bbox, zoom)` tuple in sync. The handler runs once
+ * on mount to publish the initial viewport.
+ */
+function ViewportController({ onViewportChange }: ViewportControllerProps) {
+  const map = useMap();
+  const onViewportChangeRef = useRef(onViewportChange);
+  useEffect(() => {
+    onViewportChangeRef.current = onViewportChange;
+  }, [onViewportChange]);
+
+  useEffect(() => {
+    const emit = () => {
+      const bounds = map.getBounds();
+      const sw = bounds.getSouthWest();
+      const ne = bounds.getNorthEast();
+      // Bbox tuple order mirrors `MapBucket.bbox` on the wire:
+      // `[minLat, minLng, maxLat, maxLng]`.
+      const bbox: Bbox = [sw.lat, sw.lng, ne.lat, ne.lng];
+      onViewportChangeRef.current(bbox, map.getZoom());
+    };
+    map.on("moveend", emit);
+    // Publish initial viewport — consumers driving a query off this
+    // need the first bbox before the user pans.
+    emit();
+    return () => {
+      map.off("moveend", emit);
+    };
+  }, [map]);
+
+  return null;
+}
+
 interface ModifierZoomControllerProps {
   onHintNeeded(): void;
 }
@@ -285,7 +350,15 @@ function ModifierZoomController({ onHintNeeded }: ModifierZoomControllerProps) {
   return null;
 }
 
-export function DrawMap({ shapes, onShapesChange, pins, onClusterClick, className }: DrawMapProps) {
+export function DrawMap({
+  shapes,
+  onShapesChange,
+  pins,
+  onClusterClick,
+  onViewportChange,
+  clusterMode = false,
+  className,
+}: DrawMapProps) {
   const [hintVisible, setHintVisible] = useState(false);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -333,10 +406,38 @@ export function DrawMap({ shapes, onShapesChange, pins, onClusterClick, classNam
     handler(ids);
   }, []);
 
-  const clusteringEnabled = !!onClusterClick;
+  const clusteringEnabled = !!onClusterClick && !clusterMode;
 
   const theme = useUiStore((s) => s.theme);
   const tileUrl = theme === "dark" ? TILE_URL_DARK : TILE_URL_LIGHT;
+
+  /**
+   * Render each pin. Pulled into a helper because the `clusterMode`
+   * branch uses the same markup but without the `MarkerClusterGroup`
+   * wrapper — the server has already aggregated the pins so the client
+   * should not cluster them a second time.
+   */
+  const renderPin = (pin: DrawMapPin) => {
+    const eventHandlers = pin.onClick ? { click: pin.onClick } : undefined;
+    const markerProps: {
+      icon?: L.DivIcon | L.Icon;
+      eventHandlers?: { click: () => void };
+    } = {};
+    if (pin.icon) markerProps.icon = pin.icon;
+    if (eventHandlers) markerProps.eventHandlers = eventHandlers;
+    return (
+      <Marker
+        key={pin.id}
+        position={[pin.lat, pin.lon]}
+        ref={(marker) => {
+          if (marker) marker.options.meshmonPinId = pin.id;
+        }}
+        {...markerProps}
+      >
+        {pin.popup ? <Popup>{pin.popup}</Popup> : null}
+      </Marker>
+    );
+  };
 
   return (
     <div
@@ -363,26 +464,23 @@ export function DrawMap({ shapes, onShapesChange, pins, onClusterClick, classNam
         />
         <GeomanController shapes={shapes} onShapesChange={onShapesChange} />
         <ModifierZoomController onHintNeeded={flashHint} />
+        {onViewportChange ? <ViewportController onViewportChange={onViewportChange} /> : null}
         {pins && pins.length > 0 ? (
-          // Zoom is handled by the +/- controls and Cmd/Ctrl wheel; cluster
-          // clicks open a list dialog instead of zooming.
-          <MarkerClusterGroup
-            chunkedLoading
-            zoomToBoundsOnClick={!clusteringEnabled}
-            onClick={clusteringEnabled ? handleClusterClick : undefined}
-          >
-            {pins.map((pin) => (
-              <Marker
-                key={pin.id}
-                position={[pin.lat, pin.lon]}
-                ref={(marker) => {
-                  if (marker) marker.options.meshmonPinId = pin.id;
-                }}
-              >
-                {pin.popup ? <Popup>{pin.popup}</Popup> : null}
-              </Marker>
-            ))}
-          </MarkerClusterGroup>
+          clusterMode ? (
+            // Server-side clusters: render each bucket as its own marker
+            // without running client-side clustering.
+            pins.map(renderPin)
+          ) : (
+            // Zoom is handled by the +/- controls and Cmd/Ctrl wheel; cluster
+            // clicks open a list dialog instead of zooming.
+            <MarkerClusterGroup
+              chunkedLoading
+              zoomToBoundsOnClick={!clusteringEnabled}
+              onClick={clusteringEnabled ? handleClusterClick : undefined}
+            >
+              {pins.map(renderPin)}
+            </MarkerClusterGroup>
+          )
         ) : null}
       </MapContainer>
       <div
