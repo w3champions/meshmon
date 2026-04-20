@@ -14,6 +14,16 @@ vi.mock("react-leaflet", async () => {
 vi.mock("@geoman-io/leaflet-geoman-free", () => ({}));
 vi.mock("@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css", () => ({}));
 
+// leaflet.markercluster attaches L.MarkerClusterGroup at module load; the
+// react-leaflet-cluster wrapper needs a live Leaflet map to mount against.
+// Neither is exercisable under jsdom, so stub both.
+vi.mock("leaflet.markercluster/dist/MarkerCluster.css", () => ({}));
+vi.mock("leaflet.markercluster/dist/MarkerCluster.Default.css", () => ({}));
+vi.mock("react-leaflet-cluster", async () => {
+  const { MarkerClusterGroupMock } = await import("@/test/leaflet-mock");
+  return { default: MarkerClusterGroupMock };
+});
+
 import { DrawMap } from "@/components/map/DrawMap";
 import { getLeafletMock, resetLeafletMock } from "@/test/leaflet-mock";
 import { renderWithProviders } from "@/test/query-wrapper";

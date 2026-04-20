@@ -140,3 +140,11 @@ export const LeafletMock = {
   // the same instance and invoke `__fire(...)` / mutate `__drawnLayers`.
   useMap: () => currentMap,
 };
+
+interface MarkerClusterGroupMockProps {
+  children?: ReactNode;
+}
+
+export function MarkerClusterGroupMock({ children }: MarkerClusterGroupMockProps) {
+  return <div data-testid="marker-cluster-group">{children}</div>;
+}

@@ -11,6 +11,13 @@ vi.mock("react-leaflet", async () => {
 vi.mock("@geoman-io/leaflet-geoman-free", () => ({}));
 vi.mock("@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css", () => ({}));
 
+vi.mock("leaflet.markercluster/dist/MarkerCluster.css", () => ({}));
+vi.mock("leaflet.markercluster/dist/MarkerCluster.Default.css", () => ({}));
+vi.mock("react-leaflet-cluster", async () => {
+  const { MarkerClusterGroupMock } = await import("@/test/leaflet-mock");
+  return { default: MarkerClusterGroupMock };
+});
+
 import { CatalogueMap, EntryPopup } from "@/components/catalogue/CatalogueMap";
 import { resetLeafletMock } from "@/test/leaflet-mock";
 import { renderWithProviders, renderWithQuery } from "@/test/query-wrapper";

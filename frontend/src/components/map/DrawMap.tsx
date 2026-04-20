@@ -1,11 +1,14 @@
 import "./leaflet-setup";
 import "@geoman-io/leaflet-geoman-free";
 import "@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css";
+import "leaflet.markercluster/dist/MarkerCluster.css";
+import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 
 import L from "leaflet";
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
+import MarkerClusterGroup from "react-leaflet-cluster";
 import type { GeoShape } from "@/lib/geo";
 import { cn } from "@/lib/utils";
 
@@ -212,11 +215,15 @@ export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProp
       >
         <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
         <GeomanController shapes={shapes} onShapesChange={onShapesChange} />
-        {pins?.map((pin) => (
-          <Marker key={pin.id} position={[pin.lat, pin.lon]}>
-            {pin.popup ? <Popup>{pin.popup}</Popup> : null}
-          </Marker>
-        ))}
+        {pins && pins.length > 0 ? (
+          <MarkerClusterGroup chunkedLoading>
+            {pins.map((pin) => (
+              <Marker key={pin.id} position={[pin.lat, pin.lon]}>
+                {pin.popup ? <Popup>{pin.popup}</Popup> : null}
+              </Marker>
+            ))}
+          </MarkerClusterGroup>
+        ) : null}
       </MapContainer>
     </div>
   );
