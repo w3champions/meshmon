@@ -89,6 +89,15 @@ function applyEvent(queryClient: QueryClient, event: CatalogueStreamEvent): void
         });
         return changed ? { ...old, entries } : old;
       });
+      // On terminal status, the runner has just written new country/ASN/
+      // network/geo fields. The SSE frame only carries the status, so
+      // invalidate both the list and the per-entry cache to pick up the
+      // freshly enriched fields. The in-place status patch above keeps the
+      // chip responsive while the refetch is in flight.
+      if (event.status === "enriched" || event.status === "failed") {
+        queryClient.invalidateQueries({ queryKey: catalogueEntryKey(event.id) });
+        queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      }
       // `enrichment_status` drives a facet bucket — counts change.
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
       return;

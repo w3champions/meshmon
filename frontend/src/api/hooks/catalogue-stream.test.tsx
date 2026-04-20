@@ -97,7 +97,7 @@ describe("useCatalogueStream", () => {
     expect(qc.getQueryState(["catalogue", "list"])?.isInvalidated).toBe(true);
   });
 
-  test("patches entry cache in place on `enrichment_progress` without refetching", () => {
+  test("patches entry cache and invalidates on terminal `enrichment_progress`", () => {
     const qc = makeQueryClient();
     qc.setQueryData(["catalogue", "entry", ENTRY.id], ENTRY);
     qc.setQueryData(["catalogue", "facets"], { enrichment_status: [] });
@@ -111,17 +111,17 @@ describe("useCatalogueStream", () => {
       });
     });
 
+    // In-place status patch lands first so the chip flips immediately.
     const cached = qc.getQueryData<CatalogueEntry>(["catalogue", "entry", ENTRY.id]);
     expect(cached?.enrichment_status).toBe("enriched");
-    // In-place patch — the entry cache must NOT be flagged stale.
-    expect(qc.getQueryState(["catalogue", "entry", ENTRY.id])?.isInvalidated).toBe(false);
-    // Facet bucket for status changes — facets should be stale.
+    // Terminal status — the SSE frame doesn't carry new fields, so we must
+    // invalidate so the newly enriched country/ASN/network get refetched.
+    expect(qc.getQueryState(["catalogue", "entry", ENTRY.id])?.isInvalidated).toBe(true);
     expect(qc.getQueryState(["catalogue", "facets"])?.isInvalidated).toBe(true);
   });
 
-  test("patches the list cache in place on `enrichment_progress`", () => {
+  test("patches list cache and invalidates on terminal `enrichment_progress`", () => {
     const qc = makeQueryClient();
-    // Seed a list cache keyed by the full [CATALOGUE_LIST_KEY, query] shape
     qc.setQueryData(["catalogue", "list", {}], { entries: [ENTRY], total: 1 });
     qc.setQueryData(["catalogue", "facets"], { enrichment_status: [] });
 
@@ -130,7 +130,7 @@ describe("useCatalogueStream", () => {
       MockEventSource.instances[0]?.emit({
         kind: "enrichment_progress",
         id: ENTRY.id,
-        status: "enriched",
+        status: "failed",
       });
     });
 
@@ -139,8 +139,30 @@ describe("useCatalogueStream", () => {
       "list",
       {},
     ]);
-    expect(list?.entries[0]?.enrichment_status).toBe("enriched");
-    // In-place patch — the list cache must NOT be flagged stale.
+    // Status patched in place for immediate UI feedback.
+    expect(list?.entries[0]?.enrichment_status).toBe("failed");
+    // Terminal — list must refetch to pick up any fields the runner wrote.
+    expect(qc.getQueryState(["catalogue", "list", {}])?.isInvalidated).toBe(true);
+  });
+
+  test("does not invalidate on non-terminal `enrichment_progress` status", () => {
+    const qc = makeQueryClient();
+    qc.setQueryData(["catalogue", "entry", ENTRY.id], ENTRY);
+    qc.setQueryData(["catalogue", "list", {}], { entries: [ENTRY], total: 1 });
+
+    renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
+    act(() => {
+      MockEventSource.instances[0]?.emit({
+        kind: "enrichment_progress",
+        id: ENTRY.id,
+        status: "pending",
+      });
+    });
+
+    // Non-terminal status — the runner is still working, nothing new to
+    // refetch. The in-place patch keeps the cache coherent without a
+    // network round-trip.
+    expect(qc.getQueryState(["catalogue", "entry", ENTRY.id])?.isInvalidated).toBe(false);
     expect(qc.getQueryState(["catalogue", "list", {}])?.isInvalidated).toBe(false);
   });
 
