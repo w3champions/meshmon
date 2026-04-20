@@ -41,6 +41,12 @@ const GEOMAN_CONTROL_OPTIONS = {
 const OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_ATTRIBUTION = "© OpenStreetMap contributors";
 
+// World-overview default view. Latitude 20 biases slightly north of the
+// equator so Europe/North America aren't clipped at typical aspect ratios,
+// and longitude 0 keeps the Pacific from splitting across the seam.
+const DEFAULT_CENTER: [number, number] = [20, 0];
+const DEFAULT_ZOOM = 2;
+
 /**
  * Convert a single Leaflet layer produced by geoman into our typed `GeoShape`.
  *
@@ -159,12 +165,20 @@ function GeomanController({ shapes, onShapesChange }: GeomanControllerProps) {
     // `onShapesChangeRef` so they don't require re-wiring.
   }, [map]);
 
-  // External shapes prop reconciliation. The parent-owned filter state is
-  // the only external driver we care about; in practice the important
-  // transition is N > 0 → 0 (FilterRail Clear). We mirror that by wiping
-  // the feature group when counts diverge.
+  // External shapes prop reconciliation.
+  //
+  // The component is uncontrolled on draw — the user draws and we emit via
+  // `onShapesChange`. The only external signal we react to is the
+  // FilterRail "Clear" path (N > 0 → 0), which wipes the feature group.
+  // A `suppressEmit` ref blocks the resulting `pm:remove` fan-out so the
+  // clear doesn't loop back through `onShapesChange`.
+  //
+  // Gating on a derived boolean (rather than the `shapes` array itself)
+  // keeps this effect from re-running on every parent re-render: it only
+  // fires when the cleared state toggles.
+  const isCleared = shapes.length === 0;
   useEffect(() => {
-    if (shapes.length > 0) return;
+    if (!isCleared) return;
     const current = map.pm.getGeomanDrawLayers(false) as L.Layer[];
     if (current.length === 0) return;
     suppressEmitRef.current = true;
@@ -173,7 +187,7 @@ function GeomanController({ shapes, onShapesChange }: GeomanControllerProps) {
     } finally {
       suppressEmitRef.current = false;
     }
-  }, [map, shapes]);
+  }, [map, isCleared]);
 
   return null;
 }
@@ -188,8 +202,8 @@ export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProp
       data-testid="draw-map-shell"
     >
       <MapContainer
-        center={[20, 0]}
-        zoom={2}
+        center={DEFAULT_CENTER}
+        zoom={DEFAULT_ZOOM}
         minZoom={1}
         worldCopyJump
         scrollWheelZoom={false}
