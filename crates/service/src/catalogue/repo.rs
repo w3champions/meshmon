@@ -210,12 +210,22 @@ impl RowWritePlan {
 
 /// Apply a [`RowWritePlan`] to a single row.
 ///
-/// The SQL `CASE WHEN '<Field>' = ANY(operator_edited_fields) THEN col
-/// ELSE COALESCE($new, col) END` guards mirror
-/// [`apply_enrichment_result`] — they re-check locks at write time so
-/// a concurrent operator PATCH cannot silently escape the plan. The
-/// Rust plan already honours the locks, so the SQL guard is defence
-/// in depth, not primary logic.
+/// Single-field SQL guards mirror [`apply_enrichment_result`] — they
+/// re-check locks at write time so a concurrent operator PATCH cannot
+/// silently escape the plan. Paired fields (`CountryCode`+`CountryName`,
+/// `Latitude`+`Longitude`) are guarded by a **composite** predicate:
+/// each half's CASE arm references both halves' lock state, so if
+/// either half becomes locked between plan computation and UPDATE the
+/// whole pair is skipped atomically. Without this, the narrow window
+/// where a concurrent PATCH locks only one half could leave a row
+/// with (say) the new `country_name` but the old `country_code` — a
+/// violation of the T52 paired-atomicity contract.
+///
+/// The `operator_edited_fields` array is similarly filtered: the
+/// supplied `added_locks` are trimmed of `CountryCode` / `CountryName`
+/// when the country pair's composite guard fires, and likewise for
+/// the latitude / longitude pair. This keeps the lock bookkeeping in
+/// lockstep with the values it protects.
 async fn apply_metadata_update(
     pool: &PgPool,
     id: Uuid,
@@ -235,19 +245,27 @@ async fn apply_metadata_update(
                 ELSE COALESCE($3, city)
             END,
             country_code = CASE
-                WHEN 'CountryCode' = ANY(operator_edited_fields) THEN country_code
+                WHEN 'CountryCode' = ANY(operator_edited_fields)
+                  OR 'CountryName' = ANY(operator_edited_fields)
+                    THEN country_code
                 ELSE COALESCE($4::char(2), country_code)
             END,
             country_name = CASE
-                WHEN 'CountryName' = ANY(operator_edited_fields) THEN country_name
+                WHEN 'CountryCode' = ANY(operator_edited_fields)
+                  OR 'CountryName' = ANY(operator_edited_fields)
+                    THEN country_name
                 ELSE COALESCE($5, country_name)
             END,
             latitude = CASE
-                WHEN 'Latitude' = ANY(operator_edited_fields) THEN latitude
+                WHEN 'Latitude' = ANY(operator_edited_fields)
+                  OR 'Longitude' = ANY(operator_edited_fields)
+                    THEN latitude
                 ELSE COALESCE($6, latitude)
             END,
             longitude = CASE
-                WHEN 'Longitude' = ANY(operator_edited_fields) THEN longitude
+                WHEN 'Latitude' = ANY(operator_edited_fields)
+                  OR 'Longitude' = ANY(operator_edited_fields)
+                    THEN longitude
                 ELSE COALESCE($7, longitude)
             END,
             website = CASE
@@ -260,7 +278,27 @@ async fn apply_metadata_update(
             END,
             operator_edited_fields = ARRAY(
                 SELECT DISTINCT f
-                FROM UNNEST(operator_edited_fields || $10::text[]) AS f
+                FROM UNNEST(operator_edited_fields || (
+                    SELECT COALESCE(array_agg(g), ARRAY[]::text[])
+                    FROM UNNEST($10::text[]) AS g
+                    WHERE
+                        -- Drop paired-field locks when the composite
+                        -- guard above already skipped the pair.
+                        NOT (
+                            g IN ('CountryCode', 'CountryName')
+                            AND (
+                                'CountryCode' = ANY(operator_edited_fields)
+                                OR 'CountryName' = ANY(operator_edited_fields)
+                            )
+                        )
+                        AND NOT (
+                            g IN ('Latitude', 'Longitude')
+                            AND (
+                                'Latitude' = ANY(operator_edited_fields)
+                                OR 'Longitude' = ANY(operator_edited_fields)
+                            )
+                        )
+                )) AS f
             )
         WHERE id = $1
         RETURNING
