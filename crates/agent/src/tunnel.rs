@@ -25,20 +25,24 @@ const BASE_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
 const RESET_THRESHOLD: Duration = Duration::from_secs(10);
 
-/// Fallback agent campaign concurrency cap when the operator sets no
-/// `MESHMON_CAMPAIGN_MAX_CONCURRENCY` override. Matches the service-side
-/// `[campaigns.default_agent_concurrency]` default so an agent that
-/// doesn't override sees the same cap the dispatcher enforces.
-const DEFAULT_AGENT_CAMPAIGN_CONCURRENCY: usize = 16;
+/// Effectively-unbounded semaphore size used when the operator sets no
+/// `MESHMON_CAMPAIGN_MAX_CONCURRENCY` override. The service-side
+/// dispatcher enforces the authoritative cap (using `[campaigns]
+/// default_agent_concurrency` when the agent registers without an
+/// override); the agent's local semaphore is a defense-in-depth
+/// backstop that should never be tighter than the service's view,
+/// otherwise agents silently diverge from the cluster default.
+const UNCAPPED_SEMAPHORE: usize = 65_536;
 
 /// Spawn the tunnel task. Returns a join handle the caller can await
 /// during shutdown.
 ///
 /// `campaign_max_concurrency` is the per-agent cap on concurrent
-/// in-flight campaign measurement batches; `None` falls back to
-/// [`DEFAULT_AGENT_CAMPAIGN_CONCURRENCY`]. The value feeds the tonic
-/// service's semaphore — probes above the cap get
-/// `Status::resource_exhausted`, which the dispatcher treats as a
+/// in-flight campaign measurement batches; `None` lets the service's
+/// cluster-wide default be authoritative (the agent's local semaphore
+/// becomes a large no-op backstop — see [`UNCAPPED_SEMAPHORE`]). The
+/// value feeds the tonic service's semaphore — probes above the cap
+/// get `Status::resource_exhausted`, which the dispatcher treats as a
 /// rejection so the scheduler reverts the pairs.
 pub fn spawn(
     api: Arc<GrpcServiceApi>,
@@ -49,7 +53,7 @@ pub fn spawn(
 ) -> JoinHandle<()> {
     let effective = campaign_max_concurrency
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_AGENT_CAMPAIGN_CONCURRENCY);
+        .unwrap_or(UNCAPPED_SEMAPHORE);
     tokio::spawn(run(api, source_id, refresh_trigger, effective, cancel))
 }
 
