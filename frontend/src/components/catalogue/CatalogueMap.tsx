@@ -186,19 +186,11 @@ export function CatalogueMap({
     [detailRows, onClusterOpen],
   );
 
-  if (isError) {
-    return (
-      <div
-        role="alert"
-        className="flex h-[400px] w-full items-center justify-center rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive md:h-[500px]"
-      >
-        Failed to load map data. Pan or zoom to retry.
-      </div>
-    );
-  }
-
-  // While loading we still render `DrawMap` so operators see their drawn
-  // shapes and can pan — only the pins are gated on a populated response.
+  // `DrawMap` stays mounted across loading AND error states so the
+  // operator's shapes, zoom and viewport keep tracking: `moveend` is
+  // the only trigger that re-runs the map query, so a recover-via-pan
+  // UX is only honest if the map itself stays interactive. Pins are
+  // gated on a populated response but the canvas is not.
   return (
     <div className="relative" aria-busy={isLoading}>
       <DrawMap
@@ -210,6 +202,14 @@ export function CatalogueMap({
         onClusterClick={isClusterMode ? undefined : handleDetailClusterClick}
         className={className}
       />
+      {isError ? (
+        <div
+          role="alert"
+          className="pointer-events-none absolute inset-x-0 top-2 mx-auto w-fit rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive shadow-sm"
+        >
+          Failed to load map data. Pan or zoom to retry.
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -248,7 +248,7 @@ describe("CatalogueMap", () => {
     expect(screen.queryByTestId("marker-cluster-group")).not.toBeInTheDocument();
   });
 
-  test("isError shows an error banner and suppresses the map", async () => {
+  test("isError shows an error overlay AND keeps the map interactive", async () => {
     renderWithProviders(
       <CatalogueMap
         response={undefined}
@@ -260,7 +260,10 @@ describe("CatalogueMap", () => {
     );
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/failed to load/i);
-    expect(screen.queryByTestId("draw-map-shell")).not.toBeInTheDocument();
+    // The map must stay mounted in error state: the advertised recover
+    // path ("Pan or zoom to retry") needs `moveend` to fire, and that
+    // only happens while `DrawMap` is in the tree.
+    expect(screen.getByTestId("draw-map-shell")).toBeInTheDocument();
   });
 
   test("viewport change emits bbox and zoom on moveend", async () => {
@@ -290,6 +293,35 @@ describe("CatalogueMap", () => {
     const [bbox, zoom] = onViewportChange.mock.calls.at(-1) ?? [];
     expect(bbox).toEqual([10, 20, 30, 40]);
     expect(zoom).toBe(5);
+  });
+
+  test("viewport clamps longitudes wrapped past the antimeridian", async () => {
+    const onViewportChange = vi.fn();
+    renderWithProviders(
+      <CatalogueMap
+        response={undefined}
+        isLoading={true}
+        isError={false}
+        shapes={[]}
+        onShapesChange={() => {}}
+        onOpenEntry={() => {}}
+        onClusterOpen={() => {}}
+        onViewportChange={onViewportChange}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+
+    const map = getLeafletMock();
+    // Simulate Leaflet `worldCopyJump` bounds after the operator pans
+    // east past +180°: sw.lng = 170, ne.lng = 220. The backend rejects
+    // lng > 180 with 400, so `DrawMap` must clamp before emitting.
+    map.__bounds = [-10, 170, 10, 220];
+    map.__zoom = 3;
+    map.__fire("moveend");
+
+    const [bbox] = onViewportChange.mock.calls.at(-1) ?? [];
+    const [, , , maxLng] = bbox as [number, number, number, number];
+    expect(maxLng).toBe(180);
   });
 
   test("clicking EntryPopup 'Open details' button fires the supplied callback", async () => {

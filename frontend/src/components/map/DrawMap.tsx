@@ -105,6 +105,11 @@ function isMarkerCluster(value: unknown): value is MarkerClusterLike {
   );
 }
 
+function clamp(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
 function detectIsMac(): boolean {
   if (typeof navigator === "undefined") return false;
   const platform = (navigator as Navigator & { userAgentData?: { platform?: string } })
@@ -289,8 +294,19 @@ function ViewportController({ onViewportChange }: ViewportControllerProps) {
       const sw = bounds.getSouthWest();
       const ne = bounds.getNorthEast();
       // Bbox tuple order mirrors `MapBucket.bbox` on the wire:
-      // `[minLat, minLng, maxLat, maxLng]`.
-      const bbox: Bbox = [sw.lat, sw.lng, ne.lat, ne.lng];
+      // `[minLat, minLng, maxLat, maxLng]`. Longitudes may drift
+      // outside [-180, 180] once the operator pans past the
+      // antimeridian (Leaflet's `worldCopyJump` wraps tiles but not
+      // bounds). Clamp here: the backend rejects out-of-range bboxes
+      // with 400, so un-clamped panning would silently empty the map
+      // until the operator pans back. Latitudes are already Mercator-
+      // clamped by Leaflet, but we clamp for symmetry.
+      const bbox: Bbox = [
+        clamp(sw.lat, -90, 90),
+        clamp(sw.lng, -180, 180),
+        clamp(ne.lat, -90, 90),
+        clamp(ne.lng, -180, 180),
+      ];
       onViewportChangeRef.current(bbox, map.getZoom());
     };
     map.on("moveend", emit);
