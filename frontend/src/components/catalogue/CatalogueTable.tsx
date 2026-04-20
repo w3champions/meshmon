@@ -203,7 +203,11 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
       id: "notes",
       accessorKey: "notes",
       header: "Notes",
-      cell: ({ row }) => row.original.notes ?? "—",
+      cell: ({ row }) => (
+        <span className="block max-w-[16rem] truncate" title={row.original.notes ?? undefined}>
+          {row.original.notes ?? "—"}
+        </span>
+      ),
     },
   ];
 }

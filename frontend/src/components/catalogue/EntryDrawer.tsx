@@ -70,6 +70,8 @@ interface EditableFieldConfig {
   label: string;
   /** When true the field spans both grid columns on sm+ viewports. */
   colSpan?: boolean;
+  /** When true, renders a resizable textarea instead of a single-line input. */
+  multiline?: boolean;
   extraProps?: Omit<React.ComponentProps<typeof Input>, "name" | "ref">;
 }
 
@@ -100,7 +102,7 @@ const EDITABLE_FIELD_CONFIGS: readonly EditableFieldConfig[] = [
   },
   { field: "network_operator", label: "Network operator" },
   { field: "website", label: "Website" },
-  { field: "notes", label: "Notes", colSpan: true },
+  { field: "notes", label: "Notes", colSpan: true, multiline: true },
 ];
 
 const EDITABLE_FIELDS: readonly EditableField[] = EDITABLE_FIELD_CONFIGS.map((c) => c.field);
@@ -231,10 +233,14 @@ function ReadonlyRow({ label, children }: ReadonlyRowProps) {
   );
 }
 
+const TEXTAREA_CLASS =
+  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 resize-none max-h-40 overflow-y-auto";
+
 interface EditableFieldRowProps {
   field: EditableField;
   label: string;
   colSpan?: boolean;
+  multiline?: boolean;
   locked: boolean;
   isPending: boolean;
   errorMessage?: string;
@@ -246,6 +252,7 @@ function EditableFieldRow({
   field,
   label,
   colSpan,
+  multiline,
   locked,
   isPending,
   errorMessage,
@@ -275,7 +282,16 @@ function EditableFieldRow({
           </button>
         )}
       </div>
-      <Input id={id} {...inputProps} className={locked ? "ring-1 ring-primary/30" : undefined} />
+      {multiline ? (
+        <textarea
+          id={id}
+          rows={4}
+          {...(inputProps as React.ComponentProps<"textarea">)}
+          className={`${TEXTAREA_CLASS}${locked ? " ring-1 ring-primary/30" : ""}`}
+        />
+      ) : (
+        <Input id={id} {...inputProps} className={locked ? "ring-1 ring-primary/30" : undefined} />
+      )}
       {errorMessage && <p className="text-xs text-destructive">{errorMessage}</p>}
     </div>
   );
@@ -463,12 +479,13 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
           )}
 
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {EDITABLE_FIELD_CONFIGS.map(({ field, label, colSpan, extraProps }) => (
+            {EDITABLE_FIELD_CONFIGS.map(({ field, label, colSpan, multiline, extraProps }) => (
               <EditableFieldRow
                 key={field}
                 field={field}
                 label={label}
                 colSpan={colSpan}
+                multiline={multiline}
                 locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
                 isPending={patchMutation.isPending}
                 errorMessage={errors[field]?.message}
