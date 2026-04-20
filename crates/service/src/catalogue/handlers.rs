@@ -131,6 +131,13 @@ pub async fn paste(
         let _ = state.enrichment_queue.enqueue(row.id);
     }
 
+    // New rows shift the facet bucket counts — invalidate the cache so
+    // the next GET /api/catalogue/facets reflects the paste immediately
+    // rather than waiting up to 30 s for the TTL to expire.
+    if !outcome.created.is_empty() {
+        state.facets_cache.invalidate().await;
+    }
+
     let invalid = parsed
         .rejected
         .into_iter()
@@ -370,6 +377,12 @@ pub async fn patch(
             state
                 .catalogue_broker
                 .publish(CatalogueEvent::Updated { id: entry.id });
+            // Any PATCH may change country_code, asn, or network_operator —
+            // the fields that drive facet buckets. Invalidate unconditionally
+            // rather than inspecting which fields were actually touched; the
+            // cost of an extra DB round-trip is lower than missing a bucket
+            // change because a field-level introspection was too conservative.
+            state.facets_cache.invalidate().await;
             (StatusCode::OK, Json(CatalogueEntryDto::from(entry))).into_response()
         }
         Err(sqlx::Error::RowNotFound) => {
@@ -408,6 +421,9 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resp
                 state
                     .catalogue_broker
                     .publish(CatalogueEvent::Deleted { id });
+                // The deleted row leaves its facet buckets — invalidate so
+                // the next facets GET reflects the removal immediately.
+                state.facets_cache.invalidate().await;
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -455,6 +471,10 @@ pub async fn reenrich_one(State(state): State<AppState>, Path(id): Path<Uuid>) -
             // enrichment runner handles the now-missing row gracefully —
             // benign race.
             let _ = state.enrichment_queue.enqueue(id);
+            // Flipping a row back to `pending` shifts the enrichment_status
+            // facet bucket — invalidate so the filter rail reflects the
+            // change without waiting for the TTL.
+            state.facets_cache.invalidate().await;
             StatusCode::ACCEPTED.into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),
@@ -523,6 +543,9 @@ pub async fn reenrich_many(
     for id in body.ids {
         let _ = state.enrichment_queue.enqueue(id);
     }
+    // Bulk flip shifts the enrichment_status facet bucket for every
+    // matched row — invalidate once after the full write completes.
+    state.facets_cache.invalidate().await;
     StatusCode::ACCEPTED.into_response()
 }
 

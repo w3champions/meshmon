@@ -283,6 +283,7 @@ export default function Report() {
               <p className="text-sm text-muted-foreground">Metrics unavailable.</p>
             ) : (
               <div className="grid gap-3 md:grid-cols-2">
+                {/* Pin light theme for print — PDFs read better on paper regardless of app theme. */}
                 <GrafanaPanel
                   dashboard={MESHMON_PATH_DASHBOARD}
                   panelId={PANEL_RTT}
@@ -290,6 +291,7 @@ export default function Report() {
                   from={new Date(data.window.from).getTime().toString()}
                   to={new Date(data.window.to).getTime().toString()}
                   title="RTT"
+                  theme="light"
                 />
                 <GrafanaPanel
                   dashboard={MESHMON_PATH_DASHBOARD}
@@ -298,6 +300,7 @@ export default function Report() {
                   from={new Date(data.window.from).getTime().toString()}
                   to={new Date(data.window.to).getTime().toString()}
                   title="Loss"
+                  theme="light"
                 />
               </div>
             )}

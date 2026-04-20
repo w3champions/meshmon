@@ -60,6 +60,13 @@ export const api = createClient<paths>({
   credentials: "include",
   headers: { Accept: "application/json" },
   fetch: (...args) => globalThis.fetch(...args),
+  // Backend list filters (country_code, asn, network, …) use CSV deserialisation
+  // — axum's serde_urlencoded doesn't turn repeated keys into `Vec<T>`, so the
+  // default `?asn=1&asn=2` form would silently reduce to a single value and
+  // multi-select filters would read as AND. `explode: false` emits `?asn=1,2`.
+  querySerializer: {
+    array: { style: "form", explode: false },
+  },
 });
 
 api.use(authMiddleware);

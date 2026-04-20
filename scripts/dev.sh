@@ -99,6 +99,19 @@ grafana_url = "http://127.0.0.1:3000/grafana"
 udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
 EOF
 
+# Opt-in: append the ipgeolocation.io block when the API key is exported in
+# the calling shell. Keeping it out of the main heredoc avoids parameter
+# expansion stripping the inner quotes on `api_key_env = "..."`.
+if [[ -n "${MESHMON_IPGEO_API_KEY:-}" ]]; then
+    cat >> "$DEPLOY_DIR/meshmon.toml" <<'EOF'
+
+[enrichment.ipgeolocation]
+enabled = true
+acknowledged_tos = true
+api_key_env = "MESHMON_IPGEO_API_KEY"
+EOF
+fi
+
 echo "[dev.sh] starting infra via docker compose dev overlay"
 (cd "$DEPLOY_DIR" && docker compose \
     -f docker-compose.yml -f docker-compose.dev.yml up -d --wait)
@@ -117,10 +130,10 @@ DATABASE_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=dis
 echo "[dev.sh] seeding agents + route snapshots"
 docker exec -e PGPASSWORD="$PG_PASSWORD" meshmon-db \
     psql -U meshmon -d meshmon -c "$(cat <<'SQL'
-INSERT INTO agents (id, display_name, location, ip, lat, lon, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
+INSERT INTO agents (id, display_name, location, ip, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
 VALUES
-    ('dev-a', 'Dev A', 'Local', '10.0.0.1', 0, 0, now(), 'dev', 3555, 3552),
-    ('dev-b', 'Dev B', 'Local', '10.0.0.2', 0, 0, now(), 'dev', 3555, 3552)
+    ('dev-a', 'Dev A', 'Local', '10.0.0.1', now(), 'dev', 3555, 3552),
+    ('dev-b', 'Dev B', 'Local', '10.0.0.2', now(), 'dev', 3555, 3552)
 ON CONFLICT (id) DO UPDATE SET last_seen_at = now();
 SQL
 )"
@@ -138,6 +151,14 @@ export MESHMON_ADMIN_PASSWORD_HASH="$ADMIN_HASH"
 export MESHMON_PG_GRAFANA_PASSWORD="$PG_GRAFANA_PASSWORD"
 export MESHMON_UDP_PROBE_SECRET="$UDP_PROBE_SECRET"
 export MESHMON_POSTGRES_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable"
+# Forward the ipgeolocation.io key when present so the service picks it up via
+# `api_key_env`. Unset by default — export it in your shell (do NOT commit).
+if [[ -n "${MESHMON_IPGEO_API_KEY:-}" ]]; then
+    export MESHMON_IPGEO_API_KEY
+    echo "[dev.sh] ipgeolocation provider enabled (MESHMON_IPGEO_API_KEY set)"
+else
+    echo "[dev.sh] ipgeolocation disabled — export MESHMON_IPGEO_API_KEY to enable"
+fi
 export RUST_LOG="${RUST_LOG:-meshmon_service=debug,info}"
 # Port comes from the throwaway toml's `service.listen_addr` above
 # (0.0.0.0:$SERVICE_PORT). No env-var override for listen_addr exists;

@@ -41,9 +41,12 @@ use std::time::Duration;
 /// logging sites cannot drift.
 pub(crate) const ID: &str = "ipgeolocation";
 
-/// Base URL of the single-lookup endpoint. Split out as a constant so
-/// tests can swap it when running against a `wiremock` mock server.
-const SINGLE_ENDPOINT: &str = "https://api.ipgeolocation.io/ipgeo";
+/// Base URL of the single-lookup endpoint. The v3 endpoint returns a
+/// nested shape (`location.*`, `asn.as_number`, …) and — unlike the
+/// legacy `/ipgeo` path — includes ASN fields on the free tier by
+/// default. Split out as a constant so tests can swap it when running
+/// against a `wiremock` mock server.
+const SINGLE_ENDPOINT: &str = "https://api.ipgeolocation.io/v3/ipgeo";
 
 /// Base URL of the v3 bulk endpoint (up to 50 000 IPs per call).
 const BULK_ENDPOINT: &str = "https://api.ipgeolocation.io/v3/ipgeo-bulk";
@@ -126,31 +129,63 @@ impl IpGeoProvider {
     /// encoding.
     pub(crate) fn map_single(body: &Value) -> EnrichmentResult {
         let mut out = EnrichmentResult::default();
-        if let Some(s) = body["city"].as_str() {
+        // v3 nests geo under `location`; older/legacy responses put it at
+        // the top level. Walk both for each field so the mapping tolerates
+        // both response shapes.
+        let city = body["city"]
+            .as_str()
+            .or_else(|| body["location"]["city"].as_str());
+        if let Some(s) = city {
             out.fields.insert(Field::City, FieldValue::Text(s.into()));
         }
-        if let Some(s) = body["country_code2"].as_str() {
+        let country_code = body["country_code2"]
+            .as_str()
+            .or_else(|| body["location"]["country_code2"].as_str());
+        if let Some(s) = country_code {
             out.fields
                 .insert(Field::CountryCode, FieldValue::Text(s.into()));
         }
-        if let Some(s) = body["country_name"].as_str() {
+        let country_name = body["country_name"]
+            .as_str()
+            .or_else(|| body["location"]["country_name"].as_str());
+        if let Some(s) = country_name {
             out.fields
                 .insert(Field::CountryName, FieldValue::Text(s.into()));
         }
-        if let Some(lat) = parse_float(&body["latitude"]) {
+        if let Some(lat) =
+            parse_float(&body["latitude"]).or_else(|| parse_float(&body["location"]["latitude"]))
+        {
             out.fields.insert(Field::Latitude, FieldValue::F64(lat));
         }
-        if let Some(lon) = parse_float(&body["longitude"]) {
+        if let Some(lon) =
+            parse_float(&body["longitude"]).or_else(|| parse_float(&body["location"]["longitude"]))
+        {
             out.fields.insert(Field::Longitude, FieldValue::F64(lon));
         }
+        // ASN shape depends on the account / endpoint version:
+        //   * Legacy flat response:  `"asn": "AS15169"`
+        //   * v2 nested response:    `"asn": { "as_number": "AS15169", ... }`
+        //   * Defensive bare int:    `"asn": 15169`
         // 4-byte ASNs (RFC 4893) above `i32::MAX` are dropped rather than
-        // silently wrapped to negative values. `Field::Asn` is currently
-        // stored as `i32`; widening it to `i64` / `u32` (out of scope for
-        // Task 8) would re-enable the dropped range.
-        if let Some(asn) = body["asn"].as_i64().and_then(|n| i32::try_from(n).ok()) {
+        // silently wrapped to negative values — `Field::Asn` is stored as i32.
+        let asn = body["asn"]["as_number"]
+            .as_str()
+            .or_else(|| body["asn"].as_str())
+            .and_then(parse_as_number)
+            .or_else(|| body["asn"].as_i64().and_then(|n| i32::try_from(n).ok()));
+        if let Some(asn) = asn {
             out.fields.insert(Field::Asn, FieldValue::I32(asn));
         }
-        if let Some(org) = body["organization"].as_str() {
+        // Organization is top-level on the legacy/flat response and nested
+        // under `asn` (or `company`) on v2. Walk the three shapes in the
+        // same preference order as ASN so both API versions populate the
+        // field without a config switch.
+        let organization = body["organization"]
+            .as_str()
+            .or_else(|| body["asn"]["organization"].as_str())
+            .or_else(|| body["company"]["organization"].as_str())
+            .or_else(|| body["isp"].as_str());
+        if let Some(org) = organization {
             out.fields
                 .insert(Field::NetworkOperator, FieldValue::Text(org.into()));
         }
@@ -234,6 +269,21 @@ impl IpGeoProvider {
     }
 }
 
+/// Parse ipgeolocation.io's ASN string form (e.g. `"AS15169"`) into a
+/// plain `i32`. Accepts the bare numeric form (`"15169"`) as well so a
+/// future response shape that drops the `AS` prefix still round-trips.
+/// Case-insensitive on the prefix. Returns `None` when the trimmed
+/// remainder is not a valid `i32` — 4-byte ASNs above `i32::MAX` fall
+/// into this branch and are dropped rather than wrapped to negatives.
+fn parse_as_number(s: &str) -> Option<i32> {
+    let trimmed = s.trim();
+    let numeric = trimmed
+        .strip_prefix("AS")
+        .or_else(|| trimmed.strip_prefix("as"))
+        .unwrap_or(trimmed);
+    numeric.parse::<i32>().ok()
+}
+
 /// Parse a JSON value as an `f64`. ipgeolocation.io historically returns
 /// `latitude` / `longitude` as strings (e.g. `"37.3861"`); some endpoints
 /// (notably the bulk response) emit native JSON floats. Both are accepted.
@@ -311,10 +361,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn maps_ipgeolocation_json_to_enrichment_result() {
-        // Required test from the plan: Google DNS (8.8.8.8) record carries
-        // the full set of consumable fields, including string-form
-        // latitude/longitude. map_single must produce the matching entries.
+    fn maps_legacy_flat_response_with_string_asn() {
+        // Legacy/flat ipgeolocation.io response: `asn` is a string like
+        // "AS15169" and `organization` is top-level. This was the shape the
+        // provider returned when this module was originally written and is
+        // still served by many account tiers today.
         let body = serde_json::json!({
             "ip": "8.8.8.8",
             "city": "Mountain View",
@@ -322,7 +373,7 @@ mod tests {
             "country_name": "United States",
             "latitude": "37.3861",
             "longitude": "-122.0839",
-            "asn": 15169,
+            "asn": "AS15169",
             "organization": "GOOGLE"
         });
         let r = IpGeoProvider::map_single(&body);
@@ -336,6 +387,69 @@ mod tests {
             r.fields.get(&Field::Asn),
             Some(FieldValue::I32(15169))
         ));
+        assert!(
+            matches!(r.fields.get(&Field::NetworkOperator), Some(FieldValue::Text(n)) if n == "GOOGLE")
+        );
+    }
+
+    #[test]
+    fn maps_v2_nested_response() {
+        // v2 response: `asn` is an object containing `as_number` + nested
+        // `organization`. Flat top-level `organization` is absent. The
+        // parser must walk the nested shape for both ASN and org.
+        let body = serde_json::json!({
+            "ip": "2400:cb00:2048:1::6810:1b01",
+            "location": {
+                "city": "San Francisco",
+                "country_code2": "US",
+                "country_name": "United States",
+                "latitude": "37.7749",
+                "longitude": "-122.4194",
+            },
+            "asn": {
+                "as_number": "AS13335",
+                "organization": "Cloudflare, Inc.",
+                "country": "US",
+                "type": "BUSINESS",
+            },
+            "company": {
+                "organization": "Cloudflare, Inc.",
+                "type": "HOSTING",
+            }
+        });
+        let r = IpGeoProvider::map_single(&body);
+        assert!(
+            matches!(r.fields.get(&Field::Asn), Some(FieldValue::I32(13335))),
+            "v2 nested asn.as_number should parse into i32, got {:?}",
+            r.fields.get(&Field::Asn),
+        );
+        assert!(
+            matches!(r.fields.get(&Field::NetworkOperator), Some(FieldValue::Text(n)) if n == "Cloudflare, Inc.")
+        );
+    }
+
+    #[test]
+    fn maps_defensive_bare_int_asn() {
+        // Defensive branch: if some future response shape exposes `asn` as
+        // a bare integer, the parser must still consume it.
+        let body = serde_json::json!({ "asn": 15169 });
+        let r = IpGeoProvider::map_single(&body);
+        assert!(matches!(
+            r.fields.get(&Field::Asn),
+            Some(FieldValue::I32(15169))
+        ));
+    }
+
+    #[test]
+    fn parse_as_number_accepts_various_forms() {
+        assert_eq!(super::parse_as_number("AS15169"), Some(15169));
+        assert_eq!(super::parse_as_number("as15169"), Some(15169));
+        assert_eq!(super::parse_as_number(" AS15169 "), Some(15169));
+        assert_eq!(super::parse_as_number("15169"), Some(15169));
+        assert_eq!(super::parse_as_number("AS"), None);
+        assert_eq!(super::parse_as_number("garbage"), None);
+        // 4-byte ASN above i32::MAX → drop rather than wrap.
+        assert_eq!(super::parse_as_number("AS4294967295"), None);
     }
 
     #[test]
@@ -387,9 +501,10 @@ mod tests {
     #[test]
     fn map_single_drops_out_of_range_4byte_asn() {
         // RFC 4893 4-byte ASNs above i32::MAX must not be truncated into a
-        // negative value — they are dropped instead. Widening `Field::Asn`
-        // beyond i32 is out of scope for Task 8; until then the guard keeps
-        // garbage values out of the database.
+        // negative value — they are dropped instead. The guard fires on
+        // every parse branch (string "AS…", nested `as_number`, and bare
+        // int), so covering the bare-int branch is enough to lock the
+        // saturation policy.
         let body = serde_json::json!({ "asn": 4_294_967_295_i64 });
         let r = IpGeoProvider::map_single(&body);
         assert!(!r.fields.contains_key(&Field::Asn));

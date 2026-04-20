@@ -2481,6 +2481,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "icann-rdap-client",
+ "icann-rdap-common",
  "if-addrs",
  "maxminddb",
  "memory-serve",

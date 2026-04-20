@@ -1,0 +1,380 @@
+import {
+  type ColumnDef,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+  type VisibilityState,
+} from "@tanstack/react-table";
+import { RefreshCw, Settings2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { lookupCountryName } from "@/lib/countries";
+import { cn } from "@/lib/utils";
+import { StatusChip } from "./StatusChip";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the hostname from a raw website string entered by the operator.
+ * Prepends `https://` when no scheme is present so `URL()` can parse it.
+ * Falls back to returning the raw value unchanged on parse failure.
+ */
+export function formatWebsiteHost(raw: string): string {
+  try {
+    const normalized = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return new URL(normalized).hostname;
+  } catch {
+    return raw;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+export const LS_KEY = "catalogue.table.visibleColumns";
+
+/** Columns that are visible by default. */
+const DEFAULT_VISIBLE: string[] = [
+  "ip",
+  "display_name",
+  "city",
+  "country",
+  "asn",
+  "network",
+  "status",
+  "actions",
+];
+
+/** All optional (hideable) columns — off by default. */
+const OPTIONAL_COLUMNS: string[] = ["location", "website", "notes"];
+
+// ---------------------------------------------------------------------------
+// Props
+// ---------------------------------------------------------------------------
+
+export interface CatalogueTableProps {
+  entries: CatalogueEntry[];
+  onRowClick: (id: string) => void;
+  onReenrich: (id: string) => void;
+  className?: string;
+}
+
+// ---------------------------------------------------------------------------
+// localStorage helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Load stored column visibility as a `Record<string, boolean>` map.
+ *
+ * Returns `null` when nothing is stored, the JSON is malformed, or the value
+ * is the legacy array shape (list of visible IDs). The legacy shape cannot
+ * distinguish "column is new" from "user hid it", so we deliberately ignore
+ * it — new writes will replace it with the map shape.
+ */
+function loadStoredVisibility(): Record<string, boolean> | null {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const result: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === "boolean") result[k] = v;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function saveVisibility(state: VisibilityState): void {
+  // Persist the full map so later reads can distinguish "column missing from
+  // saved state" (falls back to compile-time default on hydration) from
+  // "column explicitly hidden" (stored as `false`).
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
+}
+
+function getInitialVisibility(): VisibilityState {
+  const stored = loadStoredVisibility();
+  const result: VisibilityState = {};
+
+  for (const col of DEFAULT_VISIBLE) {
+    result[col] = stored && col in stored ? stored[col] : true;
+  }
+  for (const col of OPTIONAL_COLUMNS) {
+    result[col] = stored && col in stored ? stored[col] : false;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Column definitions
+// ---------------------------------------------------------------------------
+
+/**
+ * All columns except Actions. Actions is kept separate so it can always be
+ * appended last — even when optional columns are toggled on.
+ */
+function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
+  return [
+    {
+      id: "ip",
+      accessorKey: "ip",
+      header: "IP",
+      cell: ({ row }) => <span className="font-mono text-xs">{row.original.ip}</span>,
+    },
+    {
+      id: "display_name",
+      accessorKey: "display_name",
+      header: "Name",
+      cell: ({ row }) => row.original.display_name ?? "—",
+    },
+    {
+      id: "city",
+      accessorKey: "city",
+      header: "City",
+      cell: ({ row }) => row.original.city ?? "—",
+    },
+    {
+      id: "country",
+      accessorKey: "country_code",
+      header: "Country",
+      cell: ({ row }) => {
+        const code = row.original.country_code;
+        const name = lookupCountryName(code);
+        return <span title={code ?? undefined}>{name ?? code ?? "—"}</span>;
+      },
+    },
+    {
+      id: "asn",
+      accessorKey: "asn",
+      header: "ASN",
+      cell: ({ row }) => (row.original.asn != null ? String(row.original.asn) : "—"),
+    },
+    {
+      id: "network",
+      accessorKey: "network_operator",
+      header: "Network",
+      cell: ({ row }) => row.original.network_operator ?? "—",
+    },
+    {
+      id: "status",
+      header: "Status",
+      cell: ({ row }) => {
+        // Display-only in the table: the Actions column owns the re-enrich button.
+        // StatusChip.onReenrich is still used in EntryDrawer where the chip is
+        // the only re-enrich surface.
+        return <StatusChip status={row.original.enrichment_status} />;
+      },
+    },
+    // Optional columns — off by default
+    {
+      id: "location",
+      header: "Location",
+      cell: ({ row }) => {
+        const hasCoords = row.original.latitude != null && row.original.longitude != null;
+        return (
+          <Badge variant={hasCoords ? "secondary" : "outline"}>
+            {hasCoords ? "Present" : "Unset"}
+          </Badge>
+        );
+      },
+    },
+    {
+      id: "website",
+      accessorKey: "website",
+      header: "Website",
+      cell: ({ row }) => {
+        const website = row.original.website;
+        if (!website) return "—";
+        // Operators may save "example.com" as well as a full URL; normalise
+        // so the href is always absolute. Assume https when no scheme is set.
+        const href = /^https?:\/\//i.test(website) ? website : `https://${website}`;
+        const displayHost = formatWebsiteHost(website);
+        return (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="block max-w-[12rem] truncate text-primary underline-offset-2 hover:underline"
+            title={website}
+          >
+            {displayHost}
+          </a>
+        );
+      },
+    },
+    {
+      id: "notes",
+      accessorKey: "notes",
+      header: "Notes",
+      cell: ({ row }) => (
+        <span className="block max-w-[16rem] truncate" title={row.original.notes ?? undefined}>
+          {row.original.notes ?? "—"}
+        </span>
+      ),
+    },
+  ];
+}
+
+/** The Actions column — always rendered last regardless of optional column state. */
+function buildActionsColumn(onReenrich: (id: string) => void): ColumnDef<CatalogueEntry> {
+  return {
+    id: "actions",
+    header: "Actions",
+    cell: ({ row }) => {
+      const { id, ip } = row.original;
+      return (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={`Re-enrich ${ip}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onReenrich(id);
+          }}
+        >
+          <RefreshCw className="h-4 w-4" aria-hidden="true" />
+        </Button>
+      );
+    },
+  };
+}
+
+/**
+ * Assembles the full column list with Actions pinned to the rightmost position,
+ * regardless of which optional columns are visible.
+ */
+function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntry>[] {
+  return [...buildNonActionColumns(), buildActionsColumn(onReenrich)];
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
+export function CatalogueTable({
+  entries,
+  onRowClick,
+  onReenrich,
+  className,
+}: CatalogueTableProps) {
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(getInitialVisibility);
+
+  // Persist visibility changes to localStorage
+  useEffect(() => {
+    saveVisibility(columnVisibility);
+  }, [columnVisibility]);
+
+  const columns = useMemo(() => buildColumns(onReenrich), [onReenrich]);
+
+  const table = useReactTable({
+    data: entries,
+    columns,
+    state: { columnVisibility },
+    onColumnVisibilityChange: setColumnVisibility,
+    getCoreRowModel: getCoreRowModel(),
+  });
+
+  // All toggleable columns (default visible + optional)
+  const toggleableColumns = table.getAllLeafColumns();
+
+  return (
+    <div className={cn("flex flex-col gap-3", className)}>
+      {/* Column chooser */}
+      <div className="flex justify-end">
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" aria-label="Columns">
+              <Settings2 className="mr-2 h-4 w-4" aria-hidden="true" />
+              Columns
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-48 p-2">
+            <fieldset className="flex flex-col gap-1">
+              <legend className="mb-1 text-xs font-semibold text-muted-foreground">
+                Visible columns
+              </legend>
+              {toggleableColumns.map((col) => {
+                const header = col.columnDef.header;
+                const label = typeof header === "string" ? header : col.id;
+                return (
+                  <label key={col.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={col.getIsVisible()}
+                      onChange={col.getToggleVisibilityHandler()}
+                      aria-label={label}
+                    />
+                    {label}
+                  </label>
+                );
+              })}
+            </fieldset>
+          </PopoverContent>
+        </Popover>
+      </div>
+
+      {/* Table */}
+      <Table>
+        <TableHeader>
+          {table.getHeaderGroups().map((hg) => (
+            <TableRow key={hg.id}>
+              {hg.headers.map((h) => (
+                <TableHead key={h.id}>
+                  {flexRender(h.column.columnDef.header, h.getContext())}
+                </TableHead>
+              ))}
+            </TableRow>
+          ))}
+        </TableHeader>
+        <TableBody>
+          {table.getRowModel().rows.map((row) => {
+            const handleClick = () => onRowClick(row.original.id);
+            return (
+              <TableRow
+                key={row.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`Open entry ${row.original.ip}`}
+                onClick={handleClick}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    handleClick();
+                  }
+                }}
+                className="cursor-pointer hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+              >
+                {row.getVisibleCells().map((cell) => (
+                  <TableCell key={cell.id}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </TableCell>
+                ))}
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
