@@ -571,6 +571,41 @@ async fn apply_edit_rejects_draft_campaign() {
 }
 
 #[tokio::test]
+async fn apply_edit_tolerates_duplicate_add_pairs() {
+    // Postgres's `INSERT ... ON CONFLICT DO UPDATE` refuses to affect
+    // the same row twice in one statement (error 21000). If a client
+    // sends a duplicated `(agent, ip)` in `add_pairs`, apply_edit must
+    // collapse them client-side rather than surfacing a 500.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-edit-dup")).await.unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+    repo::stop(&pool, row.id).await.unwrap();
+
+    let new_ip = IpAddr::from_str("198.51.100.55").unwrap();
+    let edit = EditInput {
+        add_pairs: vec![
+            ("agent-new".into(), new_ip),
+            ("agent-new".into(), new_ip), // duplicate
+        ],
+        ..EditInput::default()
+    };
+    let restarted = repo::apply_edit(&pool, row.id, edit).await.unwrap();
+    assert_eq!(restarted.state, CampaignState::Running);
+
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = 'agent-new' AND destination_ip = '198.51.100.55'",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "duplicate collapsed to a single row");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn apply_edit_force_measurement_resets_resolved_pairs() {
     let pool = common::shared_migrated_pool().await;
     let row = repo::create(&pool, make_input("t-edit-force"))

@@ -364,13 +364,23 @@ pub async fn apply_edit(
 
     // 3. Insert or reset added pairs. A previously-skipped pair that is
     //    re-added resets to `pending` with cleared bookkeeping.
+    //
+    //    Duplicates are collapsed client-side first: Postgres's
+    //    `INSERT ... ON CONFLICT DO UPDATE` refuses to target the same
+    //    row twice in one statement (error 21000 — "cannot affect row a
+    //    second time"), so a payload with repeated `(agent, ip)` pairs
+    //    would otherwise surface as a 500.
     if !edit.add_pairs.is_empty() {
-        let srcs: Vec<&str> = edit.add_pairs.iter().map(|(s, _)| s.as_str()).collect();
-        let dsts: Vec<IpNetwork> = edit
-            .add_pairs
-            .iter()
-            .map(|(_, d)| IpNetwork::from(*d))
-            .collect();
+        let mut seen: std::collections::HashSet<(&str, IpAddr)> =
+            std::collections::HashSet::with_capacity(edit.add_pairs.len());
+        let mut srcs: Vec<&str> = Vec::with_capacity(edit.add_pairs.len());
+        let mut dsts: Vec<IpNetwork> = Vec::with_capacity(edit.add_pairs.len());
+        for (s, d) in &edit.add_pairs {
+            if seen.insert((s.as_str(), *d)) {
+                srcs.push(s.as_str());
+                dsts.push(IpNetwork::from(*d));
+            }
+        }
         sqlx::query!(
             "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)
              SELECT $1, src, dst
