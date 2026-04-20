@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -108,17 +108,19 @@ describe("PasteStaging", () => {
     expect(pendingChips.length).toBeGreaterThanOrEqual(2);
   });
 
-  test("invalid tokens render as red error messages with the parse error", async () => {
+  test("invalid tokens render as red chips with the parse error on hover", async () => {
     const user = userEvent.setup();
     render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
     const textarea = screen.getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "not-an-ip");
 
-    // Error for invalid_ip should appear in its own element
-    expect(screen.getByText(/not a valid ip address/i)).toBeInTheDocument();
-    // The invalid-tokens list should contain the token text
+    // The rejected token renders as a chip inside the invalid-tokens list
     const invalidList = screen.getByRole("list", { name: /invalid tokens/i });
-    expect(invalidList).toHaveTextContent("not-an-ip");
+    const chip = within(invalidList).getByText("not-an-ip");
+    // Red destructive variant — Badge applies `bg-destructive` on destructive
+    expect(chip.className).toMatch(/destructive/);
+    // Hover tooltip surfaces the parse error via the `title` attribute
+    expect(chip).toHaveAttribute("title", "Not a valid IP address");
   });
 
   test("intra-paste duplicates collapse to one row with ×N badge", async () => {
@@ -134,15 +136,21 @@ describe("PasteStaging", () => {
     expect(screen.getByText("×3")).toBeInTheDocument();
   });
 
-  test("typing a /24 CIDR shows the exact inline error copy", async () => {
+  test("typing a /24 CIDR shows the exact inline error copy on hover", async () => {
     const user = userEvent.setup();
     render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
     const textarea = screen.getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "192.168.1.0/24");
 
-    expect(
-      screen.getByText("IP addresses only — CIDR ranges aren't allowed as catalogue entries"),
-    ).toBeInTheDocument();
+    // The rejected CIDR renders as a red chip inside the invalid-tokens list;
+    // the exact error copy lives in the `title` attribute (hover tooltip).
+    const invalidList = screen.getByRole("list", { name: /invalid tokens/i });
+    const chip = within(invalidList).getByText("192.168.1.0/24");
+    expect(chip.className).toMatch(/destructive/);
+    expect(chip).toHaveAttribute(
+      "title",
+      "IP addresses only — CIDR ranges aren't allowed as catalogue entries",
+    );
   });
 
   test("chip flips to enriched when SSE enrichment_progress updates the query cache", async () => {

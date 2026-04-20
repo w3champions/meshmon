@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { CatalogueEntry, CataloguePasteResponse } from "@/api/hooks/catalogue";
 import { catalogueEntryKey, usePasteCatalogue } from "@/api/hooks/catalogue";
 import { StatusChip } from "@/components/catalogue/StatusChip";
+import { Badge } from "@/components/ui/badge";
 import type { ParseOutcome } from "@/lib/catalogue-parse";
 import { parsePasteInput } from "@/lib/catalogue-parse";
 
@@ -16,6 +17,25 @@ function rejectionLabel(reason: string): string {
     return "IP addresses only — CIDR ranges aren't allowed as catalogue entries";
   }
   return "Not a valid IP address";
+}
+
+interface RejectedChipProps {
+  token: string;
+  reason: string;
+}
+
+/**
+ * Compact red pill for a rejected paste token. Mirrors `StatusChip`'s visual
+ * vocabulary (rounded `Badge` with destructive tint) but is specific to
+ * parse-time rejection — the full reason shows on hover via the `title` attr.
+ */
+function RejectedChip({ token, reason }: RejectedChipProps) {
+  const label = rejectionLabel(reason);
+  return (
+    <Badge variant="destructive" title={label} aria-label={`${token}: ${label}`}>
+      {token}
+    </Badge>
+  );
 }
 
 /** A single staged row after a successful POST — keyed by IP, carries the server-assigned id. */
@@ -105,12 +125,10 @@ export function PasteStaging({ onClose }: PasteStagingProps) {
       </div>
 
       {outcome.rejected.length > 0 && (
-        <ul aria-label="Invalid tokens">
+        <ul aria-label="Invalid tokens" className="flex flex-wrap gap-1.5 list-none p-0">
           {outcome.rejected.map((r) => (
-            <li key={`${r.token}::${r.reason}`} style={{ color: "red" }}>
-              <span className="token-label">{r.token}</span>
-              {" — "}
-              <span className="error-reason">{rejectionLabel(r.reason)}</span>
+            <li key={`${r.token}::${r.reason}`}>
+              <RejectedChip token={r.token} reason={r.reason} />
             </li>
           ))}
         </ul>
