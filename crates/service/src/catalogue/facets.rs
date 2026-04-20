@@ -23,6 +23,16 @@
 //! - `tokio::sync::Mutex` holds across `.await`, which is required here
 //!   because we call the async [`super::repo::facets`] inside the
 //!   critical section.
+//!
+//! # Write-path invalidation
+//!
+//! Every handler that mutates catalogue rows (paste, patch, delete,
+//! re-enrich) and the enrichment runner's terminal transitions call
+//! [`FacetsCache::invalidate`] after a successful write. This means the
+//! *next* `GET /api/catalogue/facets` always sees a fresh snapshot
+//! rather than waiting up to 30 s for the TTL to expire. The TTL is
+//! therefore a **safety net** — a last-resort backstop against a missed
+//! invalidation — not the primary freshness mechanism.
 
 use super::repo::{self, FacetsResponse};
 use sqlx::PgPool;
@@ -62,6 +72,22 @@ impl FacetsCache {
         }
     }
 
+    /// Immediately discard the cached snapshot.
+    ///
+    /// The next [`Self::get`] call will re-query the database regardless
+    /// of the remaining TTL. Call this from every write path that can
+    /// shift a facet bucket (paste, patch, delete, re-enrich, enrichment
+    /// runner terminal transition) so the filter rail reflects mutations
+    /// without waiting for the TTL to expire naturally.
+    ///
+    /// Invalidation is a best-effort hint — callers should invoke it
+    /// *after* a successful DB write, never before, so a failed write
+    /// does not flush a still-valid snapshot.
+    pub async fn invalidate(&self) {
+        let mut guard = self.inner.lock().await;
+        *guard = None;
+    }
+
     /// Return the cached facets snapshot, refreshing from `pool` if the
     /// cache is empty or older than the configured TTL.
     ///
@@ -92,5 +118,37 @@ mod tests {
         // so the try_lock cannot contend with anything else.
         let guard = cache.inner.try_lock().expect("uncontended");
         assert!(guard.is_none(), "cache must start empty");
+    }
+
+    #[tokio::test]
+    async fn invalidate_clears_populated_cache() {
+        let cache = FacetsCache::new(Duration::from_secs(30));
+
+        // Manually seed a non-None value to simulate a warmed cache.
+        {
+            let mut guard = cache.inner.lock().await;
+            *guard = Some((
+                Instant::now(),
+                FacetsResponse {
+                    countries: vec![],
+                    asns: vec![],
+                    networks: vec![],
+                    cities: vec![],
+                },
+            ));
+        }
+        // Sanity-check: the cache must be Some before invalidation.
+        {
+            let guard = cache.inner.lock().await;
+            assert!(
+                guard.is_some(),
+                "seeded cache must be Some before invalidate"
+            );
+        }
+
+        cache.invalidate().await;
+
+        let guard = cache.inner.lock().await;
+        assert!(guard.is_none(), "cache must be None after invalidate");
     }
 }

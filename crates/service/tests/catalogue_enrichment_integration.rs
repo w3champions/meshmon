@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use meshmon_service::{
     catalogue::{
         events::CatalogueBroker,
+        facets::FacetsCache,
         model::{CatalogueSource, EnrichmentStatus, Field},
         repo,
     },
@@ -102,6 +103,7 @@ async fn runner_enriches_a_pending_row_and_broadcasts() {
         broker.clone(),
         rx,
         Duration::from_millis(50),
+        Arc::new(FacetsCache::new(Duration::from_secs(30))),
     );
     let handle = tokio::spawn(runner.run());
 
@@ -167,6 +169,7 @@ async fn runner_skips_operator_edited_fields() {
             broker,
             rx,
             Duration::from_millis(50),
+            Arc::new(FacetsCache::new(Duration::from_secs(30))),
         )
         .run(),
     );
@@ -230,6 +233,7 @@ async fn runner_skips_provider_when_all_supported_fields_are_settled() {
             broker,
             rx,
             Duration::from_millis(50),
+            Arc::new(FacetsCache::new(Duration::from_secs(30))),
         )
         .run(),
     );
@@ -330,6 +334,7 @@ async fn runner_leaves_row_pending_when_all_providers_return_retryable_errors() 
             broker,
             rx,
             Duration::from_secs(60), // sweep disabled; queue path only.
+            Arc::new(FacetsCache::new(Duration::from_secs(30))),
         )
         .run(),
     );
@@ -382,7 +387,15 @@ async fn runner_marks_row_failed_when_all_providers_return_terminal_errors() {
     let (queue, rx) = EnrichmentQueue::new(1024);
     let chain: Vec<Arc<dyn EnrichmentProvider>> = vec![Arc::new(FailingTerminalProvider)];
     let handle = tokio::spawn(
-        Runner::new(db.pool.clone(), chain, broker, rx, Duration::from_secs(60)).run(),
+        Runner::new(
+            db.pool.clone(),
+            chain,
+            broker,
+            rx,
+            Duration::from_secs(60),
+            Arc::new(FacetsCache::new(Duration::from_secs(30))),
+        )
+        .run(),
     );
 
     let _ = queue.enqueue(id);

@@ -26,6 +26,7 @@
 use super::{EnrichmentProvider, MergedFields};
 use crate::catalogue::{
     events::{CatalogueBroker, CatalogueEvent},
+    facets::FacetsCache,
     model::EnrichmentStatus,
     repo,
 };
@@ -87,6 +88,12 @@ pub struct Runner {
     broker: CatalogueBroker,
     rx: mpsc::Receiver<Uuid>,
     sweep_interval: Duration,
+    /// Facets cache shared with the HTTP handlers. The runner calls
+    /// [`FacetsCache::invalidate`] after every terminal enrichment
+    /// transition (`Enriched` / `Failed`) so the filter rail reflects
+    /// the new `country_code`, `asn`, `network_operator`, and
+    /// `enrichment_status` values without waiting for the TTL.
+    facets_cache: Arc<FacetsCache>,
 }
 
 impl Runner {
@@ -99,12 +106,15 @@ impl Runner {
     /// - `sweep_interval` — how often to scan for stale `pending` rows.
     ///   Production uses ~30 s; tests configure short intervals to keep
     ///   suite runtime low.
+    /// - `facets_cache` — shared cache invalidated on every terminal
+    ///   enrichment transition so the filter rail stays fresh.
     pub fn new(
         pool: PgPool,
         chain: Vec<Arc<dyn EnrichmentProvider>>,
         broker: CatalogueBroker,
         rx: mpsc::Receiver<Uuid>,
         sweep_interval: Duration,
+        facets_cache: Arc<FacetsCache>,
     ) -> Self {
         Self {
             pool,
@@ -112,6 +122,7 @@ impl Runner {
             broker,
             rx,
             sweep_interval,
+            facets_cache,
         }
     }
 
@@ -223,6 +234,18 @@ impl Runner {
         };
         self.broker
             .publish(CatalogueEvent::EnrichmentProgress { id, status });
+        // Invalidate the facets cache on terminal transitions only.
+        // `Enriched` and `Failed` both settle the row's `enrichment_status`
+        // bucket and may have filled `country_code`, `asn`, or
+        // `network_operator` — all of which drive facet counts. `Pending`
+        // means the row will be retried; its counts haven't changed yet and
+        // we skip the invalidation to avoid a spurious extra DB round-trip.
+        if matches!(
+            status,
+            EnrichmentStatus::Enriched | EnrichmentStatus::Failed
+        ) {
+            self.facets_cache.invalidate().await;
+        }
     }
 
     /// Scan the DB for stale `pending` rows and process them.

@@ -1081,6 +1081,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
             state.catalogue_broker.clone(),
             rx,
             Duration::from_millis(50),
+            Arc::clone(&state.facets_cache),
         );
         let runner_task = tokio::spawn(runner.run());
 

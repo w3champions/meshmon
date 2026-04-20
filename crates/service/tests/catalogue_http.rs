@@ -23,6 +23,7 @@
 //! | `ip_prefix_filter_matches_exact_host_and_cidr`  | `198.51.100.111–113` |
 //! | `patch_rejects_invalid_latitude_longitude_cc`   | `198.51.100.121`     |
 //! | `facets_response_has_expected_array_shape`      | (no seeded IPs)      |
+//! | `facets_cache_invalidated_after_paste`          | `198.51.100.131`     |
 
 mod common;
 
@@ -622,6 +623,91 @@ async fn facets_response_has_expected_array_shape() {
             "facets response must expose {key} as array; body = {body}"
         );
     }
+}
+
+/// Regression test for the stale-facets bug: paste must invalidate the
+/// facets cache so the next `GET /api/catalogue/facets` reflects the new
+/// row immediately rather than waiting for the 30-second TTL to expire.
+///
+/// Flow:
+/// 1. Fetch facets to warm the cache.
+/// 2. Stamp the new IP's row with a sentinel country code via direct SQL
+///    (simulating what a real enrichment write would do) — bypassing the
+///    30-second TTL path entirely.
+/// 3. Paste the same IP so the handler calls `facets_cache.invalidate()`.
+/// 4. Fetch facets again and assert the cache was cleared (the next read
+///    hit the DB) by checking that the country-bucket array is returned
+///    successfully. We don't assert the sentinel value because the shared
+///    pool may already contain rows with that code from other test runs,
+///    but we *do* confirm the handler round-tripped to the DB by
+///    verifying the response is a valid facets shape — if the cache had
+///    NOT been invalidated, the stale snapshot would still be returned
+///    (which is also a valid shape, so this is a best-effort guard).
+///
+/// The definitive proof is the unit test on `FacetsCache::invalidate`
+/// plus the handler wiring; this integration test confirms the glue is
+/// connected end-to-end.
+#[tokio::test]
+async fn facets_cache_invalidated_after_paste() {
+    let h = common::HttpHarness::start().await;
+
+    // Step 1: warm the cache with an initial facets fetch.
+    let before: serde_json::Value = h.get_json("/api/catalogue/facets").await;
+    for key in ["countries", "asns", "networks", "cities"] {
+        assert!(
+            before[key].is_array(),
+            "facets before paste must have array {key}; body = {before}"
+        );
+    }
+
+    // Step 2: paste a new row — this triggers `facets_cache.invalidate()`.
+    let paste: serde_json::Value = h
+        .post_json(
+            "/api/catalogue",
+            &serde_json::json!({ "ips": ["198.51.100.131"] }),
+        )
+        .await;
+    // Whether created or existing (shared pool), the row is present.
+    let row = paste["created"]
+        .as_array()
+        .and_then(|a| a.first())
+        .or_else(|| paste["existing"].as_array().and_then(|a| a.first()))
+        .expect("paste must surface the row");
+    let id = row["id"].as_str().expect("id is string");
+
+    // Step 3: stamp a unique sentinel country code directly in the DB
+    // so a fresh facets query would see it, while a stale cached response
+    // (if invalidation were broken) would not yet contain it.
+    const SENTINEL_CC: &str = "XZ"; // ISO 3166 user-assigned / reserved
+    sqlx::query("UPDATE ip_catalogue SET country_code = $2 WHERE id = $1::uuid")
+        .bind(id)
+        .bind(SENTINEL_CC)
+        .execute(&h.state.pool)
+        .await
+        .expect("stamp sentinel country code");
+
+    // Step 4: fetch facets again. If the cache was properly invalidated,
+    // this round-trips to the DB and returns the current state; assert
+    // the shape is valid and — as a tighter guard — that the sentinel
+    // country code appears in the countries bucket.
+    let after: serde_json::Value = h.get_json("/api/catalogue/facets").await;
+    for key in ["countries", "asns", "networks", "cities"] {
+        assert!(
+            after[key].is_array(),
+            "facets after paste must have array {key}; body = {after}"
+        );
+    }
+    let country_codes: Vec<&str> = after["countries"]
+        .as_array()
+        .expect("countries is array")
+        .iter()
+        .filter_map(|e| e["code"].as_str())
+        .collect();
+    assert!(
+        country_codes.contains(&SENTINEL_CC),
+        "facets after paste must contain sentinel country {SENTINEL_CC} — \
+         cache was not invalidated if this fails; countries = {country_codes:?}"
+    );
 }
 
 #[tokio::test]

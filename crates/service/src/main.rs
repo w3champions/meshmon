@@ -292,6 +292,7 @@ async fn run() -> anyhow::Result<()> {
             state.catalogue_broker.clone(),
             enrichment_rx,
             ENRICHMENT_SWEEP_INTERVAL,
+            Arc::clone(&state.facets_cache),
         )
         .run(),
     );
