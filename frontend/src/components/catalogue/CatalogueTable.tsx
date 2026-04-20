@@ -5,7 +5,7 @@ import {
   useReactTable,
   type VisibilityState,
 } from "@tanstack/react-table";
-import { Settings2 } from "lucide-react";
+import { RefreshCw, Settings2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ const DEFAULT_VISIBLE: string[] = [
   "asn",
   "network",
   "status",
+  "actions",
 ];
 
 /** All optional (hideable) columns — off by default. */
@@ -141,16 +142,36 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
       id: "status",
       header: "Status",
       cell: ({ row }) => {
-        const { id, enrichment_status, operator_edited_fields } = row.original;
+        const { enrichment_status, operator_edited_fields } = row.original;
+        // Display-only in the table: the Actions column owns the re-enrich button.
+        // StatusChip.onReenrich is still used in EntryDrawer where the chip is
+        // the only re-enrich surface.
         return (
-          // biome-ignore lint/a11y/noStaticElementInteractions: stopPropagation wrapper — the interactive child (StatusChip badge) is the real interactive element
-          <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-            <StatusChip
-              status={enrichment_status}
-              operatorLocked={operator_edited_fields.length > 0}
-              onReenrich={() => onReenrich(id)}
-            />
-          </span>
+          <StatusChip
+            status={enrichment_status}
+            operatorLocked={operator_edited_fields.length > 0}
+          />
+        );
+      },
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => {
+        const { id, ip } = row.original;
+        return (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Re-enrich ${ip}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onReenrich(id);
+            }}
+          >
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+          </Button>
         );
       },
     },

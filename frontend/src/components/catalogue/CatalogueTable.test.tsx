@@ -86,6 +86,7 @@ describe("CatalogueTable", () => {
       expect(screen.getByRole("columnheader", { name: "ASN" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
     });
 
     test("renders IP and display_name cell values", async () => {
@@ -200,16 +201,15 @@ describe("CatalogueTable", () => {
   });
 
   describe("re-enrich button fires onReenrich(id)", () => {
-    test("clicking the StatusChip re-enrich button calls onReenrich with the row id", async () => {
+    test("clicking the Actions re-enrich icon button calls onReenrich with the row id", async () => {
       const onRowClick = vi.fn();
       const onReenrich = vi.fn();
       renderWithProviders(
         <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={onReenrich} />,
       );
 
-      // ENTRY_A status is "enriched" → StatusChip renders a clickable badge.
-      // The aria-label is "Re-enrich (Enriched)" per StatusChip source.
-      const reenrichBtn = await screen.findByRole("button", { name: /Re-enrich \(Enriched\)/i });
+      // Actions column renders an icon button with aria-label="Re-enrich {ip}".
+      const reenrichBtn = await screen.findByRole("button", { name: "Re-enrich 1.2.3.4" });
       fireEvent.click(reenrichBtn);
 
       expect(onReenrich).toHaveBeenCalledOnce();
@@ -223,26 +223,24 @@ describe("CatalogueTable", () => {
         <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={onReenrich} />,
       );
 
-      const reenrichBtn = await screen.findByRole("button", { name: /Re-enrich \(Enriched\)/i });
+      const reenrichBtn = await screen.findByRole("button", { name: "Re-enrich 1.2.3.4" });
       fireEvent.click(reenrichBtn);
 
       expect(onReenrich).toHaveBeenCalledOnce();
       expect(onRowClick).not.toHaveBeenCalled();
     });
 
-    test("ENTRY_B with operator_edited_fields shows operator-locked chip and re-enrich", async () => {
+    test("ENTRY_B with operator_edited_fields shows operator-locked chip and Actions re-enrich", async () => {
       const onReenrich = vi.fn();
       renderWithProviders(
         <CatalogueTable entries={[ENTRY_B]} onRowClick={vi.fn()} onReenrich={onReenrich} />,
       );
 
-      // ENTRY_B is "failed" → StatusChip renders clickable "Re-enrich (Failed)"
-      const reenrichBtn = await screen.findByRole("button", { name: /Re-enrich \(Failed\)/i });
-      expect(reenrichBtn).toBeInTheDocument();
+      // operator-locked badge rendered by StatusChip (display-only in the table)
+      expect(await screen.findByLabelText("Operator-edited")).toBeInTheDocument();
 
-      // operator-locked badge rendered by StatusChip
-      expect(screen.getByLabelText("Operator-edited")).toBeInTheDocument();
-
+      // Actions column carries the re-enrich button
+      const reenrichBtn = screen.getByRole("button", { name: "Re-enrich 5.6.7.8" });
       fireEvent.click(reenrichBtn);
       expect(onReenrich).toHaveBeenCalledWith("fixture-id-b");
     });
