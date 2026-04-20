@@ -13,7 +13,6 @@ import type { CatalogueEntry, CatalogueSortBy, CatalogueSortDir } from "@/api/ho
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Table, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 import { StatusChip } from "./StatusChip";
@@ -102,44 +101,44 @@ export const ROW_HEIGHT_ESTIMATE = 44;
 const SCROLL_MAX_HEIGHT = "70vh";
 
 /**
- * Explicit per-column widths (pixels). The header is a real `<table>`
- * with `table-layout: fixed` + `<colgroup>` so column titles align and
- * screen readers still read column headers. The virtualized body is a
- * flat stack of `role="row"` / `role="cell"` divs laid out with CSS
- * grid using these same widths — grid tracks behave predictably with
- * `minWidth: 0` for in-track truncation, whereas `<tr>`-as-flex with
- * `<td>` children yields undefined table layout across browsers.
- * Every cell renderer clips overflow via `truncate`, so widths
- * narrower than the raw content are safe.
+ * Per-column CSS grid track expressions. Dense columns (monospace IP,
+ * badge, button) use fixed px widths; columns carrying longer text use
+ * `minmax(<min>, <fr>)` so the overall table flexes to fit the viewport
+ * and no column clips off the right edge. Both header and virtualized
+ * body render as CSS grids and share the same track string emitted by
+ * {@link buildGridTemplate}, so they always line up. Every cell
+ * renderer clips overflow via `truncate` so narrow viewports remain
+ * visually safe.
  */
-const COLUMN_WIDTHS: Record<string, number> = {
-  ip: 140,
-  display_name: 180,
-  city: 140,
-  country: 150,
-  asn: 100,
-  network: 180,
-  status: 120,
-  location: 110,
-  website: 180,
-  notes: 200,
-  actions: 80,
+const COLUMN_TRACKS: Record<string, string> = {
+  ip: "120px",
+  display_name: "minmax(140px, 1.2fr)",
+  city: "minmax(100px, 1fr)",
+  country: "minmax(110px, 1fr)",
+  asn: "80px",
+  network: "minmax(140px, 1.5fr)",
+  status: "110px",
+  location: "100px",
+  website: "minmax(120px, 1fr)",
+  notes: "minmax(100px, 1.5fr)",
+  actions: "70px",
 };
 
-/** Fallback width for any column that doesn't appear in {@link COLUMN_WIDTHS}. */
-const DEFAULT_COLUMN_WIDTH = 140;
+/** Fallback track for any column that doesn't appear in {@link COLUMN_TRACKS}. */
+const DEFAULT_COLUMN_TRACK = "minmax(120px, 1fr)";
 
-function columnWidth(columnId: string): number {
-  return COLUMN_WIDTHS[columnId] ?? DEFAULT_COLUMN_WIDTH;
+function columnTrack(columnId: string): string {
+  return COLUMN_TRACKS[columnId] ?? DEFAULT_COLUMN_TRACK;
 }
 
 /**
- * CSS grid-template-columns value for the virtualized body grid.
- * Emits one fixed-px track per visible column in the configured order
- * so row cells line up with the header `<colgroup>` column widths.
+ * CSS grid-template-columns value shared by the header and the
+ * virtualized body. Emits one track per visible column in the
+ * configured order so header cells and row cells line up visually
+ * while the table as a whole flexes with the viewport.
  */
 function buildGridTemplate(columns: ReadonlyArray<Column<CatalogueEntry, unknown>>): string {
-  return columns.map((col) => `${columnWidth(col.id)}px`).join(" ");
+  return columns.map((col) => columnTrack(col.id)).join(" ");
 }
 
 /**
@@ -576,50 +575,52 @@ export function CatalogueTable({
         </Popover>
       </div>
 
-      {/* Table — the header stays a real `<table>` so screen readers
-          announce column headers and aria-sort. The virtualized body
-          below is intentionally NOT a `<table>`: rendering `<tr
-          style="display: flex">` with `<td>` children inside a
-          `table-layout: fixed` `<table>` yields undefined layout
-          across browsers (Chrome clips all but the first cell). We
-          render rows as div-based CSS-grid tracks that use the same
-          per-column widths as the header `<colgroup>`, so the two
-          still line up visually. */}
-      <div className="overflow-hidden rounded-md border">
-        <Table style={{ tableLayout: "fixed" }}>
-          <colgroup>
-            {visibleColumns.map((col) => (
-              <col key={col.id} style={{ width: `${columnWidth(col.id)}px` }} />
-            ))}
-          </colgroup>
-          <TableHeader>
-            <TableRow>
-              {visibleColumns.map((col) => {
-                const sortCol = columnToSortBy(col.id);
-                const header = col.columnDef.header;
-                const label = typeof header === "string" ? header : col.id;
-                return (
-                  <TableHead
-                    key={col.id}
-                    aria-sort={sortCol ? ariaSortForColumn(sortCol, sort) : undefined}
-                    className="overflow-hidden"
-                  >
-                    {sortCol ? (
-                      <SortableHeader
-                        col={sortCol}
-                        label={label}
-                        sort={sort}
-                        onSortChange={onSortChange}
-                      />
-                    ) : (
-                      label
-                    )}
-                  </TableHead>
-                );
-              })}
-            </TableRow>
-          </TableHeader>
-        </Table>
+      {/* Table — header and body are both CSS grids sharing one
+          `grid-template-columns` string (see `buildGridTemplate`) so
+          cells line up regardless of viewport width. Fixed-px tracks
+          handle dense content (IP, ASN, badges, action button) while
+          text-heavy columns use `minmax(<min>, <fr>)` so the table
+          flexes to the container instead of clipping past the right
+          edge. ARIA semantics preserved via role="table" / "row" /
+          "columnheader" / "cell". A real `<table>` can't carry `fr`
+          tracks (table-layout needs absolute widths), so the div+grid
+          approach is load-bearing — keep the role attributes. */}
+      {/* biome-ignore lint/a11y/useSemanticElements: CSS grid needs div roots; see block comment above. Switching to <table> would force `table-layout: fixed` which forbids `fr` tracks and reintroduces the clip-past-right-edge regression. */}
+      <div role="table" className="rounded-md border">
+        {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale above. */}
+        {/* biome-ignore lint/a11y/useFocusableInteractive: role="row" is a grouping role in the ARIA table pattern — not an interactive control, no keyboard focus needed. */}
+        <div
+          role="row"
+          className="grid w-full border-b bg-muted/30 text-sm font-medium text-muted-foreground"
+          style={{ gridTemplateColumns: buildGridTemplate(visibleColumns) }}
+        >
+          {visibleColumns.map((col) => {
+            const sortCol = columnToSortBy(col.id);
+            const header = col.columnDef.header;
+            const label = typeof header === "string" ? header : col.id;
+            return (
+              /* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale above. */
+              /* biome-ignore lint/a11y/useFocusableInteractive: role="columnheader" is a non-interactive structural role; sortable headers own their own focusable <button> inside SortableHeader. */
+              <div
+                key={col.id}
+                role="columnheader"
+                aria-sort={sortCol ? ariaSortForColumn(sortCol, sort) : undefined}
+                className="overflow-hidden px-4 py-3"
+              >
+                {sortCol ? (
+                  <SortableHeader
+                    col={sortCol}
+                    label={label}
+                    sort={sort}
+                    onSortChange={onSortChange}
+                  />
+                ) : (
+                  label
+                )}
+              </div>
+            );
+          })}
+        </div>
         <div
           ref={scrollRef}
           className="relative overflow-auto"

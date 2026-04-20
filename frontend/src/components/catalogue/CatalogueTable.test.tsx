@@ -572,32 +572,38 @@ describe("CatalogueTable", () => {
       expect(renderedRow.style.height).toBe(`${ROW_HEIGHT_ESTIMATE}px`);
     });
 
-    test("rendered column widths match the declared explicit widths", async () => {
-      // The header is a real <table> with <colgroup>; the body is a
-      // pure-div CSS grid. Both must encode the same per-column widths
-      // for the columns to line up visually.
-      const { container } = renderWithProviders(<CatalogueTable {...buildProps()} />);
+    test("rendered column widths match between header and body via shared grid template", async () => {
+      // Header and body are both CSS grids sharing one
+      // `grid-template-columns` string so columns line up regardless
+      // of viewport width. Dense columns use fixed px widths; text
+      // columns use `minmax(<min>, <fr>)` so the table flexes.
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
       await screen.findByRole("columnheader", { name: /IP/ });
 
-      const tables = container.querySelectorAll("table");
-      // One table: the header. The body no longer uses table markup.
-      expect(tables.length).toBe(1);
+      // The first row-role element is the header row; the first
+      // data-index element is the first committed body row.
+      const headerRow = document.querySelector('[role="row"]') as HTMLElement | null;
+      expect(headerRow).not.toBeNull();
+      const bodyRow = document.querySelector("[data-index]") as HTMLElement | null;
+      expect(bodyRow).not.toBeNull();
 
-      const headerWidths = Array.from(tables[0].querySelectorAll("colgroup > col")).map(
-        (c) => (c as HTMLElement).style.width,
-      );
-      // Every column must have an explicit px width (no auto-sizing).
-      for (const width of headerWidths) {
-        expect(width).toMatch(/^\d+px$/);
-      }
-
-      // Body rows carry the same widths as a grid-template-columns
-      // string. The first committed row is the source of truth.
-      const firstRow = document.querySelector("[data-index]") as HTMLElement | null;
-      expect(firstRow).not.toBeNull();
       // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
-      const gridTemplate = firstRow!.style.gridTemplateColumns;
-      expect(gridTemplate).toBe(headerWidths.join(" "));
+      const headerTemplate = headerRow!.style.gridTemplateColumns;
+      // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+      const bodyTemplate = bodyRow!.style.gridTemplateColumns;
+
+      // Header and body must share the exact same track string —
+      // otherwise columns would drift as the viewport resizes.
+      expect(headerTemplate).toBe(bodyTemplate);
+
+      // Sanity-check a handful of known per-column tracks so a stray
+      // rename silently breaks the visual contract.
+      expect(headerTemplate).toContain("120px"); // ip
+      expect(headerTemplate).toContain("80px"); // asn
+      expect(headerTemplate).toContain("110px"); // status
+      expect(headerTemplate).toContain("70px"); // actions
+      expect(headerTemplate).toContain("minmax(140px, 1.2fr)"); // display_name
+      expect(headerTemplate).toContain("minmax(140px, 1.5fr)"); // network
     });
   });
 });
