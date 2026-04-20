@@ -256,7 +256,7 @@ pub fn spawn(
     let trippy_join = trippy_prober.spawn_target(
         target_for_trippy,
         trippy_rate_rx,
-        observation_tx.clone(),
+        route_trace_tx.clone(),
         allowlist_rx,
         cancel.clone(),
     );

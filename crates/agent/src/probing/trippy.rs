@@ -7,8 +7,14 @@
 //!    tracers across all targets).
 //! 3. Run one tracer round under [`tokio::task::spawn_blocking`]; the
 //!    permit is held only for the blocking call.
-//! 4. Release the permit, emit a path-level + hops [`ProbeObservation`].
+//! 4. Release the permit, emit the round's hops as a [`RouteTraceMsg`] on the
+//!    route-trace channel. Failed rounds and panicked workers are logged but
+//!    emit nothing — they are not reachability samples.
 //! 5. Sleep `1/pps` with ±20 % jitter, loop.
+//!
+//! Trippy emits topology data ([`RouteTraceMsg`]) into the supervisor's tracker
+//! channel, never reachability samples ([`ProbeObservation`]). Reachability is
+//! owned by the dedicated ICMP/TCP/UDP probers.
 //!
 //! Trippy-core 0.13 is fully synchronous and raw-socket-bound, so each
 //! round is a `spawn_blocking` worker: we rebuild a [`Builder`] per round
@@ -42,11 +48,10 @@
 //! ## Discard semantics
 //!
 //! Contaminated rounds are dropped silently — they are NOT emitted as
-//! `ProbeOutcome::Timeout` (which would inflate `PathPacketLoss`) and NOT as
-//! `ProbeOutcome::Error` (same reason). Rolling stats simply see one fewer
-//! sample that tick. A `tracing::warn!` fires at most once per 60 s per
-//! process (rate-limited via `LAST_CONTAMINATION_WARN_NANOS`) and names the
-//! sibling IP that leaked.
+//! [`RouteTraceMsg`] (which would feed the route tracker with foreign path
+//! data). A `tracing::warn!` fires at most once per 60 s per process
+//! (rate-limited via `LAST_CONTAMINATION_WARN_NANOS`) and names the sibling
+//! IP that leaked.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -61,7 +66,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio_util::sync::CancellationToken;
 use trippy_core::{Builder, Port, PortDirection, State};
 
-use crate::probing::{HopObservation, ProbeObservation, ProbeOutcome, TrippyRate};
+use crate::probing::{HopObservation, ProbeObservation, ProbeOutcome, RouteTraceMsg, TrippyRate};
 
 /// Maximum TTL (hops) the tracer will emit probes for.
 const MAX_TTL: u8 = 30;
@@ -131,7 +136,7 @@ impl TrippyProber {
         self: &Arc<Self>,
         target: Target,
         config_rx: watch::Receiver<TrippyRate>,
-        obs_tx: mpsc::Sender<ProbeObservation>,
+        route_trace_tx: mpsc::Sender<RouteTraceMsg>,
         allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
@@ -159,7 +164,7 @@ impl TrippyProber {
                 tcp_port,
                 udp_port,
                 config_rx,
-                obs_tx,
+                route_trace_tx,
                 allowlist_rx,
                 cancel,
             )
@@ -176,7 +181,7 @@ async fn run(
     tcp_port: Option<u16>,
     udp_port: Option<u16>,
     mut config_rx: watch::Receiver<TrippyRate>,
-    obs_tx: mpsc::Sender<ProbeObservation>,
+    route_trace_tx: mpsc::Sender<RouteTraceMsg>,
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
 ) {
@@ -238,7 +243,22 @@ async fn run(
                             warn_contamination_if_due(&target_id, &hit);
                             continue;
                         }
-                        if obs_tx.send(obs).await.is_err() {
+                        let Some(hops) = obs.hops else {
+                            // run_one_round always sets Some(...), but defensively skip
+                            // emission if a future change ever returns None — topology
+                            // emission requires real per-hop data.
+                            continue;
+                        };
+                        if hops.is_empty() {
+                            continue;
+                        }
+                        let trace = RouteTraceMsg {
+                            target_id: target_id.clone(),
+                            protocol: snapshot.protocol,
+                            hops,
+                            observed_at: tokio::time::Instant::now(),
+                        };
+                        if route_trace_tx.send(trace).await.is_err() {
                             return;
                         }
                     }
@@ -249,34 +269,14 @@ async fn run(
                             error = %e,
                             "trippy round failed"
                         );
-                        let obs = ProbeObservation {
-                            protocol: snapshot.protocol,
-                            target_id: target_id.clone(),
-                            outcome: ProbeOutcome::Error(e.to_string()),
-                            hops: None,
-                            observed_at: tokio::time::Instant::now(),
-                        };
-                        if obs_tx.send(obs).await.is_err() {
-                            return;
-                        }
                     }
                     Err(join_err) => {
-                        tracing::warn!(%join_err, "trippy blocking task panicked");
-                        // Preserve "one round tick → one observation" for panics so downstream
-                        // rolling-stats stay aligned with rate. Contamination discards
-                        // (above) intentionally break this invariant — see module docs.
-                        let obs = ProbeObservation {
-                            protocol: snapshot.protocol,
-                            target_id: target_id.clone(),
-                            outcome: ProbeOutcome::Error(format!(
-                                "trippy panicked: {join_err}"
-                            )),
-                            hops: None,
-                            observed_at: tokio::time::Instant::now(),
-                        };
-                        if obs_tx.send(obs).await.is_err() {
-                            return;
-                        }
+                        tracing::warn!(
+                            target_id = %target_id,
+                            protocol = ?snapshot.protocol,
+                            %join_err,
+                            "trippy blocking task panicked",
+                        );
                     }
                 }
             }
@@ -510,6 +510,13 @@ fn warn_contamination_if_due(target_id: &str, hit: &ContaminationHit) {
 /// Run one trippy round synchronously. Callers must wrap this in
 /// `spawn_blocking` — trippy-core 0.13 performs raw-socket I/O on the
 /// calling thread.
+///
+/// Returns a `ProbeObservation` so the existing `Builder::build()`-driven
+/// loopback tests below can keep their shape, but the live caller in
+/// `run()` only reads `obs.hops` — the `outcome` field is intentionally
+/// unused on the production path. The persistent-tracer rewrite (the
+/// next refactor step) replaces this function with a `Tracer::run_with`
+/// callback that yields hops directly.
 fn run_one_round(
     target_id: &str,
     target_ip: IpAddr,
@@ -718,7 +725,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let prober = TrippyProber::new(1, cancel.clone());
         let (_config_tx, config_rx) = tokio::sync::watch::channel(TrippyRate::idle());
-        let (obs_tx, _obs_rx) = tokio::sync::mpsc::channel(8);
+        let (route_trace_tx, _route_trace_rx) =
+            tokio::sync::mpsc::channel::<crate::probing::RouteTraceMsg>(8);
         let (_allow_tx, allowlist_rx) =
             tokio::sync::watch::channel::<Arc<HashSet<std::net::IpAddr>>>(Arc::new(HashSet::new()));
 
@@ -733,7 +741,13 @@ mod tests {
             udp_probe_port: 0,
         };
 
-        let handle = prober.spawn_target(target, config_rx, obs_tx, allowlist_rx, cancel.clone());
+        let handle = prober.spawn_target(
+            target,
+            config_rx,
+            route_trace_tx,
+            allowlist_rx,
+            cancel.clone(),
+        );
         cancel.cancel();
         let _ = handle.await;
     }
@@ -982,33 +996,31 @@ mod tests {
 
     // --- integration test — contaminated rounds never reach downstream ---
 
-    /// Scripted trippy-like task that replays pre-built `ProbeObservation` rounds
-    /// through the same contamination-detection path used by the real `run()` loop:
-    /// borrow the allowlist, call `detect_contamination`, bump the counter and drop
-    /// on a hit, forward to `obs_tx` on a clean round.
+    /// Replays pre-built [`RouteTraceMsg`]s through the contamination-detection
+    /// path used by `run()`'s `Ok(Ok)` arm: borrow the allowlist, call
+    /// `detect_contamination`, bump the counter and drop on a hit, forward to
+    /// `route_trace_tx` on a clean round.
     ///
     /// This is intentionally **not** the real supervisor — it has no raw sockets,
     /// no `spawn_blocking`, and no timing logic. Its only purpose is to exercise
-    /// the `Ok(Ok(obs))` branch of `run()` in a deterministic, no-privilege way.
+    /// the contamination-detection branch in a deterministic, no-privilege way.
     async fn spawn_scripted_trippy_for_test(
         target_ip: IpAddr,
         allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
-        obs_tx: mpsc::Sender<ProbeObservation>,
-        rounds: Vec<ProbeObservation>,
+        route_trace_tx: mpsc::Sender<crate::probing::RouteTraceMsg>,
+        rounds: Vec<crate::probing::RouteTraceMsg>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            for obs in rounds {
+            for msg in rounds {
                 let hit = {
                     let allowlist = allowlist_rx.borrow();
-                    obs.hops
-                        .as_ref()
-                        .and_then(|hs| detect_contamination(target_ip, hs, allowlist.as_ref()))
+                    detect_contamination(target_ip, &msg.hops, allowlist.as_ref())
                 };
                 if hit.is_some() {
                     CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if obs_tx.send(obs).await.is_err() {
+                if route_trace_tx.send(msg).await.is_err() {
                     return;
                 }
             }
@@ -1030,46 +1042,44 @@ mod tests {
                 .collect::<HashSet<IpAddr>>(),
         ));
 
-        let (obs_tx, mut obs_rx) = tokio::sync::mpsc::channel::<ProbeObservation>(8);
+        let (route_tx, mut route_rx) =
+            tokio::sync::mpsc::channel::<crate::probing::RouteTraceMsg>(8);
 
-        let clean_round_1 = ProbeObservation {
+        let clean_round_1 = crate::probing::RouteTraceMsg {
             protocol: Protocol::Icmp,
             target_id: "au-west".into(),
-            outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
-            hops: Some(vec![HopObservation {
+            hops: vec![HopObservation {
                 position: 1,
                 ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))),
                 rtt_micros: Some(100),
-            }]),
+            }],
             observed_at: tokio::time::Instant::now(),
         };
-        let contaminated_round = ProbeObservation {
+        let contaminated_round = crate::probing::RouteTraceMsg {
             protocol: Protocol::Icmp,
             target_id: "au-west".into(),
-            outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
-            hops: Some(vec![HopObservation {
+            hops: vec![HopObservation {
                 position: 5,
                 ip: Some(foreign_ip),
                 rtt_micros: Some(200),
-            }]),
+            }],
             observed_at: tokio::time::Instant::now(),
         };
-        let clean_round_2 = ProbeObservation {
+        let clean_round_2 = crate::probing::RouteTraceMsg {
             protocol: Protocol::Icmp,
             target_id: "au-west".into(),
-            outcome: ProbeOutcome::Success { rtt_micros: 1_000 },
-            hops: Some(vec![HopObservation {
+            hops: vec![HopObservation {
                 position: 1,
                 ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))),
                 rtt_micros: Some(150),
-            }]),
+            }],
             observed_at: tokio::time::Instant::now(),
         };
 
         let handle = spawn_scripted_trippy_for_test(
             target_ip,
             allowlist_rx,
-            obs_tx.clone(),
+            route_tx.clone(),
             vec![
                 clean_round_1.clone(),
                 contaminated_round,
@@ -1079,11 +1089,11 @@ mod tests {
         .await;
 
         handle.await.expect("scripted task joins cleanly");
-        drop(obs_tx); // close the channel so recv drains
+        drop(route_tx); // close the channel so recv drains
 
-        let mut emitted: Vec<ProbeObservation> = Vec::new();
-        while let Some(obs) = obs_rx.recv().await {
-            emitted.push(obs);
+        let mut emitted: Vec<crate::probing::RouteTraceMsg> = Vec::new();
+        while let Some(msg) = route_rx.recv().await {
+            emitted.push(msg);
         }
 
         assert_eq!(emitted.len(), 2, "only 2 clean rounds reach downstream");
@@ -1096,12 +1106,56 @@ mod tests {
         // Preserve ordering: the contaminated round was dropped, so emitted[0]
         // corresponds to clean_round_1 and emitted[1] to clean_round_2.
         assert_eq!(
-            emitted[0].hops, clean_round_1.hops,
+            emitted[0].hops[0].ip, clean_round_1.hops[0].ip,
             "first emitted round must be clean_round_1"
         );
         assert_eq!(
-            emitted[1].hops, clean_round_2.hops,
+            emitted[1].hops[0].ip, clean_round_2.hops[0].ip,
             "second emitted round must be clean_round_2"
         );
+    }
+
+    #[tokio::test]
+    async fn scripted_trippy_emits_route_trace_msg() {
+        use crate::probing::{HopObservation, RouteTraceMsg};
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let target_ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let (_allow_tx, allowlist_rx) = tokio::sync::watch::channel(Arc::new(HashSet::new()));
+        let (route_tx, mut route_rx) = tokio::sync::mpsc::channel::<RouteTraceMsg>(8);
+
+        let one_round = RouteTraceMsg {
+            target_id: "au-west".into(),
+            protocol: Protocol::Icmp,
+            hops: vec![HopObservation {
+                position: 1,
+                ip: Some(target_ip),
+                rtt_micros: Some(1_000),
+            }],
+            observed_at: tokio::time::Instant::now(),
+        };
+
+        let handle = spawn_scripted_trippy_for_test(
+            target_ip,
+            allowlist_rx,
+            route_tx.clone(),
+            vec![one_round.clone()],
+        )
+        .await;
+
+        handle.await.expect("scripted task joins cleanly");
+        drop(route_tx);
+
+        let mut received: Vec<RouteTraceMsg> = Vec::new();
+        while let Some(msg) = route_rx.recv().await {
+            received.push(msg);
+        }
+
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].target_id, "au-west");
+        assert_eq!(received[0].protocol, Protocol::Icmp);
+        assert_eq!(received[0].hops.len(), 1);
+        assert_eq!(received[0].hops[0].ip, Some(target_ip));
     }
 }
