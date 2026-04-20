@@ -1,14 +1,15 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useState } from "react";
-import { type Resolver, useForm } from "react-hook-form";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
 import { z } from "zod";
 import {
+  type CatalogueEntry,
   type CataloguePatchRequest,
   useDeleteCatalogueEntry,
   usePatchCatalogueEntry,
   useReenrichOne,
 } from "@/api/hooks/catalogue";
-import type { components } from "@/api/schema.gen";
 import { StatusChip } from "@/components/catalogue/StatusChip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,8 +22,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-
-export type CatalogueEntry = components["schemas"]["CatalogueEntryDto"];
 
 export interface EntryDrawerProps {
   /** Undefined closes the drawer. A defined entry opens it and seeds the form. */
@@ -103,24 +102,6 @@ const EDITABLE_FIELD_CONFIGS: readonly EditableFieldConfig[] = [
 
 const EDITABLE_FIELDS: readonly EditableField[] = EDITABLE_FIELD_CONFIGS.map((c) => c.field);
 
-/**
- * RHF form shape. Strings cover text inputs, and numeric fields are typed as
- * `number | ""` so empty input fields can coexist with Zod's numeric
- * validation (empty string → treated as cleared / `null`).
- */
-interface FormValues {
-  display_name: string;
-  asn: number | "";
-  country_code: string;
-  country_name: string;
-  city: string;
-  latitude: number | "";
-  longitude: number | "";
-  network_operator: string;
-  website: string;
-  notes: string;
-}
-
 const numberFromInput = z.union([z.number(), z.string()]).transform((value) => {
   if (typeof value === "number") return value;
   if (value.trim() === "") return "";
@@ -147,6 +128,14 @@ const schema = z.object({
   website: z.string(),
   notes: z.string(),
 });
+
+/**
+ * RHF form shape derived from the Zod schema. Numeric fields are typed as
+ * `number | string` because empty text inputs produce `""` before Zod's
+ * transform narrows them; `toPatchValue` normalises both to `null` on the
+ * wire.
+ */
+type FormValues = z.input<typeof schema>;
 
 function toFormValues(entry: CatalogueEntry): FormValues {
   return {
@@ -178,7 +167,7 @@ function toPatchValue(
   }
   const str = typeof value === "string" ? value : String(value ?? "");
   const trimmed = str.trim();
-  return trimmed === "" ? null : str;
+  return trimmed === "" ? null : trimmed;
 }
 
 /**
@@ -201,6 +190,16 @@ function buildPatchBody(
     (body as Record<string, string | number | null>)[field] = patched;
   }
   return touched ? body : undefined;
+}
+
+/**
+ * Returns `prefix: err.message` when a useful message is available, otherwise
+ * just `prefix`. Keeps toast copy consistent across the drawer's three
+ * mutations without relying on a portal-rendered custom component.
+ */
+function toastMessage(prefix: string, err: unknown): string {
+  if (err instanceof Error && err.message) return `${prefix}: ${err.message}`;
+  return prefix;
 }
 
 function formatTimestamp(value: string | null | undefined): string {
@@ -233,6 +232,7 @@ interface EditableFieldRowProps {
   field: EditableField;
   label: string;
   locked: boolean;
+  isPending: boolean;
   errorMessage?: string;
   inputProps: React.ComponentProps<typeof Input>;
   onRevert: (field: EditableField) => void;
@@ -242,6 +242,7 @@ function EditableFieldRow({
   field,
   label,
   locked,
+  isPending,
   errorMessage,
   inputProps,
   onRevert,
@@ -255,7 +256,8 @@ function EditableFieldRow({
           <button
             type="button"
             onClick={() => onRevert(field)}
-            className="text-xs text-primary underline-offset-2 hover:underline"
+            disabled={isPending}
+            className="text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
           >
             Revert to auto
           </button>
@@ -328,7 +330,7 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
     getValues,
     formState: { dirtyFields, errors },
   } = useForm<FormValues>({
-    resolver: zodResolver(schema) as unknown as Resolver<FormValues>,
+    resolver: zodResolver(schema),
     defaultValues: entry ? toFormValues(entry) : toFormValues(EMPTY_ENTRY),
   });
 
@@ -357,7 +359,14 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
       revert_to_auto: [pascal],
       [field]: null,
     } as CataloguePatchRequest;
-    patchMutation.mutate({ id: entry.id, patch });
+    patchMutation.mutate(
+      { id: entry.id, patch },
+      {
+        onError: (err) => {
+          toast.error(toastMessage("Couldn't revert to auto", err));
+        },
+      },
+    );
     // Clear the local form value so the diff reflects the revert and the
     // input mirrors the server's nulled column on echo.
     const next = { ...getValues(), [field]: "" } as FormValues;
@@ -374,12 +383,19 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
         onSuccess: (updated) => {
           reset(toFormValues(updated));
         },
+        onError: (err) => {
+          toast.error(toastMessage("Couldn't save changes", err));
+        },
       },
     );
   });
 
   const handleReenrich = (): void => {
-    reenrichMutation.mutate(entry.id);
+    reenrichMutation.mutate(entry.id, {
+      onError: (err) => {
+        toast.error(toastMessage("Couldn't re-enrich entry", err));
+      },
+    });
   };
 
   const handleConfirmDelete = (): void => {
@@ -387,6 +403,9 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
       onSuccess: () => {
         setDeleteOpen(false);
         onClose();
+      },
+      onError: (err) => {
+        toast.error(toastMessage("Couldn't delete entry", err));
       },
     });
   };
@@ -427,6 +446,7 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
                 field={field}
                 label={label}
                 locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
+                isPending={patchMutation.isPending}
                 errorMessage={errors[field]?.message}
                 inputProps={{ ...(extraProps ?? {}), ...register(field) }}
                 onRevert={handleRevert}

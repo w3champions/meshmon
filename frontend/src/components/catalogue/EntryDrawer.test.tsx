@@ -130,7 +130,8 @@ describe("EntryDrawer", () => {
     const user = userEvent.setup();
     render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
     await user.click(screen.getByRole("button", { name: "Re-enrich" }));
-    expect(reenrichMutation.mutate).toHaveBeenCalledWith(ENTRY.id);
+    expect(reenrichMutation.mutate).toHaveBeenCalledTimes(1);
+    expect(reenrichMutation.mutate.mock.calls[0][0]).toBe(ENTRY.id);
   });
 
   test("Delete flow requires confirmation and closes the drawer on success", async () => {
@@ -161,5 +162,15 @@ describe("EntryDrawer", () => {
     expect(deleteMutation.mutate).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  test("Revert to auto is disabled while a PATCH is already in flight", () => {
+    // Simulate a pending PATCH: the mutate call fires once but never resolves,
+    // so the button should be rendered `disabled` — protecting against a
+    // double-submit when the operator clicks twice in quick succession.
+    patchMutation.isPending = true;
+    render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+    const revert = screen.getByRole("button", { name: "Revert to auto" });
+    expect(revert).toBeDisabled();
   });
 });
