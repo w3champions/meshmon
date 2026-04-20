@@ -1,30 +1,20 @@
 //! Trippy (MTR) prober.
 //!
-//! One task per target. Each iteration:
+//! One persistent [`Tracer`] per (target, protocol, pps) tuple. The lifecycle:
 //!
-//! 1. Read the current [`TrippyRate`] from the watch channel.
-//! 2. Acquire a global [`Semaphore`] permit (caps concurrent raw-socket
-//!    tracers across all targets).
-//! 3. Run one tracer round under [`tokio::task::spawn_blocking`]; the
-//!    permit is held only for the blocking call.
-//! 4. Release the permit, emit the round's hops as a [`RouteTraceMsg`] on the
-//!    route-trace channel. Failed rounds and panicked workers are logged but
-//!    emit nothing — they are not reachability samples.
-//! 5. Sleep `1/pps` with ±20 % jitter, loop.
+//! 1. Build one persistent `Tracer` per (target, protocol, pps) tuple.
+//! 2. Hand it to `Tracer::run_with(callback)` inside a single `spawn_blocking` task.
+//! 3. The callback snapshots state after each round and forwards aggregated hops via
+//!    an async bridge to the per-target loop.
+//! 4. The async loop runs contamination detection and emits `RouteTraceMsg` on the
+//!    route-trace channel; failed rounds and panicked workers are log-only.
+//! 5. On cancellation: drop the bridge sender; the callback's `blocking_send` errors;
+//!    `run_with` returns; the active round completes before exit (worst-case ~10s).
+//! 6. Protocol or pps change: rebuild the tracer (no live rate adjustment in trippy-core).
 //!
 //! Trippy emits topology data ([`RouteTraceMsg`]) into the supervisor's tracker
 //! channel, never reachability samples ([`ProbeObservation`]). Reachability is
 //! owned by the dedicated ICMP/TCP/UDP probers.
-//!
-//! Trippy-core 0.13 is fully synchronous and raw-socket-bound, so each
-//! round is a `spawn_blocking` worker: we rebuild a [`Builder`] per round
-//! with `max_rounds = Some(1)` and rely on [`Tracer::run`] to block until
-//! the single round completes, then read `Tracer::snapshot()` to extract
-//! hops and the target RTT. Caching a tracer across rounds is not done
-//! because trippy-core's state is owned by the tracer's lifetime and
-//! `clear()`ing it between rounds does not save the raw-socket setup cost
-//! on every platform; keeping the code structure simple here is the better
-//! tradeoff.
 //!
 //! ## Trace-identifier allocation
 //!
@@ -60,13 +50,11 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use meshmon_protocol::{Protocol, Target};
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio_util::sync::CancellationToken;
 use trippy_core::{Builder, Port, PortDirection, State};
 
-use crate::probing::{HopObservation, ProbeObservation, ProbeOutcome, RouteTraceMsg, TrippyRate};
+use crate::probing::{HopObservation, RouteTraceMsg, TrippyRate};
 
 /// Maximum TTL (hops) the tracer will emit probes for.
 const MAX_TTL: u8 = 30;
@@ -103,8 +91,12 @@ fn next_trace_id() -> u16 {
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Grace period after the target responds before the round is considered
-/// complete (allows a few additional late responses to be collected).
-const GRACE_DURATION: Duration = Duration::from_millis(100);
+/// complete (allows late destination replies to be collected).
+///
+/// 500ms covers late destination replies on >200ms RTT paths; the previous
+/// 100ms dropped ~38% of destination replies on long-RTT paths under the
+/// per-round-fresh-socket pattern.
+const GRACE_DURATION: Duration = Duration::from_millis(500);
 
 /// Sentinel value indicating a target has not published a TCP/UDP port.
 ///
@@ -112,6 +104,24 @@ const GRACE_DURATION: Duration = Duration::from_millis(100);
 /// carry one the prober emits an error observation rather than probing a
 /// bogus port.
 const UNSET_PORT: u16 = 0;
+
+/// Bounded round count per tracer build.
+///
+/// `Tracer::run_with` has no in-band cancel; its blocking thread can only
+/// exit when `max_rounds` is reached or a network error occurs. Capping
+/// at this value forces a natural exit + rebuild so shutdown and protocol
+/// changes never leak the OS thread or raw socket. At 1 pps that's ≈ 1 hour
+/// between rebuilds — long enough to preserve the persistent-socket benefit
+/// (kernel-delivered late replies reach the same socket that sent them)
+/// without unbounded thread leaks.
+const ROUNDS_PER_TRACER: usize = 3600;
+
+/// Compute the round-duration parameter from a positive `pps` value.
+/// Both call sites in `run` (outer build + inner config-change handler)
+/// use this so the comparison `new_min == min_round` is reliable.
+fn min_round_from_pps(pps: f64) -> Duration {
+    Duration::from_secs_f64((1.0 / pps.max(0.001)).max(0.001))
+}
 
 /// Shared trippy prober. One instance per agent; `spawn_target` attaches
 /// a per-target task. The internal semaphore caps concurrent raw-socket
@@ -185,121 +195,210 @@ async fn run(
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     cancel: CancellationToken,
 ) {
-    // `ThreadRng` is not `Send`; seed a Send-safe SmallRng once. Used only
-    // for probe-interval jitter — no cryptographic requirement.
-    let mut rng = SmallRng::from_rng(&mut rand::rng());
+    // Track current build params so we know when to rebuild.
+    let mut current: Option<(Protocol, Duration)> = None;
 
     loop {
-        let snapshot = *config_rx.borrow();
-        let interval = if snapshot.pps.is_finite() && snapshot.pps > 0.0 {
-            Some(jittered_interval(snapshot.pps, &mut rng))
-        } else {
-            None
-        };
+        let rate = *config_rx.borrow();
 
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = pool.cancel.cancelled() => return,
-            r = config_rx.changed() => {
-                if r.is_err() {
-                    return; // sender dropped = shutdown
-                }
-                continue;
-            }
-            _ = maybe_sleep(interval) => {
-                if snapshot.protocol == Protocol::Unspecified {
-                    // pps>0 with UNSPECIFIED protocol is nonsensical; idle.
+        // Idle: no usable rate yet.
+        if rate.protocol == Protocol::Unspecified || !rate.pps.is_finite() || rate.pps <= 0.0 {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = pool.cancel.cancelled() => return,
+                res = config_rx.changed() => {
+                    if res.is_err() { return; }
                     continue;
                 }
+            }
+        }
 
-                let permit = match pool.semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => return, // semaphore closed
-                };
-                let round_target_id = target_id.clone();
-                let round_proto = snapshot.protocol;
-                let result = tokio::task::spawn_blocking(move || {
-                    run_one_round(
-                        &round_target_id,
-                        target_ip,
-                        round_proto,
-                        tcp_port,
-                        udp_port,
-                    )
-                })
-                .await;
+        let min_round = min_round_from_pps(rate.pps);
+
+        // Rebuild only on protocol change. PPS adjustments do NOT force a rebuild;
+        // the persistent tracer keeps its build-time cadence until either the
+        // protocol swings or the bounded `ROUNDS_PER_TRACER` count expires
+        // (forcing a natural rebuild via the closed bridge channel).
+        let needs_rebuild = current.as_ref().is_none_or(|(p, _)| *p != rate.protocol);
+
+        if !needs_rebuild {
+            // Same (protocol, pps) — wait for a change or cancel.
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = pool.cancel.cancelled() => return,
+                res = config_rx.changed() => {
+                    if res.is_err() { return; }
+                    continue;
+                }
+            }
+        }
+
+        // Acquire semaphore permit for the lifetime of this persistent tracer.
+        let permit = match pool.semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return, // semaphore closed
+        };
+
+        // Build a fresh tracer for this (protocol, pps) pair.
+        let cfg = match build_config_for(target_ip, rate.protocol, tcp_port, udp_port, min_round) {
+            Ok(c) => c,
+            Err(e) => {
                 drop(permit);
+                tracing::error!(target_id = %target_id, error = %e, "trippy build_config_for failed");
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = pool.cancel.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
+                }
+            }
+        };
 
-                match result {
-                    Ok(Ok(obs)) => {
-                        let hit = {
-                            let allowlist = allowlist_rx.borrow();
-                            obs.hops
-                                .as_ref()
-                                .and_then(|hs| detect_contamination(target_ip, hs, allowlist.as_ref()))
-                        };
-                        if let Some(hit) = hit {
-                            CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
-                            warn_contamination_if_due(&target_id, &hit);
-                            continue;
-                        }
-                        let Some(hops) = obs.hops else {
-                            // run_one_round always sets Some(...), but defensively skip
-                            // emission if a future change ever returns None — topology
-                            // emission requires real per-hop data.
-                            continue;
-                        };
-                        if hops.is_empty() {
-                            continue;
-                        }
-                        let trace = RouteTraceMsg {
-                            target_id: target_id.clone(),
-                            protocol: snapshot.protocol,
-                            hops,
-                            observed_at: tokio::time::Instant::now(),
-                        };
-                        if route_trace_tx.send(trace).await.is_err() {
-                            return;
-                        }
+        let tracer = match cfg.builder.build() {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                drop(permit);
+                tracing::error!(target_id = %target_id, error = %e, "trippy tracer build failed");
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = pool.cancel.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
+                }
+            }
+        };
+
+        current = Some((rate.protocol, min_round));
+
+        // Bridge channel: callback (sync) → async drain.
+        // Capacity 8 absorbs burst; if the async side falls behind we drop rounds.
+        let (round_tx, mut round_rx) = mpsc::channel::<Vec<HopObservation>>(8);
+
+        // Spawn the blocking tracer worker.
+        let tracer_for_blocking = tracer.clone();
+        let target_id_for_blocking = target_id.clone();
+        let blocking = tokio::task::spawn_blocking(move || {
+            // run_with returns when ROUNDS_PER_TRACER is reached or a fatal
+            // error occurs. The callback fires after each completed round.
+            let result = tracer_for_blocking.run_with(|_round| {
+                // The snapshot reflects per-round-fresh state because the
+                // callback calls `clear()` after sending; trippy-core's
+                // strategy releases the State write lock before invoking the
+                // callback, so snapshot() acquires only the read lock and
+                // never deadlocks.
+                let state: State = tracer_for_blocking.snapshot();
+                let hops: Vec<HopObservation> = state
+                    .hops()
+                    .iter()
+                    .map(|hop| HopObservation {
+                        position: hop.ttl(),
+                        ip: hop.addrs().next().copied(),
+                        rtt_micros: hop.best_ms().map(ms_to_micros),
+                    })
+                    .collect();
+                let _ = round_tx.blocking_send(hops);
+                // Reset cumulative state so the NEXT round's snapshot reflects
+                // only that round's probes. Without this the cumulative `best_ms`
+                // would dominate downstream rolling-window math (the tracker
+                // would see the all-time best RTT replayed every round).
+                tracer_for_blocking.clear();
+            });
+            if let Err(e) = result {
+                tracing::error!(
+                    target_id = %target_id_for_blocking,
+                    error = %e,
+                    "trippy persistent tracer exited with error",
+                );
+            } else {
+                tracing::debug!(
+                    target_id = %target_id_for_blocking,
+                    "trippy persistent tracer exited cleanly (round limit reached or shutdown)",
+                );
+            }
+            // Permit was held for the full tracer lifetime; drop on exit.
+            drop(permit);
+        });
+
+        // Inner async loop: drain rounds + watch for cancel/config change.
+        let mut needs_rebuild_signal = false;
+        'inner: loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    break 'inner;
+                }
+                _ = pool.cancel.cancelled() => {
+                    break 'inner;
+                }
+                res = config_rx.changed() => {
+                    if res.is_err() {
+                        needs_rebuild_signal = true;
+                        break 'inner;
                     }
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            target_id = %target_id,
-                            protocol = ?snapshot.protocol,
-                            error = %e,
-                            "trippy round failed"
-                        );
+                    let new_rate = *config_rx.borrow();
+                    if new_rate.protocol != rate.protocol {
+                        // Protocol swing: rebuild. PPS changes alone do not
+                        // rebuild (the persistent tracer keeps its build-time
+                        // cadence until ROUNDS_PER_TRACER expires).
+                        needs_rebuild_signal = true;
+                        break 'inner;
                     }
-                    Err(join_err) => {
-                        tracing::warn!(
-                            target_id = %target_id,
-                            protocol = ?snapshot.protocol,
-                            %join_err,
-                            "trippy blocking task panicked",
-                        );
+                }
+                maybe_hops = round_rx.recv() => {
+                    let Some(hops) = maybe_hops else {
+                        // Bridge channel closed — blocking task exited unexpectedly.
+                        needs_rebuild_signal = true;
+                        break 'inner;
+                    };
+                    if hops.is_empty() {
+                        continue;
+                    }
+                    let hit = {
+                        let allowlist = allowlist_rx.borrow();
+                        detect_contamination(target_ip, &hops, allowlist.as_ref())
+                    };
+                    if let Some(hit) = hit {
+                        CROSS_CONTAMINATION_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        warn_contamination_if_due(&target_id, &hit);
+                        continue;
+                    }
+                    let trace = RouteTraceMsg {
+                        target_id: target_id.clone(),
+                        protocol: rate.protocol,
+                        hops,
+                        observed_at: tokio::time::Instant::now(),
+                    };
+                    if route_trace_tx.send(trace).await.is_err() {
+                        // Supervisor gone — exit entirely.
+                        drop(round_rx);
+                        drop(tracer);
+                        let _ = tokio::time::timeout(Duration::from_secs(15), blocking).await;
+                        return;
                     }
                 }
             }
         }
-    }
-}
 
-fn jittered_interval(pps: f64, rng: &mut impl rand::Rng) -> Duration {
-    let mean = 1.0 / pps;
-    let jitter = mean * rng.random_range(-0.2..=0.2);
-    Duration::from_secs_f64((mean + jitter).max(0.001))
-}
+        // Trigger shutdown: drop bridge receiver so the next blocking_send fails,
+        // which causes run_with to keep cycling but every send errors. Then drop
+        // the tracer Arc to close the raw socket when run_with returns.
+        drop(round_rx);
+        drop(tracer);
+        // Give the blocking task up to 15s to drain and exit.
+        let _ = tokio::time::timeout(Duration::from_secs(15), blocking).await;
 
-async fn maybe_sleep(interval: Option<Duration>) {
-    match interval {
-        Some(d) => tokio::time::sleep(d).await,
-        None => std::future::pending::<()>().await,
+        if !needs_rebuild_signal {
+            // cancel fired or pool cancel fired — exit.
+            return;
+        }
+        // Loop back and rebuild with the latest config.
     }
 }
 
 /// Per-protocol `trippy_core::Builder` configuration summary. `pub(super)`
-/// so unit tests can assert what `run_one_round` hands to trippy without
+/// so unit tests can assert what the prober hands to trippy without
 /// running a raw-socket probe.
+///
+/// Used by the persistent-tracer loop in `run` (which calls `Tracer::run_with`
+/// for `ROUNDS_PER_TRACER` rounds and then rebuilds) and by the loopback
+/// unit tests (which override `max_rounds` to 1 for one-shot probes).
 #[cfg_attr(test, derive(Debug))]
 pub(super) struct TrippyBuildConfig {
     /// `None` for TCP/UDP (trippy-core matches replies on ports/address);
@@ -311,11 +410,18 @@ pub(super) struct TrippyBuildConfig {
     pub builder: Builder,
 }
 
+/// Build per-protocol trippy builder configuration.
+///
+/// `min_round_duration` pins the round cadence: both `min_round_duration`
+/// and `max_round_duration` are set to this value so trippy does not add
+/// internal jitter. PPS changes require a rebuild (no live rate adjustment
+/// is available in trippy-core 0.13).
 pub(super) fn build_config_for(
     target_ip: IpAddr,
     protocol: Protocol,
     tcp_port: Option<u16>,
     udp_port: Option<u16>,
+    min_round_duration: Duration,
 ) -> Result<TrippyBuildConfig, anyhow::Error> {
     let trippy_proto = match protocol {
         Protocol::Icmp => trippy_core::Protocol::Icmp,
@@ -329,7 +435,9 @@ pub(super) fn build_config_for(
         .max_ttl(MAX_TTL)
         .read_timeout(READ_TIMEOUT)
         .grace_duration(GRACE_DURATION)
-        .max_rounds(Some(1));
+        .min_round_duration(min_round_duration)
+        .max_round_duration(min_round_duration) // pin: no internal jitter at the trippy layer
+        .max_rounds(Some(ROUNDS_PER_TRACER));
 
     let mut trace_identifier: Option<u16> = None;
     if matches!(protocol, Protocol::Icmp) {
@@ -512,21 +620,27 @@ fn warn_contamination_if_due(target_id: &str, hit: &ContaminationHit) {
 /// calling thread.
 ///
 /// Returns a `ProbeObservation` so the existing `Builder::build()`-driven
-/// loopback tests below can keep their shape, but the live caller in
-/// `run()` only reads `obs.hops` — the `outcome` field is intentionally
-/// unused on the production path. The persistent-tracer rewrite (the
-/// next refactor step) replaces this function with a `Tracer::run_with`
-/// callback that yields hops directly.
+/// loopback tests below can keep their shape. `max_rounds(Some(1))` is set
+/// internally so this helper always stops after a single round.
+#[cfg(test)]
 fn run_one_round(
     target_id: &str,
     target_ip: IpAddr,
     protocol: Protocol,
     tcp_port: Option<u16>,
     udp_port: Option<u16>,
-) -> Result<ProbeObservation, anyhow::Error> {
-    let cfg = build_config_for(target_ip, protocol, tcp_port, udp_port)?;
+) -> Result<crate::probing::ProbeObservation, anyhow::Error> {
+    let cfg = build_config_for(
+        target_ip,
+        protocol,
+        tcp_port,
+        udp_port,
+        Duration::from_secs(1),
+    )?;
+    // One-shot: max_rounds(Some(1)) so run() returns after a single round.
     let tracer = cfg
         .builder
+        .max_rounds(Some(1))
         .build()
         .map_err(|e| anyhow::anyhow!("trippy build: {e}"))?;
     tracer
@@ -548,17 +662,17 @@ fn run_one_round(
     // highest TTL — even for the default sentinel it never panics.
     let target_hop = state.target_hop(State::default_flow_id());
     let outcome = if target_hop.total_recv() == 0 || target_hop.addrs().next().is_none() {
-        ProbeOutcome::Timeout
+        crate::probing::ProbeOutcome::Timeout
     } else {
         match target_hop.best_ms() {
-            Some(ms) => ProbeOutcome::Success {
+            Some(ms) => crate::probing::ProbeOutcome::Success {
                 rtt_micros: ms_to_micros(ms),
             },
-            None => ProbeOutcome::Timeout,
+            None => crate::probing::ProbeOutcome::Timeout,
         }
     };
 
-    Ok(ProbeObservation {
+    Ok(crate::probing::ProbeObservation {
         protocol,
         target_id: target_id.to_string(),
         outcome,
@@ -598,23 +712,15 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn jittered_interval_is_bounded() {
-        let mut rng = SmallRng::from_rng(&mut rand::rng());
-        // 1 pps → mean 1s; ±20 % jitter → [800ms, 1200ms].
-        for _ in 0..1000 {
-            let d = jittered_interval(1.0, &mut rng);
-            assert!(d >= Duration::from_millis(800), "too short: {d:?}");
-            assert!(d <= Duration::from_millis(1200), "too long: {d:?}");
-        }
-    }
-
-    #[test]
-    fn jittered_interval_clamps_min() {
-        let mut rng = SmallRng::from_rng(&mut rand::rng());
-        // 10_000 pps would otherwise yield a 100us interval; the clamp
-        // floor is 1ms.
-        let d = jittered_interval(10_000.0, &mut rng);
-        assert!(d >= Duration::from_millis(1), "below floor: {d:?}");
+    fn min_round_from_pps_clamps_to_one_ms_floor() {
+        // Very high pps must not collapse to a sub-millisecond round duration.
+        assert!(min_round_from_pps(10_000.0) >= Duration::from_millis(1));
+        // Zero or negative pps must also clamp (defensive — caller should
+        // already filter these via the idle path, but the helper is total).
+        assert!(min_round_from_pps(0.0) >= Duration::from_millis(1));
+        assert!(min_round_from_pps(-1.0) >= Duration::from_millis(1));
+        // Reasonable pps maps as expected.
+        assert_eq!(min_round_from_pps(1.0), Duration::from_secs(1));
     }
 
     #[test]
@@ -694,7 +800,8 @@ mod tests {
     #[serial]
     fn icmp_build_config_uses_nonzero_trace_identifier() {
         let ip: IpAddr = "1.1.1.1".parse().unwrap();
-        let cfg = build_config_for(ip, Protocol::Icmp, None, None).expect("config");
+        let cfg = build_config_for(ip, Protocol::Icmp, None, None, Duration::from_secs(1))
+            .expect("config");
         assert!(cfg.trace_identifier.is_some(), "ICMP must set a trace id");
         assert_ne!(cfg.trace_identifier, Some(0), "must be non-zero");
     }
@@ -702,14 +809,16 @@ mod tests {
     #[test]
     fn tcp_build_config_does_not_set_trace_identifier() {
         let ip: IpAddr = "1.1.1.1".parse().unwrap();
-        let cfg = build_config_for(ip, Protocol::Tcp, Some(443), None).expect("config");
+        let cfg = build_config_for(ip, Protocol::Tcp, Some(443), None, Duration::from_secs(1))
+            .expect("config");
         assert_eq!(cfg.trace_identifier, None, "TCP does not set trace id");
     }
 
     #[test]
     fn udp_build_config_does_not_set_trace_identifier() {
         let ip: IpAddr = "1.1.1.1".parse().unwrap();
-        let cfg = build_config_for(ip, Protocol::Udp, None, Some(33434)).expect("config");
+        let cfg = build_config_for(ip, Protocol::Udp, None, Some(33434), Duration::from_secs(1))
+            .expect("config");
         assert_eq!(cfg.trace_identifier, None, "UDP does not set trace id");
     }
 
@@ -997,7 +1106,7 @@ mod tests {
     // --- integration test — contaminated rounds never reach downstream ---
 
     /// Replays pre-built [`RouteTraceMsg`]s through the contamination-detection
-    /// path used by `run()`'s `Ok(Ok)` arm: borrow the allowlist, call
+    /// path used by `run()`'s inner loop: borrow the allowlist, call
     /// `detect_contamination`, bump the counter and drop on a hit, forward to
     /// `route_trace_tx` on a clean round.
     ///
@@ -1157,5 +1266,61 @@ mod tests {
         assert_eq!(received[0].protocol, Protocol::Icmp);
         assert_eq!(received[0].hops.len(), 1);
         assert_eq!(received[0].hops[0].ip, Some(target_ip));
+    }
+
+    /// Verifies the persistent tracer loop emits multiple RouteTraceMsgs on
+    /// loopback. Requires `CAP_NET_RAW` (or root), so ignored by default.
+    /// Run with: `cargo test -p meshmon-agent -- --ignored persistent_tracer_emits_multiple_rounds_on_loopback`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires CAP_NET_RAW; run with `cargo test -- --ignored`"]
+    async fn persistent_tracer_emits_multiple_rounds_on_loopback() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let cancel = CancellationToken::new();
+        let prober = TrippyProber::new(4, cancel.clone());
+
+        let (route_tx, mut route_rx) = mpsc::channel::<RouteTraceMsg>(16);
+        let (_allow_tx, allowlist_rx) = watch::channel(Arc::new(HashSet::<IpAddr>::new()));
+        let (rate_tx, rate_rx) = watch::channel(TrippyRate {
+            protocol: Protocol::Icmp,
+            pps: 1.0,
+        });
+        // Keep the sender alive so the watch channel stays open.
+        let _keep_rate = rate_tx;
+
+        let target = meshmon_protocol::Target {
+            id: "loopback".into(),
+            ip: vec![127, 0, 0, 1].into(),
+            display_name: "Loopback".into(),
+            location: "Test".into(),
+            lat: 0.0,
+            lon: 0.0,
+            tcp_probe_port: 0,
+            udp_probe_port: 0,
+        };
+
+        let _join = prober.spawn_target(target, rate_rx, route_tx, allowlist_rx, cancel.clone());
+
+        let mut count = 0usize;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline && count < 3 {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), route_rx.recv()).await {
+                Ok(Some(msg)) => {
+                    assert_eq!(msg.protocol, Protocol::Icmp);
+                    count += 1;
+                }
+                Ok(None) => break, // channel closed unexpectedly
+                Err(_) => {}       // timeout; keep trying until deadline
+            }
+        }
+        assert!(
+            count >= 3,
+            "expected >=3 RouteTraceMsgs in 8s on loopback, got {count}"
+        );
+
+        cancel.cancel();
+        // Give the blocking task up to 15s to exit.
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     }
 }
