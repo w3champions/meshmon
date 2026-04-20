@@ -18,6 +18,8 @@ path = "src/main.rs"
 meshmon-protocol = { path = "../protocol" }
 meshmon-revtunnel = { path = "../revtunnel" }
 anyhow.workspace = true
+async-stream = { workspace = true }
+async-trait = { workspace = true }
 dashmap.workspace = true
 prost.workspace = true
 rand.workspace = true
@@ -26,6 +28,7 @@ socket2.workspace = true
 subtle.workspace = true
 surge-ping.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["tls-native-roots"] }
 trippy-core.workspace = true
@@ -34,6 +37,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+futures-util = { workspace = true }
 proptest = { workspace = true }
 serial_test = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

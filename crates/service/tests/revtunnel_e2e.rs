@@ -16,7 +16,7 @@
 mod common;
 
 use common::{insert_agent, shared_migrated_pool, state_with_agent_token, TEST_AGENT_TOKEN};
-use meshmon_agent::command_service::RefreshConfigImpl;
+use meshmon_agent::command::{AgentCommandService, StubProber};
 use meshmon_protocol::{
     AgentApiServer, AgentCommandClient, AgentCommandServer, RefreshConfigRequest,
 };
@@ -117,8 +117,10 @@ fn spawn_agent(
                 .expect("agent dials service");
 
             let router_factory = move || {
-                Server::builder().add_service(AgentCommandServer::new(RefreshConfigImpl::new(
+                Server::builder().add_service(AgentCommandServer::new(AgentCommandService::new(
                     refresh_trigger.clone(),
+                    Arc::new(StubProber),
+                    16,
                 )))
             };
             TunnelClient::open_and_run(
@@ -243,8 +245,9 @@ async fn agent_reconnects_after_tunnel_dropped() {
 
                 let rt = refresh_trigger.clone();
                 let router_factory = move || {
-                    Server::builder()
-                        .add_service(AgentCommandServer::new(RefreshConfigImpl::new(rt.clone())))
+                    Server::builder().add_service(AgentCommandServer::new(
+                        AgentCommandService::new(rt.clone(), Arc::new(StubProber), 16),
+                    ))
                 };
                 // open_and_run returns when the session ends (either cleanly
                 // or with an error). We then loop immediately to reconnect.

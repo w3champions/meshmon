@@ -19,7 +19,7 @@ use tonic::transport::Server;
 use tracing::{debug, warn};
 
 use crate::api::GrpcServiceApi;
-use crate::command_service::RefreshConfigImpl;
+use crate::command::{AgentCommandService, StubProber};
 
 const BASE_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
@@ -103,9 +103,16 @@ async fn run_one_session(
     refresh_trigger: Arc<Notify>,
     cancel: CancellationToken,
 ) -> Result<(), meshmon_revtunnel::TunnelError> {
+    // Concurrency cap is hardcoded here and replaced with the value
+    // threaded through from `AgentEnv::campaign_max_concurrency` by the
+    // bootstrap/tunnel wiring. Kept as a literal so this seam compiles
+    // on its own; production wiring overrides it via `spawn_with`.
+    let prober = Arc::new(StubProber);
     let router_factory = move || {
-        Server::builder().add_service(AgentCommandServer::new(RefreshConfigImpl::new(
+        Server::builder().add_service(AgentCommandServer::new(AgentCommandService::new(
             refresh_trigger.clone(),
+            prober.clone(),
+            16,
         )))
     };
 

@@ -30,6 +30,7 @@ authors = ["meshmon contributors"]
 # Shared dependency versions. Downstream tasks add entries here.
 anyhow = "1"
 arc-swap = "1"
+async-stream = "0.3"
 async-trait = "0.1.89"
 axum = "0.8"
 axum-extra = "0.12"
