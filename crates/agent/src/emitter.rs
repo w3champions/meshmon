@@ -713,34 +713,21 @@ fn build_route_snapshot_request(
 
 /// Derive a `PathSummary` from the hops of a `RouteSnapshot`.
 ///
-/// - `hop_count` is the vector length.
-/// - `avg_rtt_micros` is the mean of `avg_rtt_micros` across hops that have
-///   a positive RTT. A fully-lost hop (RTT=0) is excluded from the RTT
-///   mean but still contributes to `loss_pct`. `0` when no hop has a
-///   positive RTT.
-/// - `loss_pct` is the mean of `loss_pct` across *all* hops, or `0.0`
-///   when `hops` is empty.
+/// Path-level metrics reflect the **destination hop only** — the last hop in
+/// `hops`, which the route-tracker truncate-at-target logic guarantees carries
+/// the destination IP. Per-hop loss/RTT for intermediate hops is preserved in
+/// the snapshot's `hops[]` array; aggregating across all hops would conflate
+/// silent ICMP-rate-limiting routers (always 100 % loss) with end-to-end loss.
+///
+/// - `hop_count` is the vector length (preserved as a topology marker).
+/// - `avg_rtt_micros` is `hops.last().avg_rtt_micros`, or `0` if `hops` is empty.
+/// - `loss_pct` is `hops.last().loss_pct`, or `0.0` if `hops` is empty.
 fn build_path_summary(hops: &[crate::route::HopSummary]) -> PathSummaryProto {
     let hop_count = hops.len() as u32;
-
-    let (rtt_sum, rtt_n) = hops
-        .iter()
-        .filter(|h| h.avg_rtt_micros > 0)
-        .fold((0u64, 0u64), |(s, n), h| {
-            (s + h.avg_rtt_micros as u64, n + 1)
-        });
-    let avg_rtt_micros = if rtt_n > 0 {
-        (rtt_sum / rtt_n) as u32
-    } else {
-        0
+    let (avg_rtt_micros, loss_pct) = match hops.last() {
+        Some(dest) => (dest.avg_rtt_micros, dest.loss_pct),
+        None => (0, 0.0),
     };
-
-    let loss_pct = if hops.is_empty() {
-        0.0
-    } else {
-        hops.iter().map(|h| h.loss_pct).sum::<f64>() / hops.len() as f64
-    };
-
     PathSummaryProto {
         avg_rtt_micros,
         loss_pct,
@@ -1355,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn build_path_summary_empty_hops() {
+    fn build_path_summary_empty_hops_is_zero() {
         let s = build_path_summary(&[]);
         assert_eq!(s.hop_count, 0);
         assert_eq!(s.avg_rtt_micros, 0);
@@ -1363,53 +1350,88 @@ mod tests {
     }
 
     #[test]
-    fn build_path_summary_averages_rtt_ignoring_zero_hops() {
+    fn build_path_summary_uses_destination_hop_only() {
         use crate::route::HopSummary as AgentHop;
+
+        // Three hops: silent intermediate (1.0 loss), responsive intermediate (0.10 loss),
+        // destination hop (0.0 loss, 226 ms RTT). Path-level loss MUST be the destination's
+        // 0.0 — silent intermediate hops do not influence end-to-end stats.
         let hops = vec![
             AgentHop {
                 position: 1,
                 observed_ips: vec![],
-                avg_rtt_micros: 1_000,
+                avg_rtt_micros: 0,
                 stddev_rtt_micros: 0,
-                loss_pct: 0.10,
+                loss_pct: 1.0, // silent router (does not reply to TTL-exceeded)
             },
             AgentHop {
                 position: 2,
                 observed_ips: vec![],
-                avg_rtt_micros: 0, // fully lost — excluded from RTT mean
-                stddev_rtt_micros: 0,
-                loss_pct: 1.00,
+                avg_rtt_micros: 50_000,
+                stddev_rtt_micros: 100,
+                loss_pct: 0.10,
             },
             AgentHop {
                 position: 3,
                 observed_ips: vec![],
-                avg_rtt_micros: 3_000,
-                stddev_rtt_micros: 0,
-                loss_pct: 0.20,
+                avg_rtt_micros: 226_000,
+                stddev_rtt_micros: 200,
+                loss_pct: 0.0,
             },
         ];
+
         let s = build_path_summary(&hops);
         assert_eq!(s.hop_count, 3);
-        // Mean of 1000 and 3000 = 2000 (zero hop excluded).
-        assert_eq!(s.avg_rtt_micros, 2_000);
-        // Loss averages include all 3 hops.
-        assert!((s.loss_pct - (0.10 + 1.00 + 0.20) / 3.0).abs() < 1e-9);
+        assert_eq!(s.avg_rtt_micros, 226_000);
+        assert!((s.loss_pct - 0.0).abs() < 1e-9, "got {}", s.loss_pct);
     }
 
     #[test]
-    fn build_path_summary_all_zero_rtt() {
+    fn build_path_summary_destination_hop_with_loss() {
         use crate::route::HopSummary as AgentHop;
+
+        // Destination hop has 30% loss and 226ms successful-RTT — both are reported.
+        let hops = vec![
+            AgentHop {
+                position: 1,
+                observed_ips: vec![],
+                avg_rtt_micros: 0,
+                stddev_rtt_micros: 0,
+                loss_pct: 1.0,
+            },
+            AgentHop {
+                position: 2,
+                observed_ips: vec![],
+                avg_rtt_micros: 226_000,
+                stddev_rtt_micros: 200,
+                loss_pct: 0.30,
+            },
+        ];
+
+        let s = build_path_summary(&hops);
+        assert_eq!(s.hop_count, 2);
+        assert_eq!(s.avg_rtt_micros, 226_000);
+        assert!((s.loss_pct - 0.30).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_path_summary_single_hop_is_destination_hop() {
+        use crate::route::HopSummary as AgentHop;
+
+        // Single-hop path (target on same LAN segment): hops.last() == hops[0].
+        // hop_count must be 1; both fields must come from the only hop.
         let hops = vec![AgentHop {
             position: 1,
             observed_ips: vec![],
-            avg_rtt_micros: 0,
-            stddev_rtt_micros: 0,
-            loss_pct: 1.0,
+            avg_rtt_micros: 1_500,
+            stddev_rtt_micros: 50,
+            loss_pct: 0.05,
         }];
+
         let s = build_path_summary(&hops);
-        assert_eq!(s.avg_rtt_micros, 0); // no positive RTT → fallback 0
         assert_eq!(s.hop_count, 1);
-        assert_eq!(s.loss_pct, 1.0);
+        assert_eq!(s.avg_rtt_micros, 1_500);
+        assert!((s.loss_pct - 0.05).abs() < 1e-9);
     }
 
     #[test]

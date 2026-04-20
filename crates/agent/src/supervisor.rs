@@ -5,6 +5,9 @@
 //!
 //! * An `mpsc` channel that probers send [`ProbeObservation`]s into; observations
 //!   are routed by [`Protocol`] into the matching per-protocol `RollingStats` slot.
+//! * A second `mpsc` channel for [`crate::probing::RouteTraceMsg`] — typed
+//!   topology messages from the trippy prober that feed the [`RouteTracker`]
+//!   exclusively, never the reachability `RollingStats`.
 //! * A `watch` receiver carrying the latest [`ProbeConfig`] from the service.
 //! * A [`CancellationToken`] derived from the parent token so that global
 //!   shutdown propagates automatically down to every prober.
@@ -53,7 +56,9 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ProbeConfig;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
-use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
+use crate::probing::{
+    icmp, tcp, IcmpClientPool, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate,
+};
 use crate::route::{RouteSnapshotEnvelope, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
@@ -99,9 +104,14 @@ pub struct SupervisorHandle {
     /// Sender side of the observation channel. Probers clone this to
     /// push [`ProbeObservation`]s into the supervisor.
     pub observation_tx: mpsc::Sender<ProbeObservation>,
+    /// Sender side of the route-trace channel. The trippy prober pushes
+    /// completed MTR rounds here as [`crate::probing::RouteTraceMsg`]; the
+    /// supervisor routes them to the [`RouteTracker`] only. Reachability
+    /// stats are unaffected.
+    pub route_trace_tx: mpsc::Sender<crate::probing::RouteTraceMsg>,
     /// Shared per-protocol stats, exposed via [`SupervisorHandle::snapshot`].
-    /// `pub(crate)` so the state machine can reach into the same array
-    /// from inside the agent crate; tests use [`SupervisorHandle::snapshot`].
+    /// Crate-visible so supervisor unit tests can assert directly against
+    /// per-protocol counters; the public read path is `snapshot`.
     pub(crate) stats: Arc<StatsArray>,
     /// Join handles for the 4 per-target prober tasks. Private because the
     /// only legitimate consumer is [`SupervisorHandle::await_probers`]; no
@@ -180,12 +190,20 @@ pub fn spawn(
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
+    icmp_pool: Arc<IcmpClientPool>,
     parent_cancel: CancellationToken,
     snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
     metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
 ) -> SupervisorHandle {
     let cancel = parent_cancel.child_token();
+    // Reachability channel: 4 prober tasks fan in, each can send at multi-Hz
+    // peak rates, so 256 leaves headroom for short bursts without dropping
+    // observations under back-pressure.
     let (observation_tx, observation_rx) = mpsc::channel::<ProbeObservation>(256);
+    // Route-trace channel: a single sender (trippy) at one round per ~5–10 s.
+    // 64 is generous for the steady-state cadence and surfaces back-pressure
+    // quickly if the supervisor falls behind on the tracker.
+    let (route_trace_tx, route_trace_rx) = mpsc::channel::<crate::probing::RouteTraceMsg>(64);
 
     // Snapshot the initial config to size the windows. The run loop also
     // watches `config_rx` for live updates.
@@ -215,6 +233,7 @@ pub fn spawn(
     // Spawn all 4 probers. ICMP spawn is sync, matching TCP's shape.
     let target_for_icmp = target.clone();
     let icmp_join = icmp::spawn(
+        icmp_pool,
         target_for_icmp,
         icmp_rate_rx,
         observation_tx.clone(),
@@ -241,7 +260,7 @@ pub fn spawn(
     let trippy_join = trippy_prober.spawn_target(
         target_for_trippy,
         trippy_rate_rx,
-        observation_tx.clone(),
+        route_trace_tx.clone(),
         allowlist_rx,
         cancel.clone(),
     );
@@ -251,10 +270,15 @@ pub fn spawn(
     let task_cancel = cancel.clone();
     let task_stats = Arc::clone(&stats);
     let task_last_state = Arc::clone(&last_state);
+    // Clone `route_trace_tx` into the handle BEFORE passing `route_trace_rx`
+    // into `run`. The local `route_trace_tx` binds the channel alive until
+    // `spawn` returns; the handle clone is the public-facing sender.
+    let handle_route_trace_tx = route_trace_tx.clone();
     let join = tokio::spawn(run(
         target,
         config_rx,
         observation_rx,
+        route_trace_rx,
         task_cancel,
         task_stats,
         icmp_rate_tx,
@@ -266,11 +290,16 @@ pub fn spawn(
         snapshot_tx,
         metrics_tx,
     ));
+    // `route_trace_tx` is intentionally kept alive until after the spawn so
+    // the receiver in `run` is not immediately closed. The handle's copy
+    // (`handle_route_trace_tx`) keeps the channel alive for the caller.
+    drop(route_trace_tx);
 
     SupervisorHandle {
         cancel,
         join,
         observation_tx,
+        route_trace_tx: handle_route_trace_tx,
         stats,
         prober_joins: vec![icmp_join, tcp_join, udp_join, trippy_join],
         last_state,
@@ -283,6 +312,7 @@ async fn run(
     target: Target,
     mut config_rx: watch::Receiver<ProbeConfig>,
     mut observation_rx: mpsc::Receiver<ProbeObservation>,
+    mut route_trace_rx: mpsc::Receiver<crate::probing::RouteTraceMsg>,
     cancel: CancellationToken,
     stats: Arc<StatsArray>,
     icmp_rate_tx: watch::Sender<ProbeRate>,
@@ -349,7 +379,6 @@ async fn run(
                 match maybe_obs {
                     Some(obs) => {
                         route_observation(&stats, &obs).await;
-                        feed_tracker(&mut route_tracker, &obs, Instant::now());
                     }
                     None => {
                         // All probers dropped their senders — no more
@@ -360,6 +389,23 @@ async fn run(
                             "observation channel closed, shutting down",
                         );
                         break;
+                    }
+                }
+            }
+            maybe_trace = route_trace_rx.recv() => {
+                match maybe_trace {
+                    Some(msg) => {
+                        feed_tracker_from_route_msg(&mut route_tracker, &msg, Instant::now());
+                    }
+                    None => {
+                        tracing::debug!(
+                            target_id = %target.id,
+                            "route_trace channel closed",
+                        );
+                        // Do NOT break here. The reachability obs_rx arm
+                        // is the one that should drive shutdown — losing
+                        // the trace channel only means topology updates
+                        // stop, not that probing has stopped.
                     }
                 }
             }
@@ -671,12 +717,15 @@ async fn run(
     observation_rx.close();
     // Drain any final observations so they're accounted for in the stats
     // before the supervisor exits — useful for tests that race an
-    // observation send against shutdown. The route tracker also receives
-    // these late observations so any T7 snapshot that fires during
-    // shutdown-adjacent activity sees a fully-populated accumulator.
+    // observation send against shutdown.
     while let Ok(obs) = observation_rx.try_recv() {
         route_observation(&stats, &obs).await;
-        feed_tracker(&mut route_tracker, &obs, Instant::now());
+    }
+    // Drain any final route-trace messages so the tracker is fully updated
+    // before the supervisor exits.
+    route_trace_rx.close();
+    while let Ok(msg) = route_trace_rx.try_recv() {
+        feed_tracker_from_route_msg(&mut route_tracker, &msg, Instant::now());
     }
     tracing::info!(target_id = %target.id, "supervisor stopped");
 }
@@ -747,31 +796,31 @@ async fn route_observation(stats: &StatsArray, obs: &ProbeObservation) {
     stats[idx].lock().await.insert(obs, Instant::now());
 }
 
-/// If `obs` carries hop data and its protocol matches the tracker's
-/// current accumulation protocol, push the hops into the route tracker.
-/// Observations for non-tracked protocols, observations without hops,
-/// and observations received before the tracker has been assigned a
-/// protocol are silently ignored.
-fn feed_tracker(tracker: &mut RouteTracker, obs: &ProbeObservation, now: Instant) {
-    let Some(hops) = obs.hops.as_deref() else {
-        return;
-    };
-    if hops.is_empty() {
+/// Feed hops from a `RouteTraceMsg` into the route tracker. Mirrors
+/// `feed_tracker` but takes the typed topology message instead of a
+/// `ProbeObservation` — trippy MTR rounds carry topology data, never
+/// reachability semantics.
+fn feed_tracker_from_route_msg(
+    tracker: &mut RouteTracker,
+    msg: &crate::probing::RouteTraceMsg,
+    now: Instant,
+) {
+    if msg.hops.is_empty() {
         return;
     }
     let Some(tracked) = tracker.protocol() else {
         return;
     };
-    if obs.protocol != tracked {
+    if msg.protocol != tracked {
         tracing::trace!(
-            target_id = %obs.target_id,
-            obs_protocol = ?obs.protocol,
+            target_id = %msg.target_id,
+            msg_protocol = ?msg.protocol,
             tracked = ?tracked,
-            "dropping hops for non-tracked protocol",
+            "dropping route trace for non-tracked protocol",
         );
         return;
     }
-    tracker.observe(hops, now);
+    tracker.observe(&msg.hops, now);
 }
 
 /// Enumerate `(protocol, health)` pairs that the 60 s metrics tick should
@@ -847,8 +896,16 @@ mod tests {
         .expect("valid test config")
     }
 
-    /// Build a real `UdpProberPool` + `TrippyProber` for use in supervisor tests.
-    async fn build_test_pool(cancel: CancellationToken) -> (Arc<UdpProberPool>, Arc<TrippyProber>) {
+    /// Build a real `UdpProberPool` + `TrippyProber` + `IcmpClientPool` for use in
+    /// supervisor tests.
+    ///
+    /// `IcmpClientPool::new` is infallible (sockets open lazily), so this
+    /// helper itself runs on any host. Tests that drive the pool to actually
+    /// ping should call `skip_unless_raw_icmp!()` so they self-skip on
+    /// unprivileged CI runners.
+    async fn build_test_pool(
+        cancel: CancellationToken,
+    ) -> (Arc<UdpProberPool>, Arc<TrippyProber>, Arc<IcmpClientPool>) {
         use crate::probing::echo_udp::SecretSnapshot;
         use tokio::sync::watch;
 
@@ -857,7 +914,8 @@ mod tests {
             .await
             .expect("udp pool bind");
         let trippy = TrippyProber::new(1, cancel);
-        (pool, trippy)
+        let icmp_pool = Arc::new(IcmpClientPool::new());
+        (pool, trippy, icmp_pool)
     }
 
     /// Return both halves of an empty allowlist watch channel.
@@ -880,7 +938,7 @@ mod tests {
     async fn supervisor_starts_and_cancels() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -892,6 +950,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -918,7 +977,7 @@ mod tests {
         result.unwrap().expect("supervisor task panicked");
     }
 
-    use crate::probing::{HopObservation, ProbeOutcome};
+    use crate::probing::ProbeOutcome;
     use crate::route::RouteSnapshotEnvelope;
     use crate::stats::FastSummary;
     use std::net::{IpAddr, Ipv4Addr};
@@ -926,33 +985,6 @@ mod tests {
     /// Construct a v4 `IpAddr` from four octets.
     fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
-    }
-
-    /// Synthesise a trippy-shaped `ProbeObservation` with hops attached.
-    ///
-    /// Protocol is `Icmp` because the supervisor's first-eval seeding
-    /// elects ICMP as primary, and the route tracker only accepts hops
-    /// whose observation protocol matches its current accumulation
-    /// protocol. TCP/UDP trippy rounds would be filtered out by
-    /// `feed_tracker`'s protocol-match guard.
-    fn trippy_obs(target: &str, hops: Vec<HopObservation>) -> ProbeObservation {
-        ProbeObservation {
-            protocol: Protocol::Icmp,
-            target_id: target.to_string(),
-            outcome: ProbeOutcome::Success { rtt_micros: 10_000 },
-            hops: Some(hops),
-            observed_at: tokio::time::Instant::now(),
-        }
-    }
-
-    /// Build one `HopObservation` with the given 1-indexed position, IP,
-    /// and RTT (microseconds).
-    fn hop(pos: u8, ip: IpAddr, rtt: u32) -> HopObservation {
-        HopObservation {
-            position: pos,
-            ip: Some(ip),
-            rtt_micros: Some(rtt),
-        }
     }
 
     /// Yield the executor enough times for the supervisor task to drain
@@ -1053,7 +1085,7 @@ mod tests {
     async fn supervisor_drains_observations_on_shutdown() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1065,6 +1097,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1110,7 +1143,7 @@ mod tests {
     async fn supervisor_routes_by_protocol() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1121,6 +1154,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1167,7 +1201,7 @@ mod tests {
     async fn supervisor_drops_udp_refused_but_keeps_tcp_refused() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1178,6 +1212,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1346,7 +1381,7 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let cfg = full_config_with_tight_hysteresis();
         let (config_tx, config_rx) = watch::channel(cfg);
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1358,6 +1393,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1470,16 +1506,18 @@ mod tests {
     ///    machine's `select_primary` MIN_TRANSITION_SAMPLES=3 floor is
     ///    satisfied on the first 10 s eval tick.
     /// 2. Advance 11 s → eval tick fires → seeds tracker with ICMP.
-    /// 3. Inject one trippy ICMP round with two hops. `feed_tracker`
-    ///    routes these into the tracker because obs protocol matches
+    /// 3. Inject one RouteTraceMsg with two hops via `route_trace_tx`.
+    ///    The tracker accepts the hops because the trace protocol matches
     ///    the seeded primary.
     /// 4. Advance past the 60 s snapshot tick. The tracker builds a
     ///    snapshot and the supervisor emits it on the first-ever path.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn supervisor_emits_first_snapshot_unconditionally() {
+        use crate::probing::{HopObservation, RouteTraceMsg};
+
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1491,6 +1529,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1500,10 +1539,9 @@ mod tests {
 
         // Pre-seed ICMP stats so `select_primary` clears its 3-sample floor
         // on the first eval tick and elects ICMP as primary. Without hops —
-        // `feed_tracker` drops these anyway because the tracker has no
-        // protocol assigned yet, and we want the tracker's hop buffer
-        // empty until AFTER seeding so the assertion below (`hops.len()
-        // == 2`) is unambiguous.
+        // the tracker has no protocol assigned yet and we want the tracker's
+        // hop buffer empty until AFTER seeding so the assertion below
+        // (`hops.len() == 2`) is unambiguous.
         for _ in 0..3 {
             handle
                 .observation_tx
@@ -1517,19 +1555,29 @@ mod tests {
         tokio::time::advance(Duration::from_secs(11)).await;
         yield_many(10).await;
 
-        // Inject one trippy round with two hops. Protocol is ICMP to match
-        // the seeded primary.
+        // Inject one trippy round with two hops via the route-trace channel.
+        // Protocol is ICMP to match the seeded primary.
         handle
-            .observation_tx
-            .send(trippy_obs(
-                "first-snap",
-                vec![
-                    hop(1, ipv4(10, 0, 0, 1), 1_000),
-                    hop(2, ipv4(10, 0, 0, 2), 2_000),
+            .route_trace_tx
+            .send(RouteTraceMsg {
+                target_id: "first-snap".to_string(),
+                protocol: Protocol::Icmp,
+                hops: vec![
+                    HopObservation {
+                        position: 1,
+                        ip: Some(ipv4(10, 0, 0, 1)),
+                        rtt_micros: Some(1_000),
+                    },
+                    HopObservation {
+                        position: 2,
+                        ip: Some(ipv4(10, 0, 0, 2)),
+                        rtt_micros: Some(2_000),
+                    },
                 ],
-            ))
+                observed_at: tokio::time::Instant::now(),
+            })
             .await
-            .expect("send trippy observation");
+            .expect("send route trace");
         yield_many(10).await;
 
         // Advance past the 60 s snapshot tick. The first snapshot tick
@@ -1555,15 +1603,17 @@ mod tests {
     ///
     /// Flow:
     /// 1. Advance 11 s to seed the tracker with ICMP.
-    /// 2. Loop 12 times: send an identical trippy round and advance 10 s.
-    ///    This covers ~120 s of simulated time and spans at least two
+    /// 2. Loop 12 times: send an identical RouteTraceMsg via `route_trace_tx`
+    ///    and advance 10 s. This covers ~120 s and spans at least two
     ///    60 s snapshot ticks.
     /// 3. Assert exactly one snapshot was delivered (the first).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn supervisor_emits_one_snapshot_for_steady_route() {
+        use crate::probing::{HopObservation, RouteTraceMsg};
+
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1575,6 +1625,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1582,16 +1633,39 @@ mod tests {
 
         tokio::task::yield_now().await;
 
+        // Pre-seed ICMP rolling stats so the state machine can elect ICMP
+        // as primary on the first eval tick. The real ICMP prober would
+        // normally do this, but unprivileged CI runners can't open a raw
+        // ICMP socket — `observation_tx` injection bypasses the kernel
+        // and keeps the test deterministic across hosts.
+        for _ in 0..3 {
+            handle
+                .observation_tx
+                .send(icmp_success("steady", 1_000))
+                .await
+                .expect("seed icmp sample");
+        }
+        yield_many(10).await;
+
         // Seed the tracker with ICMP primary via the first eval tick.
         tokio::time::advance(Duration::from_secs(11)).await;
         yield_many(10).await;
 
-        // Inject identical trippy rounds over ~120 s, crossing at least
+        // Inject identical RouteTraceMsgs over ~120 s, crossing at least
         // two 60 s snapshot ticks.
         for _ in 0..12 {
             handle
-                .observation_tx
-                .send(trippy_obs("steady", vec![hop(1, ipv4(10, 0, 0, 1), 1_000)]))
+                .route_trace_tx
+                .send(RouteTraceMsg {
+                    target_id: "steady".to_string(),
+                    protocol: Protocol::Icmp,
+                    hops: vec![HopObservation {
+                        position: 1,
+                        ip: Some(ipv4(10, 0, 0, 1)),
+                        rtt_micros: Some(1_000),
+                    }],
+                    observed_at: tokio::time::Instant::now(),
+                })
                 .await
                 .expect("send");
             tokio::time::advance(Duration::from_secs(10)).await;
@@ -1679,9 +1753,11 @@ mod tests {
     // ---------------------------------------------------------------------------
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn supervisor_stops_snapshot_emission_after_channel_closed() {
+        use crate::probing::{HopObservation, RouteTraceMsg};
+
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
 
         // Build a snapshot channel and immediately drop the receiver so any
         // `try_send` in the supervisor's snapshot tick will observe `Closed`.
@@ -1697,6 +1773,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1705,7 +1782,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Seed enough ICMP samples so the first eval tick elects ICMP primary
-        // and primes the tracker; also inject a trippy round so the tracker
+        // and primes the tracker; also inject a RouteTraceMsg so the tracker
         // actually has hops to snapshot on the 60 s tick. Without hops the
         // build_snapshot short-circuits and `try_send` never runs — we need
         // to exercise the `Closed` branch at least once.
@@ -1721,13 +1798,19 @@ mod tests {
         tokio::time::advance(Duration::from_secs(11)).await;
         yield_many(10).await;
         handle
-            .observation_tx
-            .send(trippy_obs(
-                "closed-snap",
-                vec![hop(1, ipv4(10, 0, 0, 1), 1_000)],
-            ))
+            .route_trace_tx
+            .send(RouteTraceMsg {
+                target_id: "closed-snap".to_string(),
+                protocol: Protocol::Icmp,
+                hops: vec![HopObservation {
+                    position: 1,
+                    ip: Some(ipv4(10, 0, 0, 1)),
+                    rtt_micros: Some(1_000),
+                }],
+                observed_at: tokio::time::Instant::now(),
+            })
             .await
-            .expect("send trippy observation");
+            .expect("send route trace");
         yield_many(10).await;
 
         // First snapshot tick — try_send observes Closed, latches the flag.
@@ -1759,7 +1842,7 @@ mod tests {
     async fn snapshot_state_returns_target_snapshot_after_eval_tick() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1771,6 +1854,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1831,6 +1915,7 @@ mod tests {
         // Minimal handle shim: all we need is `last_state`. The other fields
         // are unused by `snapshot_state`.
         let (observation_tx, _observation_rx) = mpsc::channel(1);
+        let (route_trace_tx, _route_trace_rx) = mpsc::channel(1);
         let stats: Arc<StatsArray> = Arc::new([
             Mutex::new(RollingStats::new(Duration::from_secs(60))),
             Mutex::new(RollingStats::new(Duration::from_secs(60))),
@@ -1844,6 +1929,7 @@ mod tests {
             cancel: cancel.clone(),
             join,
             observation_tx,
+            route_trace_tx,
             stats,
             prober_joins: Vec::new(),
             last_state: Arc::clone(&last_state),
@@ -1873,7 +1959,7 @@ mod tests {
     async fn supervisor_emits_path_metrics_per_protocol_after_eval() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, mut metrics_rx) =
             tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1886,6 +1972,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1951,7 +2038,7 @@ mod tests {
         // silently inflates reported rates 15x.
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, mut metrics_rx) =
             tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1964,6 +2051,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -2029,6 +2117,80 @@ mod tests {
                 msg.protocol,
             );
         }
+
+        parent_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn route_trace_msg_does_not_increment_rolling_stats() {
+        use crate::probing::{HopObservation, RouteTraceMsg};
+        use std::net::Ipv4Addr;
+
+        let parent_cancel = CancellationToken::new();
+        let (_config_tx, config_rx) = watch::channel(test_config());
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
+        let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
+        let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
+        let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
+
+        let handle = spawn(
+            test_target("rt-1"),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            config_rx,
+            allowlist_rx,
+            pool,
+            trippy,
+            icmp_pool,
+            parent_cancel.clone(),
+            snapshot_tx,
+            metrics_tx,
+        );
+
+        // Send a RouteTraceMsg that carries hops. The supervisor must NOT
+        // increment ICMP RollingStats from it — only the dedicated reachability
+        // pingers may do that. Topology messages feed the tracker, which is
+        // observed indirectly via snapshots; here we assert the negative
+        // (no reachability sample materialized).
+        let trace = RouteTraceMsg {
+            target_id: "rt-1".to_string(),
+            protocol: Protocol::Icmp,
+            hops: vec![HopObservation {
+                position: 1,
+                ip: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+                rtt_micros: Some(1_500),
+            }],
+            observed_at: tokio::time::Instant::now(),
+        };
+        handle
+            .route_trace_tx
+            .send(trace)
+            .await
+            .expect("send route trace");
+
+        // Give the supervisor a moment to drain.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Proof the supervisor actually consumed the message: with capacity 64
+        // and one buffered send, available capacity drops to 63 until the
+        // receiver drains it. Asserting we're back at the max ensures the
+        // negative `sample_count` assertion below is not vacuous (a missing
+        // select arm would leave the message buffered and capacity at 63).
+        assert_eq!(
+            handle.route_trace_tx.capacity(),
+            handle.route_trace_tx.max_capacity(),
+            "supervisor must consume the RouteTraceMsg from the channel",
+        );
+
+        // ICMP slot must show zero reachability samples — the trace went only to the tracker.
+        let icmp_idx = protocol_index(Protocol::Icmp).expect("icmp idx");
+        let icmp_stats = handle.stats[icmp_idx].lock().await;
+        assert_eq!(
+            icmp_stats.sample_count(),
+            0,
+            "RouteTraceMsg must NOT contribute to RollingStats[Icmp]",
+        );
+        drop(icmp_stats);
 
         parent_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.join).await;

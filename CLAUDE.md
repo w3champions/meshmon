@@ -59,8 +59,34 @@ Key patterns:
 - `CancellationToken` tree for graceful shutdown propagation
 - UDP prober uses shared-socket dispatcher pool (`UdpProberPool`) rather
   than per-target sockets — O(1) fd count as targets grow
-- Trippy driver uses `spawn_blocking` + a global `Semaphore`
-  (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32) to cap raw-socket + thread use
+- ICMP reachability and MTR topology are separate signals with separate
+  transports into the supervisor:
+  - Reachability: the dedicated surge-ping pinger (`probing/icmp.rs`)
+    emits `ProbeObservation` on the supervisor's `obs_tx`, routed into
+    `RollingStats[Icmp]` and thence into `meshmon_path_failure_rate`.
+  - Topology: `probing/trippy.rs` emits `RouteTraceMsg` on the dedicated
+    `route_trace_tx`, routed into the route tracker and thence into
+    snapshots. Trippy never feeds `RollingStats`.
+- Shared `IcmpClientPool` (`probing/icmp_pool.rs`) owns one
+  `surge-ping::Client` per address family for the whole process. Both v4
+  and v6 Clients are built lazily on first matching target so unit tests
+  can construct a pool without `CAP_NET_RAW`; production `bootstrap`
+  calls `pool.preflight()` to force v4 creation eagerly and abort
+  startup if the raw-socket bind is denied. Per-target pingers borrow a
+  `Pinger` from the pool; identifier allocation is a process-wide
+  monotonic non-zero `AtomicU16` (skip 0 because `PingIdentifier(0)` is
+  surge-ping's wildcard fallback). Caps raw-socket count at one per
+  address family regardless of target count.
+- Trippy uses one persistent `Tracer` per (target, protocol) via
+  `Tracer::run_with(callback)` inside a single `spawn_blocking`. The
+  callback snapshots state, forwards aggregated hops via a sync→async
+  bridge, then `clear()`s state so the next round starts fresh. Bounded
+  `max_rounds = 3600` forces a clean exit + rebuild so shutdown and
+  protocol changes never leak the OS thread or raw socket.
+  `grace_duration = 500 ms` covers late destination replies on >200 ms
+  RTT paths. A global `Semaphore`
+  (`MESHMON_ICMP_TARGET_CONCURRENCY`, default 32) caps concurrent
+  persistent tracers across targets.
 - Each ICMP trippy round picks a unique non-zero 16-bit `trace_identifier`
   (monotonic `AtomicU16`, skip 0) so concurrent tracers on the same host
   stop cross-attributing each other's ICMP replies. TCP/UDP rounds leave
@@ -75,9 +101,12 @@ Key patterns:
   position where the target's own IP appears. This matches mtr's output
   shape and stops trippy's over-probing from oscillating the reported
   hop count.
-- Dedicated ICMP pinger (`surge-ping`, `probing/icmp.rs`) runs always-on alongside
-  trippy so the state machine retains ICMP samples even when the primary protocol
-  swings to TCP or UDP; requires `CAP_NET_RAW`
+- `path_summary.{loss_pct, avg_rtt_micros}` derives from the destination
+  hop only (`hops.last()`). The route tracker's truncate-at-target
+  invariant guarantees `hops.last()` is the destination. Per-hop loss/RTT
+  for intermediate hops stays in `hops[]` for visualization; aggregating
+  across all hops would conflate silent ICMP-rate-limited intermediate
+  routers (always 100 % loss) with end-to-end loss.
 - `TargetStateMachine` (in `state.rs`) evaluates per-protocol health and derives
   path health every 10 s; the supervisor publishes resulting rates and window
   sizes to the four prober watch channels — probers are never respawned

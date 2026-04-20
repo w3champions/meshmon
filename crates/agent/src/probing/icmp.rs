@@ -11,18 +11,18 @@
 //! Uses `surge-ping` (tokio-native ICMP client). Needs `CAP_NET_RAW` or
 //! equivalent — same posture as the trippy driver, no new ops work.
 
-use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use meshmon_protocol::{Protocol, Target};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use surge_ping::{Client, Config, PingIdentifier, PingSequence, SurgeError, ICMP};
+use surge_ping::{PingSequence, SurgeError};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::probing::{ProbeObservation, ProbeOutcome, ProbeRate};
+use crate::probing::{IcmpClientPool, ProbeObservation, ProbeOutcome, ProbeRate};
 
 /// Per-probe timeout. Matches the trippy / TCP connect timeouts used
 /// elsewhere so all three protocols report `Timeout` on the same
@@ -31,7 +31,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Spawn an ICMP pinger for a single target. Returns a `JoinHandle<()>`
 /// matching `tcp::spawn`'s shape.
+///
+/// The pinger is drawn from the shared [`IcmpClientPool`] — one raw ICMP
+/// socket per address family for the entire agent process. Identifier
+/// allocation is centralized in the pool so two concurrent pingers can
+/// never share an identifier and cross-attribute each other's replies.
 pub fn spawn(
+    pool: Arc<IcmpClientPool>,
     target: Target,
     rate_rx: watch::Receiver<ProbeRate>,
     obs_tx: mpsc::Sender<ProbeObservation>,
@@ -44,46 +50,26 @@ pub fn spawn(
             return tokio::spawn(async {});
         }
     };
-    // `Config::default()` hardcodes `ICMP::V4`, so select the right
-    // socket family based on the target's IP. Without this an IPv6
-    // target would bind an ICMPv4 socket and every probe would surface
-    // as `ProbeOutcome::Error` on send — meshmon is dual-stack (agents
-    // bind `[::]`, targets can be v4 or v6), so this is a live path.
-    let config = match ip {
-        IpAddr::V4(_) => Config::default(),
-        IpAddr::V6(_) => Config::builder().kind(ICMP::V6).build(),
-    };
-    // Each task builds its own `Client`. The client owns a raw ICMP
-    // socket + a background dispatcher task; at 50 targets this means
-    // 50 raw sockets + 50 dispatchers, which matches the tokio-task
-    // budget in spec 02.
-    // TODO(scale): share a single `Client` across targets (mirror the
-    // `UdpProberPool` pattern) once target count grows past ~500 or
-    // profiling flags raw-socket setup as a hot path.
-    let client = match Client::new(&config) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(target_id = %target.id, error = %e, "icmp client bind failed");
-            return tokio::spawn(async {});
-        }
-    };
-    tokio::spawn(run(target.id, ip, client, rate_rx, obs_tx, cancel))
+    tokio::spawn(async move {
+        let pinger = match pool.pinger(ip).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(target_id = %target.id, error = %e, "icmp pinger acquire failed");
+                return;
+            }
+        };
+        run(target.id, pinger, rate_rx, obs_tx, cancel).await;
+    })
 }
 
 async fn run(
     target_id: String,
-    ip: IpAddr,
-    client: Client,
+    mut pinger: surge_ping::Pinger,
     mut rate_rx: watch::Receiver<ProbeRate>,
     obs_tx: mpsc::Sender<ProbeObservation>,
     cancel: CancellationToken,
 ) {
     let mut rng = SmallRng::from_rng(&mut rand::rng());
-    // Random identifier per pinger avoids cross-target reply confusion
-    // when two pingers end up on the same process. The dispatcher inside
-    // `surge-ping` filters replies by (identifier, sequence).
-    let identifier = PingIdentifier(rand::random::<u16>());
-    let mut pinger = client.pinger(ip, identifier).await;
     pinger.timeout(PROBE_TIMEOUT);
     let payload = [0u8; 8];
 
@@ -163,17 +149,24 @@ mod tests {
         }
     }
 
-    /// Loopback ping — requires `CAP_NET_RAW` (or macOS SOCK_DGRAM
-    /// ICMP support). On CI without raw-socket permission this test
-    /// fails at `Client::new`; `#[ignore]` keeps it opt-in.
+    /// Loopback ping. The spawned task acquires a real `Pinger` from the
+    /// pool, which hits the kernel and needs `CAP_NET_RAW` (or macOS
+    /// SOCK_DGRAM). Self-skips when the bind would fail.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires CAP_NET_RAW; run on a local dev box with `cargo test -- --ignored`"]
     async fn loopback_icmp_ping_succeeds() {
+        crate::probing::icmp_pool::skip_unless_raw_icmp!();
+        let pool = Arc::new(IcmpClientPool::new());
         let cancel = CancellationToken::new();
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(10.0));
         let (obs_tx, mut obs_rx) = mpsc::channel::<ProbeObservation>(32);
 
-        let handle = spawn(test_target("loopback"), rate_rx, obs_tx, cancel.clone());
+        let handle = spawn(
+            pool,
+            test_target("loopback"),
+            rate_rx,
+            obs_tx,
+            cancel.clone(),
+        );
 
         // Wait for the first observation, or fail after 3 s.
         let obs = tokio::time::timeout(Duration::from_secs(3), obs_rx.recv())
@@ -192,19 +185,20 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
-    /// Invalid IP (all zeros — not a meaningful ICMP target). This one
-    /// doesn't require raw socket privileges at the client-build level
-    /// but still can't be guaranteed on CI; keep `#[ignore]`.
+    /// Invalid IP (all zeros — not a meaningful ICMP target). The pool's
+    /// lazy v4 init still hits the kernel before the kernel rejects the
+    /// route; self-skip when the bind itself isn't permitted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires CAP_NET_RAW"]
     async fn invalid_ip_emits_timeout_or_error() {
+        crate::probing::icmp_pool::skip_unless_raw_icmp!();
+        let pool = Arc::new(IcmpClientPool::new());
         let cancel = CancellationToken::new();
         let mut target = test_target("bogus");
         target.ip = vec![0, 0, 0, 0].into(); // 0.0.0.0 — kernel won't route
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(5.0));
         let (obs_tx, mut obs_rx) = mpsc::channel::<ProbeObservation>(32);
 
-        let handle = spawn(target, rate_rx, obs_tx, cancel.clone());
+        let handle = spawn(pool, target, rate_rx, obs_tx, cancel.clone());
 
         let obs = tokio::time::timeout(Duration::from_secs(5), obs_rx.recv())
             .await
@@ -222,17 +216,18 @@ mod tests {
     }
 
     /// Cancellation test doesn't actually ping — it only verifies the
-    /// task exits promptly on `cancel`. Works without raw-socket
-    /// privileges because `Client::new` may still succeed in CI (it's
-    /// just that `ping()` would fail); the cancel races the ping.
+    /// task exits promptly on `cancel`. Still needs CAP_NET_RAW because
+    /// the spawned task acquires a real `Pinger` from the pool before it
+    /// reaches the cancel-vs-tick select; self-skips when it can't.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires CAP_NET_RAW for Client::new on most CI"]
     async fn honors_cancellation() {
+        crate::probing::icmp_pool::skip_unless_raw_icmp!();
+        let pool = Arc::new(IcmpClientPool::new());
         let cancel = CancellationToken::new();
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(0.0)); // idle rate
         let (obs_tx, _obs_rx) = mpsc::channel::<ProbeObservation>(32);
 
-        let handle = spawn(test_target("cancel"), rate_rx, obs_tx, cancel.clone());
+        let handle = spawn(pool, test_target("cancel"), rate_rx, obs_tx, cancel.clone());
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
