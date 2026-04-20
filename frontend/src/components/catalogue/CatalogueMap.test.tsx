@@ -23,7 +23,7 @@ vi.mock("react-leaflet-cluster", async () => {
 });
 
 import { CatalogueMap, EntryPopup } from "@/components/catalogue/CatalogueMap";
-import { getLeafletMock, resetLeafletMock } from "@/test/leaflet-mock";
+import { fireClusterClick, getLeafletMock, resetLeafletMock } from "@/test/leaflet-mock";
 import { renderWithProviders, renderWithQuery } from "@/test/query-wrapper";
 
 function makeEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry {
@@ -190,6 +190,62 @@ describe("CatalogueMap", () => {
     );
     await screen.findByTestId("draw-map-shell");
     expect(screen.getByTestId("marker-cluster-group")).toBeInTheDocument();
+  });
+
+  test("detail-mode cluster click fires onClusterOpen with a bbox enclosing the pins", async () => {
+    const onClusterOpen = vi.fn();
+    const entries = [
+      makeEntry({ id: "a", latitude: 10, longitude: 20 }),
+      makeEntry({ id: "b", latitude: 12, longitude: 24 }),
+    ];
+    renderWithProviders(
+      <CatalogueMap
+        response={detailResponse(entries)}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        onShapesChange={() => {}}
+        onRowClick={() => {}}
+        onClusterOpen={onClusterOpen}
+        onViewportChange={() => {}}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    // `MarkerClusterGroup` only receives an `onClick` when
+    // `onClusterClick` is wired — assert that first so a regression
+    // where the wiring is lost surfaces here.
+    const clusterGroup = screen.getByTestId("marker-cluster-group");
+    expect(clusterGroup).toHaveAttribute("data-has-on-click", "true");
+
+    // Simulate a cluster click carrying both pin ids.
+    fireClusterClick(["a", "b"]);
+
+    expect(onClusterOpen).toHaveBeenCalledTimes(1);
+    const [bbox] = onClusterOpen.mock.calls[0];
+    const [minLat, minLng, maxLat, maxLng] = bbox as [number, number, number, number];
+    // Bbox must enclose every clustered pin — with a small epsilon pad
+    // so backend BETWEEN filters don't drop edge pins.
+    expect(minLat).toBeLessThanOrEqual(10);
+    expect(maxLat).toBeGreaterThanOrEqual(12);
+    expect(minLng).toBeLessThanOrEqual(20);
+    expect(maxLng).toBeGreaterThanOrEqual(24);
+  });
+
+  test("cluster-mode does not wire onClusterClick (server already aggregated)", async () => {
+    const buckets = [clusterBucket({ count: 5 })];
+    renderWithProviders(
+      <CatalogueMap
+        response={clustersResponse(buckets)}
+        isLoading={false}
+        isError={false}
+        shapes={[]}
+        {...noopHandlers}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    // In cluster mode the wrapper is bypassed entirely — no MarkerClusterGroup,
+    // no onClusterClick to worry about. Guard this invariant.
+    expect(screen.queryByTestId("marker-cluster-group")).not.toBeInTheDocument();
   });
 
   test("isError shows an error banner and suppresses the map", async () => {

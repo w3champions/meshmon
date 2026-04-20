@@ -1,5 +1,5 @@
 import L from "leaflet";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import type {
   CatalogueEntry,
   CatalogueMapBucket,
@@ -141,6 +141,44 @@ export function CatalogueMap({
 
   const pins = isClusterMode ? clusterPins : detailPins;
 
+  /**
+   * Detail-mode cluster handler. `react-leaflet-cluster` groups nearby
+   * detail pins visually; clicking a cluster should open the same dialog
+   * the server-aggregated cluster bubbles use, scoped to the bounding
+   * box of the clustered pins. Without this, `MarkerClusterGroup` falls
+   * back to its default zoom-to-bounds behavior and the dialog never
+   * opens.
+   */
+  const handleDetailClusterClick = useCallback(
+    (pinIds: string[]) => {
+      if (!detailRows || pinIds.length === 0) return;
+      // Look up each pin's lat/lon (detail pins were filtered to have both).
+      let minLat = Number.POSITIVE_INFINITY;
+      let maxLat = Number.NEGATIVE_INFINITY;
+      let minLng = Number.POSITIVE_INFINITY;
+      let maxLng = Number.NEGATIVE_INFINITY;
+      for (const id of pinIds) {
+        const entry = detailRows.find((e) => e.id === id);
+        if (!entry || entry.latitude == null || entry.longitude == null) continue;
+        const lat = entry.latitude as number;
+        const lng = entry.longitude as number;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+      }
+      if (!Number.isFinite(minLat)) return;
+      // Pad the bbox by a small epsilon so edge pins stay inside — Leaflet
+      // clusters compose out of pins that round to the same visual area,
+      // but the backend keyset filter uses a strict BETWEEN, so an exact
+      // zero-area bbox would return a single row.
+      const epsilon = Math.max(1e-6, (maxLat - minLat) * 0.02, (maxLng - minLng) * 0.02);
+      const bbox: Bbox = [minLat - epsilon, minLng - epsilon, maxLat + epsilon, maxLng + epsilon];
+      onClusterOpen(bbox);
+    },
+    [detailRows, onClusterOpen],
+  );
+
   if (isError) {
     return (
       <div
@@ -162,6 +200,7 @@ export function CatalogueMap({
         pins={pins}
         onViewportChange={onViewportChange}
         clusterMode={isClusterMode}
+        onClusterClick={isClusterMode ? undefined : handleDetailClusterClick}
         className={className}
       />
     </div>

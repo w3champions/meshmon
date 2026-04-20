@@ -102,10 +102,40 @@ function columnToSortBy(columnId: string): CatalogueSortCol | null {
 }
 
 /** Estimated row height in px — matches the shadcn `TableRow` default. */
-const ROW_HEIGHT_ESTIMATE = 44;
+export const ROW_HEIGHT_ESTIMATE = 44;
 
 /** Max height of the virtualized scroll container. */
 const SCROLL_MAX_HEIGHT = "70vh";
+
+/**
+ * Explicit per-column widths (pixels). Pinning width at both the header
+ * and body tables — paired with `table-layout: fixed` — lets header
+ * columns and virtualized body columns align vertically and keeps cell
+ * content from expanding its row beyond {@link ROW_HEIGHT_ESTIMATE}
+ * (which the virtualizer assumes is constant). Every cell renderer
+ * clips overflow via `truncate`, so widths narrower than the raw
+ * content are safe.
+ */
+const COLUMN_WIDTHS: Record<string, number> = {
+  ip: 140,
+  display_name: 180,
+  city: 140,
+  country: 150,
+  asn: 100,
+  network: 180,
+  status: 120,
+  location: 110,
+  website: 180,
+  notes: 200,
+  actions: 80,
+};
+
+/** Fallback width for any column that doesn't appear in {@link COLUMN_WIDTHS}. */
+const DEFAULT_COLUMN_WIDTH = 140;
+
+function columnWidth(columnId: string): number {
+  return COLUMN_WIDTHS[columnId] ?? DEFAULT_COLUMN_WIDTH;
+}
 
 /**
  * Initial viewport rect fed to the virtualizer before the ResizeObserver
@@ -281,19 +311,37 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       id: "ip",
       accessorKey: "ip",
       header: "IP",
-      cell: ({ row }) => <span className="font-mono text-xs">{row.original.ip}</span>,
+      cell: ({ row }) => (
+        <span className="block truncate font-mono text-xs" title={row.original.ip}>
+          {row.original.ip}
+        </span>
+      ),
     },
     {
       id: "display_name",
       accessorKey: "display_name",
       header: "Name",
-      cell: ({ row }) => row.original.display_name ?? "—",
+      cell: ({ row }) => {
+        const name = row.original.display_name;
+        return (
+          <span className="block truncate" title={name ?? undefined}>
+            {name ?? "—"}
+          </span>
+        );
+      },
     },
     {
       id: "city",
       accessorKey: "city",
       header: "City",
-      cell: ({ row }) => row.original.city ?? "—",
+      cell: ({ row }) => {
+        const city = row.original.city;
+        return (
+          <span className="block truncate" title={city ?? undefined}>
+            {city ?? "—"}
+          </span>
+        );
+      },
     },
     {
       id: "country",
@@ -302,20 +350,39 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       cell: ({ row }) => {
         const code = row.original.country_code;
         const name = lookupCountryName(code);
-        return <span title={code ?? undefined}>{name ?? code ?? "—"}</span>;
+        const display = name ?? code ?? "—";
+        return (
+          <span className="block truncate" title={code ?? undefined}>
+            {display}
+          </span>
+        );
       },
     },
     {
       id: "asn",
       accessorKey: "asn",
       header: "ASN",
-      cell: ({ row }) => (row.original.asn != null ? String(row.original.asn) : "—"),
+      cell: ({ row }) => {
+        const asn = row.original.asn != null ? String(row.original.asn) : "—";
+        return (
+          <span className="block truncate" title={asn}>
+            {asn}
+          </span>
+        );
+      },
     },
     {
       id: "network",
       accessorKey: "network_operator",
       header: "Network",
-      cell: ({ row }) => row.original.network_operator ?? "—",
+      cell: ({ row }) => {
+        const net = row.original.network_operator;
+        return (
+          <span className="block truncate" title={net ?? undefined}>
+            {net ?? "—"}
+          </span>
+        );
+      },
     },
     {
       id: "status",
@@ -346,7 +413,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       header: "Website",
       cell: ({ row }) => {
         const website = row.original.website;
-        if (!website) return "—";
+        if (!website) return <span className="block truncate">—</span>;
         // Operators may save "example.com" as well as a full URL; normalise
         // so the href is always absolute. Assume https when no scheme is set.
         const href = /^https?:\/\//i.test(website) ? website : `https://${website}`;
@@ -357,7 +424,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="block max-w-[12rem] truncate text-primary underline-offset-2 hover:underline"
+            className="block truncate text-primary underline-offset-2 hover:underline"
             title={website}
           >
             {displayHost}
@@ -370,7 +437,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       accessorKey: "notes",
       header: "Notes",
       cell: ({ row }) => (
-        <span className="block max-w-[16rem] truncate" title={row.original.notes ?? undefined}>
+        <span className="block truncate" title={row.original.notes ?? undefined}>
           {row.original.notes ?? "—"}
         </span>
       ),
@@ -505,9 +572,18 @@ export function CatalogueTable({
       </div>
 
       {/* Table — header lives outside the scrollable body so the column
-          titles stay pinned and don't virtualize. */}
+          titles stay pinned and don't virtualize. A shared <colgroup>
+          plus `table-layout: fixed` on both the header and body tables
+          keeps column widths locked so header/body line up vertically
+          and cell content cannot push the absolutely-positioned row
+          past its virtualizer-assumed height. */}
       <div className="overflow-hidden rounded-md border">
-        <Table>
+        <Table style={{ tableLayout: "fixed" }}>
+          <colgroup>
+            {visibleColumns.map((col) => (
+              <col key={col.id} style={{ width: `${columnWidth(col.id)}px` }} />
+            ))}
+          </colgroup>
           <TableHeader>
             <TableRow>
               {visibleColumns.map((col) => {
@@ -518,6 +594,7 @@ export function CatalogueTable({
                   <TableHead
                     key={col.id}
                     aria-sort={sortCol ? ariaSortForColumn(sortCol, sort) : undefined}
+                    className="overflow-hidden"
                   >
                     {sortCol ? (
                       <SortableHeader
@@ -540,7 +617,12 @@ export function CatalogueTable({
           className="relative overflow-auto"
           style={{ maxHeight: SCROLL_MAX_HEIGHT }}
         >
-          <Table>
+          <Table style={{ tableLayout: "fixed" }}>
+            <colgroup>
+              {visibleColumns.map((col) => (
+                <col key={col.id} style={{ width: `${columnWidth(col.id)}px` }} />
+              ))}
+            </colgroup>
             <TableBody
               style={{
                 display: "block",
@@ -566,17 +648,28 @@ export function CatalogueTable({
                         handleClick();
                       }
                     }}
-                    className="absolute top-0 left-0 flex w-full cursor-pointer hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+                    className="absolute top-0 left-0 flex w-full cursor-pointer items-center overflow-hidden hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
                     style={{
                       transform: `translateY(${virtualItem.start}px)`,
                       height: `${virtualItem.size}px`,
                     }}
                   >
-                    {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id} className="flex-1">
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </TableCell>
-                    ))}
+                    {row.getVisibleCells().map((cell) => {
+                      const width = columnWidth(cell.column.id);
+                      return (
+                        <TableCell
+                          key={cell.id}
+                          className="overflow-hidden"
+                          style={{
+                            width: `${width}px`,
+                            minWidth: `${width}px`,
+                            maxWidth: `${width}px`,
+                          }}
+                        >
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </TableCell>
+                      );
+                    })}
                   </TableRow>
                 );
               })}

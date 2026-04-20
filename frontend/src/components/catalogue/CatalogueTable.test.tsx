@@ -9,6 +9,7 @@ import {
   type CatalogueTableSort,
   formatWebsiteHost,
   LS_KEY,
+  ROW_HEIGHT_ESTIMATE,
 } from "./CatalogueTable";
 
 // ---------------------------------------------------------------------------
@@ -536,6 +537,59 @@ describe("CatalogueTable", () => {
       // With a 2000-row dataset, the virtualizer should never commit all
       // of them at once regardless of layout measurements.
       expect(rendered.length).toBeLessThan(2000);
+    });
+
+    test("rows with very long cell content keep the fixed virtualizer row height", async () => {
+      // Regression guard for the T51 layout bug: a row carrying a
+      // massively-long notes string would grow past the 44px the
+      // virtualizer pinned in its translateY math, causing neighbouring
+      // rows to overlap visually. The fix truncates every cell to a
+      // single line, so the inline style on the `<tr>` must always
+      // report exactly `ROW_HEIGHT_ESTIMATE`.
+      const longNotes = "qwdqwo;as ".repeat(50);
+      const longCity = "A really very absurdly long city name ".repeat(10);
+      const rows: CatalogueEntry[] = [
+        {
+          ...ENTRY_A,
+          id: "long-row",
+          ip: "8.8.8.8",
+          notes: longNotes,
+          city: longCity,
+        },
+      ];
+      const user = userEvent.setup();
+      renderWithProviders(<CatalogueTable {...buildProps({ rows, total: 1 })} />);
+
+      // Enable notes so the long cell is actually in the DOM.
+      const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+      await user.click(chooserBtn);
+      await user.click(screen.getByRole("checkbox", { name: /notes/i }));
+
+      const renderedRow = await screen.findByRole("button", { name: /Open entry 8\.8\.8\.8/i });
+      expect(renderedRow.style.height).toBe(`${ROW_HEIGHT_ESTIMATE}px`);
+    });
+
+    test("rendered column widths match the declared explicit widths", async () => {
+      // Fixed table layout + shared colgroup is how header and body
+      // stay aligned. Verify both tables carry the same <col>
+      // width for each visible column id.
+      const { container } = renderWithProviders(<CatalogueTable {...buildProps()} />);
+      await screen.findByRole("columnheader", { name: /IP/ });
+
+      const tables = container.querySelectorAll("table");
+      // Two tables: header + virtualized body.
+      expect(tables.length).toBe(2);
+
+      const widthsPerTable = Array.from(tables).map((t) =>
+        Array.from(t.querySelectorAll("colgroup > col")).map((c) => (c as HTMLElement).style.width),
+      );
+
+      // Header/body colgroups must match column-for-column.
+      expect(widthsPerTable[0]).toEqual(widthsPerTable[1]);
+      // Every column must have an explicit px width (no auto-sizing).
+      for (const width of widthsPerTable[0]) {
+        expect(width).toMatch(/^\d+px$/);
+      }
     });
   });
 });
