@@ -3531,6 +3531,16 @@
                 "description": "Optional default metadata applied to every accepted IP. See the\nstruct-level docs for the merge semantics."
               }
             ]
+          },
+          "per_ip_display_names": {
+            "type": "object",
+            "description": "Optional per-IP display-name overrides, keyed by the caller's\nliteral IP string (same form as it appears in `ips`). An\noverride supplies the display name for a single IP and wins\nover `metadata.display_name`; it still honours the lock rule on\nexisting rows (an existing `DisplayName` lock blocks the\noverride just like it blocks the panel default). Keys that do\nnot parse as IPs, or that are not in the accepted set, are\nsilently ignored — matches the permissive posture used by the\nkeyset cursor and `ip_prefix` filter.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },

@@ -138,26 +138,6 @@ fn validate_metadata(md: &PasteMetadata) -> Result<repo::BulkMetadata, &'static 
     })
 }
 
-/// Number of distinct metadata columns the caller wants to apply.
-/// Paired fields count once (the composite `Country` / `Location`
-/// key), matching the repo-layer skip semantics. Zero means "no
-/// metadata" and the handler skips the merge pass entirely.
-fn supplied_field_count(md: &repo::BulkMetadata) -> usize {
-    [
-        md.display_name.is_some(),
-        md.city.is_some(),
-        md.website.is_some(),
-        md.notes.is_some(),
-        // Paired halves count once; the handler's validator guarantees
-        // both halves of a pair are supplied together or not at all.
-        md.country_code.is_some(),
-        md.latitude.is_some(),
-    ]
-    .into_iter()
-    .filter(|b| *b)
-    .count()
-}
-
 /// Aggregate a per-row skip log into the wire-shape [`PasteSkippedSummary`].
 fn aggregate_skipped_summary(skips: &[(Uuid, Vec<String>)]) -> PasteSkippedSummary {
     let mut summary = PasteSkippedSummary::default();
@@ -228,7 +208,6 @@ pub async fn paste(
         None => None,
     };
     let metadata_present = md_for_repo.is_some();
-    let supplied_count = md_for_repo.as_ref().map(supplied_field_count).unwrap_or(0);
 
     // `parse_ip_tokens` accepts any delimiter; join the array so the
     // parser sees one blob regardless of how the client split tokens.
@@ -238,12 +217,35 @@ pub async fn paste(
     let joined = body.ips.join(" ");
     let parsed = parse_ip_tokens(&joined);
 
+    // Translate the wire-side `per_ip_display_names` map (string-keyed
+    // so JSON can round-trip cleanly) into the repo-layer
+    // `HashMap<IpAddr, String>` it expects. Keys that fail to parse as
+    // an IP are silently dropped — matches the permissive parse
+    // posture used for `ips` tokens and the keyset cursor.
+    // Whitespace-only display-name values collapse to "no override"
+    // so the panel default still applies when the operator typed then
+    // cleared the inline input.
+    let per_ip_display_names: std::collections::HashMap<std::net::IpAddr, String> = body
+        .per_ip_display_names
+        .iter()
+        .filter_map(|(k, v)| {
+            let name = v.trim();
+            if name.is_empty() {
+                return None;
+            }
+            k.parse::<std::net::IpAddr>()
+                .ok()
+                .map(|ip| (ip, name.to_string()))
+        })
+        .collect();
+
     let outcome = match repo::insert_many_with_metadata(
         &state.pool,
         &parsed.accepted,
         CatalogueSource::Operator,
         Some(&principal.username),
         md_for_repo.as_ref(),
+        &per_ip_display_names,
     )
     .await
     {
@@ -263,31 +265,16 @@ pub async fn paste(
         let _ = state.enrichment_queue.enqueue(row.id);
     }
 
-    // Metadata may have changed fields on existing rows. Publish an
-    // `Updated` event per row that *actually* changed — rows where
-    // every supplied field was skipped (full skip list) would be a
-    // no-op and waking SSE subscribers would be misleading.
-    //
-    // `supplied_count == 0` implies no metadata was submitted; in that
-    // case `existing` is the untouched pre-paste state and no
-    // `Updated` event is owed.
-    let skip_count: std::collections::HashMap<Uuid, usize> = outcome
-        .skips
-        .iter()
-        .map(|(id, fields)| (*id, fields.len()))
-        .collect();
-    let mut touched_existing = false;
-    if supplied_count > 0 {
-        for row in &outcome.existing {
-            let skipped = skip_count.get(&row.id).copied().unwrap_or(0);
-            if skipped < supplied_count {
-                touched_existing = true;
-                state
-                    .catalogue_broker
-                    .publish(CatalogueEvent::Updated { id: row.id });
-            }
-        }
+    // Metadata may have changed fields on existing rows. The repo
+    // returns an explicit `updated_existing` set — we only publish
+    // `Updated` for rows that actually wrote at least one column, so
+    // SSE subscribers are never woken on a full-skip no-op.
+    for id in &outcome.updated_existing {
+        state
+            .catalogue_broker
+            .publish(CatalogueEvent::Updated { id: *id });
     }
+    let touched_existing = !outcome.updated_existing.is_empty();
 
     // New rows or any existing-row write can shift facet bucket counts
     // (country / city / network). Invalidate once after the full merge

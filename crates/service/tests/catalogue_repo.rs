@@ -449,6 +449,7 @@ async fn bulk_metadata_applies_to_new_rows_and_locks_fields() {
         CatalogueSource::Operator,
         Some("operator@example.com"),
         Some(&md),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -525,6 +526,7 @@ async fn bulk_metadata_skips_locked_fields_on_existing_rows() {
         CatalogueSource::Operator,
         None,
         Some(&test_metadata()),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -587,6 +589,7 @@ async fn bulk_metadata_paired_lat_lon_skip_if_either_locked() {
         CatalogueSource::Operator,
         None,
         Some(&test_metadata()),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -647,6 +650,7 @@ async fn bulk_metadata_paired_country_skip_if_either_locked() {
         CatalogueSource::Operator,
         None,
         Some(&test_metadata()),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -684,10 +688,16 @@ async fn bulk_metadata_none_mirrors_legacy_insert_many() {
     meshmon_service::db::run_migrations(&db.pool).await.unwrap();
 
     let ips: Vec<IpAddr> = vec!["198.51.100.146".parse().unwrap()];
-    let outcome =
-        repo::insert_many_with_metadata(&db.pool, &ips, CatalogueSource::Operator, None, None)
-            .await
-            .unwrap();
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        None,
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(outcome.created.len(), 1);
     assert!(outcome.existing.is_empty());
@@ -698,6 +708,141 @@ async fn bulk_metadata_none_mirrors_legacy_insert_many() {
         outcome.created[0].enrichment_status,
         EnrichmentStatus::Pending
     );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn per_ip_display_name_wins_over_panel_default_on_new_rows() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ip_overridden: IpAddr = "198.51.100.181".parse().unwrap();
+    let ip_default: IpAddr = "198.51.100.182".parse().unwrap();
+    let ips = vec![ip_overridden, ip_default];
+
+    let md = repo::BulkMetadata {
+        display_name: Some("panel-default".into()),
+        ..Default::default()
+    };
+    let per_ip: std::collections::HashMap<IpAddr, String> =
+        [(ip_overridden, "inline-override".into())]
+            .into_iter()
+            .collect();
+
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        None,
+        Some(&md),
+        &per_ip,
+    )
+    .await
+    .unwrap();
+
+    let overridden = outcome
+        .created
+        .iter()
+        .find(|r| r.ip == ip_overridden)
+        .expect("row for overridden IP");
+    let default_row = outcome
+        .created
+        .iter()
+        .find(|r| r.ip == ip_default)
+        .expect("row for default IP");
+
+    // Per-IP override wins for the IP that was named inline.
+    assert_eq!(overridden.display_name.as_deref(), Some("inline-override"));
+    assert!(overridden.is_locked(Field::DisplayName));
+    // Rows without an override fall back to the panel default.
+    assert_eq!(default_row.display_name.as_deref(), Some("panel-default"));
+    assert!(default_row.is_locked(Field::DisplayName));
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn per_ip_display_name_alone_without_panel_metadata_still_writes() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ip: IpAddr = "198.51.100.183".parse().unwrap();
+    let per_ip: std::collections::HashMap<IpAddr, String> =
+        [(ip, "solo-override".into())].into_iter().collect();
+
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &[ip],
+        CatalogueSource::Operator,
+        None,
+        None,
+        &per_ip,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.created.len(), 1);
+    let row = &outcome.created[0];
+    // Per-IP override reaches the DB even when the panel-wide
+    // `metadata` block was not supplied — the repo short-circuit
+    // doesn't skip the merge pass when any per-IP override carries a
+    // write.
+    assert_eq!(row.display_name.as_deref(), Some("solo-override"));
+    assert!(row.is_locked(Field::DisplayName));
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn per_ip_display_name_honors_existing_lock_and_skips_write() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ip: IpAddr = "198.51.100.184".parse().unwrap();
+    let seeded = repo::insert_many(&db.pool, &[ip], CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = seeded.created[0].id;
+    // Pre-lock DisplayName with a specific operator-set value.
+    repo::patch(
+        &db.pool,
+        id,
+        repo::PatchSet {
+            display_name: Some(Some("pre-existing-name".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let per_ip: std::collections::HashMap<IpAddr, String> =
+        [(ip, "attempted-override".into())].into_iter().collect();
+
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &[ip],
+        CatalogueSource::Operator,
+        None,
+        None,
+        &per_ip,
+    )
+    .await
+    .unwrap();
+
+    let row = &outcome.existing[0];
+    // Locked DisplayName blocks the per-IP override just like it
+    // blocks the panel default — operator intent is preserved.
+    assert_eq!(row.display_name.as_deref(), Some("pre-existing-name"));
+    // Skip log records the single field skip keyed by the lock.
+    let skip_for_row = outcome
+        .skips
+        .iter()
+        .find(|(rid, _)| *rid == id)
+        .expect("skip entry for locked DisplayName");
+    assert_eq!(skip_for_row.1, vec!["DisplayName".to_string()]);
+    // No `updated_existing` entry — the row was not touched.
+    assert!(!outcome.updated_existing.contains(&id));
 
     db.close().await;
 }

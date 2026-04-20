@@ -86,6 +86,10 @@ pub struct BulkInsertOutcome {
     /// one metadata write. `"Location"` / `"Country"` appear as
     /// composite keys for paired-field skips.
     pub skips: Vec<(Uuid, Vec<String>)>,
+    /// Ids of existing rows whose merge actually wrote at least one
+    /// column. Lets the handler fan out `Updated` SSE events without
+    /// double-counting rows whose supplied fields were all locked.
+    pub updated_existing: std::collections::HashSet<Uuid>,
 }
 
 /// Per-row write plan distilled from a [`BulkMetadata`] and the
@@ -381,7 +385,8 @@ pub async fn insert_many(
     source: CatalogueSource,
     created_by: Option<&str>,
 ) -> Result<InsertOutcome, sqlx::Error> {
-    let out = insert_many_with_metadata(pool, ips, source, created_by, None).await?;
+    let out =
+        insert_many_with_metadata(pool, ips, source, created_by, None, &Default::default()).await?;
     Ok(InsertOutcome {
         created: out.created,
         existing: out.existing,
@@ -414,6 +419,7 @@ pub async fn insert_many_with_metadata(
     source: CatalogueSource,
     created_by: Option<&str>,
     md: Option<&BulkMetadata>,
+    per_ip_display_names: &std::collections::HashMap<IpAddr, String>,
 ) -> Result<BulkInsertOutcome, sqlx::Error> {
     if ips.is_empty() {
         return Ok(BulkInsertOutcome::default());
@@ -483,34 +489,60 @@ pub async fn insert_many_with_metadata(
     };
 
     let mut skips: Vec<(Uuid, Vec<String>)> = Vec::new();
+    let mut updated_existing: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
 
-    if let Some(md) = md {
-        if !md.is_empty() {
-            // New rows start with an empty lock set, so the plan's
-            // `skipped` is always empty for this bucket — record the
-            // `added_locks` and overwrite the row with the post-merge
-            // state so callers see the metadata they supplied.
-            for row in created.iter_mut() {
-                let plan = RowWritePlan::compute(md, &row.operator_edited_fields);
-                if plan.has_writes() {
-                    let updated = apply_metadata_update(pool, row.id, &plan).await?;
-                    *row = updated;
-                }
+    // Short-circuit only when neither a global `md` nor any per-IP
+    // override carries a write. `per_ip_display_names` lets the caller
+    // supply per-row display names without setting the panel-wide
+    // default, so an empty `md` does not imply "no work to do".
+    let has_any_per_ip = !per_ip_display_names.is_empty();
+    let has_any_md = md.map(|m| !m.is_empty()).unwrap_or(false);
+    if has_any_md || has_any_per_ip {
+        // For a given row, compute the effective [`BulkMetadata`]:
+        // starts from the global default (or all-None when absent),
+        // then overlays the per-IP display-name override if set for
+        // this row's IP. The override wins over `md.display_name`.
+        let effective_for = |row_ip: IpAddr| -> BulkMetadata {
+            let mut eff = md.cloned().unwrap_or_default();
+            if let Some(name) = per_ip_display_names.get(&row_ip) {
+                eff.display_name = Some(name.clone());
             }
+            eff
+        };
 
-            // Existing rows may have locks; the plan encodes the
-            // per-row skip decision. Issue the UPDATE only when at
-            // least one field would actually be written, otherwise
-            // record the skip and leave the row untouched.
-            for row in existing.iter_mut() {
-                let plan = RowWritePlan::compute(md, &row.operator_edited_fields);
-                if plan.has_writes() {
-                    let updated = apply_metadata_update(pool, row.id, &plan).await?;
-                    *row = updated;
-                }
-                if !plan.skipped.is_empty() {
-                    skips.push((row.id, plan.skipped.clone()));
-                }
+        // New rows start with an empty lock set, so the plan's
+        // `skipped` is always empty for this bucket — record the
+        // `added_locks` and overwrite the row with the post-merge
+        // state so callers see the metadata they supplied.
+        for row in created.iter_mut() {
+            let eff = effective_for(row.ip);
+            if eff.is_empty() {
+                continue;
+            }
+            let plan = RowWritePlan::compute(&eff, &row.operator_edited_fields);
+            if plan.has_writes() {
+                let updated = apply_metadata_update(pool, row.id, &plan).await?;
+                *row = updated;
+            }
+        }
+
+        // Existing rows may have locks; the plan encodes the per-row
+        // skip decision. Issue the UPDATE only when at least one field
+        // would actually be written, otherwise record the skip and
+        // leave the row untouched.
+        for row in existing.iter_mut() {
+            let eff = effective_for(row.ip);
+            if eff.is_empty() {
+                continue;
+            }
+            let plan = RowWritePlan::compute(&eff, &row.operator_edited_fields);
+            if plan.has_writes() {
+                let updated = apply_metadata_update(pool, row.id, &plan).await?;
+                *row = updated;
+                updated_existing.insert(row.id);
+            }
+            if !plan.skipped.is_empty() {
+                skips.push((row.id, plan.skipped.clone()));
             }
         }
     }
@@ -519,6 +551,7 @@ pub async fn insert_many_with_metadata(
         created,
         existing,
         skips,
+        updated_existing,
     })
 }
 

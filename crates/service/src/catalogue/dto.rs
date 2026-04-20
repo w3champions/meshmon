@@ -182,6 +182,17 @@ pub struct PasteRequest {
     /// struct-level docs for the merge semantics.
     #[serde(default)]
     pub metadata: Option<PasteMetadata>,
+    /// Optional per-IP display-name overrides, keyed by the caller's
+    /// literal IP string (same form as it appears in `ips`). An
+    /// override supplies the display name for a single IP and wins
+    /// over `metadata.display_name`; it still honours the lock rule on
+    /// existing rows (an existing `DisplayName` lock blocks the
+    /// override just like it blocks the panel default). Keys that do
+    /// not parse as IPs, or that are not in the accepted set, are
+    /// silently ignored — matches the permissive posture used by the
+    /// keyset cursor and `ip_prefix` filter.
+    #[serde(default)]
+    pub per_ip_display_names: std::collections::HashMap<String, String>,
 }
 
 /// Operator-set default metadata applied to every accepted IP in a
