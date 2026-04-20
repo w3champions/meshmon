@@ -8,11 +8,7 @@ vi.mock("react-leaflet", async () => {
 });
 
 import { LocationPicker } from "@/components/map/LocationPicker";
-import {
-  fireMapClick,
-  fireMarkerDragEnd,
-  resetLeafletMock,
-} from "@/test/leaflet-mock";
+import { fireMapClick, fireMarkerDragEnd, resetLeafletMock } from "@/test/leaflet-mock";
 import { renderWithProviders } from "@/test/query-wrapper";
 
 describe("LocationPicker", () => {
@@ -31,10 +27,7 @@ describe("LocationPicker", () => {
 
   test("renders a marker at the supplied coordinates", async () => {
     renderWithProviders(
-      <LocationPicker
-        value={{ latitude: 48.14, longitude: 11.58 }}
-        onChange={() => {}}
-      />,
+      <LocationPicker value={{ latitude: 48.14, longitude: 11.58 }} onChange={() => {}} />,
     );
     const marker = await screen.findByTestId("marker");
     expect(marker).toHaveAttribute("data-lat", "48.14");
@@ -58,10 +51,7 @@ describe("LocationPicker", () => {
   test("dragging the marker fires onChange with the new position", async () => {
     const handler = vi.fn();
     renderWithProviders(
-      <LocationPicker
-        value={{ latitude: 1, longitude: 2 }}
-        onChange={handler}
-      />,
+      <LocationPicker value={{ latitude: 1, longitude: 2 }} onChange={handler} />,
     );
     await screen.findByTestId("marker");
 
@@ -74,10 +64,7 @@ describe("LocationPicker", () => {
     const handler = vi.fn();
     const user = userEvent.setup();
     renderWithProviders(
-      <LocationPicker
-        value={{ latitude: 1, longitude: 2 }}
-        onChange={handler}
-      />,
+      <LocationPicker value={{ latitude: 1, longitude: 2 }} onChange={handler} />,
     );
     const clear = await screen.findByRole("button", { name: /clear location/i });
     await user.click(clear);
