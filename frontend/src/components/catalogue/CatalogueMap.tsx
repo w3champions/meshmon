@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { DrawMap } from "@/components/map/DrawMap";
 import type { GeoShape } from "@/lib/geo";
+import { EntryCard } from "./EntryCard";
 
 export interface CatalogueMapProps {
   entries: CatalogueEntry[];
@@ -18,13 +19,11 @@ interface EntryPopupProps {
 
 export function EntryPopup({ entry, onOpen }: EntryPopupProps) {
   return (
-    <div className="space-y-1 text-sm">
-      <p className="font-mono font-semibold">{entry.ip}</p>
-      <p className="text-muted-foreground">{entry.display_name ?? "—"}</p>
-      <p className="text-muted-foreground">ASN: {entry.asn != null ? String(entry.asn) : "—"}</p>
+    <div className="flex w-64 flex-col gap-2 text-sm">
+      <EntryCard entry={entry} />
       <button
         type="button"
-        className="mt-1 text-xs underline underline-offset-2 hover:text-foreground"
+        className="self-start text-xs underline underline-offset-2 hover:text-foreground"
         aria-label={`Open details for ${entry.ip}`}
         onClick={onOpen}
       >

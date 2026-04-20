@@ -109,29 +109,64 @@ describe("CatalogueMap", () => {
     expect(onRowClick).toHaveBeenCalledWith("entry-42");
   });
 
-  test("EntryPopup renders IP, display_name fallback, and ASN fallback", () => {
+  test("EntryPopup shows IP as header when display_name absent and hides optional rows", () => {
     const entry = makeEntry({
       ip: "192.168.1.1",
       display_name: null,
       asn: null,
+      city: null,
+      country_name: null,
+      country_code: null,
+      network_operator: null,
+      website: null,
+      notes: null,
     });
-    const { container } = renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
+    renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
+    // Header falls back to the IP address when display_name is absent.
     expect(screen.getByText("192.168.1.1")).toBeInTheDocument();
-    // display_name absent → standalone em-dash in its own <p>
-    expect(screen.getByText("—")).toBeInTheDocument();
-    // ASN absent → "ASN: —" in the same <p>
-    expect(container.textContent).toContain("ASN: —");
+    // Optional rows are hidden entirely when their source field is absent.
+    // No location/network "—" placeholder rows should appear.
+    expect(screen.queryByText(/AS\s*—/i)).not.toBeInTheDocument();
   });
 
-  test("EntryPopup renders actual display_name and ASN when present", () => {
+  test("EntryPopup renders display_name, IP, location, network, and website", () => {
     const entry = makeEntry({
       ip: "10.1.2.3",
       display_name: "My Server",
       asn: 13335,
+      city: "Hong Kong",
+      country_name: "Hong Kong",
+      network_operator: "Cloudflare",
+      website: "https://cloudflare.com/about",
     });
     renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
     expect(screen.getByText("My Server")).toBeInTheDocument();
-    // ASN is rendered inline with a label — match on partial text content
-    expect(screen.getByText(/13335/)).toBeInTheDocument();
+    expect(screen.getByText("10.1.2.3")).toBeInTheDocument();
+    expect(screen.getByText("Hong Kong, Hong Kong")).toBeInTheDocument();
+    expect(screen.getByText("AS13335 · Cloudflare")).toBeInTheDocument();
+    // Website is rendered as hostname-only link with target=_blank.
+    const link = screen.getByRole("link", { name: "cloudflare.com" });
+    expect(link).toHaveAttribute("href", "https://cloudflare.com/about");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  test("EntryPopup falls back to lookupCountryName when country_name missing", () => {
+    const entry = makeEntry({
+      city: "Frankfurt",
+      country_name: null,
+      country_code: "DE",
+    });
+    renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
+    expect(screen.getByText("Frankfurt, Germany")).toBeInTheDocument();
+  });
+
+  test("EntryPopup truncates notes to the first line", () => {
+    const entry = makeEntry({
+      notes: "first line of the note\nsecond line that must be hidden",
+    });
+    renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
+    expect(screen.getByText("first line of the note")).toBeInTheDocument();
+    expect(screen.queryByText("second line that must be hidden")).not.toBeInTheDocument();
   });
 });
