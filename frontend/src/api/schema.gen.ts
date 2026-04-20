@@ -139,6 +139,203 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/campaigns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns` — filtered list of campaigns.
+         * @description `limit` is clamped server-side to 500 rows; list responses do not
+         *     populate `pair_counts` (see [`get_one`] for the per-state counts).
+         */
+        get: operations["campaigns_list"];
+        put?: never;
+        /**
+         * `POST /api/campaigns` — create a new campaign in `draft`.
+         * @description Rejects blank titles and malformed destination IP strings up front
+         *     so a client mistake surfaces as 400 rather than leaking a Postgres
+         *     type error as 500. The `created_by` field is filled from the active
+         *     session principal; anonymous callers get 401.
+         */
+        post: operations["create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}` — single-row fetch + pair-state counts.
+         * @description Runs two queries (campaign fetch + `COUNT(*) GROUP BY
+         *     resolution_state`) and joins the results handler-side. A failure
+         *     on the counts query degrades gracefully: the campaign body is
+         *     still returned with an empty `pair_counts` list and the error is
+         *     logged — the campaign shell is more valuable to the UI than a 500.
+         */
+        get: operations["campaigns_get_one"];
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/campaigns/{id}` — idempotent removal.
+         * @description Returns 204 whether or not the row existed (the underlying
+         *     `DELETE ... WHERE id = $1` is a no-op on an absent id).
+         */
+        delete: operations["campaigns_delete"];
+        options?: never;
+        head?: never;
+        /**
+         * `PATCH /api/campaigns/{id}` — partial update.
+         * @description Absent fields leave the underlying column untouched; explicit
+         *     `null` values are currently treated as "no change" (see
+         *     [`PatchCampaignRequest`]). Campaign lifecycle state is not
+         *     editable through this surface — use `/start` / `/stop` / `/edit`.
+         */
+        patch: operations["campaigns_patch"];
+        trace?: never;
+    };
+    "/api/campaigns/{id}/edit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/campaigns/{id}/edit` — apply an edit delta.
+         * @description Adds/removes pairs on a finished campaign (`completed`, `stopped`,
+         *     or `evaluated`) and transitions it back to `running`. When
+         *     `force_measurement` is `Some(true)`, the sticky flag is flipped and
+         *     every non-delta pair is reset so the whole campaign re-runs.
+         */
+        post: operations["edit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/force_pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/campaigns/{id}/force_pair` — reset a single pair and
+         *     re-enter `running`.
+         * @description 404 when the `(source_agent_id, destination_ip)` pair is unknown for
+         *     the campaign; 400 if the destination IP fails to parse.
+         */
+        post: operations["force_pair"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/pairs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}/pairs` — paginated pair list.
+         * @description Empty `state` filter expands to all six pair-resolution states.
+         *     `limit` is clamped to 5 000 rows handler-side; the repo clamps
+         *     further to its own upper bound.
+         */
+        get: operations["pairs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/preview-dispatch-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}/preview-dispatch-count` — dispatch estimate.
+         * @description Counts the campaign's actual `campaign_pairs` rows, splitting them
+         *     between ones resolvable from the 24 h reuse window and ones the
+         *     scheduler would dispatch fresh. Never writes.
+         */
+        get: operations["preview_dispatch_count"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/campaigns/{id}/start` — transition `draft` → `running`.
+         * @description Returns 409 (`illegal_state_transition`) if the campaign is not in
+         *     `draft`. The scheduler picks up the newly-running campaign via its
+         *     `LISTEN` loop.
+         */
+        post: operations["start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/campaigns/{id}/stop` — transition `running` → `stopped`.
+         * @description Pending pairs are flipped to `skipped` in the same transaction;
+         *     in-flight `dispatched` pairs settle as-is via the campaign result
+         *     writer.
+         */
+        post: operations["stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalogue": {
         parameters: {
             query?: never;
@@ -588,6 +785,102 @@ export interface components {
             ids: string[];
         };
         /**
+         * @description Wire shape for a single campaign.
+         *
+         *     `pair_counts` is populated only by the single-row GET endpoint; list
+         *     responses leave it empty to avoid an N+1 COUNT fan-out.
+         */
+        CampaignDto: {
+            /**
+             * Format: date-time
+             * @description When all pairs reached a terminal state, if ever.
+             */
+            completed_at?: string | null;
+            /**
+             * Format: date-time
+             * @description Row creation timestamp.
+             */
+            created_at: string;
+            /** @description Session principal that created the row; audit-only. */
+            created_by?: string | null;
+            /**
+             * Format: date-time
+             * @description When the evaluation pass last produced results, if ever.
+             */
+            evaluated_at?: string | null;
+            /** @description Evaluation strategy. */
+            evaluation_mode: components["schemas"]["EvaluationMode"];
+            /**
+             * @description When `true`, the scheduler forces a fresh measurement instead of
+             *     reusing a matching row from the 24 h window.
+             */
+            force_measurement: boolean;
+            /**
+             * Format: uuid
+             * @description Primary key.
+             */
+            id: string;
+            /**
+             * Format: float
+             * @description Loss-rate threshold (percent) used by the evaluator.
+             */
+            loss_threshold_pct: number;
+            /** @description Free-form operator notes. */
+            notes: string;
+            /** @description Per-state pair counts. Empty on list responses; populated on single-row GET. */
+            pair_counts?: [
+                "pending" | "dispatched" | "reused" | "succeeded" | "unreachable" | "skipped",
+                number
+            ][];
+            /**
+             * Format: int32
+             * @description Probes per dispatched measurement (campaign rounds).
+             */
+            probe_count: number;
+            /**
+             * Format: int32
+             * @description Probes per detail measurement (UI re-runs).
+             */
+            probe_count_detail: number;
+            /**
+             * Format: int32
+             * @description Inter-probe stagger in milliseconds.
+             */
+            probe_stagger_ms: number;
+            /** @description Probe protocol shared by every pair. */
+            protocol: components["schemas"]["ProbeProtocol"];
+            /**
+             * Format: date-time
+             * @description When the campaign most recently transitioned to `running`.
+             */
+            started_at?: string | null;
+            /** @description Lifecycle state. */
+            state: components["schemas"]["CampaignState"];
+            /**
+             * Format: float
+             * @description Weight applied to RTT stddev by the evaluator.
+             */
+            stddev_weight: number;
+            /**
+             * Format: date-time
+             * @description When the operator last stopped the campaign, if ever.
+             */
+            stopped_at?: string | null;
+            /**
+             * Format: int32
+             * @description Per-probe timeout in milliseconds.
+             */
+            timeout_ms: number;
+            /** @description Operator-facing title. */
+            title: string;
+        };
+        /**
+         * @description Lifecycle state of a measurement campaign. Mirrors the
+         *     `campaign_state` Postgres enum.
+         * @enum {string}
+         */
+        CampaignState: "draft" | "running" | "completed" | "evaluated" | "stopped";
+        /**
          * @description Latitude / longitude pair sourced from the IP catalogue join.
          *
          *     Present only when both coordinates are known; otherwise the parent
@@ -748,26 +1041,90 @@ export interface components {
             /** @description Human-readable country name when available. */
             name?: string | null;
         };
+        /** @description POST body for `/api/campaigns`. */
+        CreateCampaignRequest: {
+            /** @description Destination IPs as strings (e.g. `"10.0.0.1"`, `"2001:db8::1"`). */
+            destination_ips?: string[];
+            evaluation_mode?: null | components["schemas"]["EvaluationMode"];
+            /** @description When `true`, the scheduler ignores the 24 h reuse cache. */
+            force_measurement?: boolean;
+            /**
+             * Format: float
+             * @description Optional loss-rate threshold for the evaluator.
+             */
+            loss_threshold_pct?: number | null;
+            /** @description Optional free-form notes. */
+            notes?: string | null;
+            /**
+             * Format: int32
+             * @description Optional probe-count override (campaign rounds).
+             */
+            probe_count?: number | null;
+            /**
+             * Format: int32
+             * @description Optional detail-probe count override (UI re-runs).
+             */
+            probe_count_detail?: number | null;
+            /**
+             * Format: int32
+             * @description Optional inter-probe stagger (ms).
+             */
+            probe_stagger_ms?: number | null;
+            /** @description Probe protocol shared by every pair. */
+            protocol: components["schemas"]["ProbeProtocol"];
+            /** @description Source agent ids that will probe. */
+            source_agent_ids?: string[];
+            /**
+             * Format: float
+             * @description Optional RTT-stddev weight for the evaluator.
+             */
+            stddev_weight?: number | null;
+            /**
+             * Format: int32
+             * @description Optional per-probe timeout (ms).
+             */
+            timeout_ms?: number | null;
+            /** @description Operator-facing title. Rejected when blank. */
+            title: string;
+        };
+        /** @description Body for `POST /api/campaigns/{id}/edit`. */
+        EditCampaignRequest: {
+            /** @description Pairs to add (or reset to `pending` if they already exist). */
+            add_pairs?: components["schemas"]["EditPairDto"][];
+            /**
+             * @description When `Some(true)`, flips the sticky `force_measurement` flag and
+             *     resets every non-delta pair so the whole campaign re-runs.
+             */
+            force_measurement?: boolean | null;
+            /** @description Pairs to remove entirely. */
+            remove_pairs?: components["schemas"]["EditPairDto"][];
+        };
+        /**
+         * @description A single `(source_agent, destination_ip)` pair identifier used by
+         *     the edit and force endpoints. `destination_ip` is a bare IP string.
+         */
+        EditPairDto: {
+            /** @description Destination IP as a bare host string. */
+            destination_ip: string;
+            /** @description Source agent id. */
+            source_agent_id: string;
+        };
         /**
          * @description Current status of the enrichment pipeline for a row.
          * @enum {string}
          */
         EnrichmentStatus: "pending" | "enriched" | "failed";
-        /**
-         * @description Error envelope used by every non-2xx catalogue response.
-         *
-         *     The single `error` field carries a stable, machine-parseable
-         *     snake_case code (e.g. `not_found`, `database_error`). Matches the
-         *     gateway-level JSON 404 emitted by `crate::http::backend_path_404`
-         *     so clients can use one shape for every `/api` error.
-         */
+        /** @description JSON error body returned by every non-2xx `/api/campaigns/*` response. */
         ErrorEnvelope: {
-            /**
-             * @description Stable error code. Clients should match on this string, not on
-             *     the HTTP status alone.
-             */
+            /** @description Snake-case error code; stable across versions. */
             error: string;
         };
+        /**
+         * @description Evaluation strategy for the campaign's result-aggregation pass
+         *     (spec 04). Storage here; consumed by T48.
+         * @enum {string}
+         */
+        EvaluationMode: "diversity" | "optimization";
         /** @description Aggregate facets used by the catalogue's filter UI. */
         FacetsResponse: {
             /** @description Top 250 ASN buckets, descending by count. */
@@ -778,6 +1135,13 @@ export interface components {
             countries: components["schemas"]["CountryFacet"][];
             /** @description Top 250 operator buckets, descending by count. */
             networks: components["schemas"]["NetworkFacet"][];
+        };
+        /** @description Body for `POST /api/campaigns/{id}/force_pair`. */
+        ForcePairRequest: {
+            /** @description Destination IP of the pair to force. */
+            destination_ip: string;
+            /** @description Source agent id of the pair to force. */
+            source_agent_id: string;
         };
         /** @description JSON representation of an observed IP at a hop. */
         HopIpJson: {
@@ -858,6 +1222,12 @@ export interface components {
             /** @description Echoed username on success. */
             username: string;
         };
+        /**
+         * @description Kind of measurement row stored in `measurements`. `campaign` is the
+         *     default; T44 never writes anything else (T45/T48 do).
+         * @enum {string}
+         */
+        MeasurementKind: "campaign" | "detail_ping" | "detail_mtr";
         /** @description Per-network-operator occurrence count. */
         NetworkFacet: {
             /**
@@ -868,6 +1238,53 @@ export interface components {
             /** @description Network operator / ISP name. */
             name: string;
         };
+        /** @description Wire shape for a single pair in `GET /api/campaigns/{id}/pairs`. */
+        PairDto: {
+            /**
+             * Format: int32
+             * @description Number of dispatch attempts to date.
+             */
+            attempt_count: number;
+            /**
+             * Format: uuid
+             * @description Owning campaign.
+             */
+            campaign_id: string;
+            /** @description Destination IP as a bare host string. */
+            destination_ip: string;
+            /**
+             * Format: date-time
+             * @description When the scheduler dispatched the pair to an agent.
+             */
+            dispatched_at?: string | null;
+            /**
+             * Format: int64
+             * @description Primary key.
+             */
+            id: number;
+            /** @description Last error observed on this pair, if any. */
+            last_error?: string | null;
+            /**
+             * Format: int64
+             * @description FK to the `measurements` row once dispatched or reused.
+             */
+            measurement_id?: number | null;
+            /** @description Current resolution state. */
+            resolution_state: components["schemas"]["PairResolutionState"];
+            /**
+             * Format: date-time
+             * @description When the pair reached a terminal state.
+             */
+            settled_at?: string | null;
+            /** @description Source agent (the prober). */
+            source_agent_id: string;
+        };
+        /**
+         * @description Terminal or in-progress state of a single `(source_agent_id,
+         *     destination_ip)` pair within a campaign.
+         * @enum {string}
+         */
+        PairResolutionState: "pending" | "dispatched" | "reused" | "succeeded" | "unreachable" | "skipped";
         /** @description Per-token rejection surfaced by [`PasteResponse::invalid`]. */
         PasteInvalid: {
             /** @description Short human-readable reason — intended for immediate UI display. */
@@ -900,6 +1317,30 @@ export interface components {
             existing: components["schemas"]["CatalogueEntryDto"][];
             /** @description Tokens rejected during parse. */
             invalid: components["schemas"]["PasteInvalid"][];
+        };
+        /**
+         * @description PATCH body for `/api/campaigns/{id}`.
+         *
+         *     Absent fields leave the existing column untouched. There is no
+         *     revert-to-auto surface here because campaigns only persist
+         *     operator-authored data.
+         */
+        PatchCampaignRequest: {
+            evaluation_mode?: null | components["schemas"]["EvaluationMode"];
+            /**
+             * Format: float
+             * @description Replacement loss-rate threshold.
+             */
+            loss_threshold_pct?: number | null;
+            /** @description Replacement notes (when present). */
+            notes?: string | null;
+            /**
+             * Format: float
+             * @description Replacement RTT-stddev weight.
+             */
+            stddev_weight?: number | null;
+            /** @description Replacement title (when present). */
+            title?: string | null;
         };
         /**
          * @description PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12
@@ -1019,6 +1460,29 @@ export interface components {
              */
             loss_pct: number;
         };
+        /** @description Response body for `POST /api/campaigns/preview`. */
+        PreviewDispatchResponse: {
+            /**
+             * Format: int64
+             * @description Pairs the scheduler would dispatch fresh.
+             */
+            fresh: number;
+            /**
+             * Format: int64
+             * @description Pairs resolvable from the 24 h reuse window.
+             */
+            reusable: number;
+            /**
+             * Format: int64
+             * @description Total number of `(source, destination)` pairs that would be created.
+             */
+            total: number;
+        };
+        /**
+         * @description The probe protocol an individual pair uses.
+         * @enum {string}
+         */
+        ProbeProtocol: "icmp" | "tcp" | "udp";
         /** @description Query parameters for `GET /api/metrics/query_range` (range query). */
         RangeQuery: {
             /** @description End timestamp (RFC 3339 or Unix epoch). */
@@ -1352,6 +1816,574 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    campaigns_list: {
+        parameters: {
+            query?: {
+                /** @description Optional substring match on `title` / `notes`. */
+                q?: string;
+                /** @description Optional state filter. */
+                state?: components["schemas"]["CampaignState"];
+                /** @description Optional exact-match filter on `created_by`. */
+                created_by?: string;
+                /** @description Page size. Clamped to `1..=500` internally; default 100. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Campaign list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"][];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCampaignRequest"];
+            };
+        };
+        responses: {
+            /** @description Created campaign */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description Invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    campaigns_get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Campaign + pair counts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    campaigns_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    campaigns_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchCampaignRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated campaign */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    edit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditCampaignRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated campaign */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description Invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Illegal state transition */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    force_pair: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForcePairRequest"];
+            };
+        };
+        responses: {
+            /** @description Pair reset + campaign running */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description Invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Pair not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    pairs: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated list of pair resolution states. */
+                state?: components["schemas"]["PairResolutionState"][];
+                /** @description Page size. Clamped to `1..=500` internally; default 500. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pair list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PairDto"][];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    preview_dispatch_count: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dispatch preview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewDispatchResponse"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Started */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Illegal state transition */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stopped */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Illegal state transition */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };

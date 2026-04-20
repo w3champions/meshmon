@@ -281,7 +281,7 @@
         ],
         "summary": "`GET /api/campaigns` — filtered list of campaigns.",
         "description": "`limit` is clamped server-side to 500 rows; list responses do not\npopulate `pair_counts` (see [`get_one`] for the per-state counts).",
-        "operationId": "list",
+        "operationId": "campaigns_list",
         "parameters": [
           {
             "name": "q",
@@ -411,7 +411,7 @@
         ],
         "summary": "`GET /api/campaigns/{id}` — single-row fetch + pair-state counts.",
         "description": "Runs two queries (campaign fetch + `COUNT(*) GROUP BY\nresolution_state`) and joins the results handler-side. A failure\non the counts query degrades gracefully: the campaign body is\nstill returned with an empty `pair_counts` list and the error is\nlogged — the campaign shell is more valuable to the UI than a 500.",
-        "operationId": "get_one",
+        "operationId": "campaigns_get_one",
         "parameters": [
           {
             "name": "id",
@@ -466,7 +466,7 @@
         ],
         "summary": "`DELETE /api/campaigns/{id}` — idempotent removal.",
         "description": "Returns 204 whether or not the row existed (the underlying\n`DELETE ... WHERE id = $1` is a no-op on an absent id).",
-        "operationId": "delete",
+        "operationId": "campaigns_delete",
         "parameters": [
           {
             "name": "id",
@@ -504,7 +504,7 @@
         ],
         "summary": "`PATCH /api/campaigns/{id}` — partial update.",
         "description": "Absent fields leave the underlying column untouched; explicit\n`null` values are currently treated as \"no change\" (see\n[`PatchCampaignRequest`]). Campaign lifecycle state is not\neditable through this surface — use `/start` / `/stop` / `/edit`.",
-        "operationId": "patch",
+        "operationId": "campaigns_patch",
         "parameters": [
           {
             "name": "id",
@@ -808,7 +808,7 @@
           "campaigns"
         ],
         "summary": "`GET /api/campaigns/{id}/preview-dispatch-count` — dispatch estimate.",
-        "description": "Computes `total`, `reusable`, and `fresh` counts against the\ncampaign's current pair set (sources × destinations, deduped) using\nthe 24 h reuse window. Never writes.",
+        "description": "Counts the campaign's actual `campaign_pairs` rows, splitting them\nbetween ones resolvable from the 24 h reuse window and ones the\nscheduler would dispatch fresh. Never writes.",
         "operationId": "preview_dispatch_count",
         "parameters": [
           {

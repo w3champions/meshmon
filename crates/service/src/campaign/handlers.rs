@@ -137,6 +137,7 @@ pub async fn create(
     get,
     path = "/api/campaigns",
     tag = "campaigns",
+    operation_id = "campaigns_list",
     params(CampaignListQuery),
     responses(
         (status = 200, description = "Campaign list", body = Vec<CampaignDto>),
@@ -174,6 +175,7 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<CampaignListQue
     get,
     path = "/api/campaigns/{id}",
     tag = "campaigns",
+    operation_id = "campaigns_get_one",
     params(("id" = Uuid, Path, description = "Campaign id")),
     responses(
         (status = 200, description = "Campaign + pair counts", body = CampaignDto),
@@ -226,6 +228,7 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
     patch,
     path = "/api/campaigns/{id}",
     tag = "campaigns",
+    operation_id = "campaigns_patch",
     params(("id" = Uuid, Path, description = "Campaign id")),
     request_body = PatchCampaignRequest,
     responses(
@@ -275,6 +278,7 @@ pub async fn patch(
     delete,
     path = "/api/campaigns/{id}",
     tag = "campaigns",
+    operation_id = "campaigns_delete",
     params(("id" = Uuid, Path, description = "Campaign id")),
     responses(
         (status = 204, description = "Deleted"),
