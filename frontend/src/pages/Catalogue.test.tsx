@@ -233,6 +233,41 @@ describe("Catalogue page — row click opens drawer", () => {
     // Entry drawer should appear — identified by its aria-label
     await screen.findByLabelText(/catalogue entry editor/i);
   });
+
+  test("drawer closes cleanly when the open entry disappears from the list", async () => {
+    // Drive the mocked hook via a live variable so we can swap the returned
+    // entries mid-test. Vitest re-invokes the mock on every render, so
+    // mutating `currentEntries` and forcing a re-render surfaces the new
+    // list to Catalogue.
+    //
+    // Scenario (SSE `deleted` event): list refetches without the entry
+    // the drawer is observing. The deletion guard effect in Catalogue
+    // nulls `drawerId` so the drawer unmounts and doesn't leak stale
+    // data or an orphaned drawer-open state.
+    let currentEntries: CatalogueEntry[] = [ENTRY_A];
+    vi.mocked(useCatalogueList).mockImplementation(
+      () => makeMockReturn(currentEntries) as ReturnType<typeof useCatalogueList>,
+    );
+    const user = userEvent.setup();
+    renderCatalogue();
+
+    const row = await screen.findByRole("button", { name: /open entry 1\.2\.3\.4/i });
+    await user.click(row);
+    await screen.findByLabelText(/catalogue entry editor/i);
+
+    // Entry vanishes from the list.
+    currentEntries = [];
+
+    // Escape closes the drawer (releasing focus trap) and also forces a
+    // Catalogue re-render. The guard observes `drawerEntry === undefined`
+    // on the next render and nulls `drawerId` — the drawer should no
+    // longer be in the DOM.
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/catalogue entry editor/i)).not.toBeInTheDocument();
+    });
+  });
 });
 
 describe("Catalogue page — Re-enrich all button", () => {

@@ -1,5 +1,5 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type CatalogueEntry,
   type CatalogueListQuery,
@@ -145,30 +145,38 @@ export default function Catalogue() {
   const view: ViewMode = rawSearch.view ?? "table";
 
   // Synchronise filter changes back to the URL (shapes excluded).
-  function setFilter(next: FilterValue): void {
-    setShapes(next.shapes);
-    const searchUpdate = {
-      ...filterToSearch(next),
-      view: rawSearch.view,
-    } as CatalogueSearch;
-    // Cast required: route is not yet registered in the router type tree
-    // (Task 16 wires it); strict:false means the router sees `never` for search.
-    void (navigate as (opts: { search: unknown; replace: boolean }) => void)({
-      search: searchUpdate,
-      replace: true,
-    });
-  }
+  // Stable across renders so it can be passed to memoized children
+  // (FilterRail, CatalogueMap) without defeating their memoization.
+  const setFilter = useCallback(
+    (next: FilterValue): void => {
+      setShapes(next.shapes);
+      const searchUpdate = {
+        ...filterToSearch(next),
+        view: rawSearch.view,
+      } as CatalogueSearch;
+      // Cast required: route is not yet registered in the router type tree
+      // (Task 16 wires it); strict:false means the router sees `never` for search.
+      void (navigate as (opts: { search: unknown; replace: boolean }) => void)({
+        search: searchUpdate,
+        replace: true,
+      });
+    },
+    [navigate, rawSearch.view],
+  );
 
-  function setView(next: ViewMode): void {
-    const searchUpdate: CatalogueSearch = {
-      ...rawSearch,
-      view: next,
-    };
-    void (navigate as (opts: { search: unknown; replace: boolean }) => void)({
-      search: searchUpdate,
-      replace: true,
-    });
-  }
+  const setView = useCallback(
+    (next: ViewMode): void => {
+      const searchUpdate: CatalogueSearch = {
+        ...rawSearch,
+        view: next,
+      };
+      void (navigate as (opts: { search: unknown; replace: boolean }) => void)({
+        search: searchUpdate,
+        replace: true,
+      });
+    },
+    [navigate, rawSearch],
+  );
 
   // Drawer state
   const [drawerId, setDrawerId] = useState<string | null>(null);
@@ -209,15 +217,47 @@ export default function Catalogue() {
     [allEntries, drawerId],
   );
 
-  function handleReenrichOne(id: string): void {
-    reenrichOneMutation.mutate(id);
-  }
+  // Drawer deletion guard: if the list refetches (e.g. after an SSE `deleted`
+  // event) and the open entry is gone, clear `drawerId` so the drawer state
+  // stays consistent. Without this, `drawerId` lingers and re-opening the
+  // same id later would briefly flash stale behaviour.
+  useEffect(() => {
+    if (drawerId !== null && listData !== undefined && drawerEntry === undefined) {
+      setDrawerId(null);
+    }
+  }, [drawerId, drawerEntry, listData]);
 
-  function handleReenrichMany(): void {
+  // Stable across renders. `useReenrichOne` / `useReenrichMany` return
+  // reference-stable mutation objects so capturing `.mutate` directly would
+  // work, but passing the mutation object keeps the dep explicit.
+  const handleReenrichOne = useCallback(
+    (id: string): void => {
+      reenrichOneMutation.mutate(id);
+    },
+    [reenrichOneMutation],
+  );
+
+  const handleReenrichMany = useCallback((): void => {
     const ids = visibleEntries.map((e) => e.id);
     reenrichManyMutation.mutate({ ids });
     setReenrichConfirmOpen(false);
-  }
+  }, [visibleEntries, reenrichManyMutation]);
+
+  // Stable row-click & shape-change handlers for memoized heavy children.
+  const handleRowClick = useCallback((id: string): void => {
+    setDrawerId(id);
+  }, []);
+
+  const handleShapesChange = useCallback(
+    (nextShapes: GeoShape[]): void => {
+      setFilter({ ...filter, shapes: nextShapes });
+    },
+    [filter, setFilter],
+  );
+
+  const handleDrawerClose = useCallback((): void => {
+    setDrawerId(null);
+  }, []);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -255,15 +295,15 @@ export default function Catalogue() {
           {view === "table" ? (
             <CatalogueTable
               entries={visibleEntries}
-              onRowClick={(id) => setDrawerId(id)}
+              onRowClick={handleRowClick}
               onReenrich={handleReenrichOne}
             />
           ) : (
             <CatalogueMap
               entries={visibleEntries}
               shapes={filter.shapes}
-              onShapesChange={(next) => setFilter({ ...filter, shapes: next })}
-              onRowClick={(id) => setDrawerId(id)}
+              onShapesChange={handleShapesChange}
+              onRowClick={handleRowClick}
               className={cn("h-full w-full")}
             />
           )}
@@ -271,7 +311,7 @@ export default function Catalogue() {
       </div>
 
       {/* Entry drawer — passes undefined to close */}
-      <EntryDrawer entry={drawerEntry} onClose={() => setDrawerId(null)} />
+      <EntryDrawer entry={drawerEntry} onClose={handleDrawerClose} />
 
       {/* Paste panel */}
       {pasteOpen && <PasteStaging onClose={() => setPasteOpen(false)} />}
