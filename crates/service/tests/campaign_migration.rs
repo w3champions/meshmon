@@ -141,3 +141,46 @@ async fn migration_creates_campaign_tables_and_indexes() {
 
     db.close().await;
 }
+
+#[tokio::test]
+async fn campaign_evaluations_migration_applies_cleanly() {
+    let db = acquire(/*with_timescale=*/ false).await;
+    meshmon_service::db::run_migrations(&db.pool)
+        .await
+        .expect("migrations apply");
+
+    let has_kind: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'campaign_pairs' AND column_name = 'kind')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(has_kind, "campaign_pairs.kind column missing");
+
+    let has_tbl: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables
+         WHERE table_name = 'campaign_evaluations')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(has_tbl, "campaign_evaluations table missing");
+
+    let unique_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+           SELECT 1 FROM pg_constraint
+           WHERE conrelid = 'campaign_evaluations'::regclass
+             AND contype = 'u'
+         )",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        unique_exists,
+        "campaign_evaluations UNIQUE constraint missing"
+    );
+
+    db.close().await;
+}

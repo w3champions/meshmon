@@ -976,3 +976,94 @@ async fn preview_dispatch_count_for_campaign_uses_actual_pair_set() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn resolve_reuse_skips_detail_kind_pairs() {
+    // A detail measurement (kind='detail_ping'/'detail_mtr') must always run
+    // fresh — the 24h reuse cache is for campaign-kind rows only. This test
+    // seeds one campaign with two destinations: one pair stays kind='campaign'
+    // (MUST reuse), the other is flipped to kind='detail_ping' (MUST NOT
+    // reuse even when a matching measurement exists in the window).
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("detail-skip-{}", uuid::Uuid::new_v4().simple());
+    let dst_campaign = IpAddr::from_str("198.51.100.201").unwrap();
+    let dst_detail = IpAddr::from_str("198.51.100.202").unwrap();
+
+    let mut input = make_input("t-detail-skip");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst_campaign, dst_detail];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Seed a reusable measurement younger than 24h for both destinations so
+    // the reuse window would otherwise match each pair.
+    let m_campaign_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 0.0) RETURNING id",
+    )
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_campaign))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let m_detail_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 0.0) RETURNING id",
+    )
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Flip the detail-destination pair to kind='detail_ping'. The campaign
+    // pair keeps the default kind='campaign'.
+    sqlx::query(
+        "UPDATE campaign_pairs SET kind = 'detail_ping' \
+         WHERE campaign_id = $1 AND destination_ip = $2",
+    )
+    .bind(row.id)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let pairs = repo::list_pairs(&pool, row.id, &[], 100).await.unwrap();
+    assert_eq!(pairs.len(), 2, "two pairs seeded");
+
+    let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
+        .await
+        .unwrap();
+
+    let campaign_pair_id = pairs
+        .iter()
+        .find(|p| p.destination_ip.ip() == dst_campaign)
+        .expect("campaign pair present")
+        .id;
+    let detail_pair_id = pairs
+        .iter()
+        .find(|p| p.destination_ip.ip() == dst_detail)
+        .expect("detail pair present")
+        .id;
+
+    assert_eq!(decisions.len(), 1, "only the campaign-kind pair reuses");
+    assert_eq!(
+        decisions[0].0, campaign_pair_id,
+        "campaign-kind pair id present"
+    );
+    assert_eq!(
+        decisions[0].1, m_campaign_id,
+        "campaign pair points at its own seeded measurement"
+    );
+    assert!(
+        decisions.iter().all(|(pid, _)| *pid != detail_pair_id),
+        "detail_ping pair must never appear in reuse output"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE id = ANY($1)")
+        .bind(&[m_campaign_id, m_detail_id][..])
+        .execute(&pool)
+        .await
+        .unwrap();
+}

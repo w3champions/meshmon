@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH requested AS (\n            SELECT r.pair_id, r.source_agent_id, r.destination_ip_str, cp.kind\n              FROM UNNEST($1::bigint[], $2::text[], $3::text[])\n                     AS r(pair_id, source_agent_id, destination_ip_str)\n              JOIN campaign_pairs cp ON cp.id = r.pair_id\n             WHERE cp.kind = 'campaign'\n        ),\n        latest AS (\n            SELECT DISTINCT ON (r.source_agent_id, r.destination_ip_str)\n                   r.pair_id, m.id AS measurement_id\n              FROM requested r\n              JOIN measurements m\n                ON m.source_agent_id = r.source_agent_id\n               AND m.destination_ip = r.destination_ip_str::inet\n               AND m.protocol = $4::probe_protocol\n               AND m.measured_at > now() - interval '24 hours'\n             ORDER BY r.source_agent_id, r.destination_ip_str,\n                      m.probe_count DESC, m.measured_at DESC\n        )\n        SELECT pair_id AS \"pair_id!\", measurement_id AS \"measurement_id!\"\n          FROM latest\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pair_id!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "measurement_id!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "TextArray",
+        "TextArray",
+        {
+          "Custom": {
+            "name": "probe_protocol",
+            "kind": {
+              "Enum": [
+                "icmp",
+                "tcp",
+                "udp"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      null,
+      false
+    ]
+  },
+  "hash": "9e3449a83178e86c2cef2cacbb13eb73e8dc5ea70f494126c31af33441ba0e18"
+}

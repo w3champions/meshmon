@@ -808,9 +808,11 @@ pub async fn resolve_reuse(
     let rows = sqlx::query!(
         r#"
         WITH requested AS (
-            SELECT pair_id, source_agent_id, destination_ip_str
+            SELECT r.pair_id, r.source_agent_id, r.destination_ip_str, cp.kind
               FROM UNNEST($1::bigint[], $2::text[], $3::text[])
                      AS r(pair_id, source_agent_id, destination_ip_str)
+              JOIN campaign_pairs cp ON cp.id = r.pair_id
+             WHERE cp.kind = 'campaign'
         ),
         latest AS (
             SELECT DISTINCT ON (r.source_agent_id, r.destination_ip_str)
