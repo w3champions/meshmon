@@ -51,6 +51,10 @@ both via `PgListener::listen_all`.
 - `sse.rs` — `/api/campaigns/stream` handler; subscribes to the broker
   and serializes events as `Event::data` frames.
 - `dto.rs` — wire DTOs; `utoipa::ToSchema` on every public type.
+- `eval.rs` — pure-function evaluator core. Builds the (A,B,X) triple
+  matrix from attributed measurements, applies the mode-specific
+  predicate (diversity / optimization), serialises to the JSONB shape
+  persisted in `campaign_evaluations`.
 - `handlers.rs` — axum handlers for every campaign HTTP endpoint.
 
 ## SSE event stream
@@ -68,6 +72,7 @@ Every frame is a single-line `data:` payload carrying JSON with a top-level
 |------------------|------------------------------------------------|----------------------------------------------------------------------------------|
 | `state_changed`  | `campaign_id: uuid`, `state: CampaignState`    | Campaign moved into `state` (handler call or scheduler-driven `running→completed`) |
 | `pair_settled`   | `campaign_id: uuid`                            | `SettleWriter` terminally resolved a pair belonging to `campaign_id`             |
+| `evaluated`      | `campaign_id: uuid`                            | `POST /api/campaigns/:id/evaluate` rewrote `campaign_evaluations` for `campaign_id` |
 | `lag`            | `missed: u64`                                  | Subscriber fell behind the broker's 512-slot buffer; re-fetch to reconcile       |
 
 The `lag` frame is synthetic — emitted by the SSE handler when the
