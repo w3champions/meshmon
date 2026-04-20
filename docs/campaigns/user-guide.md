@@ -42,16 +42,31 @@ SSE events to flip the status badge without a refresh.
 
 ## Filtering
 
-The filter rail accepts:
+The filter rail runs across the top of the catalogue view. Active
+filters compose with AND — a row must satisfy every set filter to
+appear. Within multi-select filters (Country, ASN) each selection is
+OR-combined.
 
-- **Country** — exact ISO country code match; multi-select.
-- **ASN** — exact match; multi-select.
-- **Network operator** — substring match.
-- **IP prefix** — accepts any Postgres-parseable CIDR or bare IP.
-- **Name search** — full-text search over display name, city, country
-  name, and network operator.
-- **Bounding box** — four-value `[minLat, minLon, maxLat, maxLon]`
-  driven by the map's draw tool.
+| Filter | Behaviour |
+|---|---|
+| **Country** | Exact ISO country-code match; multi-select. |
+| **ASN** | Exact match; multi-select. |
+| **Network** | Substring match against the network-operator field. |
+| **City** | Substring match against the city field. |
+| **Name** | Full-text search over display name, city, country name, and network operator. |
+| **IP prefix** | Accepts any Postgres-parseable CIDR or bare IP. |
+| **Map polygon** | Client-side containment check: a row matches when its geo-pin falls inside any of the drawn shapes (OR across shapes). |
+
+Switching to **Map view** reveals the draw toolbar (rectangle, circle,
+freehand polygon). Each shape drawn adds to the active filter; the
+filter clears when you remove all shapes or click **Clear** in the
+filter rail. Shapes compose with OR — a pin only needs to be inside
+one shape to pass.
+
+The server-side query uses the convex bounding box of all drawn shapes
+as a pre-filter; the exact per-shape containment test runs on the
+client against the returned rows. Entries with no coordinates are
+excluded from the map view but still appear in the table.
 
 Filter facets (top countries, top ASNs, top cities, top networks) are
 served from a cached snapshot with a 30-second TTL. Immediately after
@@ -60,30 +75,36 @@ counts until the cache refreshes.
 
 ## Editing
 
-Click a row to open the edit drawer. Every field is editable. Anything
-you save is treated as authoritative — subsequent enrichment runs
-leave that field alone.
+Click any row to open the edit drawer. Every field is editable.
+Anything you save is treated as authoritative — subsequent enrichment
+runs leave that field alone.
 
-Each edited field gains a **Revert to auto** link. Clicking it clears
-your value *and* removes the lock, so the next enrichment pass
-re-populates the column from the provider chain.
+Each operator-edited field shows a **Revert to auto** link next to its
+label. Clicking it sends a `revert_to_auto` patch that NULLs the
+column value *and* removes that field from the lock set on the server,
+so the next enrichment pass re-populates the column from the provider
+chain. Reverts take effect immediately; the drawer refreshes to the
+server's response.
 
 ## Re-enrichment
 
-The **Re-enrich** button on a row (returns 202 Accepted) enqueues a
-fresh enrichment pass against the provider chain. Your manually-edited
+The **Re-enrich** button on a row (or in the edit drawer) enqueues a
+fresh enrichment pass against the provider chain. Operator-locked
 fields stay put — only unlocked columns can change.
 
-Bulk re-enrich on a selection enqueues the whole set in one call. Both
-paths feed the same background runner; order is not guaranteed.
+**Bulk re-enrich** on a selection (25+ rows) shows a confirmation
+dialog that displays the approximate credit cost ("~N ipgeolocation
+credits") before anything is sent. Confirm to enqueue the entire
+selection in one call. Both paths feed the same background runner;
+completion order is not guaranteed.
 
 `ipgeolocation`'s free tier has a daily quota shared across the whole
-deployment. Each re-enrich click uses one credit.
+deployment. Each enrichment pass uses one credit per IP.
 
 ## Deleting
 
-**Delete** removes the row immediately. The call is idempotent: a
-delete against a missing id still returns success.
+**Delete** in the edit drawer removes the row immediately. The call is
+idempotent: a delete against a missing id still returns success.
 
 ## Agents in the catalogue
 

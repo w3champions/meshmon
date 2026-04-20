@@ -28,6 +28,9 @@ meshmon/
 
 Subsystems:
 
+- **IP catalogue (`/catalogue`):** Per-host registry with live
+  enrichment, map-based spatial filtering, and operator field overrides;
+  see [`docs/campaigns/user-guide.md`](docs/campaigns/user-guide.md).
 - **Alerting:** VMAlert rules + Alertmanager Discord routing; see
   [`deploy/alerts/README.md`](deploy/alerts/README.md).
 

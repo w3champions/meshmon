@@ -80,11 +80,11 @@ config section.
 1. **`ipgeolocation`** — richest field coverage (city, country, lat/lon,
    ASN, network operator). Default first in the chain. Subject to the
    provider's free-tier quota.
-2. **`rdap`** (off by default while the in-tree lookup is a stub; flip
-   `[enrichment.rdap] enabled = true` once the real registry wiring
-   ships) — free, credential-less registry lookup via
-   `icann-rdap-client`. Fills registry-level fields (ASN, network
-   operator, country) that `ipgeolocation` did not already supply.
+2. **`rdap`** — free, credential-less registry lookup via
+   `icann-rdap-client`. Resolves the appropriate RIR via IANA
+   bootstrap; caches the bootstrap registry in memory for the process
+   lifetime. Fills ASN, network operator, and country for any field
+   that `ipgeolocation` did not already supply. Enabled by default.
 3. **`maxmind-geolite2`** (feature `enrichment-maxmind`, off by default) —
    local mmdb lookups; offline fallback for city / ASN.
 4. **`whois`** (feature `enrichment-whois`, off by default) — last-resort
@@ -180,6 +180,43 @@ handler translates that into a synthetic frame
 `{"kind":"lag","missed":N}` so clients can detect the gap and refetch
 state rather than drift silently.
 
+## Frontend — SSE and cache
+
+The `/catalogue` page opens one `EventSource` connection to
+`/api/catalogue/stream` for its entire lifetime. A single hook at the
+page level receives all events:
+
+- `created` and `updated` — `setQueryData` on the per-entry cache key
+  (`['catalogue','entry',id]`) with the fresh payload.
+- `deleted` — removes the entry from the list query and the per-entry
+  cache.
+- `enrichment_progress` — merges the new `enrichment_status` into the
+  per-entry cache so `StatusChip` and `PasteStaging` re-render live.
+- `lag` — triggers a full list refetch so the page re-syncs with the
+  server after a burst that outpaced the 512-slot broadcast buffer.
+
+Components read per-entry data directly from the cache
+(`useQuery({ queryKey: ['catalogue','entry',id], enabled: false })`);
+they never open a second SSE connection.
+
+## Frontend — map-polygon filter
+
+Map-polygon filtering is a two-stage process:
+
+1. **Server pre-filter (bounding box).** When shapes are drawn, the
+   frontend computes the convex bounding box of all shapes and passes it
+   to `GET /api/catalogue` as `bbox=[minLat,minLon,maxLat,maxLon]`.
+   The server returns all rows whose coordinates fall inside the box.
+
+2. **Client containment test.** The returned rows are filtered again
+   client-side using `pointInShapes` from `lib/geo.ts` (backed by
+   `@turf/boolean-point-in-polygon`). A row passes when its pin falls
+   inside *any* drawn shape (OR semantics). Rows without coordinates
+   are excluded from the map view but not from the table.
+
+This two-stage approach keeps server load bounded (bounding-box index
+query) while keeping containment exact for non-rectangular shapes.
+
 ## Agent Register hook
 
 `AgentApi::Register` calls
@@ -231,9 +268,8 @@ api_key_env      = "IPGEOLOCATION_API_KEY"
 acknowledged_tos = false  # must be true when enabled = true
 
 [enrichment.rdap]
-# The in-tree provider is a stub today — leave disabled until the real
-# wire-up ships. See `rdap_enabled_default` for the reasoning.
-enabled = false
+# Enabled by default. Set to false to disable RDAP lookups entirely.
+# enabled = true
 
 [enrichment.maxmind]
 enabled   = false
