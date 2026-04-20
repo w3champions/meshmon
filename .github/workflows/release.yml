@@ -257,3 +257,53 @@ jobs:
 
       - name: Inspect manifest
         run: docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
+
+  trigger-azure-release:
+    name: Trigger Azure DevOps Release
+    needs: [merge]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Derive tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=main-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: POST release creation to Azure DevOps
+        env:
+          AZDO_PAT: ${{ secrets.AZDO_RELEASE_PAT }}
+          AZDO_ORG: w3champions
+          AZDO_PROJECT: w3champions
+          # Fill in after the Azure Release pipeline is created in the UI.
+          # The definition ID is visible in the Release pipeline URL:
+          # https://dev.azure.com/w3champions/w3champions/_release?definitionId=<ID>
+          AZDO_RELEASE_DEFINITION_ID: ${{ vars.AZDO_MESHMON_RELEASE_DEFINITION_ID }}
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AZDO_PAT}" ]; then
+            echo "::error::AZDO_RELEASE_PAT secret not configured; skipping Azure trigger."
+            exit 1
+          fi
+          if [ -z "${AZDO_RELEASE_DEFINITION_ID}" ]; then
+            echo "::error::AZDO_MESHMON_RELEASE_DEFINITION_ID variable not configured; skipping Azure trigger."
+            exit 1
+          fi
+          AUTH=$(printf ":%s" "$AZDO_PAT" | base64 -w0)
+          BODY=$(jq -n \
+            --arg defId "$AZDO_RELEASE_DEFINITION_ID" \
+            --arg tag "$TAG" \
+            '{
+              definitionId: ($defId | tonumber),
+              description: ("Triggered by meshmon release.yml for tag " + $tag),
+              variables: { TAG: { value: $tag, isSecret: false } }
+            }')
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Basic $AUTH" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "https://vsrm.dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/release/releases?api-version=7.1"
