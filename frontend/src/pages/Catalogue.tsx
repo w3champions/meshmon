@@ -278,13 +278,17 @@ export default function Catalogue() {
   const mapInfinite = useCatalogueMap(mapViewport?.bbox, mapViewport?.zoom ?? 2, mapQuery);
 
   // -----------------------------------------------------------------------
-  // Cluster dialog filters: drop `shapes` so the dialog stays consistent
-  // with the map (shape-blind). Country/ASN/network/city/ip_prefix/name
-  // and sort all propagate so a pre-filtered table view still narrows
-  // cluster contents.
+  // Cluster dialog filters: must match the map endpoint's filter set
+  // exactly, otherwise "N in this area" on the cluster bubble
+  // disagrees with the dialog body's row count whenever a shape- or
+  // city-filter is active. Drop both `shapes` and `city` — the same
+  // two keys `mapQuery` drops — so country/ASN/network/ip_prefix/name
+  // propagate but the viewport semantics stay consistent across the
+  // bubble → dialog handoff. Sort still rides along so a pre-sorted
+  // table view surfaces cluster contents in the same order.
   // -----------------------------------------------------------------------
   const dialogFilters: CatalogueListQuery = useMemo(() => {
-    const { shapes: _shapes, ...rest } = tableQuery;
+    const { shapes: _shapes, city: _city, ...rest } = tableQuery;
     return rest;
   }, [tableQuery]);
 
