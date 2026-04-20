@@ -13,6 +13,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
 import Alerts from "@/pages/Alerts";
+import Campaigns from "@/pages/Campaigns";
 import Catalogue from "@/pages/Catalogue";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
@@ -166,6 +167,21 @@ export const catalogueRoute = createRoute({
   validateSearch: (search) => catalogueSearchSchema.parse(search),
 });
 
+export const campaignsSearchSchema = z.object({
+  q: z.string().optional(),
+  state: z.enum(["draft", "running", "completed", "evaluated", "stopped"]).optional(),
+  created_by: z.string().optional(),
+  sort: z.enum(["title", "created_at", "started_at", "state"]).optional(),
+  dir: z.enum(["asc", "desc"]).optional(),
+});
+
+export const campaignsRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/campaigns",
+  component: Campaigns,
+  validateSearch: (search) => campaignsSearchSchema.parse(search),
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   authRoute.addChildren([
@@ -177,6 +193,7 @@ const routeTree = rootRoute.addChildren([
     reportRoute,
     alertsRoute,
     catalogueRoute,
+    campaignsRoute,
   ]),
 ]);
 
