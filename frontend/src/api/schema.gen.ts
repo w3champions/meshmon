@@ -2769,6 +2769,8 @@ export interface operations {
                  *     cluster aggregation when the filtered count crosses
                  *     [`super::repo::MAP_DETAIL_THRESHOLD`]. See
                  *     [`super::repo::cell_size_for_zoom`] for the mapping.
+                 *     Values above 20 surface as 400 — leaflet doesn't advertise
+                 *     zooms beyond that on any of our tile backends.
                  */
                 zoom: number;
             };
