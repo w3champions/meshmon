@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -80,10 +80,10 @@ describe("PasteStaging", () => {
       makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
     );
 
-    render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
-    const textarea = screen.getByRole("textbox", { name: /paste ip/i });
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "1.2.3.4\n5.6.7.8");
-    await user.click(screen.getByRole("button", { name: /add/i }));
+    await user.click(within(document.body).getByRole("button", { name: /add/i }));
 
     expect(mutateAsync).toHaveBeenCalledTimes(1);
     const body = mutateAsync.mock.calls[0][0];
@@ -93,29 +93,28 @@ describe("PasteStaging", () => {
 
   test("staging table renders one row per accepted IP with a pending chip", async () => {
     const user = userEvent.setup();
-    render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
-    const textarea = screen.getByRole("textbox", { name: /paste ip/i });
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "10.0.0.1\n10.0.0.2");
 
-    // Two rows in the staging table
-    const rows = screen.getAllByRole("row");
-    // rows[0] is the header, rows[1..] are data rows
+    // Two rows in the parsed IPs table (rows[0] is header, rows[1..] are data)
+    const rows = within(document.body).getAllByRole("row");
     expect(rows.length).toBeGreaterThanOrEqual(3);
-    expect(screen.getByText("10.0.0.1")).toBeInTheDocument();
-    expect(screen.getByText("10.0.0.2")).toBeInTheDocument();
+    expect(within(document.body).getByText("10.0.0.1")).toBeInTheDocument();
+    expect(within(document.body).getByText("10.0.0.2")).toBeInTheDocument();
     // Each accepted row shows a pending chip
-    const pendingChips = screen.getAllByText("Pending");
+    const pendingChips = within(document.body).getAllByText("Pending");
     expect(pendingChips.length).toBeGreaterThanOrEqual(2);
   });
 
   test("invalid tokens render as red chips with the parse error on hover", async () => {
     const user = userEvent.setup();
-    render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
-    const textarea = screen.getByRole("textbox", { name: /paste ip/i });
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "not-an-ip");
 
     // The rejected token renders as a chip inside the invalid-tokens list
-    const invalidList = screen.getByRole("list", { name: /invalid tokens/i });
+    const invalidList = within(document.body).getByRole("list", { name: /invalid tokens/i });
     const chip = within(invalidList).getByText("not-an-ip");
     // Hover tooltip surfaces the parse error via the `title` attribute
     expect(chip).toHaveAttribute("title", "Not a valid IP address");
@@ -123,26 +122,26 @@ describe("PasteStaging", () => {
 
   test("intra-paste duplicates collapse to one row with ×N badge", async () => {
     const user = userEvent.setup();
-    render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
-    const textarea = screen.getByRole("textbox", { name: /paste ip/i });
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "1.2.3.4\n1.2.3.4\n1.2.3.4");
 
     // Only one row for that IP
-    const ipCells = screen.getAllByText("1.2.3.4");
+    const ipCells = within(document.body).getAllByText("1.2.3.4");
     expect(ipCells).toHaveLength(1);
     // Badge showing ×3
-    expect(screen.getByText("×3")).toBeInTheDocument();
+    expect(within(document.body).getByText("×3")).toBeInTheDocument();
   });
 
   test("typing a /24 CIDR shows the exact inline error copy on hover", async () => {
     const user = userEvent.setup();
-    render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
-    const textarea = screen.getByRole("textbox", { name: /paste ip/i });
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "192.168.1.0/24");
 
     // The rejected CIDR renders as a red chip inside the invalid-tokens list;
     // the exact error copy lives in the `title` attribute (hover tooltip).
-    const invalidList = screen.getByRole("list", { name: /invalid tokens/i });
+    const invalidList = within(document.body).getByRole("list", { name: /invalid tokens/i });
     const chip = within(invalidList).getByText("192.168.1.0/24");
     expect(chip).toHaveAttribute(
       "title",
@@ -161,15 +160,15 @@ describe("PasteStaging", () => {
       makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
     );
 
-    render(<PasteStaging onClose={vi.fn()} />, { wrapper: wrap() });
-    const textarea = screen.getByRole("textbox", { name: /paste ip/i });
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "1.2.3.4");
-    await user.click(screen.getByRole("button", { name: /add/i }));
+    await user.click(within(document.body).getByRole("button", { name: /add/i }));
 
     // After POST success the row is keyed by id from the response
     await waitFor(() => {
       // The chip should still exist (panel stays mounted after POST)
-      expect(screen.getAllByText("1.2.3.4").length).toBeGreaterThanOrEqual(1);
+      expect(within(document.body).getAllByText("1.2.3.4").length).toBeGreaterThanOrEqual(1);
     });
 
     // Simulate SSE enrichment_progress: directly set the query cache
@@ -183,7 +182,7 @@ describe("PasteStaging", () => {
 
     // The chip should flip to enriched
     await waitFor(() => {
-      expect(screen.getByText("Enriched")).toBeInTheDocument();
+      expect(within(document.body).getByText("Enriched")).toBeInTheDocument();
     });
   });
 });

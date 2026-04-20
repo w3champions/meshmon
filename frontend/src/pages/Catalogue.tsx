@@ -314,7 +314,7 @@ export default function Catalogue() {
       <EntryDrawer entry={drawerEntry} onClose={handleDrawerClose} />
 
       {/* Paste panel */}
-      {pasteOpen && <PasteStaging onClose={() => setPasteOpen(false)} />}
+      <PasteStaging open={pasteOpen} onOpenChange={(next) => setPasteOpen(next)} />
 
       {/* Bulk re-enrich confirm */}
       <ReenrichConfirm

@@ -214,7 +214,7 @@ describe("Catalogue page — Add IPs panel", () => {
     const addIpsButton = screen.getByRole("button", { name: /add ips/i });
     await user.click(addIpsButton);
 
-    await screen.findByRole("region", { name: /paste ips staging panel/i });
+    await screen.findByRole("dialog", { name: /add ips/i });
   });
 });
 
