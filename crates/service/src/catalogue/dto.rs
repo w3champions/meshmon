@@ -267,6 +267,7 @@ pub struct PasteResponse {
 /// - `"Location"` — either half of `Latitude`/`Longitude` was locked.
 /// - `"Country"`  — either half of `CountryCode`/`CountryName` was
 ///   locked.
+///
 /// The composite names let the UI narrate skips without reconstructing
 /// the pairing client-side.
 #[derive(Debug, Default, Serialize, ToSchema)]

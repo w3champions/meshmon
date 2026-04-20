@@ -468,10 +468,7 @@ async fn bulk_metadata_applies_to_new_rows_and_locks_fields() {
         assert_eq!(row.country_name.as_deref(), Some("United States"));
         assert_eq!(row.latitude, Some(37.7749));
         assert_eq!(row.longitude, Some(-122.4194));
-        assert_eq!(
-            row.website.as_deref(),
-            Some("https://example.com/status")
-        );
+        assert_eq!(row.website.as_deref(), Some("https://example.com/status"));
         assert_eq!(
             row.notes.as_deref(),
             Some("operator-seeded during bulk paste")
@@ -687,22 +684,20 @@ async fn bulk_metadata_none_mirrors_legacy_insert_many() {
     meshmon_service::db::run_migrations(&db.pool).await.unwrap();
 
     let ips: Vec<IpAddr> = vec!["198.51.100.146".parse().unwrap()];
-    let outcome = repo::insert_many_with_metadata(
-        &db.pool,
-        &ips,
-        CatalogueSource::Operator,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let outcome =
+        repo::insert_many_with_metadata(&db.pool, &ips, CatalogueSource::Operator, None, None)
+            .await
+            .unwrap();
 
     assert_eq!(outcome.created.len(), 1);
     assert!(outcome.existing.is_empty());
     assert!(outcome.skips.is_empty());
     // No metadata → no fields locked, no enrichment state touched.
     assert!(outcome.created[0].operator_edited_fields.is_empty());
-    assert_eq!(outcome.created[0].enrichment_status, EnrichmentStatus::Pending);
+    assert_eq!(
+        outcome.created[0].enrichment_status,
+        EnrichmentStatus::Pending
+    );
 
     db.close().await;
 }
