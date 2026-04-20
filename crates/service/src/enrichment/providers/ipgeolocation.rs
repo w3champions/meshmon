@@ -34,6 +34,7 @@ use reqwest::{Client, Url};
 use serde_json::Value;
 use std::net::IpAddr;
 use std::time::Duration;
+use tracing::{debug, trace};
 
 /// Stable identifier for this provider — appears in logs and metrics
 /// labels. Kept as a module-level constant so the
@@ -310,13 +311,40 @@ impl EnrichmentProvider for IpGeoProvider {
             .send()
             .await
             .map_err(|e| EnrichmentError::Transient(e.without_url().to_string()))?;
-        match resp.status().as_u16() {
+        let status = resp.status().as_u16();
+        debug!(%ip, status, "ipgeolocation: response status");
+        match status {
             200 => {
                 let body: Value = resp
                     .json()
                     .await
                     .map_err(|e| EnrichmentError::Transient(e.without_url().to_string()))?;
-                Ok(Self::map_single(&body))
+                // Diagnose shape mismatches (e.g. "asn" as nested object vs
+                // bare integer) without dumping the full payload at debug.
+                // Full body is gated on `trace!` for deep investigation.
+                let top_keys: Vec<&str> = body
+                    .as_object()
+                    .map(|o| o.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                debug!(
+                    %ip,
+                    asn_kind = body["asn"].as_str().map(|_| "string")
+                        .or_else(|| body["asn"].as_i64().map(|_| "number"))
+                        .or_else(|| body["asn"].as_object().map(|_| "object"))
+                        .unwrap_or("absent"),
+                    has_organization = body.get("organization").is_some(),
+                    has_location = body.get("location").is_some(),
+                    ?top_keys,
+                    "ipgeolocation: response shape"
+                );
+                trace!(%ip, body = %body, "ipgeolocation: full response body");
+                let mapped = Self::map_single(&body);
+                debug!(
+                    %ip,
+                    mapped_fields = ?mapped.fields.keys().collect::<Vec<_>>(),
+                    "ipgeolocation: mapped fields"
+                );
+                Ok(mapped)
             }
             401 | 403 => Err(EnrichmentError::Unauthorized),
             // TODO(T10): read upstream `Retry-After` header when present and
