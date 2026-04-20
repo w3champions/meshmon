@@ -771,6 +771,102 @@ Agent-reported failures (`NO_ROUTE`, `TIMEOUT`, etc.) are **settled**
 by the writer — they are not rejections and do not feed
 `rejected_ids`.
 
+## Agent one-off prober
+
+The agent-side `CampaignProber` is `crates/agent/src/probing/oneshot.rs::OneshotProber`.
+Per batch, it spawns one tokio task per pair, builds a `trippy_core::Tracer`
+from the request knobs, runs the tracer under `spawn_blocking`, and
+emits a `MeasurementSummary`, `MtrTraceResult`, or `MeasurementFailure`
+to the response stream. All four campaign protocols (ICMP / TCP / UDP /
+MTR) route through the same builder matrix; no forks of the continuous
+prober.
+
+### Trippy builder matrix
+
+`build_oneshot_config(kind, protocol, req, dest_ip, tcp_port, udp_port)`
+returns a fresh `trippy_core::Builder`:
+
+| Kind | Protocol | `max_rounds` | `min/max_round_duration` | `read_timeout` | `grace` | TTL | `port_direction` | `trace_identifier` |
+|---|---|---|---|---|---|---|---|---|
+| `LATENCY` | `ICMP` | `probe_count` | `probe_stagger_ms` | `timeout_ms` | 500 ms | 1..=32 | default | `next_trace_id()` |
+| `LATENCY` | `TCP` | `probe_count` | `probe_stagger_ms` | `timeout_ms` | 500 ms | 1..=32 | `FixedDest(port)` | unset |
+| `LATENCY` | `UDP` | `probe_count` | `probe_stagger_ms` | `timeout_ms` | 500 ms | 1..=32 | `FixedDest(port)` | unset |
+| `MTR` | any | 1 | 0 ms / 30 s | 30 s | 500 ms | 1..=32 | protocol default / `FixedDest(port)` | ICMP only |
+
+MTR pins a single round regardless of `probe_count` and uses a
+hard-coded 30 s round timeout. The LATENCY `read_timeout` equals
+`req.timeout_ms`; setting `max_round_duration = min_round_duration`
+pins the probe cadence so trippy emits no internal jitter.
+
+### Loss predicates
+
+- **ICMP LATENCY** — success iff `target_hop.total_recv() > 0` within
+  the per-probe `read_timeout`; silent batches surface as
+  `MeasurementFailureCode::TIMEOUT`. Per-probe RTTs come from
+  `target_hop.samples()`; the `MeasurementSummary` carries
+  min / avg / median / p95 / max / stddev and `loss_pct`.
+- **TCP LATENCY** — any destination reply counts as success.
+  Trippy 0.13 collapses SYN/ACK and RST replies into
+  `total_recv` at the hop level and exposes no per-probe distinction
+  on the public `Hop` surface, so the oneshot prober cannot emit an
+  explicit `REFUSED` failure today; operators that need to
+  distinguish an open port from a refused port rely on latency
+  patterns or on the continuous TCP prober's per-probe telemetry.
+- **UDP LATENCY** — success iff the destination replied (service
+  response OR ICMP Port-Unreachable from the destination IP itself);
+  ICMP Time-Exceeded from intermediate hops do not inflate the
+  counter because trippy accrues those on lower-TTL hops.
+- **MTR** — always emits a `MtrTraceResult`, even against unreachable
+  destinations. The single round is dense-packed over
+  `[1..=target_reached_ttl]`: every hop with `total_recv > 0`
+  contributes one `HopSummary` with its observed IPs (frequency 1.0
+  per unique address, single-round), `avg_rtt_micros` derived from
+  `best_ms`, `stddev_rtt_micros = 0`, and `loss_pct = 0`. Silent TTLs
+  pad with `observed_ips: []`, `loss_pct = 1.0`, and zero RTT. A
+  completely silent trace surfaces as `MeasurementFailureCode::TIMEOUT`
+  instead of a zero-length MTR result so the writer's `last_error`
+  vocabulary stays consistent with LATENCY paths.
+
+### Concurrency
+
+`OneshotProber` owns an independent `tokio::sync::Semaphore` sized from
+the cluster-wide `campaign_max_concurrency` cap (same value the
+`AgentCommandService`'s outer RPC semaphore uses). The continuous pool's
+`MESHMON_ICMP_TARGET_CONCURRENCY` is unaffected — campaign probes
+cannot consume continuous permits and vice versa. The combined
+ceiling of `continuous_cap + campaign_cap` budgets the tokio blocking
+thread pool, which defaults to 64 threads; operators who raise either
+cap should validate the combined load.
+
+### Cancellation
+
+The gRPC stream drop propagates to a `CancellationToken` the per-pair
+task selects on. On cancel, the task drops the `Arc<Tracer>` (closing
+the raw socket) and waits up to 1 s for the blocking `Tracer::run()`
+to unwind; if the blocking thread misses the window, the handle is
+dropped anyway — the socket is already closed and a stale blocking
+thread expires on its next round boundary. Cancelled pairs emit
+`MeasurementFailureCode::CANCELLED`.
+
+A wall-clock safety net caps each LATENCY pair at
+`probe_count * (stagger_ms + timeout_ms) + 5 s` and MTR pairs at
+35 s; tripping the safety net emits `MeasurementFailureCode::TIMEOUT`.
+
+### Shared-resource audit
+
+| Resource | Owner | Coexistence strategy |
+|---|---|---|
+| ICMP echo identifier | `IcmpClientPool::allocate_id()` (continuous reachability prober) | Oneshot does not allocate. Raw-socket ICMP campaigns use trippy's `trace_identifier` as the echo identifier, which comes from `probing::next_trace_id()`. `surge-ping` and `trippy-core` keep independent reply dispatchers, so identifier overlap cannot cross-contaminate. |
+| UDP nonce | per-target `nonce_counter: u32` in the continuous UDP dispatcher | Distinct wire protocol. Continuous UDP uses the meshmon secret-echo handshake; campaign UDP uses trippy traceroute probes which the meshmon listener rejects at the secret gate. |
+| Trippy trace id | `probing::next_trace_id()` — process-wide monotonic non-zero `AtomicU16`, randomly seeded | **Shared between continuous MTR and campaign tracers by design.** One allocator, one sequence; uniqueness is guaranteed by construction. |
+| TCP/UDP source port | OS ephemeral allocator | Kernel-owned; no application-level collision. |
+
+A defensive agent-side counter
+(`ONESHOT_PROBE_COLLISIONS_TOTAL`) mirrors the continuous
+`CROSS_CONTAMINATION_TOTAL` so operators can assert both stay at 0.
+Coexistence tests spawn a continuous trippy tracer and an oneshot
+tracer against the same destination and confirm the invariant.
+
 ## 24 h reuse
 
 Before dispatching a batch, the scheduler consults the `measurements`
@@ -863,12 +959,11 @@ catalogue surface. `RepoError::NotFound` → 404 `not_found`,
 
 ```toml
 [campaigns]
-# Spawn the background scheduler. Default: false until a real prober
-# ships — the agent's current `StubProber` would persist synthetic
-# measurements against real campaigns otherwise. Once the real prober
-# lands, flip this to `true`. HTTP CRUD and preview remain online
-# regardless of this flag.
-enabled = false
+# Spawn the background scheduler. Default `true` — the agent ships a
+# trippy-backed `OneshotProber` that returns real measurements. Set
+# `false` to keep the HTTP CRUD and preview endpoints online while
+# disabling dispatch (e.g. during an incident or infra migration).
+enabled = true
 # Composer confirm-dialog threshold on expected dispatch count.
 # Advisory only — no hard cap.
 size_warning_threshold = 1000
