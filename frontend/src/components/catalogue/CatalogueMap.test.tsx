@@ -81,6 +81,27 @@ describe("CatalogueMap", () => {
     expect(onRowClick).toHaveBeenCalledTimes(1);
   });
 
+  test("integration: clicking pin popup button fires onRowClick with entry id", async () => {
+    const onRowClick = vi.fn();
+    const entries = [makeEntry({ id: "entry-42", ip: "1.2.3.4", latitude: 10, longitude: 20 })];
+    const user = userEvent.setup();
+    renderWithProviders(
+      <CatalogueMap
+        entries={entries}
+        shapes={[]}
+        onShapesChange={vi.fn()}
+        onRowClick={onRowClick}
+      />,
+    );
+    // The leaflet mock renders Popup children inline within the marker tree,
+    // so the popup's button is reachable via a normal role query.
+    const button = await screen.findByRole("button", {
+      name: /open details for 1\.2\.3\.4/i,
+    });
+    await user.click(button);
+    expect(onRowClick).toHaveBeenCalledWith("entry-42");
+  });
+
   test("EntryPopup renders IP, display_name fallback, and ASN fallback", () => {
     const entry = makeEntry({
       ip: "192.168.1.1",
