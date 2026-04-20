@@ -30,7 +30,7 @@ surge-ping.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-stream.workspace = true
 tokio-util.workspace = true
-tonic = { workspace = true, features = ["tls-native-roots"] }
+tonic = { workspace = true, features = ["tls-native-roots", "tls-ring"] }
 trippy-core.workspace = true
 tonic-prost.workspace = true
 tracing.workspace = true
