@@ -9,6 +9,7 @@
 pub mod broker;
 pub mod dispatch;
 pub mod dto;
+pub mod eval;
 pub mod events;
 pub mod handlers;
 pub mod listener;
