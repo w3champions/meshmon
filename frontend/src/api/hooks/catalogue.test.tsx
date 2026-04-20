@@ -82,8 +82,10 @@ describe("useCatalogueList", () => {
     const call = fetchSpy.mock.calls[0]?.[0];
     const url = call instanceof Request ? call.url : String(call);
     expect(url).toContain("/api/catalogue");
-    expect(url).toContain("country_code=US");
-    expect(url).toContain("country_code=DE");
+    // CSV encoding (explode=false) — axum's serde_urlencoded can't deserialise
+    // repeated keys into `Vec<T>`, so the client sends a single comma-joined
+    // value instead of `country_code=US&country_code=DE`.
+    expect(url).toContain("country_code=US,DE");
     expect(url).toContain("limit=25");
   });
 });
