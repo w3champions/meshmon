@@ -45,10 +45,24 @@ export const LeafletMock = {
     </div>
   ),
   Popup: ({ children }: PopupProps) => <div data-testid="popup">{children}</div>,
-  // Stub react-leaflet's useMap so components calling fitBounds don't crash
-  // under jsdom. The map is never rendered in unit tests.
+  // Stub react-leaflet's useMap so components calling fitBounds (or
+  // geoman's map.pm) don't crash under jsdom. The map is never rendered
+  // in unit tests. `pm` mirrors just enough of the geoman surface area
+  // that DrawMap's GeomanController can mount and tear down cleanly.
   useMap: () => ({
     fitBounds: () => {},
     setView: () => {},
+    on: () => {},
+    off: () => {},
+    removeLayer: () => {},
+    pm: {
+      addControls: () => {},
+      removeControls: () => {},
+      disableDraw: () => {},
+      disableGlobalEditMode: () => {},
+      disableGlobalRemovalMode: () => {},
+      disableGlobalDragMode: () => {},
+      getGeomanDrawLayers: () => [],
+    },
   }),
 };
