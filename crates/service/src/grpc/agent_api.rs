@@ -220,6 +220,19 @@ impl AgentApi for AgentApiImpl {
                 req.udp_probe_port
             )));
         }
+        // Optional per-agent campaign concurrency override (T45). Unset
+        // means "follow cluster default"; 0 is rejected because it would
+        // permanently starve the agent. Clamp to `i16::MAX` so the DB
+        // narrowing conversion stays lossless (the DB column is SMALLINT).
+        let campaign_max_concurrency: Option<i16> = match req.campaign_max_concurrency {
+            None => None,
+            Some(0) => {
+                return Err(Status::invalid_argument(
+                    "campaign_max_concurrency must be >= 1 when set",
+                ));
+            }
+            Some(n) => Some(n.min(i16::MAX as u32) as i16),
+        };
         let claimed_ip = proto_ip::to_ipaddr(&req.ip)
             .map_err(|e| Status::invalid_argument(format!("invalid ip bytes: {e}")))?;
 
@@ -291,15 +304,17 @@ impl AgentApi for AgentApiImpl {
             r#"INSERT INTO agents
                   (id, display_name, location, ip, agent_version,
                    tcp_probe_port, udp_probe_port,
+                   campaign_max_concurrency,
                    registered_at, last_seen_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
                ON CONFLICT (id) DO UPDATE SET
-                   display_name   = EXCLUDED.display_name,
-                   location       = EXCLUDED.location,
-                   agent_version  = EXCLUDED.agent_version,
-                   tcp_probe_port = EXCLUDED.tcp_probe_port,
-                   udp_probe_port = EXCLUDED.udp_probe_port,
-                   last_seen_at   = NOW()
+                   display_name             = EXCLUDED.display_name,
+                   location                 = EXCLUDED.location,
+                   agent_version            = EXCLUDED.agent_version,
+                   tcp_probe_port           = EXCLUDED.tcp_probe_port,
+                   udp_probe_port           = EXCLUDED.udp_probe_port,
+                   campaign_max_concurrency = EXCLUDED.campaign_max_concurrency,
+                   last_seen_at             = NOW()
                  WHERE agents.ip = EXCLUDED.ip
                RETURNING id"#,
             req.id,
@@ -309,6 +324,7 @@ impl AgentApi for AgentApiImpl {
             agent_version,
             tcp_port_i32,
             udp_port_i32,
+            campaign_max_concurrency,
         )
         .fetch_optional(&mut *tx)
         .await

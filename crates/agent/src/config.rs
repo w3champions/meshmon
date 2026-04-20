@@ -57,6 +57,14 @@ pub struct AgentEnv {
     /// Global cap on concurrent per-target ICMP/traceroute rounds.
     /// Defaults to 32 when unset.
     pub icmp_target_concurrency: usize,
+    /// Optional per-agent override for the cluster-wide campaign
+    /// concurrency cap. Read from `MESHMON_CAMPAIGN_MAX_CONCURRENCY`;
+    /// `None` means "follow the cluster default" (persisted unset on the
+    /// service side so the dispatcher falls back to
+    /// `[campaigns.default_agent_concurrency]`). Zero is rejected at
+    /// parse time because it would permanently block the agent from
+    /// receiving campaign batches.
+    pub campaign_max_concurrency: Option<u32>,
 }
 
 /// Read a required env var, pushing an error message if missing.
@@ -165,6 +173,32 @@ impl AgentEnv {
             },
         };
 
+        // -- campaign concurrency override (optional, None = cluster default) --
+        //
+        // Parse failures are pushed as errors rather than silently
+        // discarded so operators notice typos. A zero value is rejected
+        // because it would permanently block the agent from receiving
+        // campaign batches.
+        let campaign_max_concurrency = match std::env::var("MESHMON_CAMPAIGN_MAX_CONCURRENCY") {
+            Err(_) => None,
+            Ok(raw) => match raw.parse::<u32>() {
+                Ok(0) => {
+                    errors.push(
+                        "MESHMON_CAMPAIGN_MAX_CONCURRENCY: must be >= 1 (0 would block all batches)"
+                            .to_string(),
+                    );
+                    None
+                }
+                Ok(n) => Some(n),
+                Err(e) => {
+                    errors.push(format!(
+                        "MESHMON_CAMPAIGN_MAX_CONCURRENCY: invalid u32 {raw:?}: {e}"
+                    ));
+                    None
+                }
+            },
+        };
+
         // -- report all collected errors --
         if !errors.is_empty() {
             bail!("invalid agent environment:\n  {}", errors.join("\n  "));
@@ -186,6 +220,7 @@ impl AgentEnv {
             tcp_probe_port: tcp_probe_port.unwrap(),
             udp_probe_port: udp_probe_port.unwrap(),
             icmp_target_concurrency,
+            campaign_max_concurrency,
         })
     }
 }
@@ -392,7 +427,10 @@ mod tests {
 
     /// Optional env vars the agent accepts. Cleared between tests to prevent
     /// leakage but not required for `from_env` to succeed.
-    const OPTIONAL_VARS: [&str; 1] = ["MESHMON_ICMP_TARGET_CONCURRENCY"];
+    const OPTIONAL_VARS: [&str; 2] = [
+        "MESHMON_ICMP_TARGET_CONCURRENCY",
+        "MESHMON_CAMPAIGN_MAX_CONCURRENCY",
+    ];
 
     /// Clear every env var this test module is aware of, both required and
     /// optional, to prevent cross-test leakage.
@@ -600,6 +638,47 @@ mod tests {
             let err = AgentEnv::from_env().unwrap_err();
             assert!(
                 err.to_string().contains("MESHMON_ICMP_TARGET_CONCURRENCY"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn campaign_max_concurrency_defaults_to_none() {
+        with_valid_env(|| {
+            let env = AgentEnv::from_env().expect("valid");
+            assert_eq!(env.campaign_max_concurrency, None);
+        });
+    }
+
+    #[test]
+    fn campaign_max_concurrency_override_is_parsed() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_CAMPAIGN_MAX_CONCURRENCY", "8");
+            let env = AgentEnv::from_env().expect("valid");
+            assert_eq!(env.campaign_max_concurrency, Some(8));
+        });
+    }
+
+    #[test]
+    fn rejects_campaign_max_concurrency_zero() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_CAMPAIGN_MAX_CONCURRENCY", "0");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(
+                err.to_string().contains("MESHMON_CAMPAIGN_MAX_CONCURRENCY"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_campaign_max_concurrency_invalid() {
+        with_valid_env(|| {
+            env::set_var("MESHMON_CAMPAIGN_MAX_CONCURRENCY", "not-a-number");
+            let err = AgentEnv::from_env().unwrap_err();
+            assert!(
+                err.to_string().contains("MESHMON_CAMPAIGN_MAX_CONCURRENCY"),
                 "{err}"
             );
         });

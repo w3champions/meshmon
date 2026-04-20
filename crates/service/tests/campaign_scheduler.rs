@@ -97,7 +97,6 @@ async fn scheduler_dispatches_pairs_for_running_campaign() {
         dispatcher,
         /*tick_ms=*/ 100,
         /*chunk_size=*/ 32,
-        /*per_destination_rps=*/ 10,
         /*max_pair_attempts=*/ 3,
         /*target_active_window=*/ Duration::from_secs(300),
     );
@@ -190,15 +189,15 @@ async fn scheduler_fair_rr_interleaves_two_campaigns() {
         settle_to: PairResolutionState::Succeeded,
     });
 
-    // High rps so the per-destination bucket never blocks the fairness
-    // assertion — this test targets the RR interleaving, not rate-limiting.
+    // Per-destination rate limiting lives on the dispatcher; this
+    // scheduler test stubs dispatch so no bucket interferes with the RR
+    // fairness assertion.
     let scheduler = Scheduler::new(
         db.pool.clone(),
         registry,
         dispatcher,
         /*tick_ms=*/ 50,
         /*chunk_size=*/ 32,
-        /*per_destination_rps=*/ 1000,
         /*max_pair_attempts=*/ 3,
         Duration::from_secs(300),
     );
@@ -328,7 +327,6 @@ async fn stop_prevents_further_dispatch() {
         dispatcher,
         /*tick_ms=*/ 50,
         /*chunk_size=*/ 4,
-        /*per_destination_rps=*/ 1000,
         /*max_pair_attempts=*/ 3,
         Duration::from_secs(300),
     );
@@ -420,6 +418,7 @@ async fn scheduler_reverts_rejected_pairs_to_pending() {
             DispatchOutcome {
                 dispatched: 0,
                 rejected_ids: batch.iter().map(|p| p.pair_id).collect(),
+                rate_limited_ids: Vec::new(),
                 skipped_reason: Some("test-rejects-all".into()),
             }
         }
@@ -438,7 +437,6 @@ async fn scheduler_reverts_rejected_pairs_to_pending() {
         Arc::new(RejectAll),
         /*tick_ms=*/ 80,
         /*chunk_size=*/ 32,
-        /*per_destination_rps=*/ 10,
         /*max_pair_attempts=*/ 3,
         /*target_active_window=*/ Duration::from_secs(300),
     );

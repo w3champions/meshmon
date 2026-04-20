@@ -21,10 +21,12 @@ pub mod pb {
 
 pub use pb::{
     AgentMetadata, ConfigResponse, DiffDetection, GetConfigRequest, GetTargetsRequest, HopIp,
-    HopSummary, MetricsBatch, PathHealth, PathHealthThresholds, PathMetrics, PathSummary, Protocol,
-    ProtocolHealth, ProtocolThresholds, PushMetricsResponse, PushRouteSnapshotResponse, RateEntry,
-    RefreshConfigRequest, RefreshConfigResponse, RegisterRequest, RegisterResponse,
-    RouteSnapshotRequest, Target, TargetsResponse, TunnelFrame, Windows,
+    HopSummary, MeasurementFailure, MeasurementFailureCode, MeasurementKind, MeasurementResult,
+    MeasurementSummary, MeasurementTarget, MetricsBatch, MtrTraceResult, PathHealth,
+    PathHealthThresholds, PathMetrics, PathSummary, Protocol, ProtocolHealth, ProtocolThresholds,
+    PushMetricsResponse, PushRouteSnapshotResponse, RateEntry, RefreshConfigRequest,
+    RefreshConfigResponse, RegisterRequest, RegisterResponse, RouteSnapshotRequest,
+    RunMeasurementBatchRequest, Target, TargetsResponse, TunnelFrame, Windows,
 };
 
 /// Generated tonic server trait + server adapter. Implement [`AgentApi`],

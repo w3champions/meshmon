@@ -323,6 +323,7 @@ one supervisor task per target.
 | `MESHMON_TCP_PROBE_PORT` | yes | Port the TCP echo listener binds (dual-stack on `[::]`, serves both IPv4 and IPv6 peers). Must be open on the host and reachable from peers. |
 | `MESHMON_UDP_PROBE_PORT` | yes | Port the UDP echo listener binds (dual-stack on `[::]`, serves both IPv4 and IPv6 peers). Must be open on the host and reachable from peers. |
 | `MESHMON_ICMP_TARGET_CONCURRENCY` | no (default `32`) | Global cap on concurrent per-target ICMP/traceroute rounds. Lower if raw-socket / thread use is too high. |
+| `MESHMON_CAMPAIGN_MAX_CONCURRENCY` | no (cluster default wins) | Per-agent cap on concurrent `RunMeasurementBatch` RPCs. Advertised to the service on Register so both sides enforce the same value; zero is rejected. Unset means "follow the cluster-wide `[campaigns] default_agent_concurrency`". |
 | `RUST_LOG` | no | Tracing filter (default: `meshmon_agent=info,warn`) |
 
 The agent needs raw-socket access for ICMP/traceroute probes. In Docker,
@@ -369,7 +370,8 @@ cargo run -p meshmon-agent
 | `route.rs` | Per-target route-state tracker: accumulates trippy per-hop observations over a rolling window, builds canonical snapshots, detects meaningful diffs |
 | `supervisor.rs` | Per-target supervisor: spawns 4 probers, runs state machine every 10 s, publishes rates, emits diff-gated route snapshots on a 60 s tick, and pushes one `PathMetricsMsg` per healthy protocol on an independent 60 s metrics tick |
 | `emitter.rs` | Single outbound task: batches `PathMetricsMsg` into `MetricsBatch` every 60 s, pushes route snapshots immediately, retries retriable failures (UNAVAILABLE / RESOURCE_EXHAUSTED / transport errors) with jittered 1 s → 5 min backoff, buffers up to 65 failed RPCs in a drop-oldest ring queue with `dropped_count` reporting |
-| `bootstrap.rs` | Register → config → targets → spawn emitter + per-target supervisors, 5-minute refresh loop |
+| `bootstrap.rs` | Register → config → targets → spawn emitter + per-target supervisors + tunnel-backed `AgentCommandService`, 5-minute refresh loop |
+| `command/` | `AgentCommandService` (`RefreshConfig`, `RunMeasurementBatch`) + `CampaignProber` trait (production seam) + `StubProber` (transport tests) |
 | `probing/mod.rs` | `ProbeObservation` / `HopObservation` types (populated by probers) |
 | `probing/icmp.rs` | ICMP Echo pinger (`surge-ping`), always-on per target for per-protocol health |
 

@@ -46,6 +46,12 @@ pub struct DispatchOutcome {
     /// Without this, a rejected pair is stranded in `dispatched` —
     /// `expire_stale_attempts` only sweeps `pending` rows.
     pub rejected_ids: Vec<i64>,
+    /// IDs of pairs that never reached the agent because the per-
+    /// destination token bucket rejected them. The scheduler reverts
+    /// these to `pending` AND decrements `attempt_count` — the pair
+    /// should not burn retry budget for a throttling decision the
+    /// dispatcher made before the RPC opened.
+    pub rate_limited_ids: Vec<i64>,
     /// When the whole batch was skipped, the reason tag.
     pub skipped_reason: Option<String>,
 }

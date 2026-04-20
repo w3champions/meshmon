@@ -12,4 +12,6 @@ pub mod events;
 pub mod handlers;
 pub mod model;
 pub mod repo;
+pub mod rpc_dispatcher;
 pub mod scheduler;
+pub mod writer;

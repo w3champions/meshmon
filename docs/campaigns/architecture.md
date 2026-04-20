@@ -429,7 +429,7 @@ write surface of the scheduler.
 | `measurement_id` | `BIGINT` | Nullable FK → `measurements(id)`. |
 | `dispatched_at`, `settled_at` | `TIMESTAMPTZ` | Lifecycle. |
 | `attempt_count` | `SMALLINT` | Incremented on each dispatch claim. |
-| `last_error` | `TEXT` | Most recent error tag; e.g. `max_attempts_exceeded`. |
+| `last_error` | `TEXT` | Most recent error tag. Scheduler-origin: `agent_offline`, `max_attempts_exceeded`, `campaign_stopped`. Writer-origin: `unreachable`, `timeout`, `refused`, `cancelled`, `agent_rejected`. Vocabularies are disjoint so a dashboard filter surfaces origin unambiguously. |
 
 `UNIQUE (campaign_id, source_agent_id, destination_ip)` enforces the
 operator-visible pair identity; repeated inserts land via
@@ -443,11 +443,13 @@ Indexes:
 
 ### `measurements`
 
-Minimal skeleton used by the 24 h reuse lookup. T44 never writes this
-table; T45's result-writer populates it. A follow-up dispatch-transport
-migration extends the table with `mtr_id` and adds the sibling
-`mtr_traces` table plus the FK `campaign_pairs.measurement_id →
-measurements(id)`.
+One row per settled campaign measurement. Written by the dispatch
+writer on every `MeasurementResult` that carries a success outcome;
+the 24 h reuse lookup reads the same table. The companion `mtr_traces`
+table stores per-round hop arrays for MTR runs and is referenced from
+`measurements.mtr_id`. `campaign_pairs.measurement_id` FKs back into
+`measurements(id)` so a terminal pair always points at the row it was
+settled from.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -460,10 +462,27 @@ measurements(id)`.
 | `latency_min_ms`, `latency_avg_ms`, `latency_median_ms`, `latency_p95_ms`, `latency_max_ms`, `latency_stddev_ms` | `REAL` | RTT aggregates. |
 | `loss_pct` | `REAL` | Loss percentage. |
 | `kind` | `measurement_kind` enum | `campaign` default; `detail_ping` / `detail_mtr` for UI re-runs. |
+| `mtr_id` | `BIGINT` | Nullable FK → `mtr_traces(id)`; set on MTR settlements. |
 
 `measurements_reuse_idx (source_agent_id, destination_ip, protocol,
 probe_count DESC, measured_at DESC)` is tuned for the reuse lookup and
 preview-dispatch queries — see the "24 h reuse" section below.
+
+### `mtr_traces`
+
+One row per MTR result. Holds the hop array as JSONB in the same
+shape the ingestion pipeline uses for route snapshots so the frontend
+consumes both paths without a second deserialiser.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL` | Primary key. |
+| `hops` | `JSONB` | Array of `{position, observed_ips, avg_rtt_micros, stddev_rtt_micros, loss_pct}`. |
+| `captured_at` | `TIMESTAMPTZ` | `now()` default — when the trace was persisted. |
+
+The writer inserts the trace first, captures the ID, then inserts the
+`measurements` row with `mtr_id` set — all inside one transaction so a
+measurement never exists without its trace.
 
 ### ENUMs
 
@@ -481,20 +500,26 @@ Five Postgres ENUMs created by the migration:
 `rename_all = "snake_case"`, so the Rust side and the database side
 share a single source of truth.
 
-### NOTIFY trigger
+### NOTIFY channels
 
-`measurement_campaigns_notify` fires `AFTER INSERT OR UPDATE OF state`
-on `measurement_campaigns` and calls
-`pg_notify('campaign_state_changed', NEW.id::text)`. The payload is
-always the campaign UUID, well under pg_notify's 8000-byte cap. The
-scheduler's `PgListener::listen(NOTIFY_CHANNEL)` — `NOTIFY_CHANNEL` is
-defined in `campaign::events` — wakes ahead of the 500 ms tick
-whenever a state change commits.
+Two channels wake the scheduler ahead of the 500 ms tick fallback.
+Both carry the campaign UUID as text, well under pg_notify's 8000-byte
+cap, and both are pinned by unit tests that assert the constant value:
 
-The channel name is a load-bearing contract. Renaming it requires
-touching the trigger in the migration and
-`campaign::events::NOTIFY_CHANNEL` in the same commit; a unit test
-pins the constant value to make the coupling explicit.
+- **`campaign_state_changed`** — fired by the
+  `measurement_campaigns_notify` trigger on `AFTER INSERT OR UPDATE OF
+  state`. Lets the scheduler pick up operator-driven lifecycle changes
+  (`start`, `stop`, `edit`, `force_pair`) without waiting for the tick.
+- **`campaign_pair_settled`** — fired by the dispatch writer inside
+  the settle transaction. Lets the scheduler run `maybe_complete`
+  promptly after a batch lands instead of sitting idle until the next
+  tick.
+
+Constants live in `campaign::events` (`NOTIFY_CHANNEL` and
+`PAIR_SETTLED_CHANNEL`). The scheduler opens one `PgListener` and
+calls `listen_all([…])` for both channels; either wake drives a
+single `tick_once`. Renaming either channel requires touching the
+trigger or writer and the corresponding constant in the same commit.
 
 ## Lifecycle
 
@@ -515,7 +540,7 @@ pins the constant value to make the coupling explicit.
 - `stop` (POST `/stop`): `running → stopped`; stamps `stopped_at`. In
   the same transaction, `pending` pairs flip to `skipped` with
   `last_error = 'campaign_stopped'`. In-flight `dispatched` pairs are
-  left alone; the dispatch-layer writer (T45) settles them as-is.
+  left alone; the dispatch writer settles them as they land.
 - `maybe_complete`: the scheduler ends every tick by checking each
   active campaign; a `running → completed` flip happens iff no pair
   remains in `pending` or `dispatched`. Stamps `completed_at`.
@@ -540,9 +565,13 @@ surfaces as `RepoError::IllegalTransition` (HTTP 409).
   `measurement_id` all cleared.
 - `force_measurement`: when `Some(true)`, the sticky
   `measurement_campaigns.force_measurement` flag flips to TRUE and
-  every non-delta pair currently in `reused`, `succeeded`, or
-  `unreachable` resets to `pending`. The whole campaign re-runs; the
-  24 h reuse cache is ignored for the duration.
+  every non-delta pair currently in `dispatched`, `reused`,
+  `succeeded`, `unreachable`, or `skipped` resets to `pending`. The
+  whole campaign re-runs; the 24 h reuse cache is ignored for the
+  duration. Including `dispatched` in the reset set is load-bearing
+  for late settles: the writer's `resolution_state='dispatched'` gate
+  observes the reset and drops the stale settle silently instead of
+  clobbering the rerun.
 
 After the delta applies, the campaign transitions back to `running`
 and `started_at` is bumped. A row-level `FOR UPDATE` lock on the
@@ -553,24 +582,26 @@ campaign protects the delta from racing completion/evaluation.
 `campaign::scheduler::Scheduler` is a single long-lived tokio task,
 spawned once per service instance. It owns the dispatch loop; the
 dispatcher itself is injected via the `PairDispatcher` trait so tests
-can drive the loop with stubs (`NoopDispatcher`, `DirectSettleDispatcher`)
-and T45 plugs in the real RPC-backed dispatcher.
+can drive the loop with stubs (`NoopDispatcher`, `DirectSettleDispatcher`).
+Production wires the RPC-backed `RpcDispatcher` (see "Dispatch
+transport" below).
 
 ### Wake-up
 
 ```
 tokio::select! {
     _ = cancel.cancelled() => return,
-    recv = listener.try_recv() => …,   // PgListener on NOTIFY
+    recv = listener.try_recv() => …,   // PgListener on both channels
     _ = sleep(self.tick)     => …,     // tick fallback, default 500 ms
 }
 ```
 
-The scheduler opens a dedicated `PgListener` on `NOTIFY_CHANNEL`; any
-`campaign_state_changed` NOTIFY wakes the loop ahead of the periodic
-tick. If the listener fails to open (or closes mid-run) the scheduler
-falls back to a tick-only loop — a transient listener outage never
-grounds dispatch permanently.
+The scheduler opens a dedicated `PgListener` and subscribes to
+`campaign_state_changed` and `campaign_pair_settled` via `listen_all`.
+Either notification wakes the loop ahead of the periodic tick. If the
+listener fails to open (or closes mid-run) the scheduler falls back to
+a tick-only loop — a transient listener outage never grounds dispatch
+permanently.
 
 ### Fair round-robin
 
@@ -607,9 +638,10 @@ revert is in-line with the claim in the same tick.
 `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED)` to atomically claim
 up to `chunk_size` pending pairs for `(campaign, source_agent)`,
 flipping them to `dispatched` and incrementing `attempt_count`. Two
-concurrent tick paths can never double-claim a row; crash-recovery is
-the operator's problem only for rows already in-flight (T45's writer
-is the settle authority).
+concurrent tick paths can never double-claim a row; crashed in-flight
+rows stay `dispatched` until an operator `force_pair` or
+`force_measurement` reset lands (the dispatch writer is the only
+terminal-state authority for `dispatched` rows).
 
 ### `maybe_complete` and safety sweep
 
@@ -622,6 +654,122 @@ At the end of every tick the scheduler:
    any `pending` pair whose `attempt_count >= max_pair_attempts` to
    `skipped` with `last_error = 'max_attempts_exceeded'`. This is the
    safety net for pairs the dispatcher keeps failing.
+
+## Dispatch transport
+
+Production wires `RpcDispatcher` into the scheduler's `PairDispatcher`
+seam. Each batch `(campaign, agent, pending-pairs)` the scheduler
+hands the dispatcher flows through the pipeline below; test harnesses
+swap the implementation for `NoopDispatcher` or `DirectSettleDispatcher`
+without touching scheduler code.
+
+### Wire protocol
+
+Dispatch routes through a reverse-tunnel-backed gRPC call:
+`AgentCommand.RunMeasurementBatch(RunMeasurementBatchRequest)` returns
+`stream MeasurementResult`. Each pair emits exactly one result
+correlated by `pair_id`; dropping the client stream cancels the batch
+on the agent (HTTP/2 `CANCEL` propagates to the handler's
+`CancellationToken`).
+
+`RunMeasurementBatchRequest` carries per-campaign knobs (`protocol`,
+`probe_count`, `timeout_ms`, `probe_stagger_ms`) plus a
+`MeasurementKind` selector (`LATENCY` | `MTR`). The dispatcher picks
+`MTR` when `probe_count == 1` (detail-MTR re-runs force
+`probe_count=1`) and `LATENCY` otherwise — an explicit
+`measurement_kind` on `PendingPair` will supersede this heuristic once
+detail-MTR campaigns are a first-class campaign type.
+
+### Failure-code mapping
+
+Success results carry a full latency (or MTR hop) summary that the
+writer persists. Failure results funnel through
+`writer::map_failure_code`, which tags `campaign_pairs.last_error` and
+picks the terminal `resolution_state`:
+
+| Failure code | `last_error` tag | `resolution_state` |
+|---|---|---|
+| `NO_ROUTE` | `unreachable` | `unreachable` |
+| `TIMEOUT` | `timeout` | `skipped` |
+| `REFUSED` | `refused` | `skipped` |
+| `CANCELLED` | `cancelled` | `skipped` |
+| `AGENT_ERROR` / `UNSPECIFIED` | `agent_rejected` | `skipped` |
+
+The writer's tag vocabulary is disjoint from the scheduler's
+(`agent_offline`, `max_attempts_exceeded`, `campaign_stopped`), so an
+operator filtering `last_error` on a dashboard sees origin without
+ambiguity.
+
+### Per-agent concurrency
+
+Each agent advertises an optional `campaign_max_concurrency` on
+`RegisterRequest`; the Register handler persists it on
+`agents.campaign_max_concurrency` and zero is rejected at the handler.
+On each dispatch the `RpcDispatcher` reads the effective value from
+the registry snapshot (override → cluster default →
+`[campaigns].default_agent_concurrency`) and acquires a permit on a
+per-agent `tokio::sync::Semaphore` sized to match. The semaphore is
+cached in a `DashMap` keyed on agent id and rebuilt when the
+effective value changes, so an operator tightening the cap takes
+effect on the next dispatch without a restart. The agent enforces the
+same value inside `AgentCommandService`; an overflow batch returns
+`Status::resource_exhausted`, which the dispatcher maps to
+`rejected_ids` without settling any pair.
+
+### Per-destination rate limit
+
+A process-wide `moka::future::Cache<IpAddr, Arc<Mutex<Bucket>>>` caps
+per-destination request rate. Bucket capacity is
+`[campaigns].per_destination_rps` (default 2); each whole second
+refills the bucket to full. Cache `time_to_idle` is 60 s so a
+destination that stops receiving traffic expires out of the cache.
+Pairs that cannot draw a token join `DispatchOutcome::rejected_ids`
+and the scheduler reverts them to `pending` on the next tick.
+
+### Writer pipeline and late-settle idempotency
+
+The writer owns the per-result settle transaction:
+
+1. On success, INSERT INTO `measurements` with the latency / loss
+   summary.
+2. On MTR, INSERT INTO `mtr_traces` first, then INSERT INTO
+   `measurements` with `mtr_id` set.
+3. On failure, skip the `measurements` insert — the failure tag plus
+   target `resolution_state` come from `map_failure_code`.
+4. UPDATE `campaign_pairs` SET `resolution_state`, `measurement_id`,
+   `settled_at`, `last_error`, **gated on
+   `resolution_state = 'dispatched'`**.
+5. `SELECT pg_notify('campaign_pair_settled', campaign_id::text)`.
+
+The state predicate is load-bearing. A concurrent operator action
+(`apply_edit{force_measurement=true}`, `force_pair`) can flip a
+`dispatched` row back to `pending` between claim and settle; without
+the gate, a late-arriving result would clobber the reset. The 0-row
+UPDATE is the silent-drop path — the writer returns
+`SettleOutcome::RaceLost` and `RpcDispatcher` treats it as neither
+dispatched nor rejected. A separate `SettleOutcome::MalformedNoOutcome`
+covers the "agent sent a result with no `outcome` field" protocol
+violation, which the dispatcher reverts via `rejected_ids` so the pair
+does not strand in `dispatched`.
+
+### `DispatchOutcome`
+
+The scheduler reverts both revert fields to `pending` on the next
+tick. `rate_limited_ids` additionally decrements `attempt_count` so a
+pre-RPC throttling decision does not burn retry budget.
+`skipped_reason` is set only when the whole batch failed before any
+pair streamed:
+
+| Field | Population |
+|---|---|
+| `dispatched` | Count of pairs whose result streamed back and whose writer settle returned `SettleOutcome::Settled`. |
+| `rejected_ids` | Pairs whose result never arrived, pairs that hit a mid-stream RPC error, pairs whose writer settle returned `MalformedNoOutcome`, pairs whose writer settle errored. Scheduler reverts to `pending` **without** `attempt_count--`. |
+| `rate_limited_ids` | Pairs that lost the dispatcher's per-destination bucket draw. Scheduler reverts to `pending` AND decrements `attempt_count`. |
+| `skipped_reason` | `"agent_unreachable"`, `"rpc_error:<code>"`, `"rate_limited"` (bucket consumed every pair), `"semaphore_closed"`. |
+
+Agent-reported failures (`NO_ROUTE`, `TIMEOUT`, etc.) are **settled**
+by the writer — they are not rejections and do not feed
+`rejected_ids`.
 
 ## 24 h reuse
 
@@ -668,13 +816,13 @@ never a write.
 the same transaction, flips every `pending` pair to `skipped` with
 `last_error = 'campaign_stopped'` and `settled_at = now()`.
 
-In-flight `dispatched` pairs are left alone: the dispatch-layer writer
-(T45) is responsible for settling them as they land. A stopped
-campaign still accepts settlement writes, so dispatched pairs may
-flow through to `succeeded`, `unreachable`, or `skipped` after the
-stop. The scheduler's `maybe_complete` does not run on stopped
-campaigns (stopped is already terminal from the scheduler's
-perspective; edit-delta is the only way back).
+In-flight `dispatched` pairs are left alone: the dispatch writer
+settles them as they land. A stopped campaign still accepts settlement
+writes, so dispatched pairs may flow through to `succeeded`,
+`unreachable`, or `skipped` after the stop. The scheduler's
+`maybe_complete` does not run on stopped campaigns (stopped is already
+terminal from the scheduler's perspective; edit-delta is the only way
+back).
 
 ## Size guard
 
@@ -715,9 +863,10 @@ catalogue surface. `RepoError::NotFound` → 404 `not_found`,
 
 ```toml
 [campaigns]
-# Spawn the background scheduler. Default: false. Keep it off until a
-# real dispatcher is wired (T45) — the T44 NoopDispatcher flips pairs
-# pending→dispatched but never settles them. HTTP CRUD + preview work
+# Spawn the background scheduler. Default: false until a real prober
+# ships — the agent's current `StubProber` would persist synthetic
+# measurements against real campaigns otherwise. Once the real prober
+# lands, flip this to `true`. HTTP CRUD and preview remain online
 # regardless of this flag.
 enabled = false
 # Composer confirm-dialog threshold on expected dispatch count.
@@ -729,6 +878,14 @@ scheduler_tick_ms = 500
 max_pair_attempts = 3
 # Per-destination-IP token-bucket capacity, refilled once per second.
 per_destination_rps = 2
+# Cluster-wide per-agent concurrent-measurement cap. An agent's
+# `RegisterRequest.campaign_max_concurrency` override (persisted on
+# `agents.campaign_max_concurrency`) wins per agent when set.
+default_agent_concurrency = 16
+# Hard cap on `MeasurementTarget`s in a single RunMeasurementBatch RPC.
+# Pairs beyond this cap are dropped at the request-build boundary; the
+# scheduler's chunk_size is usually smaller so this is a safety net.
+max_batch_size = 50
 ```
 
 Every knob has a positive-integer guard at config-load time — a zero
@@ -755,12 +912,17 @@ metric aggregates do not require a `.sqlx/` regeneration.
   UPDATE is gated on the expected prior state and 0-row outcomes
   surface as `IllegalTransition` (HTTP 409). No handler hand-writes an
   unchecked state flip.
-- **The scheduler is the sole writer of `campaign_pairs.resolution_state`
-  for T44.** Reuse settlements, dispatch claims, and stale-attempt
-  sweeps all route through `campaign::repo`. The dispatch-layer writer
-  (T45) is the only other authority and it only writes terminal states.
-- **The NOTIFY channel name is a load-bearing contract.** Trigger and
-  listener reference the same constant; a unit test pins the name.
+- **Two writers own `campaign_pairs.resolution_state`.** The scheduler
+  owns claim (`pending → dispatched`), reuse settlements
+  (`pending → reused`), and the stale-attempt sweep
+  (`pending → skipped`) via `campaign::repo`. The dispatch writer
+  owns terminal settle (`dispatched → succeeded|unreachable|skipped`)
+  via `campaign::writer::SettleWriter`, gated on
+  `resolution_state = 'dispatched'` so concurrent operator resets are
+  never clobbered.
+- **NOTIFY channel names are load-bearing contracts.** Trigger and
+  writer reference the same constants as the scheduler's listener;
+  unit tests pin every name.
 - **Fair RR at batch granularity.** Each `(campaign, agent)` gets one
   batch per tick; the cursor persists across ticks so one busy campaign
   cannot starve its neighbours.

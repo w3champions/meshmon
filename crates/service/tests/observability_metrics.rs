@@ -122,6 +122,7 @@ async fn metrics_exposes_registered_agent_info_and_last_seen() {
             tcp_probe_port: 3555,
             udp_probe_port: 3552,
             agent_version: "0.42.0".into(),
+            campaign_max_concurrency: None,
         })
         .await
         .expect("register");

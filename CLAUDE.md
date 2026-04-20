@@ -119,9 +119,18 @@ Key patterns:
   secret from `ConfigResponse`) + allowlist-gated (IPs from
   `GetTargets`).
 - Reverse tunnel (`tunnel.rs`) keeps one long-lived `OpenTunnel` RPC open
-  so the service can invoke `AgentCommand::RefreshConfig` through it —
-  cuts config-fetch latency from up-to-5min (poll) to near-immediate.
-  Reconnects with 1s→60s exponential backoff + ±25% jitter on termination.
+  so the service can invoke `AgentCommand::RefreshConfig` and
+  `AgentCommand::RunMeasurementBatch` through it — cuts config-fetch
+  latency from up-to-5min (poll) to near-immediate and carries
+  campaign dispatch back to the same agent. Reconnects with 1s→60s
+  exponential backoff + ±25% jitter on termination.
+- `AgentCommandService` (`command/`) hosts the tonic server exposed
+  over the tunnel. The measurement prober plugs in via the
+  `CampaignProber` trait at service-construction time; the default
+  `StubProber` covers transport-level tests. `MESHMON_CAMPAIGN_MAX_CONCURRENCY`
+  sizes the service-wide semaphore and is advertised to the service
+  via `RegisterRequest.campaign_max_concurrency` so both sides
+  enforce the same cap.
 
 ## Service
 
@@ -145,14 +154,27 @@ Key patterns:
   requires `acknowledged_tos = true`. The config loader aborts
   startup otherwise.
 - Campaign scheduler is a single tokio task, gated on `[campaigns]
-  enabled` (default `false` until T45's real dispatcher lands — with
-  the T44 `NoopDispatcher` active, pairs flip `pending → dispatched`
-  but never settle). When enabled it subscribes to the
-  `campaign_state_changed` Postgres NOTIFY channel (see
-  `measurement_campaigns_notify` trigger) plus a periodic tick
-  (default 500 ms) and issues fair-RR batches across active campaigns
-  to a pluggable `PairDispatcher`. The NOTIFY channel name is a load-
-  bearing contract — keep trigger + listener in lockstep on rename.
+  enabled` (default `false` until a real prober ships; the agent's
+  current `StubProber` would persist synthetic measurements otherwise).
+  It subscribes to two Postgres NOTIFY
+  channels — `campaign_state_changed` (lifecycle changes from the
+  `measurement_campaigns_notify` trigger) and `campaign_pair_settled`
+  (writer-side fan-out) — plus a periodic tick (default 500 ms), and
+  issues fair-RR batches across active campaigns to a pluggable
+  `PairDispatcher`. Both channel names are load-bearing contracts —
+  keep trigger / writer / listener constants in lockstep on rename.
+- Campaign dispatch runs through `AgentCommand.RunMeasurementBatch`
+  over the reverse tunnel. `RpcDispatcher` owns a per-agent semaphore
+  (sized from `agents.campaign_max_concurrency` with a cluster-wide
+  fallback of `[campaigns] default_agent_concurrency`) and a
+  process-wide per-destination token bucket. Results stream into
+  `SettleWriter`, which persists `measurements` (+ `mtr_traces` on
+  MTR) and UPDATEs `campaign_pairs` gated on
+  `resolution_state='dispatched'` so concurrent operator resets
+  (`apply_edit{force_measurement=true}`, `force_pair`) are never
+  clobbered by a late settle. Agent-reported failure codes funnel
+  through a writer-owned mapping table that keeps the writer's
+  `last_error` vocabulary disjoint from the scheduler's origin tags.
 
 ## Alerting
 

@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO measurements\n                        (source_agent_id, destination_ip, protocol, probe_count,\n                         latency_min_ms, latency_avg_ms, latency_median_ms,\n                         latency_p95_ms, latency_max_ms, latency_stddev_ms,\n                         loss_pct, kind)\n                    VALUES ($1, $2, $3::probe_protocol, $4,\n                            $5, $6, $7, $8, $9, $10, $11,\n                            'campaign'::measurement_kind)\n                    RETURNING id\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Inet",
+        {
+          "Custom": {
+            "name": "probe_protocol",
+            "kind": {
+              "Enum": [
+                "icmp",
+                "tcp",
+                "udp"
+              ]
+            }
+          }
+        },
+        "Int2",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d7173374e1a403ab456bbdf79a991a6b6e4eea746203ac82000ece2a61c9421a"
+}

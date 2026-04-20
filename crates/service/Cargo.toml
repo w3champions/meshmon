@@ -33,7 +33,9 @@ moka = { workspace = true }
 prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 # `geo` is used purely for polygon containment (catalogue shape filter).
 # Default features pull in `earcut`/`spade` triangulation which has
 # build issues on our toolchain and isn't needed for `Contains` — keep
@@ -47,6 +49,7 @@ maxminddb = { workspace = true, optional = true }
 whois-rust = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 password-hash = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }

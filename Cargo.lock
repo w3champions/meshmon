@@ -2512,7 +2512,10 @@ name = "meshmon-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
+ "async-trait",
  "dashmap",
+ "futures-util",
  "meshmon-protocol",
  "meshmon-revtunnel",
  "proptest",
@@ -2592,7 +2595,9 @@ dependencies = [
  "bytes",
  "chrono",
  "ctor",
+ "dashmap",
  "futures",
+ "futures-util",
  "geo",
  "governor",
  "hyper",
@@ -2612,6 +2617,7 @@ dependencies = [
  "password-hash 0.6.1",
  "prometheus-reqwest-remote-write",
  "prost",
+ "rand 0.9.4",
  "reqwest 0.12.28",
  "rustls-pemfile",
  "serde",

@@ -19,6 +19,7 @@ fn mk(id: &str, last_seen_offset_minutes: i64) -> AgentInfo {
         udp_probe_port: 3552,
         registered_at: Utc::now(),
         last_seen_at: Utc::now() + Duration::minutes(last_seen_offset_minutes),
+        campaign_max_concurrency: None,
     }
 }
 

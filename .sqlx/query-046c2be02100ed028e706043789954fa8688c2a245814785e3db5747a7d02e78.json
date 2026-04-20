@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE campaign_pairs\n                    SET resolution_state = 'pending',\n                        dispatched_at    = NULL\n                  WHERE id = ANY($1::bigint[])\n                    AND resolution_state = 'dispatched'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "046c2be02100ed028e706043789954fa8688c2a245814785e3db5747a7d02e78"
+}

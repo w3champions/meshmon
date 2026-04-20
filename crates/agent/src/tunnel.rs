@@ -19,27 +19,49 @@ use tonic::transport::Server;
 use tracing::{debug, warn};
 
 use crate::api::GrpcServiceApi;
-use crate::command_service::RefreshConfigImpl;
+use crate::command::{AgentCommandService, StubProber};
 
 const BASE_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
 const RESET_THRESHOLD: Duration = Duration::from_secs(10);
 
+/// Effectively-unbounded semaphore size used when the operator sets no
+/// `MESHMON_CAMPAIGN_MAX_CONCURRENCY` override. The service-side
+/// dispatcher enforces the authoritative cap (using `[campaigns]
+/// default_agent_concurrency` when the agent registers without an
+/// override); the agent's local semaphore is a defense-in-depth
+/// backstop that should never be tighter than the service's view,
+/// otherwise agents silently diverge from the cluster default.
+const UNCAPPED_SEMAPHORE: usize = 65_536;
+
 /// Spawn the tunnel task. Returns a join handle the caller can await
 /// during shutdown.
+///
+/// `campaign_max_concurrency` is the per-agent cap on concurrent
+/// in-flight campaign measurement batches; `None` lets the service's
+/// cluster-wide default be authoritative (the agent's local semaphore
+/// becomes a large no-op backstop — see [`UNCAPPED_SEMAPHORE`]). The
+/// value feeds the tonic service's semaphore — probes above the cap
+/// get `Status::resource_exhausted`, which the dispatcher treats as a
+/// rejection so the scheduler reverts the pairs.
 pub fn spawn(
     api: Arc<GrpcServiceApi>,
     source_id: String,
     refresh_trigger: Arc<Notify>,
+    campaign_max_concurrency: Option<u32>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(api, source_id, refresh_trigger, cancel))
+    let effective = campaign_max_concurrency
+        .map(|n| n as usize)
+        .unwrap_or(UNCAPPED_SEMAPHORE);
+    tokio::spawn(run(api, source_id, refresh_trigger, effective, cancel))
 }
 
 async fn run(
     api: Arc<GrpcServiceApi>,
     source_id: String,
     refresh_trigger: Arc<Notify>,
+    max_concurrency: usize,
     cancel: CancellationToken,
 ) {
     let mut delay = BASE_DELAY;
@@ -54,6 +76,7 @@ async fn run(
             &source_id,
             &api.agent_token(),
             refresh_trigger.clone(),
+            max_concurrency,
             cancel.clone(),
         )
         .await;
@@ -101,11 +124,18 @@ async fn run_one_session(
     source_id: &str,
     agent_token: &str,
     refresh_trigger: Arc<Notify>,
+    max_concurrency: usize,
     cancel: CancellationToken,
 ) -> Result<(), meshmon_revtunnel::TunnelError> {
+    // `StubProber` is the default; it's the T45 transport-test seam and
+    // will be swapped for a real trippy-backed prober at this same call
+    // site in T46 without changing any other wiring.
+    let prober = Arc::new(StubProber);
     let router_factory = move || {
-        Server::builder().add_service(AgentCommandServer::new(RefreshConfigImpl::new(
+        Server::builder().add_service(AgentCommandServer::new(AgentCommandService::new(
             refresh_trigger.clone(),
+            prober.clone(),
+            max_concurrency,
         )))
     };
 

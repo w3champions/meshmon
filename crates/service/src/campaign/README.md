@@ -9,26 +9,39 @@ Measurement-campaign subsystem.
   `repo::transition_state`, which issues an UPDATE gated on the expected
   prior state and surfaces 0-row outcomes as
   `RepoError::IllegalTransition` (→ HTTP 409).
-- Only the scheduler task writes `campaign_pairs.resolution_state`
-  outside of the dispatch-layer writer (T45). Integration tests that
+- Two writers own `campaign_pairs.resolution_state`: the scheduler
+  task (claim, reuse, stale-attempt sweep via `campaign::repo`) and
+  `SettleWriter` (terminal settle from agent-reported results, gated
+  on `resolution_state='dispatched'`). Integration tests that
   simulate settlements use `DirectSettleDispatcher`.
-- Per-destination rate limit lives on the scheduler's
-  `moka::future::Cache<IpAddr, Bucket>`; cache TTL is 60 s idle.
+- Per-destination rate limit lives on `RpcDispatcher` as a
+  `moka::future::Cache<IpAddr, Bucket>` (60 s idle TTL). Bucket-rejected
+  pairs flow back to the scheduler via `DispatchOutcome::rate_limited_ids`
+  so the scheduler reverts them with `attempt_count--`.
 - Fair round-robin cursor is preserved across ticks and only advances
   when a batch actually dispatches (empty passes leave it where it was).
 
-## NOTIFY channel
+## NOTIFY channels
 
-`campaign_state_changed` carries the campaign UUID as a string payload.
-See the trigger in `migrations/20260420120000_campaigns.up.sql` and the
-listener in `scheduler::Scheduler::run`.
+- `campaign_state_changed` — fired by the
+  `measurement_campaigns_notify` trigger on lifecycle changes.
+- `campaign_pair_settled` — fired by `SettleWriter` inside the settle
+  transaction on every successful terminal UPDATE.
+
+Both payloads are the campaign UUID as text. Constants live in
+`events.rs`; a unit test pins each name. The scheduler listens on
+both via `PgListener::listen_all`.
 
 ## Files
 
 - `model.rs` — domain types + `transition_allowed()`.
-- `repo.rs` — sqlx queries; every write goes through here.
-- `events.rs` — NOTIFY channel constant + explicit publisher helper.
+- `repo.rs` — sqlx queries; every scheduler-side write goes through here.
+- `events.rs` — `NOTIFY_CHANNEL` + `PAIR_SETTLED_CHANNEL` constants.
 - `dispatch.rs` — `PairDispatcher` trait + stub dispatchers.
+- `rpc_dispatcher.rs` — the production `PairDispatcher`; see
+  `dispatch.md` for per-call flow.
+- `writer.rs` — `SettleWriter`; owns the per-result transaction and
+  the writer-origin `last_error` mapping.
 - `scheduler.rs` — single-task fair-RR scheduler.
 - `dto.rs` — wire DTOs; `utoipa::ToSchema` on every public type.
-- `handlers.rs` — axum handlers for every endpoint in spec 02 §7.
+- `handlers.rs` — axum handlers for every campaign HTTP endpoint.

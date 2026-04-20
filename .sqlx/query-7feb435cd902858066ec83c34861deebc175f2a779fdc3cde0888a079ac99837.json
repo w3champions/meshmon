@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_notify($1, $2::text) AS _notified",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "_notified",
+        "type_info": "Void"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7feb435cd902858066ec83c34861deebc175f2a779fdc3cde0888a079ac99837"
+}

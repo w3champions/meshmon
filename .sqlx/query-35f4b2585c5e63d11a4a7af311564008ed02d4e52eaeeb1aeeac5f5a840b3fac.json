@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE campaign_pairs\n               SET resolution_state = $2::pair_resolution_state,\n                   measurement_id   = $3,\n                   settled_at       = now(),\n                   last_error       = $4\n             WHERE id = $1\n               AND resolution_state = 'dispatched'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        {
+          "Custom": {
+            "name": "pair_resolution_state",
+            "kind": {
+              "Enum": [
+                "pending",
+                "dispatched",
+                "reused",
+                "succeeded",
+                "unreachable",
+                "skipped"
+              ]
+            }
+          }
+        },
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "35f4b2585c5e63d11a4a7af311564008ed02d4e52eaeeb1aeeac5f5a840b3fac"
+}
