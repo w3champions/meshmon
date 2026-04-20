@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(t.diff_against(&a, &default_diff()), None);
     }
 
-    // ---------------- Rule 1: new IP ≥ threshold ----------------
+    // ---------------- NewIp: new IP ≥ threshold ----------------
 
     #[test]
     fn diff_rule1_fires_on_new_ip_above_threshold() {
@@ -1015,21 +1015,15 @@ mod tests {
             .any(|r| matches!(r, DiffReason::NewIp { position: 3 })),);
     }
 
-    // ---------------- Rule 2: IP dropped below missing threshold ----------------
-
-    // Rule 2 (MissingIp) was removed — a previously-seen IP dropping off
-    // isn't by itself a route change. Either it's been replaced (Rule 1
-    // fires on the replacement) or it's just gone silent (measurement
-    // signal, not topology). The regression guard is
-    // `diff_ignores_pure_loss_and_rtt_noise_at_near_silent_hop` below,
-    // which asserts no diff is produced when only per-hop frequency /
-    // loss changes.
+    // ---------------- Per-hop IP frequency changes must not diff ----------------
 
     #[test]
     fn diff_does_not_fire_when_previously_seen_ip_loses_frequency() {
-        // Old behaviour: this would fire Rule 2 (MissingIp) because
-        // .2 dropped below 5 %. New behaviour: packet-loss-only events
-        // don't count as route changes.
+        // A previously-seen IP dropping off is not by itself a route change:
+        // it's either been replaced (in which case the NewIp rule fires on
+        // the replacement) or it's just gone silent (a measurement signal,
+        // not a topology signal). Pair with
+        // `diff_ignores_pure_loss_and_rtt_noise_at_near_silent_hop`.
         let last = snap(
             Protocol::Icmp,
             &[(
@@ -1068,7 +1062,7 @@ mod tests {
         assert_eq!(t.diff_against(&new, &default_diff()), None);
     }
 
-    // ---------------- Rule 3: hop count change ----------------
+    // ---------------- HopCountChanged: hop count change ----------------
 
     #[test]
     fn diff_rule3_fires_when_route_lengthens() {
@@ -1114,10 +1108,10 @@ mod tests {
 
     #[test]
     fn diff_rule3_respects_threshold_of_2() {
-        // With hop_count_change = 2, a 1-hop change must not fire Rule 3.
-        // To isolate Rule 3, also disable Rule 1 by setting a freq
-        // threshold no real frequency can cross — otherwise a newly-added
-        // hop's IP would trip Rule 1 at the new position.
+        // With hop_count_change = 2, a 1-hop change must not fire
+        // HopCountChanged. To isolate it, also disable NewIp by setting a
+        // freq threshold no real frequency can cross — otherwise a
+        // newly-added hop's IP would trip NewIp at the new position.
         let last = snap(
             Protocol::Icmp,
             &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
@@ -1131,23 +1125,21 @@ mod tests {
         );
         let mut thr = default_diff();
         thr.hop_count_change = 2;
-        thr.new_ip_min_freq = 2.0; // disable Rule 1 so only Rule 3 can fire
+        thr.new_ip_min_freq = 2.0; // disable NewIp so only HopCountChanged can fire
         let t = tracker_with_last(Protocol::Icmp, last);
         assert_eq!(t.diff_against(&new, &thr), None);
     }
 
-    // Rule 4 (RttShift) was removed — per-hop RTT is a measurement signal,
-    // not a route signal. The regression guards are the repro test at the
-    // bottom of this file and `diff_returns_none_on_large_rtt_shift_same_topology`.
+    // ---------------- Per-hop RTT shifts must not diff ----------------
 
     #[test]
     fn diff_returns_none_on_large_rtt_shift_same_topology() {
+        // 60 % avg-RTT shift at an otherwise-stable hop. Per-hop RTT is a
+        // measurement signal (jitter / latency), not a route signal.
         let last = snap(
             Protocol::Icmp,
             &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 10_000)],
         );
-        // 60 % RTT shift at a reliable hop — old behaviour fired Rule 4;
-        // new behaviour ignores it because the topology didn't change.
         let new = snap(
             Protocol::Icmp,
             &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 16_000)],
@@ -1171,7 +1163,7 @@ mod tests {
             Protocol::Icmp,
             &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
         );
-        // Both rule 1 (new IP at position 2 at 100%) AND rule 3 (hop count +1).
+        // Both NewIp (new IP at position 2 at 100%) AND HopCountChanged (+1).
         let new = snap(
             Protocol::Icmp,
             &[
