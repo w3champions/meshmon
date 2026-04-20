@@ -42,9 +42,12 @@ use tracing::{debug, trace};
 /// logging sites cannot drift.
 pub(crate) const ID: &str = "ipgeolocation";
 
-/// Base URL of the single-lookup endpoint. Split out as a constant so
-/// tests can swap it when running against a `wiremock` mock server.
-const SINGLE_ENDPOINT: &str = "https://api.ipgeolocation.io/ipgeo";
+/// Base URL of the single-lookup endpoint. The v3 endpoint returns a
+/// nested shape (`location.*`, `asn.as_number`, …) and — unlike the
+/// legacy `/ipgeo` path — includes ASN fields on the free tier by
+/// default. Split out as a constant so tests can swap it when running
+/// against a `wiremock` mock server.
+const SINGLE_ENDPOINT: &str = "https://api.ipgeolocation.io/v3/ipgeo";
 
 /// Base URL of the v3 bulk endpoint (up to 50 000 IPs per call).
 const BULK_ENDPOINT: &str = "https://api.ipgeolocation.io/v3/ipgeo-bulk";
@@ -127,21 +130,37 @@ impl IpGeoProvider {
     /// encoding.
     pub(crate) fn map_single(body: &Value) -> EnrichmentResult {
         let mut out = EnrichmentResult::default();
-        if let Some(s) = body["city"].as_str() {
+        // v3 nests geo under `location`; older/legacy responses put it at
+        // the top level. Walk both for each field so the mapping tolerates
+        // both response shapes.
+        let city = body["city"]
+            .as_str()
+            .or_else(|| body["location"]["city"].as_str());
+        if let Some(s) = city {
             out.fields.insert(Field::City, FieldValue::Text(s.into()));
         }
-        if let Some(s) = body["country_code2"].as_str() {
+        let country_code = body["country_code2"]
+            .as_str()
+            .or_else(|| body["location"]["country_code2"].as_str());
+        if let Some(s) = country_code {
             out.fields
                 .insert(Field::CountryCode, FieldValue::Text(s.into()));
         }
-        if let Some(s) = body["country_name"].as_str() {
+        let country_name = body["country_name"]
+            .as_str()
+            .or_else(|| body["location"]["country_name"].as_str());
+        if let Some(s) = country_name {
             out.fields
                 .insert(Field::CountryName, FieldValue::Text(s.into()));
         }
-        if let Some(lat) = parse_float(&body["latitude"]) {
+        if let Some(lat) =
+            parse_float(&body["latitude"]).or_else(|| parse_float(&body["location"]["latitude"]))
+        {
             out.fields.insert(Field::Latitude, FieldValue::F64(lat));
         }
-        if let Some(lon) = parse_float(&body["longitude"]) {
+        if let Some(lon) =
+            parse_float(&body["longitude"]).or_else(|| parse_float(&body["location"]["longitude"]))
+        {
             out.fields.insert(Field::Longitude, FieldValue::F64(lon));
         }
         // ASN shape depends on the account / endpoint version:
@@ -165,7 +184,8 @@ impl IpGeoProvider {
         let organization = body["organization"]
             .as_str()
             .or_else(|| body["asn"]["organization"].as_str())
-            .or_else(|| body["company"]["organization"].as_str());
+            .or_else(|| body["company"]["organization"].as_str())
+            .or_else(|| body["isp"].as_str());
         if let Some(org) = organization {
             out.fields
                 .insert(Field::NetworkOperator, FieldValue::Text(org.into()));
