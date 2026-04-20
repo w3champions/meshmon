@@ -78,6 +78,22 @@ pub struct HopObservation {
     pub rtt_micros: Option<u32>,
 }
 
+/// A completed MTR round from trippy. Distinct from `ProbeObservation` because
+/// it represents *topology data*, not a *reachability sample* — it must never
+/// flow into `RollingStats` / `meshmon_path_failure_rate`. The supervisor
+/// routes it to the route tracker only.
+#[derive(Debug, Clone)]
+pub struct RouteTraceMsg {
+    /// Target agent ID this trace is for.
+    pub target_id: String,
+    /// Protocol of the trace (always `Icmp` today; kept for symmetry).
+    pub protocol: meshmon_protocol::Protocol,
+    /// Per-hop observations from this round, ordered by TTL.
+    pub hops: Vec<HopObservation>,
+    /// Monotonic instant when the round completed.
+    pub observed_at: tokio::time::Instant,
+}
+
 /// Probe rate in probes per second. Zero means "do not probe."
 ///
 /// A rate update is delivered via `tokio::sync::watch` to TCP and UDP

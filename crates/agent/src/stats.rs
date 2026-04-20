@@ -149,6 +149,14 @@ impl RollingStats {
         self.window
     }
 
+    /// Number of samples in the current window (the running counter, not
+    /// the deque length). Equivalent to `summary_fast().sample_count`.
+    /// Exposed so tests can assert sample counts without going through
+    /// the full `FastSummary` allocation.
+    pub fn sample_count(&self) -> u64 {
+        self.sent
+    }
+
     /// Number of buffered samples (post last `purge_old`). Public for tests
     /// and operator metrics; the canonical sample count for callers is
     /// `summary_fast().sample_count`.
