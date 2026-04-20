@@ -1170,7 +1170,7 @@
           "catalogue"
         ],
         "summary": "`POST /api/catalogue` — operator paste flow.",
-        "description": "Tokens are concatenated with spaces and run through\n[`parse_ip_tokens`]; accepted IPs become catalogue rows via\n[`repo::insert_many`], and each newly-created id is enqueued for\nenrichment. Existing rows come back under `existing` so the UI can\nsurface their current enrichment state without a follow-up fetch.\nRejected tokens land in `invalid`.",
+        "description": "Tokens are concatenated with spaces and run through\n[`parse_ip_tokens`]; accepted IPs become catalogue rows via\n[`repo::insert_many_with_metadata`], and each newly-created id is\nenqueued for enrichment. Existing rows come back under `existing`\nso the UI can surface their current enrichment state without a\nfollow-up fetch. Rejected tokens land in `invalid`.\n\nWhen the request carries a [`PasteMetadata`] block, each supplied\nfield applies to every accepted IP. Newly-created rows always\nreceive the values and have the field names appended to\n`operator_edited_fields`. Existing rows receive a field only if it\nis not already locked; paired fields\n(`CountryCode`+`CountryName`, `Latitude`+`Longitude`) apply\natomically — if either half of a pair is locked, neither half is\nwritten and the response's [`PasteSkippedSummary`] records a\ncomposite `\"Country\"` / `\"Location\"` skip.",
         "operationId": "paste",
         "requestBody": {
           "content": {
@@ -1189,6 +1189,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PasteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -3433,9 +3443,73 @@
           }
         }
       },
+      "PasteMetadata": {
+        "type": "object",
+        "description": "Operator-set default metadata applied to every accepted IP in a\npaste.\n\nEach field is independently optional — absent means \"don't touch\nthis column\". Two pairings are **atomic**: `latitude`+`longitude`\nmust be supplied together (or both omitted), and\n`country_code`+`country_name` must be supplied together. The\npaste handler rejects half-supplied pairs with 400\n`paired_metadata_half_missing`.",
+        "properties": {
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "City name."
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO 3166-1 alpha-2 country code. Must be paired with\n[`PasteMetadata::country_name`]. Validated as a 2-character\nASCII-alphabetic string by the handler."
+          },
+          "country_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Country human-readable name. Must be paired with\n[`PasteMetadata::country_code`]."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-facing display label."
+          },
+          "latitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Decimal latitude in [-90, 90]. Must be paired with\n[`PasteMetadata::longitude`]."
+          },
+          "longitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Decimal longitude in [-180, 180]. Must be paired with\n[`PasteMetadata::latitude`]."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-form operator notes."
+          },
+          "website": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-supplied external link."
+          }
+        }
+      },
       "PasteRequest": {
         "type": "object",
-        "description": "Paste payload — a raw list of IP tokens. Each token is parsed by\n[`super::parse::parse_ip_tokens`]; tokens may be bare IPs or host\nCIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable\ntokens fall into [`PasteResponse::invalid`] instead of aborting the\nwhole request.",
+        "description": "Paste payload — a raw list of IP tokens. Each token is parsed by\n[`super::parse::parse_ip_tokens`]; tokens may be bare IPs or host\nCIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable\ntokens fall into [`PasteResponse::invalid`] instead of aborting the\nwhole request.\n\nAn optional [`PasteMetadata`] applies the same operator-set fields\nto every accepted IP. Newly-created rows always receive the values\nand have the corresponding field names appended to\n`operator_edited_fields`. Existing rows receive a field only if it\nis not already locked; paired fields (`Latitude`+`Longitude` and\n`CountryCode`+`CountryName`) apply atomically — if either half of\na pair is locked, neither half is written. Requests without\n`metadata` preserve the pre-T52 behaviour exactly (no writes to\n`existing` rows, no `skipped_summary` on the response).",
         "required": [
           "ips"
         ],
@@ -3446,12 +3520,23 @@
               "type": "string"
             },
             "description": "Raw tokens to parse and (when valid) insert into the catalogue."
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PasteMetadata",
+                "description": "Optional default metadata applied to every accepted IP. See the\nstruct-level docs for the merge semantics."
+              }
+            ]
           }
         }
       },
       "PasteResponse": {
         "type": "object",
-        "description": "Response body for `POST /api/catalogue` — a three-way split of the\npaste outcome.",
+        "description": "Response body for `POST /api/catalogue` — a three-way split of the\npaste outcome plus an optional aggregate describing metadata\nwrites that were skipped against existing rows.",
         "required": [
           "created",
           "existing",
@@ -3470,7 +3555,7 @@
             "items": {
               "$ref": "#/components/schemas/CatalogueEntryDto"
             },
-            "description": "Rows already present in the catalogue. Surfaces the existing\nenrichment state without a follow-up fetch."
+            "description": "Rows already present in the catalogue. When the request\ncarried a [`PasteMetadata`], each entry here reflects the\npost-merge row state — so the UI does not need a follow-up\nfetch to observe writes that survived the lock check."
           },
           "invalid": {
             "type": "array",
@@ -3478,6 +3563,45 @@
               "$ref": "#/components/schemas/PasteInvalid"
             },
             "description": "Tokens rejected during parse."
+          },
+          "skipped_summary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PasteSkippedSummary",
+                "description": "Aggregate summary of metadata writes that were refused because\nthe target field was already operator-locked. Absent when the\nrequest did not carry `metadata`; present (and possibly\nall-zero) otherwise."
+              }
+            ]
+          }
+        }
+      },
+      "PasteSkippedSummary": {
+        "type": "object",
+        "description": "Aggregate describing metadata writes the server refused to apply\nbecause the target row already carried operator locks on the\naffected fields.\n\nKeys in [`PasteSkippedSummary::skipped_field_counts`] are canonical\n[`super::model::Field::as_str`] names, plus two composite labels\nfor paired fields:\n- `\"Location\"` — either half of `Latitude`/`Longitude` was locked.\n- `\"Country\"`  — either half of `CountryCode`/`CountryName` was\n  locked.\n\nThe composite names let the UI narrate skips without reconstructing\nthe pairing client-side.",
+        "required": [
+          "rows_with_skips",
+          "skipped_field_counts"
+        ],
+        "properties": {
+          "rows_with_skips": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Count of rows that kept at least one operator-locked field.",
+            "minimum": 0
+          },
+          "skipped_field_counts": {
+            "type": "object",
+            "description": "Per-field skip counts; zero-count keys are omitted.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },
