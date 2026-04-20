@@ -206,6 +206,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
             &env.agent_version,
             env.tcp_probe_port,
             env.udp_probe_port,
+            env.campaign_max_concurrency,
         );
         retry_with_backoff(
             || {
@@ -630,6 +631,7 @@ fn build_register_request(
     version: &str,
     tcp_probe_port: u16,
     udp_probe_port: u16,
+    campaign_max_concurrency: Option<u32>,
 ) -> RegisterRequest {
     RegisterRequest {
         id: id.id.clone(),
@@ -641,9 +643,10 @@ fn build_register_request(
         agent_version: version.to_string(),
         tcp_probe_port: tcp_probe_port as u32,
         udp_probe_port: udp_probe_port as u32,
-        // T45 transitional: Task 10 populates this from
-        // AgentEnv::campaign_max_concurrency (MESHMON_CAMPAIGN_MAX_CONCURRENCY).
-        campaign_max_concurrency: None,
+        // `None` means "follow the cluster default" — the service
+        // persists it as NULL and the dispatcher falls back to
+        // `[campaigns.default_agent_concurrency]`.
+        campaign_max_concurrency,
     }
 }
 
@@ -816,6 +819,7 @@ mod tests {
             tcp_probe_port,
             udp_probe_port,
             icmp_target_concurrency: 32,
+            campaign_max_concurrency: None,
         }
     }
 

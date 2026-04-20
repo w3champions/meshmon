@@ -207,6 +207,7 @@ async fn bootstrap_against_real_grpc_server() {
         tcp_probe_port,
         udp_probe_port,
         icmp_target_concurrency: 32,
+        campaign_max_concurrency: None,
     };
 
     let api = GrpcServiceApi::connect(&env.service_url, &env.agent_token)
@@ -278,6 +279,7 @@ async fn three_minute_session_completes_registration_and_shutdown_without_panic(
         tcp_probe_port,
         udp_probe_port,
         icmp_target_concurrency: 32,
+        campaign_max_concurrency: None,
     };
 
     let api = GrpcServiceApi::connect(&env.service_url, &env.agent_token)

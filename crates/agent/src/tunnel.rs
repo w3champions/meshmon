@@ -25,21 +25,39 @@ const BASE_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
 const RESET_THRESHOLD: Duration = Duration::from_secs(10);
 
+/// Fallback agent campaign concurrency cap when the operator sets no
+/// `MESHMON_CAMPAIGN_MAX_CONCURRENCY` override. Matches the service-side
+/// `[campaigns.default_agent_concurrency]` default so an agent that
+/// doesn't override sees the same cap the dispatcher enforces.
+const DEFAULT_AGENT_CAMPAIGN_CONCURRENCY: usize = 16;
+
 /// Spawn the tunnel task. Returns a join handle the caller can await
 /// during shutdown.
+///
+/// `campaign_max_concurrency` is the per-agent cap on concurrent
+/// in-flight campaign measurement batches; `None` falls back to
+/// [`DEFAULT_AGENT_CAMPAIGN_CONCURRENCY`]. The value feeds the tonic
+/// service's semaphore — probes above the cap get
+/// `Status::resource_exhausted`, which the dispatcher treats as a
+/// rejection so the scheduler reverts the pairs.
 pub fn spawn(
     api: Arc<GrpcServiceApi>,
     source_id: String,
     refresh_trigger: Arc<Notify>,
+    campaign_max_concurrency: Option<u32>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(api, source_id, refresh_trigger, cancel))
+    let effective = campaign_max_concurrency
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_AGENT_CAMPAIGN_CONCURRENCY);
+    tokio::spawn(run(api, source_id, refresh_trigger, effective, cancel))
 }
 
 async fn run(
     api: Arc<GrpcServiceApi>,
     source_id: String,
     refresh_trigger: Arc<Notify>,
+    max_concurrency: usize,
     cancel: CancellationToken,
 ) {
     let mut delay = BASE_DELAY;
@@ -54,6 +72,7 @@ async fn run(
             &source_id,
             &api.agent_token(),
             refresh_trigger.clone(),
+            max_concurrency,
             cancel.clone(),
         )
         .await;
@@ -101,18 +120,18 @@ async fn run_one_session(
     source_id: &str,
     agent_token: &str,
     refresh_trigger: Arc<Notify>,
+    max_concurrency: usize,
     cancel: CancellationToken,
 ) -> Result<(), meshmon_revtunnel::TunnelError> {
-    // Concurrency cap is hardcoded here and replaced with the value
-    // threaded through from `AgentEnv::campaign_max_concurrency` by the
-    // bootstrap/tunnel wiring. Kept as a literal so this seam compiles
-    // on its own; production wiring overrides it via `spawn_with`.
+    // `StubProber` is the default; it's the T45 transport-test seam and
+    // will be swapped for a real trippy-backed prober at this same call
+    // site in T46 without changing any other wiring.
     let prober = Arc::new(StubProber);
     let router_factory = move || {
         Server::builder().add_service(AgentCommandServer::new(AgentCommandService::new(
             refresh_trigger.clone(),
             prober.clone(),
-            16,
+            max_concurrency,
         )))
     };
 

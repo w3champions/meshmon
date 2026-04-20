@@ -57,8 +57,9 @@ async fn async_main() -> Result<()> {
         cancel_for_signal.cancel();
     });
 
-    // Snapshot the agent ID before `env` is moved into bootstrap.
+    // Snapshot fields needed after `env` is moved into bootstrap.
     let agent_id = env.identity.id.clone();
+    let campaign_max_concurrency = env.campaign_max_concurrency;
 
     // Bootstrap: register, fetch config + targets, spawn supervisors.
     // Clone `api` so both bootstrap and the tunnel task share the same
@@ -70,8 +71,13 @@ async fn async_main() -> Result<()> {
     // expose the raw gRPC channel, so this wiring lives here rather than
     // inside bootstrap.
     let refresh_trigger = std::sync::Arc::new(tokio::sync::Notify::new());
-    let tunnel_handle =
-        meshmon_agent::tunnel::spawn(api, agent_id, refresh_trigger.clone(), cancel.clone());
+    let tunnel_handle = meshmon_agent::tunnel::spawn(
+        api,
+        agent_id,
+        refresh_trigger.clone(),
+        campaign_max_concurrency,
+        cancel.clone(),
+    );
     runtime.attach_tunnel(refresh_trigger, tunnel_handle);
 
     // Run the refresh loop (blocks until cancellation).
