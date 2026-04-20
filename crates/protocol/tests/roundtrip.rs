@@ -43,6 +43,7 @@ fn register_request_roundtrip() {
         agent_version: "0.1.0".into(),
         tcp_probe_port: 3555,
         udp_probe_port: 3552,
+        campaign_max_concurrency: None,
     };
     assert_roundtrip(&msg);
 }

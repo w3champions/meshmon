@@ -94,6 +94,10 @@ message RegisterRequest {
   // range 1-65535; service rejects out-of-range. Must be non-zero.
   uint32 tcp_probe_port = 8;
   uint32 udp_probe_port = 9;
+  // Optional per-agent override of the cluster-wide campaign
+  // concurrency cap. Unset (proto3 optional) means "follow the cluster
+  // default". 0 is rejected at the service-side Register handler.
+  optional uint32 campaign_max_concurrency = 10;
 
   reserved 15 to 31;
 }
@@ -417,4 +421,103 @@ service AgentCommand {
   // right away instead of waiting for its next 5-minute poll. Idempotent
   // and cheap; service calls one per config change per agent, no retries.
   rpc RefreshConfig(RefreshConfigRequest) returns (RefreshConfigResponse);
+  // Service → agent: run a batch of one-off measurements (campaigns).
+  // Results are streamed as they settle so late-arriving pairs don't
+  // block early ones. Dropping the response stream cancels the batch.
+  rpc RunMeasurementBatch(RunMeasurementBatchRequest)
+      returns (stream MeasurementResult);
+}
+
+// ---------------------------------------------------------------------------
+// Service → agent: campaigns one-off measurement transport (T45)
+// ---------------------------------------------------------------------------
+
+// High-level kind of a one-off measurement. `LATENCY` uses `Protocol` above;
+// `MTR` runs traceroute and emits `MtrTraceResult` instead of a summary.
+enum MeasurementKind {
+  MEASUREMENT_KIND_UNSPECIFIED = 0;
+  MEASUREMENT_KIND_LATENCY = 1;
+  MEASUREMENT_KIND_MTR = 2;
+}
+
+// Why a pair's measurement failed. Writer maps each to a `last_error` tag;
+// see docs/campaigns/architecture.md for the mapping table.
+//
+// Variant names use the full `MEASUREMENT_FAILURE_CODE_` prefix so prost
+// strips it in codegen (the stripped Rust names are `Unspecified`,
+// `NoRoute`, `Refused`, `Timeout`, `Cancelled`, `AgentError`).
+enum MeasurementFailureCode {
+  MEASUREMENT_FAILURE_CODE_UNSPECIFIED = 0;
+  MEASUREMENT_FAILURE_CODE_NO_ROUTE    = 1;
+  MEASUREMENT_FAILURE_CODE_REFUSED     = 2;
+  MEASUREMENT_FAILURE_CODE_TIMEOUT     = 3;
+  MEASUREMENT_FAILURE_CODE_CANCELLED   = 4;
+  MEASUREMENT_FAILURE_CODE_AGENT_ERROR = 5;
+}
+
+// One destination within a RunMeasurementBatchRequest. `pair_id` echoes back
+// in the corresponding MeasurementResult for correlation.
+message MeasurementTarget {
+  uint64 pair_id           = 1;
+  bytes  destination_ip    = 2;  // 4 or 16 bytes
+  uint32 destination_port  = 3;  // 0 for ICMP; echoes campaign config otherwise
+
+  reserved 15 to 31;
+}
+
+// Service → agent: run a batch of probes and stream results back.
+message RunMeasurementBatchRequest {
+  uint64 batch_id         = 1;
+  MeasurementKind kind    = 2;
+  Protocol protocol       = 3;
+  uint32 probe_count      = 4;
+  uint32 timeout_ms       = 5;
+  uint32 probe_stagger_ms = 6;
+  repeated MeasurementTarget targets = 7;
+
+  reserved 15 to 31;
+}
+
+// Latency / loss summary over N probes. Emitted for MEASUREMENT_KIND_LATENCY.
+message MeasurementSummary {
+  uint32 attempted         = 1;
+  uint32 succeeded         = 2;
+  float  latency_min_ms    = 3;
+  float  latency_avg_ms    = 4;
+  float  latency_median_ms = 5;
+  float  latency_p95_ms    = 6;
+  float  latency_max_ms    = 7;
+  float  latency_stddev_ms = 8;
+  float  loss_pct          = 9;
+
+  reserved 15 to 31;
+}
+
+// Failure branch. `detail` is operator-visible context; `code` drives the
+// writer's last_error mapping.
+message MeasurementFailure {
+  MeasurementFailureCode code = 1;
+  string detail               = 2;
+
+  reserved 15 to 31;
+}
+
+// MTR traceroute result — reuses the existing HopSummary message.
+message MtrTraceResult {
+  repeated HopSummary hops = 1;
+
+  reserved 15 to 31;
+}
+
+// One result for one pair in the batch. The `outcome` oneof is required —
+// an empty result is a wire-level bug.
+message MeasurementResult {
+  uint64 pair_id = 1;
+  oneof outcome {
+    MeasurementSummary success = 2;
+    MeasurementFailure failure = 3;
+    MtrTraceResult     mtr     = 4;
+  }
+
+  reserved 15 to 31;
 }
