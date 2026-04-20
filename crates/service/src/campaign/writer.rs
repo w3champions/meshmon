@@ -15,10 +15,17 @@
 //! appear "half-attributed" (a `measurements` row without a matching
 //! `campaign_pairs.measurement_id` pointer).
 //!
-//! [`settle`] returns `Ok(true)` when the pair was actually updated,
-//! `Ok(false)` when the state gate rejected the update (concurrent
-//! reset landed first, or the result carried no outcome), and `Err` on
-//! a database error.
+//! [`settle`] returns a [`SettleOutcome`] so the caller can distinguish
+//! between three disjoint outcomes:
+//!   * [`SettleOutcome::Settled`] — the pair was actually updated,
+//!   * [`SettleOutcome::RaceLost`] — the `resolution_state='dispatched'`
+//!     gate refused the update because a concurrent reset landed first,
+//!   * [`SettleOutcome::MalformedNoOutcome`] — the result arrived with
+//!     no `outcome` field, which is a protocol violation from the agent.
+//!
+//! Dispatchers treat `RaceLost` as a silent drop and `MalformedNoOutcome`
+//! as a rejection so the scheduler reverts the pair — a malformed result
+//! must not leave a pair stranded in `dispatched`.
 
 use super::dispatch::PendingPair;
 use super::events::PAIR_SETTLED_CHANNEL;
@@ -90,6 +97,23 @@ fn hops_to_jsonb(hops: &[HopSummary]) -> Result<JsonValue, serde_json::Error> {
     serde_json::to_value(converted)
 }
 
+/// Disjoint outcomes of a single [`SettleWriter::settle`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettleOutcome {
+    /// The pair row was updated; a measurement (and, for MTR, a trace)
+    /// was inserted; the `campaign_pair_settled` NOTIFY fired.
+    Settled,
+    /// The `resolution_state='dispatched'` gate refused the update — a
+    /// concurrent operator reset landed first. The whole transaction
+    /// rolled back; callers drop this case silently.
+    RaceLost,
+    /// The agent sent a result with no `outcome` field — protocol
+    /// violation. The whole transaction rolled back; callers must treat
+    /// this as a rejection so the scheduler reverts the pair rather
+    /// than leaving it stranded in `dispatched`.
+    MalformedNoOutcome,
+}
+
 /// Concrete writer that owns a connection pool.
 #[derive(Clone)]
 pub struct SettleWriter {
@@ -102,15 +126,13 @@ impl SettleWriter {
         Self { pool }
     }
 
-    /// Persist one result. Returns `Ok(true)` if the row was actually
-    /// settled; `Ok(false)` if the `resolution_state='dispatched'` gate
-    /// rejected the update (concurrent reset landed first) or if the
-    /// result carried no outcome at all.
+    /// Persist one result. See [`SettleOutcome`] for the three possible
+    /// non-error returns.
     pub async fn settle(
         &self,
         pair: &PendingPair,
         result: &MeasurementResult,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<SettleOutcome, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
         let (measurement_id, pair_end_state, last_error_tag): (
@@ -190,10 +212,10 @@ impl SettleWriter {
             None => {
                 warn!(
                     pair_id = pair.pair_id,
-                    "settle called with empty outcome; dropping",
+                    "settle called with empty outcome; rejecting as malformed",
                 );
                 tx.rollback().await?;
-                return Ok(false);
+                return Ok(SettleOutcome::MalformedNoOutcome);
             }
         };
 
@@ -225,7 +247,7 @@ impl SettleWriter {
         if updated == 0 {
             // Pair was reset between claim and settle — drop silently.
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(SettleOutcome::RaceLost);
         }
 
         // Fire the NOTIFY inside the same transaction so the scheduler
@@ -241,7 +263,7 @@ impl SettleWriter {
         .await?;
 
         tx.commit().await?;
-        Ok(true)
+        Ok(SettleOutcome::Settled)
     }
 }
 

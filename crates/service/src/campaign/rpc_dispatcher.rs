@@ -37,7 +37,7 @@
 
 use super::dispatch::{DispatchOutcome, PairDispatcher, PendingPair};
 use super::model::ProbeProtocol;
-use super::writer::SettleWriter;
+use super::writer::{SettleOutcome, SettleWriter};
 use crate::metrics;
 use crate::registry::AgentRegistry;
 use async_trait::async_trait;
@@ -410,13 +410,23 @@ impl PairDispatcher for RpcDispatcher {
                 continue;
             };
             match self.writer.settle(&pair, &result).await {
-                Ok(true) => dispatched_ok += 1,
-                Ok(false) => {
-                    // Writer's state gate rejected the update (concurrent
-                    // reset landed first, or the result carried no
-                    // outcome). Drop silently — the scheduler owns the
-                    // next step for that row.
+                Ok(SettleOutcome::Settled) => dispatched_ok += 1,
+                Ok(SettleOutcome::RaceLost) => {
+                    // Concurrent operator reset landed first; the writer
+                    // rolled back. Drop silently — the scheduler owns
+                    // the next step for that row.
                     debug!(agent_id, pair_id, "late settle dropped by state gate");
+                }
+                Ok(SettleOutcome::MalformedNoOutcome) => {
+                    // Agent sent a result with no `outcome` field —
+                    // protocol violation. Reject so the scheduler
+                    // reverts the pair; otherwise it would sit in
+                    // `dispatched` forever and block campaign completion.
+                    warn!(
+                        agent_id,
+                        pair_id, "result carried no outcome; reverting pair"
+                    );
+                    rejected.push(pair_id);
                 }
                 Err(e) => {
                     warn!(

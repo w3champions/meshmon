@@ -19,7 +19,7 @@ use meshmon_protocol::{
 use meshmon_service::campaign::dispatch::PendingPair;
 use meshmon_service::campaign::model::ProbeProtocol;
 use meshmon_service::campaign::repo::{self, CreateInput};
-use meshmon_service::campaign::writer::SettleWriter;
+use meshmon_service::campaign::writer::{SettleOutcome, SettleWriter};
 use sqlx::PgPool;
 use std::net::IpAddr;
 
@@ -121,7 +121,7 @@ async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
         .settle(&mk_pair(campaign_id, pair_id, dest), &ok_result(pair_id))
         .await
         .expect("settle");
-    assert!(settled);
+    assert_eq!(settled, SettleOutcome::Settled);
 
     let (state, measurement_id, last_error): (String, Option<i64>, Option<String>) =
         sqlx::query_as(
@@ -165,7 +165,7 @@ async fn settle_failure_timeout_writes_skipped_with_timeout_tag() {
         )
         .await
         .expect("settle");
-    assert!(settled);
+    assert_eq!(settled, SettleOutcome::Settled);
 
     let (state, measurement_id, last_error): (String, Option<i64>, Option<String>) =
         sqlx::query_as(
@@ -381,7 +381,7 @@ async fn settle_mtr_writes_trace_and_links_measurement() {
 }
 
 #[tokio::test]
-async fn settle_returns_false_when_pair_was_reset_between_claim_and_settle() {
+async fn settle_returns_race_lost_when_pair_was_reset_between_claim_and_settle() {
     let pool = common::shared_migrated_pool().await.clone();
     let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
@@ -403,7 +403,11 @@ async fn settle_returns_false_when_pair_was_reset_between_claim_and_settle() {
         .settle(&mk_pair(campaign_id, pair_id, dest), &ok_result(pair_id))
         .await
         .expect("settle");
-    assert!(!settled, "late settle against reset pair must be a no-op");
+    assert_eq!(
+        settled,
+        SettleOutcome::RaceLost,
+        "late settle against reset pair must be a no-op",
+    );
 
     let state: String =
         sqlx::query_scalar("SELECT resolution_state::text FROM campaign_pairs WHERE id = $1")
@@ -476,7 +480,7 @@ async fn settle_emits_campaign_pair_settled_notify() {
 }
 
 #[tokio::test]
-async fn settle_empty_outcome_is_a_rollback() {
+async fn settle_empty_outcome_returns_malformed_and_rolls_back() {
     let pool = common::shared_migrated_pool().await.clone();
     let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
@@ -489,7 +493,11 @@ async fn settle_empty_outcome_is_a_rollback() {
         .settle(&mk_pair(campaign_id, pair_id, dest), &result)
         .await
         .expect("settle");
-    assert!(!settled);
+    assert_eq!(
+        settled,
+        SettleOutcome::MalformedNoOutcome,
+        "empty outcome is a protocol violation; caller must revert the pair",
+    );
 
     let state: String =
         sqlx::query_scalar("SELECT resolution_state::text FROM campaign_pairs WHERE id = $1")

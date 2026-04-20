@@ -37,11 +37,16 @@ clone (interior state is `Arc`-owned) and holds references to:
    .run_measurement_batch(req)`. An open-phase error returns
    `skipped_reason = Some("rpc_error:<code>")` and every allowed pair
    joins `rejected_ids`.
-6. **Drain the stream into `SettleWriter::settle`.**
-   - `Ok(true)` → `dispatched_ok += 1`.
-   - `Ok(false)` → the `resolution_state='dispatched'` gate rejected
+6. **Drain the stream into `SettleWriter::settle`.** The writer
+   returns a `SettleOutcome`:
+   - `Settled` → `dispatched_ok += 1`.
+   - `RaceLost` → the `resolution_state='dispatched'` gate rejected
      the update (concurrent reset landed); drop silently. The
      scheduler owns the next step for that row.
+   - `MalformedNoOutcome` → the agent sent a result with no `outcome`
+     field (protocol violation). The pair joins `rejected_ids` so the
+     scheduler reverts it; silent dropping would leave the pair stuck
+     in `dispatched` forever.
    - `Err(_)` → the pair joins `rejected_ids`.
 7. **Sweep up missing pairs.** Any `pair_id` the agent never produced
    a result for joins `rejected_ids` — the scheduler reverts those on
@@ -51,8 +56,8 @@ clone (interior state is `Arc`-owned) and holds references to:
 
 | Field | Population |
 |---|---|
-| `dispatched` | Count of pairs whose results streamed back AND whose writer settle returned `Ok(true)`. |
-| `rejected_ids` | Pairs blocked by the per-destination bucket, pairs whose response never arrived, pairs whose stream errored mid-flight, pairs whose writer call returned `Err`. |
+| `dispatched` | Count of pairs whose results streamed back AND whose writer settle returned `Settled`. |
+| `rejected_ids` | Pairs blocked by the per-destination bucket, pairs whose response never arrived, pairs whose stream errored mid-flight, pairs whose writer call returned `MalformedNoOutcome`, pairs whose writer call returned `Err`. |
 | `skipped_reason` | Set only when the batch failed before any pair streamed: `"agent_unreachable"`, `"rpc_error:<code>"`, `"rate_limited"` (bucket consumed every pair), `"semaphore_closed"`. |
 
 Agent-reported failures (`MeasurementFailure` — `NO_ROUTE`, `TIMEOUT`,

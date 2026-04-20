@@ -14,7 +14,7 @@ use meshmon_protocol::{MeasurementResult, MeasurementSummary};
 use meshmon_service::campaign::dispatch::PendingPair;
 use meshmon_service::campaign::model::ProbeProtocol;
 use meshmon_service::campaign::repo::{self, CreateInput, EditInput};
-use meshmon_service::campaign::writer::SettleWriter;
+use meshmon_service::campaign::writer::{SettleOutcome, SettleWriter};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -138,7 +138,11 @@ async fn late_settle_is_dropped_when_pair_was_reset() {
         })),
     };
     let settled = writer.settle(&pair, &result).await.expect("settle");
-    assert!(!settled, "late settle must be a no-op when pair was reset");
+    assert_eq!(
+        settled,
+        SettleOutcome::RaceLost,
+        "late settle must be a no-op when pair was reset",
+    );
 
     // The pair is still pending; the reset survived the race.
     let state: String =

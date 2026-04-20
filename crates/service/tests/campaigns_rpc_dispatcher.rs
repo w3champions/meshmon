@@ -438,6 +438,73 @@ async fn dispatch_rate_limit_rejects_every_pair_when_rps_is_zero() {
     repo::delete(&pool, campaign_id).await.expect("cleanup");
 }
 
+/// Agent that sends one `MeasurementResult` with `outcome = None` —
+/// a protocol violation. The dispatcher must reject the pair so the
+/// scheduler reverts it; silent dropping would leave the pair stuck
+/// in `dispatched` forever and block campaign completion.
+struct MalformedOutcomeAgent;
+
+#[tonic::async_trait]
+impl AgentCommand for MalformedOutcomeAgent {
+    async fn refresh_config(
+        &self,
+        _: Request<RefreshConfigRequest>,
+    ) -> Result<Response<RefreshConfigResponse>, Status> {
+        Ok(Response::new(RefreshConfigResponse {}))
+    }
+
+    type RunMeasurementBatchStream = ResultStream;
+
+    async fn run_measurement_batch(
+        &self,
+        req: Request<RunMeasurementBatchRequest>,
+    ) -> Result<Response<Self::RunMeasurementBatchStream>, Status> {
+        let req = req.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(req.targets.len().max(1));
+        for t in req.targets {
+            let r = MeasurementResult {
+                pair_id: t.pair_id,
+                outcome: None,
+            };
+            let _ = tx.send(Ok(r)).await;
+        }
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[tokio::test]
+async fn dispatch_malformed_outcome_rejects_pair_and_leaves_state_dispatched() {
+    let pool = common::shared_migrated_pool().await;
+    let agent_id = "agent-rpc-malformed";
+    seed_agent_row(&pool, agent_id, "203.0.113.15").await;
+    let registry = make_registry(&pool).await;
+
+    let channel = spawn_agent_server(MalformedOutcomeAgent).await;
+    let tunnels = Arc::new(TunnelManager::new_for_test(vec![(
+        agent_id.to_string(),
+        channel,
+    )]));
+    let writer = SettleWriter::new(pool.clone());
+    let dispatcher = RpcDispatcher::new(tunnels, registry, writer, 16, 100, 50);
+
+    let (campaign_id, pending) = seed_dispatched_batch(&pool, agent_id, vec![unique_dest()]).await;
+    let pair_id = pending[0].pair_id;
+
+    let outcome = dispatcher.dispatch(agent_id, pending).await;
+    assert_eq!(outcome.dispatched, 0);
+    assert_eq!(
+        outcome.rejected_ids,
+        vec![pair_id],
+        "malformed outcome must revert the pair via rejected_ids",
+    );
+    // Writer rolled back the tx, so the pair stayed in `dispatched`;
+    // the scheduler will flip it back to `pending` via `rejected_ids`.
+    assert_eq!(pair_state(&pool, pair_id).await, "dispatched");
+
+    repo::delete(&pool, campaign_id).await.expect("cleanup");
+}
+
 #[tokio::test]
 async fn dispatch_empty_batch_returns_default_outcome() {
     let pool = common::shared_migrated_pool().await;
