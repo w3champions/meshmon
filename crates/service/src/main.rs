@@ -310,7 +310,13 @@ async fn run() -> anyhow::Result<()> {
             registry.clone(),
             dispatcher,
             initial_config.campaigns.scheduler_tick_ms,
-            /* chunk_size = */ 64,
+            // Scheduler chunks must not exceed what the dispatcher will
+            // put on the wire, otherwise the RPC truncation at
+            // `max_batch_size` silently drops pairs and the scheduler
+            // reverts them as `rejected_ids` even though no transient
+            // fault occurred. Keep chunk = max_batch so every claimed
+            // pair makes it into at least one RPC request.
+            initial_config.campaigns.max_batch_size as usize,
             initial_config.campaigns.per_destination_rps,
             // `max_pair_attempts` is `u16` in config but `i16` at the DB edge;
             // both map onto the same non-negative range in practice. Clamp
