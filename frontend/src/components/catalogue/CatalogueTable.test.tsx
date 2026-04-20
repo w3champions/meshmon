@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { renderWithProviders } from "@/test/query-wrapper";
-import { CatalogueTable, LS_KEY } from "./CatalogueTable";
+import { CatalogueTable, formatWebsiteHost, LS_KEY } from "./CatalogueTable";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -94,13 +94,14 @@ describe("CatalogueTable", () => {
       expect(screen.getByText("Beta Node")).toBeInTheDocument();
     });
 
-    test("renders country code in Country column", async () => {
+    test("renders country name in Country column (resolved from code)", async () => {
       renderWithProviders(
         <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
       );
 
-      expect(await screen.findByText("NL")).toBeInTheDocument();
-      expect(screen.getByText("DE")).toBeInTheDocument();
+      // Country column now shows the full name; the raw code is in the title attribute.
+      expect(await screen.findByText("Netherlands")).toBeInTheDocument();
+      expect(screen.getByText("Germany")).toBeInTheDocument();
     });
 
     test("renders em-dash when display_name is null", async () => {
@@ -416,5 +417,66 @@ describe("CatalogueTable", () => {
       const headerNames = headers.map((h) => h.textContent?.trim());
       expect(headerNames.at(-1)).toBe("Actions");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatWebsiteHost unit tests
+// ---------------------------------------------------------------------------
+
+describe("formatWebsiteHost", () => {
+  test("extracts hostname from a full URL with path and query", () => {
+    expect(formatWebsiteHost("https://google.com/blah/blah?ssd&asdads=10")).toBe("google.com");
+  });
+
+  test("extracts hostname from a URL without a path", () => {
+    expect(formatWebsiteHost("https://example.com")).toBe("example.com");
+  });
+
+  test("handles URLs without a scheme by prepending https://", () => {
+    expect(formatWebsiteHost("example.com")).toBe("example.com");
+  });
+
+  test("returns the raw string when parsing fails (truly malformed input)", () => {
+    // An un-parseable value that even https:// prepending can't fix.
+    expect(formatWebsiteHost("not a url at all ://???")).toBe("not a url at all ://???");
+  });
+
+  test("strips fragment from URL", () => {
+    expect(formatWebsiteHost("https://example.com/page#section")).toBe("example.com");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Website column integration test
+// ---------------------------------------------------------------------------
+
+describe("website column display", () => {
+  test("shows only the hostname in the anchor text while preserving href and title", async () => {
+    const user = userEvent.setup();
+    const entry: CatalogueEntry = {
+      ...ENTRY_A,
+      id: "website-test",
+      website: "https://google.com/blah/blah?ssd",
+    };
+    renderWithProviders(
+      <CatalogueTable entries={[entry]} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
+    );
+
+    // Enable the Website column via the column chooser
+    const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+    await user.click(chooserBtn);
+    const websiteCheckbox = screen.getByRole("checkbox", { name: /website/i });
+    await user.click(websiteCheckbox);
+
+    // The anchor should show only the hostname.
+    const link = await screen.findByRole("link");
+    expect(link).toHaveTextContent("google.com");
+
+    // The href must be the full normalized URL.
+    expect(link).toHaveAttribute("href", "https://google.com/blah/blah?ssd");
+
+    // The title must be the raw value the operator entered.
+    expect(link).toHaveAttribute("title", "https://google.com/blah/blah?ssd");
   });
 });
