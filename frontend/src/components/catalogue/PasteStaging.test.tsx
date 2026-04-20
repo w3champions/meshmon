@@ -149,6 +149,13 @@ describe("PasteStaging", () => {
     );
   });
 
+  test("dialog primitive smoke: renders role=dialog with Add IPs title", () => {
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const dialog = within(document.body).getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(within(document.body).getByText("Add IPs")).toBeInTheDocument();
+  });
+
   test("chip flips to enriched when SSE enrichment_progress updates the query cache", async () => {
     const user = userEvent.setup();
     const mutateAsync = vi.fn().mockResolvedValue({

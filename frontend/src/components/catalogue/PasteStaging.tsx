@@ -5,15 +5,15 @@ import { catalogueEntryKey, usePasteCatalogue } from "@/api/hooks/catalogue";
 import { StatusChip } from "@/components/catalogue/StatusChip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -133,14 +133,14 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
   const canAdd = outcome.accepted.length > 0 && !pasteMutation.isPending;
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl">
-        <SheetHeader>
-          <SheetTitle>Add IPs</SheetTitle>
-          <SheetDescription>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="w-[95vw] sm:max-w-xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Add IPs</DialogTitle>
+          <DialogDescription>
             Paste one IP per line or comma-separated. Duplicate entries will be collapsed.
-          </SheetDescription>
-        </SheetHeader>
+          </DialogDescription>
+        </DialogHeader>
 
         <div className="mt-4 space-y-4">
           <div className="space-y-1.5">
@@ -232,7 +232,7 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           )}
         </div>
 
-        <SheetFooter className="mt-6 flex flex-row gap-2">
+        <DialogFooter className="mt-6 flex flex-row gap-2">
           <Button
             type="button"
             onClick={() => void handleAdd()}
@@ -244,8 +244,8 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
