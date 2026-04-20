@@ -97,6 +97,16 @@ grafana_url = "http://127.0.0.1:3000/grafana"
 
 [probing]
 udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
+
+# Opt-in: enable ipgeolocation.io enrichment when the API key is exported in
+# the calling shell. If the env var is unset the section stays commented so
+# startup doesn't abort on the "enabled without api_key" guard. RDAP is
+# already on by default via the chain builder.
+${MESHMON_IPGEO_API_KEY:+[enrichment.ipgeolocation]
+enabled = true
+acknowledged_tos = true
+api_key_env = "MESHMON_IPGEO_API_KEY"
+}
 EOF
 
 echo "[dev.sh] starting infra via docker compose dev overlay"
@@ -138,6 +148,14 @@ export MESHMON_ADMIN_PASSWORD_HASH="$ADMIN_HASH"
 export MESHMON_PG_GRAFANA_PASSWORD="$PG_GRAFANA_PASSWORD"
 export MESHMON_UDP_PROBE_SECRET="$UDP_PROBE_SECRET"
 export MESHMON_POSTGRES_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable"
+# Forward the ipgeolocation.io key when present so the service picks it up via
+# `api_key_env`. Unset by default — export it in your shell (do NOT commit).
+if [[ -n "${MESHMON_IPGEO_API_KEY:-}" ]]; then
+    export MESHMON_IPGEO_API_KEY
+    echo "[dev.sh] ipgeolocation provider enabled (MESHMON_IPGEO_API_KEY set)"
+else
+    echo "[dev.sh] ipgeolocation disabled — export MESHMON_IPGEO_API_KEY to enable"
+fi
 export RUST_LOG="${RUST_LOG:-meshmon_service=debug,info}"
 # Port comes from the throwaway toml's `service.listen_addr` above
 # (0.0.0.0:$SERVICE_PORT). No env-var override for listen_addr exists;
