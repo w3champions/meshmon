@@ -5,10 +5,15 @@
 //! wakes the refresh loop so the agent fetches fresh config + targets
 //! without waiting for its 5-minute periodic poll.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
-use meshmon_protocol::{AgentCommand, RefreshConfigRequest, RefreshConfigResponse};
+use meshmon_protocol::{
+    AgentCommand, MeasurementResult, RefreshConfigRequest, RefreshConfigResponse,
+    RunMeasurementBatchRequest,
+};
 use tokio::sync::Notify;
+use tonic::codegen::tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -29,6 +34,9 @@ impl RefreshConfigImpl {
 
 #[tonic::async_trait]
 impl AgentCommand for RefreshConfigImpl {
+    type RunMeasurementBatchStream =
+        Pin<Box<dyn Stream<Item = Result<MeasurementResult, Status>> + Send + 'static>>;
+
     async fn refresh_config(
         &self,
         _request: Request<RefreshConfigRequest>,
@@ -36,6 +44,15 @@ impl AgentCommand for RefreshConfigImpl {
         info!("received RefreshConfig; waking refresh loop");
         self.refresh_trigger.notify_one();
         Ok(Response::new(RefreshConfigResponse {}))
+    }
+
+    async fn run_measurement_batch(
+        &self,
+        _request: Request<RunMeasurementBatchRequest>,
+    ) -> Result<Response<Self::RunMeasurementBatchStream>, Status> {
+        // T45 transitional stub: Task 9 relocates this behind
+        // `AgentCommandService` with a `CampaignProber`-driven stream.
+        Err(Status::unimplemented("run_measurement_batch: not wired yet"))
     }
 }
 

@@ -641,6 +641,9 @@ fn build_register_request(
         agent_version: version.to_string(),
         tcp_probe_port: tcp_probe_port as u32,
         udp_probe_port: udp_probe_port as u32,
+        // T45 transitional: Task 10 populates this from
+        // AgentEnv::campaign_max_concurrency (MESHMON_CAMPAIGN_MAX_CONCURRENCY).
+        campaign_max_concurrency: None,
     }
 }
 
