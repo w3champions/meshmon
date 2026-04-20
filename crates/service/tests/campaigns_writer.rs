@@ -139,13 +139,12 @@ async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
     // The inserted measurement must be a campaign-kind row with the
     // agent's stats; the writer never writes detail_* kinds on success.
     let m_id = measurement_id.unwrap();
-    let (kind, probe_count, loss_pct): (String, i16, f32) = sqlx::query_as(
-        "SELECT kind::text, probe_count, loss_pct FROM measurements WHERE id = $1",
-    )
-    .bind(m_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (kind, probe_count, loss_pct): (String, i16, f32) =
+        sqlx::query_as("SELECT kind::text, probe_count, loss_pct FROM measurements WHERE id = $1")
+            .bind(m_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(kind, "campaign");
     assert_eq!(probe_count, 10);
     assert_eq!(loss_pct, 0.0);

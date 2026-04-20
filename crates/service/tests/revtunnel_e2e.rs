@@ -116,13 +116,12 @@ fn spawn_agent(
                 .await
                 .expect("agent dials service");
 
-            let router_factory = move || {
-                Server::builder().add_service(AgentCommandServer::new(AgentCommandService::new(
-                    refresh_trigger.clone(),
-                    Arc::new(StubProber),
-                    16,
-                )))
-            };
+            let router_factory =
+                move || {
+                    Server::builder().add_service(AgentCommandServer::new(
+                        AgentCommandService::new(refresh_trigger.clone(), Arc::new(StubProber), 16),
+                    ))
+                };
             TunnelClient::open_and_run(
                 channel,
                 source_id,

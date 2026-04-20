@@ -50,12 +50,11 @@ async fn migration_creates_mtr_traces_and_extends_measurements_and_agents() {
     assert!(concurrency_col, "agents.campaign_max_concurrency missing");
 
     // Round-trip: insert an mtr_trace row, reference from a measurements row.
-    let trace_id: i64 = sqlx::query_scalar(
-        "INSERT INTO mtr_traces (hops) VALUES ('[]'::jsonb) RETURNING id",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
+    let trace_id: i64 =
+        sqlx::query_scalar("INSERT INTO mtr_traces (hops) VALUES ('[]'::jsonb) RETURNING id")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
     let m_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, mtr_id) \
          VALUES ('agent-a', '203.0.113.5', 'icmp', 1, $1) RETURNING id",

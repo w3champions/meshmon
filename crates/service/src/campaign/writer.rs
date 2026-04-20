@@ -74,12 +74,12 @@ fn hops_to_jsonb(hops: &[HopSummary]) -> Result<JsonValue, serde_json::Error> {
                 .observed_ips
                 .iter()
                 .filter_map(|ip| {
-                    meshmon_protocol::ip::to_ipaddr(&ip.ip).ok().map(|addr| {
-                        HopIpJson {
+                    meshmon_protocol::ip::to_ipaddr(&ip.ip)
+                        .ok()
+                        .map(|addr| HopIpJson {
                             ip: addr.to_string(),
                             freq: ip.frequency,
-                        }
-                    })
+                        })
                 })
                 .collect(),
             avg_rtt_micros: h.avg_rtt_micros,
@@ -292,10 +292,7 @@ mod tests {
     fn no_route_targets_unreachable_state() {
         let tag = map_failure_code(MeasurementFailureCode::NoRoute);
         assert_eq!(tag, "unreachable");
-        assert_eq!(
-            state_for_failure_tag(tag),
-            PairResolutionState::Unreachable,
-        );
+        assert_eq!(state_for_failure_tag(tag), PairResolutionState::Unreachable,);
     }
 
     #[test]

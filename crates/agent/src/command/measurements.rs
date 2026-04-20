@@ -325,9 +325,12 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Should return promptly rather than hanging on a closed channel.
-        tokio::time::timeout(Duration::from_millis(200), prober.run_batch(req, cancel, tx))
-            .await
-            .expect("stub returned after receiver dropped");
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            prober.run_batch(req, cancel, tx),
+        )
+        .await
+        .expect("stub returned after receiver dropped");
     }
 
     // -- AgentCommandService --------------------------------------------------
