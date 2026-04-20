@@ -85,7 +85,31 @@ impl<A: ServiceApi> AgentRuntime<A> {
     /// Register with the service, fetch config and targets, and spawn one
     /// supervisor per target. Each step retries with exponential backoff until
     /// success or cancellation.
+    ///
+    /// Production entry point: constructs an [`IcmpClientPool`] and force-
+    /// opens the v4 raw socket (preflight) so missing `CAP_NET_RAW` aborts
+    /// boot loudly instead of failing silently inside per-target probes.
+    /// Tests that don't need the kernel side should call
+    /// [`Self::bootstrap_with_pool`] with `Arc::new(IcmpClientPool::new())`
+    /// to bypass the preflight.
     pub async fn bootstrap(env: AgentEnv, api: Arc<A>, cancel: CancellationToken) -> Result<Self> {
+        let icmp_pool = Arc::new(IcmpClientPool::new());
+        icmp_pool.preflight().await.context(
+            "ICMP client pool init failed (raw ICMP socket bind requires CAP_NET_RAW on Linux)",
+        )?;
+        Self::bootstrap_with_pool(env, api, cancel, icmp_pool).await
+    }
+
+    /// Same as [`Self::bootstrap`] but takes a preconstructed (and
+    /// optionally not-preflighted) [`IcmpClientPool`]. The seam exists so
+    /// unit and integration tests can run on unprivileged CI hosts where
+    /// the raw v4 socket bind would fail.
+    pub async fn bootstrap_with_pool(
+        env: AgentEnv,
+        api: Arc<A>,
+        cancel: CancellationToken,
+        icmp_pool: Arc<IcmpClientPool>,
+    ) -> Result<Self> {
         // Derive a child cancel token. Every task spawned here (listeners,
         // UDP pool receiver/sweeper, trippy driver semaphore holders,
         // per-target supervisors) uses `child.clone()` so either (a) the
@@ -140,16 +164,9 @@ impl<A: ServiceApi> AgentRuntime<A> {
             .await
             .context("UDP prober pool bind failed")?;
         let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, child.clone());
-        // Pool construction is infallible; the raw v4 socket is opened by
-        // `preflight()` so production aborts at boot if `CAP_NET_RAW` is
-        // missing. Tests skip the preflight so the same `bootstrap` entry
-        // point works on unprivileged CI runners.
-        let icmp_pool = Arc::new(IcmpClientPool::new());
-        if !cfg!(test) {
-            icmp_pool.preflight().await.context(
-                "ICMP client pool init failed (raw ICMP socket bind requires CAP_NET_RAW on Linux)",
-            )?;
-        }
+        // `icmp_pool` is supplied by the caller. `bootstrap()` preflights
+        // the raw v4 socket; `bootstrap_with_pool()` callers (tests) get
+        // to skip that preflight on unprivileged hosts.
 
         // Shared route-snapshot channel. Every supervisor clones the sender;
         // the emitter drains the receiver. Capacity 8 is deliberately small:
@@ -768,6 +785,17 @@ mod tests {
         (tcp_port, udp_port)
     }
 
+    /// Test wrapper that bypasses [`AgentRuntime::bootstrap`]'s ICMP raw-
+    /// socket preflight. Bootstrap unit tests don't probe; the preflight
+    /// would just refuse to start on unprivileged CI runners.
+    async fn bootstrap_for_test<A: ServiceApi>(
+        env: AgentEnv,
+        api: Arc<A>,
+        cancel: CancellationToken,
+    ) -> Result<AgentRuntime<A>> {
+        AgentRuntime::bootstrap_with_pool(env, api, cancel, Arc::new(IcmpClientPool::new())).await
+    }
+
     async fn test_env() -> AgentEnv {
         let (tcp_probe_port, udp_probe_port) = ephemeral_probe_ports().await;
         AgentEnv {
@@ -908,7 +936,7 @@ mod tests {
         let api = MockApi::new(vec![test_target("peer-a"), test_target("peer-b")]);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
+        let runtime = bootstrap_for_test(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed");
 
@@ -925,7 +953,7 @@ mod tests {
         let api = MockApi::new(vec![test_target("self-agent"), test_target("peer-a")]);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env().await, api, cancel.clone())
+        let runtime = bootstrap_for_test(test_env().await, api, cancel.clone())
             .await
             .expect("bootstrap should succeed");
 
@@ -941,7 +969,7 @@ mod tests {
         let api = MockApi::new(vec![test_target("peer-a")]);
         let cancel = CancellationToken::new();
 
-        let mut runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
+        let mut runtime = bootstrap_for_test(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed");
 
@@ -975,7 +1003,7 @@ mod tests {
         let api = FailThenSucceedApi::new(2);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
+        let runtime = bootstrap_for_test(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed after retries");
 
@@ -1061,7 +1089,7 @@ mod tests {
         env.tcp_probe_port = occupied_port;
 
         let api = MockApi::new(vec![test_target("peer-a")]);
-        let res = AgentRuntime::bootstrap(env, api, CancellationToken::new()).await;
+        let res = bootstrap_for_test(env, api, CancellationToken::new()).await;
         let err = match res {
             Ok(_) => panic!("bootstrap should fail when TCP port is taken"),
             Err(e) => e,
@@ -1121,7 +1149,7 @@ mod tests {
         let udp_port = env.udp_probe_port;
 
         let api = Arc::new(BadConfigApi);
-        let res = AgentRuntime::bootstrap(env, api, CancellationToken::new()).await;
+        let res = bootstrap_for_test(env, api, CancellationToken::new()).await;
         let err = match res {
             Ok(_) => panic!("bootstrap should fail on invalid ConfigResponse"),
             Err(e) => e,
@@ -1170,7 +1198,7 @@ mod tests {
         env.udp_probe_port = occupied_port;
 
         let api = MockApi::new(vec![test_target("peer-a")]);
-        let res = AgentRuntime::bootstrap(env, api, CancellationToken::new()).await;
+        let res = bootstrap_for_test(env, api, CancellationToken::new()).await;
         let err = match res {
             Ok(_) => panic!("bootstrap should fail when UDP port is taken"),
             Err(e) => e,
@@ -1194,7 +1222,7 @@ mod tests {
         let api = HangThenSucceedApi::new(1);
         let cancel = CancellationToken::new();
 
-        let runtime = AgentRuntime::bootstrap(test_env().await, api.clone(), cancel.clone())
+        let runtime = bootstrap_for_test(test_env().await, api.clone(), cancel.clone())
             .await
             .expect("bootstrap should succeed after timeout + retry");
 

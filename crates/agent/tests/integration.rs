@@ -24,6 +24,7 @@ use meshmon_protocol::{
 use meshmon_agent::api::GrpcServiceApi;
 use meshmon_agent::bootstrap::AgentRuntime;
 use meshmon_agent::config::{AgentEnv, AgentIdentity};
+use meshmon_agent::probing::IcmpClientPool;
 
 // ---------------------------------------------------------------------------
 // Mock server
@@ -213,9 +214,14 @@ async fn bootstrap_against_real_grpc_server() {
         .expect("connect should succeed");
 
     let cancel = CancellationToken::new();
-    let runtime = AgentRuntime::bootstrap(env, api, cancel.clone())
-        .await
-        .expect("bootstrap should succeed");
+    let runtime = AgentRuntime::bootstrap_with_pool(
+        env,
+        api,
+        cancel.clone(),
+        Arc::new(IcmpClientPool::new()),
+    )
+    .await
+    .expect("bootstrap should succeed");
 
     assert_eq!(
         counters.register_count.load(Ordering::SeqCst),
@@ -279,9 +285,14 @@ async fn three_minute_session_completes_registration_and_shutdown_without_panic(
         .expect("connect should succeed");
 
     let cancel = CancellationToken::new();
-    let runtime = AgentRuntime::bootstrap(env, api, cancel.clone())
-        .await
-        .expect("bootstrap should succeed");
+    let runtime = AgentRuntime::bootstrap_with_pool(
+        env,
+        api,
+        cancel.clone(),
+        Arc::new(IcmpClientPool::new()),
+    )
+    .await
+    .expect("bootstrap should succeed");
 
     // Drive 3 minutes of simulated time. Real probers run against the
     // loopback mock server; samples arrive and state machines classify,
