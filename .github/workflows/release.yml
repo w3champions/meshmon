@@ -285,12 +285,16 @@ jobs:
           TAG: ${{ steps.tag.outputs.value }}
         run: |
           set -euo pipefail
+          # Required setup is deliberately load-bearing: a missing
+          # secret or variable fails the workflow so the operator sees
+          # the misconfiguration immediately on the first push after
+          # wiring up the pipeline.
           if [ -z "${AZDO_PAT}" ]; then
-            echo "::error::AZDO_RELEASE_PAT secret not configured; skipping Azure trigger."
+            echo "::error::AZDO_RELEASE_PAT secret not configured; cannot trigger Azure DevOps Release."
             exit 1
           fi
           if [ -z "${AZDO_RELEASE_DEFINITION_ID}" ]; then
-            echo "::error::AZDO_MESHMON_RELEASE_DEFINITION_ID variable not configured; skipping Azure trigger."
+            echo "::error::AZDO_MESHMON_RELEASE_DEFINITION_ID variable not configured; cannot trigger Azure DevOps Release."
             exit 1
           fi
           AUTH=$(printf ":%s" "$AZDO_PAT" | base64 -w0)
