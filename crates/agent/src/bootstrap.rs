@@ -19,7 +19,7 @@ use crate::config::{AgentEnv, AgentIdentity, ProbeConfig};
 use crate::probing::echo_udp::SecretSnapshot;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
-use crate::probing::{echo_tcp, echo_udp};
+use crate::probing::{echo_tcp, echo_udp, IcmpClientPool};
 use crate::route::RouteSnapshotEnvelope;
 use crate::supervisor::{self, SupervisorHandle};
 use meshmon_protocol::{ConfigResponse, RegisterRequest, Target, TargetsResponse};
@@ -51,6 +51,9 @@ pub struct AgentRuntime<A: ServiceApi> {
     pub udp_pool: Arc<UdpProberPool>,
     /// Trippy shared prober (semaphore).
     pub trippy_prober: Arc<TrippyProber>,
+    /// Shared ICMP client pool — one v4 raw socket (+ lazy v6) for the whole
+    /// process; per-target pingers borrow from it.
+    pub icmp_pool: Arc<IcmpClientPool>,
     /// TCP echo listener handle. Held so the task is cancelled along with
     /// the cancellation token but not awaited synchronously.
     _tcp_listener: tokio::task::JoinHandle<()>,
@@ -137,6 +140,9 @@ impl<A: ServiceApi> AgentRuntime<A> {
             .await
             .context("UDP prober pool bind failed")?;
         let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, child.clone());
+        let icmp_pool = Arc::new(IcmpClientPool::new().context(
+            "ICMP client pool init failed (raw ICMP socket bind requires CAP_NET_RAW on Linux)",
+        )?);
 
         // Shared route-snapshot channel. Every supervisor clones the sender;
         // the emitter drains the receiver. Capacity 8 is deliberately small:
@@ -274,6 +280,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 allowlist_tx.subscribe(),
                 Arc::clone(&udp_pool),
                 Arc::clone(&trippy_prober),
+                Arc::clone(&icmp_pool),
                 child.clone(),
                 route_snapshot_tx.clone(),
                 path_metrics_tx.clone(),
@@ -302,6 +309,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
             allowlist_tx,
             udp_pool,
             trippy_prober,
+            icmp_pool,
             _tcp_listener: tcp_listener,
             _udp_listener: udp_listener,
             route_snapshot_tx,
@@ -512,6 +520,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
                 self.allowlist_tx.subscribe(),
                 Arc::clone(&self.udp_pool),
                 Arc::clone(&self.trippy_prober),
+                Arc::clone(&self.icmp_pool),
                 self.cancel.clone(),
                 self.route_snapshot_tx.clone(),
                 self.path_metrics_tx.clone(),

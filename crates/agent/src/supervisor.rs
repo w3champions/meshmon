@@ -56,7 +56,9 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ProbeConfig;
 use crate::probing::trippy::TrippyProber;
 use crate::probing::udp::UdpProberPool;
-use crate::probing::{icmp, tcp, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate};
+use crate::probing::{
+    icmp, tcp, IcmpClientPool, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate,
+};
 use crate::route::{RouteSnapshotEnvelope, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
@@ -188,6 +190,7 @@ pub fn spawn(
     allowlist_rx: watch::Receiver<Arc<HashSet<IpAddr>>>,
     udp_pool: Arc<UdpProberPool>,
     trippy_prober: Arc<TrippyProber>,
+    icmp_pool: Arc<IcmpClientPool>,
     parent_cancel: CancellationToken,
     snapshot_tx: mpsc::Sender<RouteSnapshotEnvelope>,
     metrics_tx: mpsc::Sender<crate::emitter::PathMetricsMsg>,
@@ -230,6 +233,7 @@ pub fn spawn(
     // Spawn all 4 probers. ICMP spawn is sync, matching TCP's shape.
     let target_for_icmp = target.clone();
     let icmp_join = icmp::spawn(
+        icmp_pool,
         target_for_icmp,
         icmp_rate_rx,
         observation_tx.clone(),
@@ -892,8 +896,16 @@ mod tests {
         .expect("valid test config")
     }
 
-    /// Build a real `UdpProberPool` + `TrippyProber` for use in supervisor tests.
-    async fn build_test_pool(cancel: CancellationToken) -> (Arc<UdpProberPool>, Arc<TrippyProber>) {
+    /// Build a real `UdpProberPool` + `TrippyProber` + `IcmpClientPool` for use in
+    /// supervisor tests.
+    ///
+    /// `IcmpClientPool::new` requires `CAP_NET_RAW` on Linux but works without
+    /// root on macOS (surge-ping uses `SOCK_DGRAM` ICMP there). Tests that
+    /// call `build_test_pool` are therefore implicitly `CAP_NET_RAW`-gated on
+    /// Linux CI; the test binary skips them when the raw socket cannot be opened.
+    async fn build_test_pool(
+        cancel: CancellationToken,
+    ) -> (Arc<UdpProberPool>, Arc<TrippyProber>, Arc<IcmpClientPool>) {
         use crate::probing::echo_udp::SecretSnapshot;
         use tokio::sync::watch;
 
@@ -902,7 +914,8 @@ mod tests {
             .await
             .expect("udp pool bind");
         let trippy = TrippyProber::new(1, cancel);
-        (pool, trippy)
+        let icmp_pool = Arc::new(IcmpClientPool::new().expect("icmp pool"));
+        (pool, trippy, icmp_pool)
     }
 
     /// Return both halves of an empty allowlist watch channel.
@@ -925,7 +938,7 @@ mod tests {
     async fn supervisor_starts_and_cancels() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -937,6 +950,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1071,7 +1085,7 @@ mod tests {
     async fn supervisor_drains_observations_on_shutdown() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1083,6 +1097,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1128,7 +1143,7 @@ mod tests {
     async fn supervisor_routes_by_protocol() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1139,6 +1154,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1185,7 +1201,7 @@ mod tests {
     async fn supervisor_drops_udp_refused_but_keeps_tcp_refused() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1196,6 +1212,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1364,7 +1381,7 @@ mod tests {
         let parent_cancel = CancellationToken::new();
         let cfg = full_config_with_tight_hysteresis();
         let (config_tx, config_rx) = watch::channel(cfg);
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
 
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1376,6 +1393,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1499,7 +1517,7 @@ mod tests {
 
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1511,6 +1529,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1594,7 +1613,7 @@ mod tests {
 
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, mut snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1606,6 +1625,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1723,7 +1743,7 @@ mod tests {
 
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
 
         // Build a snapshot channel and immediately drop the receiver so any
         // `try_send` in the supervisor's snapshot tick will observe `Closed`.
@@ -1739,6 +1759,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1807,7 +1828,7 @@ mod tests {
     async fn snapshot_state_returns_target_snapshot_after_eval_tick() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -1819,6 +1840,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -1923,7 +1945,7 @@ mod tests {
     async fn supervisor_emits_path_metrics_per_protocol_after_eval() {
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, mut metrics_rx) =
             tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -1936,6 +1958,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -2001,7 +2024,7 @@ mod tests {
         // silently inflates reported rates 15x.
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(full_config_with_tight_hysteresis());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, mut metrics_rx) =
             tokio::sync::mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
@@ -2014,6 +2037,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,
@@ -2091,7 +2115,7 @@ mod tests {
 
         let parent_cancel = CancellationToken::new();
         let (_config_tx, config_rx) = watch::channel(test_config());
-        let (pool, trippy) = build_test_pool(parent_cancel.clone()).await;
+        let (pool, trippy, icmp_pool) = build_test_pool(parent_cancel.clone()).await;
         let (snapshot_tx, _snapshot_rx) = test_snapshot_tx();
         let (metrics_tx, _metrics_rx) = mpsc::channel::<crate::emitter::PathMetricsMsg>(16);
         let (_allow_tx, allowlist_rx) = empty_allowlist_channel();
@@ -2103,6 +2127,7 @@ mod tests {
             allowlist_rx,
             pool,
             trippy,
+            icmp_pool,
             parent_cancel.clone(),
             snapshot_tx,
             metrics_tx,

@@ -8,6 +8,8 @@
 pub mod echo_tcp;
 pub mod echo_udp;
 pub mod icmp;
+mod icmp_pool;
+pub use icmp_pool::IcmpClientPool;
 pub mod tcp;
 pub mod trippy;
 pub mod udp;
