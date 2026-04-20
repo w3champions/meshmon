@@ -257,12 +257,16 @@ describe("CatalogueTable", () => {
       await user.click(cityCheckbox);
       expect(cityCheckbox).not.toBeChecked();
 
-      // localStorage should reflect the change — City should be absent
+      // localStorage should reflect the change — stored as a Record<string, boolean>
+      // map; City explicitly set to false so future reads can tell "user hid it"
+      // apart from "column didn't exist when saved."
       const stored = localStorage.getItem(LS_KEY);
       expect(stored).not.toBeNull();
       // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
-      const parsed: string[] = JSON.parse(stored!);
-      expect(parsed).not.toContain("city");
+      const parsed: unknown = JSON.parse(stored!);
+      expect(parsed).toEqual(expect.any(Object));
+      expect(Array.isArray(parsed)).toBe(false);
+      expect(parsed).toMatchObject({ city: false, ip: true, display_name: true });
     });
 
     test("hidden column persists across remount (localStorage restore)", async () => {
@@ -319,9 +323,7 @@ describe("CatalogueTable", () => {
 
     test("first-time users (no stored preferences) see compile-time default columns", async () => {
       // No localStorage entry → getInitialVisibility seeds from DEFAULT_VISIBLE /
-      // OPTIONAL_COLUMNS. This covers the "new install" case and also guards
-      // against the hydration regression where a user who never interacted with
-      // the chooser would lose access to newly added default-visible columns.
+      // OPTIONAL_COLUMNS. Covers the "new install" baseline.
       expect(localStorage.getItem(LS_KEY)).toBeNull();
 
       renderWithProviders(
@@ -329,10 +331,67 @@ describe("CatalogueTable", () => {
       );
 
       await screen.findByRole("columnheader", { name: "IP" });
-      // Every compile-time default-visible column should be present.
       expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
+    });
+
+    test("newly added default-visible column stays visible for users with older saved preferences", async () => {
+      // Simulate a pre-existing user whose saved map predates the "actions"
+      // column. The map shape lets us distinguish "explicit false" (hidden)
+      // from "not in map" (column didn't exist when saved). For `actions`,
+      // the column is missing from the map → hydration must fall back to
+      // the compile-time default, which for DEFAULT_VISIBLE is `true`.
+      const legacyMap: Record<string, boolean> = {
+        ip: true,
+        display_name: true,
+        city: true,
+        country: true,
+        asn: true,
+        network: true,
+        status: true,
+        // NB: no `actions` key — the column didn't exist at save time.
+      };
+      localStorage.setItem(LS_KEY, JSON.stringify(legacyMap));
+
+      renderWithProviders(
+        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
+      );
+
+      await screen.findByRole("columnheader", { name: "IP" });
+      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+    });
+
+    test("legacy array-shaped localStorage payload is ignored and defaults apply", async () => {
+      // An older build serialized an array of visible column IDs. On load,
+      // the new map-shaped parser must reject the array (because it cannot
+      // distinguish missing-from-set from hidden) and fall through to the
+      // compile-time defaults. After mount, writes replace it with the new
+      // map shape.
+      const legacyArray = ["ip", "display_name"];
+      localStorage.setItem(LS_KEY, JSON.stringify(legacyArray));
+
+      renderWithProviders(
+        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
+      );
+
+      await screen.findByRole("columnheader", { name: "IP" });
+      // All DEFAULT_VISIBLE columns should be visible, not just the two
+      // in the legacy array.
+      expect(screen.getByRole("columnheader", { name: "City" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Country" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "ASN" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+
+      // And the write path should have replaced the legacy array with the map shape.
+      const stored = localStorage.getItem(LS_KEY);
+      expect(stored).not.toBeNull();
+      // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+      const parsed: unknown = JSON.parse(stored!);
+      expect(Array.isArray(parsed)).toBe(false);
+      expect(parsed).toEqual(expect.any(Object));
     });
   });
 });

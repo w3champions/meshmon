@@ -57,34 +57,48 @@ export interface CatalogueTableProps {
 // localStorage helpers
 // ---------------------------------------------------------------------------
 
-function loadVisibleIds(): string[] | null {
+/**
+ * Load stored column visibility as a `Record<string, boolean>` map.
+ *
+ * Returns `null` when nothing is stored, the JSON is malformed, or the value
+ * is the legacy array shape (list of visible IDs). The legacy shape cannot
+ * distinguish "column is new" from "user hid it", so we deliberately ignore
+ * it — new writes will replace it with the map shape.
+ */
+function loadStoredVisibility(): Record<string, boolean> | null {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    return parsed as string[];
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const result: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === "boolean") result[k] = v;
+    }
+    return result;
   } catch {
     return null;
   }
 }
 
 function saveVisibility(state: VisibilityState): void {
-  const visibleIds = Object.entries(state)
-    .filter(([, visible]) => visible)
-    .map(([id]) => id);
-  localStorage.setItem(LS_KEY, JSON.stringify(visibleIds));
+  // Persist the full map so later reads can distinguish "column missing from
+  // saved state" (falls back to compile-time default on hydration) from
+  // "column explicitly hidden" (stored as `false`).
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
 }
 
 function getInitialVisibility(): VisibilityState {
-  const stored = loadVisibleIds();
+  const stored = loadStoredVisibility();
   const result: VisibilityState = {};
 
   for (const col of DEFAULT_VISIBLE) {
-    result[col] = stored ? stored.includes(col) : true;
+    result[col] = stored && col in stored ? stored[col] : true;
   }
   for (const col of OPTIONAL_COLUMNS) {
-    result[col] = stored ? stored.includes(col) : false;
+    result[col] = stored && col in stored ? stored[col] : false;
   }
 
   return result;
