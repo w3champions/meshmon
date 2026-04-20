@@ -76,6 +76,9 @@ function ClickToPlace({ onPick }: { onPick(next: LocationPickerValue): void }) {
   return null;
 }
 
+/** Zoom level used when the picker first receives a non-null value. */
+const FIRST_PICK_ZOOM = 6;
+
 /**
  * Keep the Leaflet viewport tracking controlled `value` updates.
  *
@@ -88,11 +91,15 @@ function ClickToPlace({ onPick }: { onPick(next: LocationPickerValue): void }) {
  * the gap by calling `setView` whenever `value` changes, and returning
  * to the world-overview default when `value` clears.
  *
+ * Zoom is preserved across point→point transitions so an operator who
+ * zoomed in to fine-tune a pick does not get thrown back to the initial
+ * zoom when they click a nearby spot or drag the marker. Only the
+ * null→point (first selection) and point→null (clear) transitions
+ * override the zoom.
+ *
  * User-driven pans and zooms survive untouched: the effect only fires
  * when the controlled `value` prop itself changes, not on map
- * interaction. Dragging the marker does loop through `onChange` and
- * therefore re-centres — intentional, since a fresh pick is exactly
- * when the operator expects the map to follow.
+ * interaction.
  */
 function RecenterOnValueChange({ value }: { value: LocationPickerValue | null }) {
   const map = useMap();
@@ -104,11 +111,19 @@ function RecenterOnValueChange({ value }: { value: LocationPickerValue | null })
   useEffect(() => {
     const key = value ? `${value.latitude},${value.longitude}` : null;
     if (last.current === key) return;
+    const previousKey = last.current;
     last.current = key;
-    if (value) {
-      map.setView([value.latitude, value.longitude], 6);
-    } else {
+    if (!value) {
       map.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+      return;
+    }
+    // null → point: zoom in from the world overview. Otherwise keep the
+    // operator's current zoom so a nearby re-click doesn't throw them
+    // out of a close-up framing.
+    if (previousKey === null) {
+      map.setView([value.latitude, value.longitude], FIRST_PICK_ZOOM);
+    } else {
+      map.setView([value.latitude, value.longitude]);
     }
   }, [map, value]);
   return null;

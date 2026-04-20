@@ -110,18 +110,25 @@ describe("LocationPicker", () => {
     rerender(
       <LocationPicker value={{ latitude: 37.77, longitude: -122.42 }} onChange={() => {}} />,
     );
+    // null → point zooms in from the world overview.
     const afterFirstPoint = map.__setViewCalls.at(-1);
     expect(afterFirstPoint?.center).toEqual([37.77, -122.42]);
+    expect(afterFirstPoint?.zoom).toBe(6);
 
     rerender(<LocationPicker value={{ latitude: 48.14, longitude: 11.58 }} onChange={() => {}} />);
+    // point → point keeps the operator's current zoom (undefined ⇒ leave
+    // zoom alone in real Leaflet) so a nearby re-click doesn't throw
+    // them out of a close-up framing.
     const afterSecondPoint = map.__setViewCalls.at(-1);
     expect(afterSecondPoint?.center).toEqual([48.14, 11.58]);
+    expect(afterSecondPoint?.zoom).toBeUndefined();
 
     rerender(<LocationPicker value={null} onChange={() => {}} />);
     // Clearing the value must recentre to the world overview.
     const afterClear = map.__setViewCalls.at(-1);
     expect(afterClear?.center[0]).toBe(20);
     expect(afterClear?.center[1]).toBe(0);
+    expect(afterClear?.zoom).toBe(2);
 
     expect(map.__setViewCalls.length).toBeGreaterThan(initialCalls);
   });
