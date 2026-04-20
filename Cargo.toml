@@ -98,6 +98,7 @@ maxminddb = "0.27"
 memory-serve = "2.1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
+moka = { version = "0.12.15", features = ["future"] }
 prometheus-reqwest-remote-write = "0.5"
 snap = "1"
 surge-ping = "0.8"

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT state AS \"state: CampaignState\"\n             FROM measurement_campaigns WHERE id = $1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "state: CampaignState",
+        "type_info": {
+          "Custom": {
+            "name": "campaign_state",
+            "kind": {
+              "Enum": [
+                "draft",
+                "running",
+                "completed",
+                "evaluated",
+                "stopped"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f34e8ecc5de44f568bd489e2a86292d3142095c291a6fdcf8eb56ae3472c31f5"
+}

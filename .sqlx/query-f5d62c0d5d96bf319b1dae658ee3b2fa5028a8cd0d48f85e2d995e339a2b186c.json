@@ -1,0 +1,113 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, campaign_id, source_agent_id, destination_ip,\n               resolution_state AS \"resolution_state: PairResolutionState\",\n               measurement_id, dispatched_at, settled_at, attempt_count, last_error\n          FROM campaign_pairs\n         WHERE campaign_id = $1\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY id\n         LIMIT $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "campaign_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_agent_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 4,
+        "name": "resolution_state: PairResolutionState",
+        "type_info": {
+          "Custom": {
+            "name": "pair_resolution_state",
+            "kind": {
+              "Enum": [
+                "pending",
+                "dispatched",
+                "reused",
+                "succeeded",
+                "unreachable",
+                "skipped"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "measurement_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "dispatched_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "settled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "attempt_count",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 9,
+        "name": "last_error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "pair_resolution_state[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "pair_resolution_state",
+                  "kind": {
+                    "Enum": [
+                      "pending",
+                      "dispatched",
+                      "reused",
+                      "succeeded",
+                      "unreachable",
+                      "skipped"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "f5d62c0d5d96bf319b1dae658ee3b2fa5028a8cd0d48f85e2d995e339a2b186c"
+}

@@ -1,0 +1,199 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE measurement_campaigns\n               SET state = $2\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_pct, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "notes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "state: CampaignState",
+        "type_info": {
+          "Custom": {
+            "name": "campaign_state",
+            "kind": {
+              "Enum": [
+                "draft",
+                "running",
+                "completed",
+                "evaluated",
+                "stopped"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "protocol: ProbeProtocol",
+        "type_info": {
+          "Custom": {
+            "name": "probe_protocol",
+            "kind": {
+              "Enum": [
+                "icmp",
+                "tcp",
+                "udp"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "probe_count",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 6,
+        "name": "probe_count_detail",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 7,
+        "name": "timeout_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "probe_stagger_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "force_measurement",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "loss_threshold_pct",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 11,
+        "name": "stddev_weight",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 12,
+        "name": "evaluation_mode: EvaluationMode",
+        "type_info": {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "stopped_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "evaluated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "campaign_state",
+            "kind": {
+              "Enum": [
+                "draft",
+                "running",
+                "completed",
+                "evaluated",
+                "stopped"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "campaign_state[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "campaign_state",
+                  "kind": {
+                    "Enum": [
+                      "draft",
+                      "running",
+                      "completed",
+                      "evaluated",
+                      "stopped"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2f07983f5a3ff19558cdaab8d663ca873391b58a71a342a49a057ee4aa2439d6"
+}
