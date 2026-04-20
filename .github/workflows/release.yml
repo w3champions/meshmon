@@ -33,6 +33,12 @@ jobs:
           - name: meshmon-grafana
             dockerfile: docker/Dockerfile.grafana
             context: .
+          - name: meshmon-vmalert
+            dockerfile: docker/Dockerfile.vmalert
+            context: .
+          - name: meshmon-alertmanager
+            dockerfile: docker/Dockerfile.alertmanager
+            context: .
         platform:
           - linux/amd64
           - linux/arm64
@@ -106,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [meshmon-service, meshmon-agent, meshmon-grafana]
+        image: [meshmon-service, meshmon-agent, meshmon-grafana, meshmon-vmalert, meshmon-alertmanager]
     steps:
       - name: Download amd64 digest
         uses: actions/download-artifact@v4
@@ -191,7 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [meshmon-service, meshmon-agent, meshmon-grafana]
+        image: [meshmon-service, meshmon-agent, meshmon-grafana, meshmon-vmalert, meshmon-alertmanager]
     env:
       REGISTRY_IMAGE: ghcr.io/w3champions/${{ matrix.image }}
     steps:
