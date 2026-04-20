@@ -42,6 +42,10 @@ export interface MockLeafletMap {
   on: (event: string, handler: EventHandler) => void;
   off: (event: string, handler: EventHandler) => void;
   removeLayer: (layer: L.Layer) => void;
+  getContainer: () => HTMLElement;
+  getZoom: () => number;
+  setZoom: (zoom: number) => void;
+  options: { zoomSnap: number };
   pm: {
     addControls: () => void;
     removeControls: () => void;
@@ -54,11 +58,16 @@ export interface MockLeafletMap {
   __fire: (event: string) => void;
   __drawnLayers: L.Layer[];
   __handlers: Map<string, Set<EventHandler>>;
+  __container: HTMLElement;
+  __zoom: number;
 }
 
 function createMockMap(): MockLeafletMap {
   const handlers = new Map<string, Set<EventHandler>>();
   const drawnLayers: L.Layer[] = [];
+  const container =
+    typeof document !== "undefined" ? document.createElement("div") : ({} as HTMLElement);
+  let zoom = 2;
 
   const map: MockLeafletMap = {
     fitBounds: () => {},
@@ -78,6 +87,12 @@ function createMockMap(): MockLeafletMap {
       const idx = drawnLayers.indexOf(layer);
       if (idx >= 0) drawnLayers.splice(idx, 1);
     },
+    getContainer: () => container,
+    getZoom: () => zoom,
+    setZoom: (next) => {
+      zoom = next;
+    },
+    options: { zoomSnap: 1 },
     pm: {
       addControls: () => {},
       removeControls: () => {},
@@ -94,6 +109,13 @@ function createMockMap(): MockLeafletMap {
     },
     __drawnLayers: drawnLayers,
     __handlers: handlers,
+    __container: container,
+    get __zoom() {
+      return zoom;
+    },
+    set __zoom(next: number) {
+      zoom = next;
+    },
   };
 
   return map;

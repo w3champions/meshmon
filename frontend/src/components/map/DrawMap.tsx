@@ -6,7 +6,7 @@ import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 
 import L from "leaflet";
 import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import MarkerClusterGroup from "react-leaflet-cluster";
 import type { GeoShape } from "@/lib/geo";
@@ -50,6 +50,24 @@ const OSM_ATTRIBUTION = "© OpenStreetMap contributors";
 // and longitude 0 keeps the Pacific from splitting across the seam.
 const DEFAULT_CENTER: [number, number] = [20, 0];
 const DEFAULT_ZOOM = 2;
+
+const ZOOM_HINT_FADE_MS = 1500;
+
+function detectIsMac(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+    .userAgentData?.platform;
+  if (typeof platform === "string" && platform.length > 0) {
+    return /mac/i.test(platform);
+  }
+  if (typeof navigator.platform === "string" && navigator.platform.length > 0) {
+    return /mac/i.test(navigator.platform);
+  }
+  if (typeof navigator.userAgent === "string") {
+    return /mac/i.test(navigator.userAgent);
+  }
+  return false;
+}
 
 /**
  * Convert a single Leaflet layer produced by geoman into our typed `GeoShape`.
@@ -196,11 +214,77 @@ function GeomanController({ shapes, onShapesChange }: GeomanControllerProps) {
   return null;
 }
 
+interface ModifierZoomControllerProps {
+  onHintNeeded(): void;
+}
+
+/**
+ * Default page scroll when hovering the map; modifier-gated wheel zoom.
+ *
+ * `scrollWheelZoom` stays off on `MapContainer` so we can intercept the
+ * native `wheel` event ourselves. With `metaKey` (macOS ⌘) or `ctrlKey`
+ * held, we consume the event and nudge the map zoom. Otherwise we let
+ * the event bubble (the page scrolls) and ask the parent to flash the
+ * hint overlay.
+ */
+function ModifierZoomController({ onHintNeeded }: ModifierZoomControllerProps) {
+  const map = useMap();
+  const onHintNeededRef = useRef(onHintNeeded);
+  useEffect(() => {
+    onHintNeededRef.current = onHintNeeded;
+  }, [onHintNeeded]);
+
+  useEffect(() => {
+    const container = map.getContainer();
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const delta = event.deltaY;
+        if (delta === 0) return;
+        const snap = map.options.zoomSnap ?? 1;
+        const step = delta < 0 ? snap : -snap;
+        map.setZoom(map.getZoom() + step);
+        return;
+      }
+      onHintNeededRef.current();
+    };
+
+    container.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      container.removeEventListener("wheel", handleWheel);
+    };
+  }, [map]);
+
+  return null;
+}
+
 export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProps) {
+  const [hintVisible, setHintVisible] = useState(false);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const isMac = useMemo(() => detectIsMac(), []);
+  const hintKeyLabel = isMac ? "\u2318" : "Ctrl";
+
+  const flashHint = useCallback(() => {
+    setHintVisible(true);
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = setTimeout(() => {
+      setHintVisible(false);
+      hintTimerRef.current = null;
+    }, ZOOM_HINT_FADE_MS);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    };
+  }, []);
+
   return (
     <div
       className={cn(
-        "h-[400px] md:h-[500px] w-full rounded-md border border-border overflow-hidden",
+        "relative h-[400px] md:h-[500px] w-full rounded-md border border-border overflow-hidden",
         className,
       )}
       data-testid="draw-map-shell"
@@ -215,6 +299,7 @@ export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProp
       >
         <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
         <GeomanController shapes={shapes} onShapesChange={onShapesChange} />
+        <ModifierZoomController onHintNeeded={flashHint} />
         {pins && pins.length > 0 ? (
           <MarkerClusterGroup chunkedLoading>
             {pins.map((pin) => (
@@ -225,6 +310,19 @@ export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProp
           </MarkerClusterGroup>
         ) : null}
       </MapContainer>
+      <div
+        data-testid="zoom-hint"
+        aria-hidden={!hintVisible}
+        className={cn(
+          "pointer-events-none absolute inset-0 z-[1000] flex items-center justify-center transition-opacity duration-200",
+          hintVisible ? "opacity-100" : "opacity-0",
+        )}
+      >
+        <div className="rounded-md bg-black/70 px-4 py-2 text-sm font-medium text-white shadow-lg">
+          Hold <kbd className="rounded bg-white/20 px-1.5 py-0.5 font-mono">{hintKeyLabel}</kbd> to
+          zoom
+        </div>
+      </div>
     </div>
   );
 }
