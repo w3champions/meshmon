@@ -347,6 +347,14 @@ impl Scheduler {
 
         let outcome = self.dispatcher.dispatch(agent_id, allowed).await;
 
+        // Both revert branches gate on `resolution_state = 'dispatched'`
+        // — the same predicate the writer uses. Without it, an operator
+        // `force_pair` or `apply_edit{force_measurement=true}` that
+        // lands between batch claim and dispatcher completion would
+        // get clobbered back to `pending` by these UPDATEs, losing
+        // the reset. With the gate, concurrent resets survive and the
+        // revert becomes a silent no-op for those rows.
+
         // Rate-limited pairs: revert AND decrement attempt_count so a
         // throttling decision made before the RPC does not burn retry
         // budget. Without this, a high-traffic destination would exhaust
@@ -358,7 +366,8 @@ impl Scheduler {
                     SET resolution_state = 'pending',
                         dispatched_at    = NULL,
                         attempt_count    = GREATEST(0, attempt_count - 1)
-                  WHERE id = ANY($1::bigint[])",
+                  WHERE id = ANY($1::bigint[])
+                    AND resolution_state = 'dispatched'",
                 &outcome.rate_limited_ids as &[i64],
             )
             .execute(&self.pool)
@@ -376,7 +385,8 @@ impl Scheduler {
                 "UPDATE campaign_pairs
                     SET resolution_state = 'pending',
                         dispatched_at    = NULL
-                  WHERE id = ANY($1::bigint[])",
+                  WHERE id = ANY($1::bigint[])
+                    AND resolution_state = 'dispatched'",
                 &outcome.rejected_ids as &[i64],
             )
             .execute(&self.pool)

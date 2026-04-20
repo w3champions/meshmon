@@ -9,15 +9,22 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use async_trait::async_trait;
 use meshmon_protocol::pb::measurement_result::Outcome;
 use meshmon_protocol::{MeasurementResult, MeasurementSummary};
-use meshmon_service::campaign::dispatch::PendingPair;
+use meshmon_service::campaign::dispatch::{DispatchOutcome, PairDispatcher, PendingPair};
 use meshmon_service::campaign::model::ProbeProtocol;
 use meshmon_service::campaign::repo::{self, CreateInput, EditInput};
+use meshmon_service::campaign::scheduler::Scheduler;
 use meshmon_service::campaign::writer::{SettleOutcome, SettleWriter};
+use meshmon_service::registry::AgentRegistry;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Test-unique destination so parallel runs cannot collide on the
 /// `(campaign, source, dest)` uniqueness constraint. Allocations stay
@@ -166,6 +173,176 @@ async fn late_settle_is_dropped_when_pair_was_reset() {
         "pair measurement_id must stay NULL after reset-then-late-settle",
     );
 
+    repo::delete(&pool, campaign.id).await.expect("cleanup");
+    sqlx::query("DELETE FROM agents WHERE id = $1")
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup agent");
+}
+
+/// Custom dispatcher that parks the batch on a shared `Mutex` so the
+/// test can inject an operator reset between the dispatcher returning
+/// and the scheduler running its revert UPDATE. Returns every pair as
+/// `rejected_ids` so we hit the scheduler's dispatcher-rejection
+/// revert path — which must be gated on `resolution_state='dispatched'`
+/// to survive the concurrent reset.
+struct RejectAfterBlockDispatcher {
+    released: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    observed: Arc<Mutex<Vec<i64>>>,
+}
+
+#[async_trait]
+impl PairDispatcher for RejectAfterBlockDispatcher {
+    async fn dispatch(&self, _agent: &str, batch: Vec<PendingPair>) -> DispatchOutcome {
+        let ids: Vec<i64> = batch.iter().map(|p| p.pair_id).collect();
+        *self.observed.lock().await = ids.clone();
+        if let Some(rx) = self.released.lock().await.take() {
+            let _ = rx.await;
+        }
+        DispatchOutcome {
+            dispatched: 0,
+            rejected_ids: ids,
+            rate_limited_ids: Vec::new(),
+            skipped_reason: Some("test-reject".into()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn scheduler_revert_does_not_clobber_concurrent_reset() {
+    let pool = common::shared_migrated_pool().await;
+    let dest = unique_dest();
+    let agent_id = "agent-scheduler-revert-race";
+
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
+         VALUES ($1, $1, '198.51.100.2'::inet, 7000, 7001, now()) \
+         ON CONFLICT (id) DO UPDATE SET last_seen_at = now()",
+    )
+    .bind(agent_id)
+    .execute(&pool)
+    .await
+    .expect("seed agent");
+
+    let campaign = repo::create(
+        &pool,
+        CreateInput {
+            title: "scheduler-revert-race".into(),
+            notes: "".into(),
+            protocol: ProbeProtocol::Icmp,
+            source_agent_ids: vec![agent_id.to_string()],
+            destination_ips: vec![dest],
+            force_measurement: false,
+            probe_count: None,
+            probe_count_detail: None,
+            timeout_ms: None,
+            probe_stagger_ms: None,
+            loss_threshold_pct: None,
+            stddev_weight: None,
+            evaluation_mode: None,
+            created_by: None,
+        },
+    )
+    .await
+    .expect("create campaign");
+    repo::start(&pool, campaign.id).await.expect("start");
+
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let observed = Arc::new(Mutex::new(Vec::<i64>::new()));
+    let dispatcher = Arc::new(RejectAfterBlockDispatcher {
+        released: Arc::new(Mutex::new(Some(release_rx))),
+        observed: observed.clone(),
+    });
+
+    let registry = Arc::new(AgentRegistry::new(
+        pool.clone(),
+        Duration::from_secs(60),
+        Duration::from_secs(300),
+    ));
+    registry.initial_load().await.expect("registry load");
+
+    let scheduler = Scheduler::new(
+        pool.clone(),
+        registry,
+        dispatcher,
+        /*tick_ms=*/ 50,
+        /*chunk_size=*/ 10,
+        /*max_pair_attempts=*/ 3,
+        /*target_active_window=*/ Duration::from_secs(300),
+    );
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(scheduler.run(cancel.clone()));
+
+    // Wait for the scheduler to claim the pair and hand it to the
+    // dispatcher (which then parks on `released`).
+    let pair_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let guard = observed.lock().await;
+            if let Some(id) = guard.first() {
+                break *id;
+            }
+            drop(guard);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("dispatcher saw the batch within 5 s");
+
+    // Pair is `dispatched`; dispatcher is parked. Simulate an operator
+    // action racing the dispatcher — flip the row to `skipped` with a
+    // distinctive `last_error` tag so the assertion below fires iff the
+    // scheduler's revert UPDATE clobbers the reset back to `pending`.
+    sqlx::query(
+        "UPDATE campaign_pairs \
+            SET resolution_state = 'skipped', last_error = 'operator-reset-marker' \
+          WHERE id = $1",
+    )
+    .bind(pair_id)
+    .execute(&pool)
+    .await
+    .expect("mark pair skipped");
+
+    // Release the dispatcher; its DispatchOutcome returns `rejected_ids`
+    // so the scheduler runs the revert UPDATE.
+    release_tx.send(()).expect("release dispatcher");
+
+    // Poll for the race to resolve. The revert must NOT clobber the
+    // `skipped` state — the gate on `resolution_state = 'dispatched'`
+    // makes the UPDATE a no-op for the now-non-dispatched row.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut final_state = String::new();
+    while std::time::Instant::now() < deadline {
+        final_state = sqlx::query_scalar::<_, String>(
+            "SELECT resolution_state::text FROM campaign_pairs WHERE id = $1",
+        )
+        .bind(pair_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read state");
+        if final_state != "dispatched" {
+            // Either the race has fully played out to `skipped` (good)
+            // or it clobbered to `pending` (bad) — break and assert.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            final_state = sqlx::query_scalar::<_, String>(
+                "SELECT resolution_state::text FROM campaign_pairs WHERE id = $1",
+            )
+            .bind(pair_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read state");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        final_state, "skipped",
+        "scheduler revert must not clobber the concurrent operator reset",
+    );
+
+    cancel.cancel();
+    let _ = handle.await;
     repo::delete(&pool, campaign.id).await.expect("cleanup");
     sqlx::query("DELETE FROM agents WHERE id = $1")
         .bind(agent_id)
