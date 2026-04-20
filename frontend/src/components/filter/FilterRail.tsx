@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { components } from "@/api/schema.gen";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,34 @@ type CityFacet = components["schemas"]["CityFacet"];
  * buckets beyond the initial cap.
  */
 const TOP_N = 50;
+
+const mapCountryFacet = (o: CountryFacet): FacetOption<string> => ({
+  id: o.code,
+  label: o.name ? `${o.name} (${o.code})` : o.code,
+  searchText: `${o.code} ${o.name ?? ""}`,
+  count: o.count,
+});
+
+const mapAsnFacet = (o: AsnFacet): FacetOption<number> => ({
+  id: o.asn,
+  label: `AS${o.asn}`,
+  searchText: String(o.asn),
+  count: o.count,
+});
+
+const mapNetworkFacet = (o: NetworkFacet): FacetOption<string> => ({
+  id: o.name,
+  label: o.name,
+  searchText: o.name,
+  count: o.count,
+});
+
+const mapCityFacet = (o: CityFacet): FacetOption<string> => ({
+  id: o.name,
+  label: o.name,
+  searchText: o.name,
+  count: o.count,
+});
 
 export interface FilterValue {
   countryCodes: string[];
@@ -52,12 +80,7 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
         searchPlaceholder="Search countries"
         clearLabel="Clear country filter"
         idToKey={(id) => id}
-        mapOption={(o) => ({
-          id: o.code,
-          label: o.name ? `${o.name} (${o.code})` : o.code,
-          searchText: `${o.code} ${o.name ?? ""}`,
-          count: o.count,
-        })}
+        mapOption={mapCountryFacet}
         onToggle={(code) =>
           onChange({ ...value, countryCodes: toggleInArray(value.countryCodes, code) })
         }
@@ -72,12 +95,7 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
         searchPlaceholder="Search ASN"
         clearLabel="Clear ASN filter"
         idToKey={(id) => String(id)}
-        mapOption={(o) => ({
-          id: o.asn,
-          label: `AS${o.asn}`,
-          searchText: String(o.asn),
-          count: o.count,
-        })}
+        mapOption={mapAsnFacet}
         onToggle={(asn) => onChange({ ...value, asns: toggleInArray(value.asns, asn) })}
         onClear={() => onChange({ ...value, asns: [] })}
       />
@@ -90,7 +108,7 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
         searchPlaceholder="Search networks"
         clearLabel="Clear network filter"
         idToKey={(id) => id}
-        mapOption={(o) => ({ id: o.name, label: o.name, searchText: o.name, count: o.count })}
+        mapOption={mapNetworkFacet}
         onToggle={(name) => onChange({ ...value, networks: toggleInArray(value.networks, name) })}
         onClear={() => onChange({ ...value, networks: [] })}
       />
@@ -103,7 +121,7 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
         searchPlaceholder="Search cities"
         clearLabel="Clear city filter"
         idToKey={(id) => id}
-        mapOption={(o) => ({ id: o.name, label: o.name, searchText: o.name, count: o.count })}
+        mapOption={mapCityFacet}
         onToggle={(name) => onChange({ ...value, cities: toggleInArray(value.cities, name) })}
         onClear={() => onChange({ ...value, cities: [] })}
       />
@@ -152,9 +170,19 @@ function GroupShell({
   children,
   rightSlot,
 }: GroupShellProps) {
+  // `<details>` is treated as uncontrolled: `defaultOpen` only sets the initial
+  // state on mount. After mount, the user is in full control — later prop
+  // changes MUST NOT retake control and re-open or re-close the group.
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount; re-running on defaultOpen would retake control from the user
+  useEffect(() => {
+    if (detailsRef.current && defaultOpen) {
+      detailsRef.current.open = true;
+    }
+  }, []);
   return (
     <details
-      open={defaultOpen}
+      ref={detailsRef}
       className="group rounded-md border border-transparent open:border-border open:bg-muted/30"
     >
       <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted">

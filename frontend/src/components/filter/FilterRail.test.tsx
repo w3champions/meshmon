@@ -208,4 +208,41 @@ describe("FilterRail", () => {
     const usButton = screen.getByRole("button", { name: /united states/i });
     expect(usButton).toHaveAttribute("aria-pressed", "true");
   });
+
+  test("Map shapes <details> is uncontrolled — prop changes don't retake control from the user", () => {
+    // Regression: previously GroupShell used `open={defaultOpen}`, which made
+    // the element controlled. Adding a shape would permanently re-open the
+    // section and defeat user collapses. With an uncontrolled <details> +
+    // one-shot ref-init, initial state honors the prop at mount; subsequent
+    // prop changes MUST NOT change the open attribute.
+    const { rerender } = render(
+      <FilterRail
+        value={EMPTY_VALUE}
+        onChange={() => {}}
+        facets={baseFacets()}
+        onOpenMap={() => {}}
+      />,
+    );
+    const summary = findSummary(/^Map shapes/);
+    const details = summary.closest("details") as HTMLDetailsElement;
+    expect(details).not.toBeNull();
+    // Starts closed with no shapes.
+    expect(details.open).toBe(false);
+
+    const shape: GeoShape = {
+      kind: "rectangle",
+      sw: [-10, -10],
+      ne: [10, 10],
+    };
+    rerender(
+      <FilterRail
+        value={{ ...EMPTY_VALUE, shapes: [shape] }}
+        onChange={() => {}}
+        facets={baseFacets()}
+        onOpenMap={() => {}}
+      />,
+    );
+    // Adding a shape must NOT force the section open — the user is in control.
+    expect(details.open).toBe(false);
+  });
 });
