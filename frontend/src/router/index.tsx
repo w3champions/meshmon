@@ -13,6 +13,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
 import Alerts from "@/pages/Alerts";
+import Catalogue from "@/pages/Catalogue";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
@@ -146,6 +147,23 @@ const alertsRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/alerts",
   component: Alerts,
+});
+
+export const catalogueSearchSchema = z.object({
+  country: z.array(z.string()).optional(),
+  asn: z.array(z.coerce.number()).optional(),
+  network: z.array(z.string()).optional(),
+  city: z.array(z.string()).optional(),
+  ipPrefix: z.string().optional(),
+  name: z.string().optional(),
+  view: z.enum(["table", "map"]).default("table"),
+});
+
+export const catalogueRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/catalogue",
+  component: Catalogue,
+  validateSearch: (search) => catalogueSearchSchema.parse(search),
 });
 
 const routeTree = rootRoute.addChildren([
