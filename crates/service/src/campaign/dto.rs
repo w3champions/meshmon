@@ -344,7 +344,7 @@ pub struct EvaluationDto {
     /// Owning campaign.
     pub campaign_id: Uuid,
     /// When the evaluator produced this result set.
-    pub evaluated_at: chrono::DateTime<chrono::Utc>,
+    pub evaluated_at: DateTime<Utc>,
     /// Loss-rate threshold (percent) that was applied.
     pub loss_threshold_pct: f32,
     /// Weight applied to RTT stddev during scoring.
@@ -359,6 +359,7 @@ pub struct EvaluationDto {
     pub candidates_good: i32,
     /// Average end-to-end improvement (ms) across qualifying candidates;
     /// negative means faster. `None` when no candidate qualified.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_improvement_ms: Option<f32>,
     /// Full candidate breakdown + unqualified-reason map.
     pub results: EvaluationResultsDto,
@@ -381,14 +382,19 @@ pub struct EvaluationCandidateDto {
     /// Transit destination IP as a bare host string.
     pub destination_ip: String,
     /// Operator-facing label from the catalogue, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Catalogue city, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
     /// Catalogue ISO country code, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
     /// Catalogue ASN, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub asn: Option<i64>,
     /// Catalogue network operator, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub network_operator: Option<String>,
     /// True when destination_ip appears in agents.ip. UI renders a
     /// "mesh member — no acquisition needed" badge.
@@ -398,8 +404,10 @@ pub struct EvaluationCandidateDto {
     /// Number of baseline pairs this candidate was scored against.
     pub pairs_total_considered: i32,
     /// Average improvement (ms) across considered pairs; negative means faster.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_improvement_ms: Option<f32>,
     /// Average observed loss (percent) on the direct leg during scoring.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_loss_pct: Option<f32>,
     /// Composite score; lower is better.
     pub composite_score: f32,
@@ -433,8 +441,10 @@ pub struct EvaluationPairDetailDto {
     /// Whether this pair cleared the evaluator's qualify predicate.
     pub qualifies: bool,
     /// FK to the `measurements` row covering A→X, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mtr_measurement_id_ax: Option<i64>,
     /// FK to the `measurements` row covering X→B, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mtr_measurement_id_xb: Option<i64>,
 }
 
