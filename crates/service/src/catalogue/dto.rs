@@ -23,6 +23,75 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+/// Sort columns accepted by `GET /api/catalogue`.
+///
+/// The list handler always appends `id DESC` as the tiebreaker so the
+/// ordering is total even when multiple rows share the same sort
+/// value, and every variant treats nullable columns as `NULLS LAST`
+/// regardless of direction. Both invariants are load-bearing for the
+/// keyset cursor — see [`super::sort::Cursor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SortBy {
+    /// Row creation timestamp — the default.
+    #[default]
+    CreatedAt,
+    /// Catalogued IP address (text form for ordering).
+    Ip,
+    /// Operator-supplied display label.
+    DisplayName,
+    /// City name.
+    City,
+    /// ISO 3166-1 alpha-2 country code.
+    CountryCode,
+    /// Autonomous system number.
+    Asn,
+    /// Network operator / ISP name.
+    NetworkOperator,
+    /// Enrichment pipeline status.
+    EnrichmentStatus,
+    /// Operator-supplied external link.
+    Website,
+    /// Derived "row has coordinates" boolean — rows with lat+lng land
+    /// before rows without, regardless of direction; `NULLS LAST` applies.
+    Location,
+}
+
+/// Sort direction for [`SortBy`]. `NULLS LAST` applies to both arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDir {
+    /// Ascending — smallest first, NULLs at the tail.
+    Asc,
+    /// Descending — largest first, NULLs at the tail.
+    #[default]
+    Desc,
+}
+
+/// Default [`SortBy`] when the query omits `sort` — newest rows first.
+pub fn default_sort() -> SortBy {
+    SortBy::CreatedAt
+}
+
+/// Default [`SortDir`] when the query omits `sort_dir` — pairs with
+/// [`default_sort`] to produce the historical `(created_at DESC, id DESC)`
+/// ordering.
+pub fn default_sort_dir() -> SortDir {
+    SortDir::Desc
+}
+
+/// GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.
+///
+/// The ring is implicitly closed — the server appends the closing
+/// vertex if absent. A minimum of three distinct points is required;
+/// the wire-type conversion in [`super::shapes`] (added in Task 2)
+/// rejects shorter rings.
+///
+/// The `[lng, lat]` order matches GeoJSON and `@turf/helpers`, so the
+/// frontend can feed Turf outputs straight through without reordering.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct Polygon(pub Vec<[f64; 2]>);
+
 /// Operator-facing view of a single catalogue row.
 ///
 /// This is the wire shape returned by `GET /api/catalogue/{id}` and
@@ -192,12 +261,37 @@ pub struct ListQuery {
     #[serde(default, deserialize_with = "deserialize_bbox")]
     #[param(style = Form, explode = false)]
     pub bbox: Option<[f64; 4]>,
-    /// TODO(T13): cursor pagination by `created_at`.
+    /// Zero-or-more city names. ANY semantics; exact match.
+    ///
+    /// CSV string; e.g. `?city=Berlin,Paris`. See `country_code` for
+    /// rationale; repeat-key form is not accepted.
+    #[serde(default, deserialize_with = "deserialize_csv_string")]
+    #[param(style = Form, explode = false)]
+    pub city: Vec<String>,
+    /// Zero-or-more polygon shapes (point-in-any OR semantics).
+    ///
+    /// Accepts an inline JSON array of `[[lng, lat], ...]` rings, URL-
+    /// encoded into the query string. The server computes the union
+    /// bbox as a cheap SQL pre-filter and then runs exact point-in-
+    /// polygon over the returned page — see [`super::shapes`] (Task 2).
+    ///
+    /// Malformed JSON silently yields no filter, matching the other
+    /// filter-input permissiveness on this endpoint.
+    #[serde(default, deserialize_with = "deserialize_shapes_json")]
+    #[param(value_type = String)]
+    pub shapes: Vec<Polygon>,
+    /// Sort column — defaults to [`SortBy::CreatedAt`]. `NULLS LAST`
+    /// applies; `id DESC` is the invariant tiebreaker.
+    #[serde(default = "default_sort")]
+    pub sort: SortBy,
+    /// Sort direction — defaults to [`SortDir::Desc`].
+    #[serde(default = "default_sort_dir")]
+    pub sort_dir: SortDir,
+    /// Opaque keyset cursor returned by a prior call's `next_cursor`.
+    /// Absent for the first page. See [`super::sort::Cursor`] for the
+    /// wire format and the server-side revalidation rules.
     #[serde(default)]
-    pub cursor_created_at: Option<DateTime<Utc>>,
-    /// TODO(T13): cursor pagination by `id` (tie-breaker).
-    #[serde(default)]
-    pub cursor_id: Option<Uuid>,
+    pub after: Option<String>,
     /// Page size. Clamped to `1..=500` internally; default 100.
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -265,13 +359,48 @@ where
     Ok(Some([parts[0], parts[1], parts[2], parts[3]]))
 }
 
+/// Parse the `shapes` query parameter into `Vec<Polygon>`.
+///
+/// Accepts either an inline JSON array (`?shapes=[[[lng,lat],…]]`) or
+/// an absent / empty value. Malformed JSON silently yields an empty
+/// vec — the endpoint's filter inputs are advisory and the caller
+/// gets a successful response with no shape filter rather than a 400,
+/// matching the `ip_prefix` / `bbox` silent-drop semantics.
+fn deserialize_shapes_json<'de, D>(de: D) -> Result<Vec<Polygon>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = Option::deserialize(de)?;
+    let Some(s) = raw else { return Ok(Vec::new()) };
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str(&s).unwrap_or_default())
+}
+
 /// Response body for `GET /api/catalogue`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListResponse {
-    /// Matching rows in `created_at DESC, id DESC` order.
+    /// Matching rows ordered by the request's `sort` / `sort_dir` with
+    /// `id DESC` as the tiebreaker; nullable sort columns place NULLs
+    /// at the tail regardless of direction.
     pub entries: Vec<CatalogueEntryDto>,
     /// Count of all rows matching the filter (ignores `limit`).
+    ///
+    /// When the `shapes` filter is non-empty, `total` is an upper-
+    /// bound approximation: SQL can only pre-filter by the shapes'
+    /// union bounding box, so rows inside the bbox but outside every
+    /// polygon are counted here while the corresponding point-in-
+    /// polygon pass drops them from `entries`. Clients that need an
+    /// exact post-shape count must sum `entries.len()` across every
+    /// page.
     pub total: i64,
+    /// Forward-paging token. `Some` when the server filled `limit`
+    /// rows and a subsequent page may exist; `None` when the end of
+    /// the result set has been reached. See [`super::sort::Cursor`]
+    /// for the wire format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Error envelope used by every non-2xx catalogue response.

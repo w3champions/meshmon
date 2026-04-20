@@ -203,14 +203,22 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
         name: name_filter,
         bounding_box: q.bbox,
         limit: q.limit,
-        cursor_created_at: q.cursor_created_at,
-        cursor_id: q.cursor_id,
+        // Task 3 rewrites `repo::list` with the `list_variant!` macro
+        // and drops these fields from `ListFilter`. Until then, the
+        // repo still expects them — pass `None` so the handler keeps
+        // compiling while `ListQuery` already speaks the new surface.
+        cursor_created_at: None,
+        cursor_id: None,
     };
     match repo::list(&state.pool, filter).await {
         Ok((entries, total)) => {
             let body = ListResponse {
                 entries: entries.into_iter().map(CatalogueEntryDto::from).collect(),
                 total,
+                // Task 3 derives the cursor from the last row of the
+                // page; `None` is the only value the legacy repo can
+                // produce.
+                next_cursor: None,
             };
             (StatusCode::OK, Json(body)).into_response()
         }
