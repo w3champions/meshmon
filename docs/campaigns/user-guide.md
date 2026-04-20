@@ -333,6 +333,88 @@ later subsystem. A `completed` campaign can be flipped to `evaluated`
 once the evaluator ships; `evaluated` campaigns accept edit deltas and
 round-trip through `running → completed → evaluated` again.
 
+## Composer workflow
+
+The sections above describe the HTTP contract. The composer UI is the
+operator's front door onto that contract — the mapping from button
+clicks to payloads is below.
+
+### Start a new campaign
+
+Navigate to `/campaigns/new`. Fill the title, pick sources (agents),
+pick destinations (catalogue IPs), tune the knobs, and click **Start**.
+The page keeps a local draft until **Start** is clicked — the URL does
+not persist draft state, so a browser refresh loses the draft.
+
+### Sources
+
+Agents with `catalogue_coordinates: null` are excluded from the map
+view but remain in the list. Offline agents (last heartbeat older than
+5 min) carry a badge; the backend still accepts them and silently skips
+their pairs after 3 dispatch attempts.
+
+### Destinations
+
+The destination panel uses the same **FilterRail** surface as the
+catalogue (country, ASN, network, city, shapes). An inline paste flow
+accepts newline-separated IPs; duplicates are reconciled against the
+catalogue silently. **Add all** and **Add matching** snapshot the
+current filter's IPs at click time — a later filter change does not
+alter the selection.
+
+### Knobs
+
+Per-campaign parameters exposed in the composer:
+
+- `protocol` — `icmp` / `tcp` / `udp`. MTR is UI-only and blocks
+  **Start**; run MTR via the per-pair **Detail** action in the results
+  view instead.
+- `probe_count` — probes per dispatched measurement (default 10).
+- `probe_count_detail` — probes per detail re-run (default 250).
+- `timeout_ms` — per-probe timeout (default 2000).
+- `probe_stagger_ms` — inter-probe stagger (default 100).
+- `loss_threshold_pct` — evaluator's loss-rate threshold in percent
+  (default 2.0).
+- `stddev_weight` — weight applied to RTT stddev (default 1.0).
+- `evaluation_mode` — `diversity` or `optimization` (default
+  `optimization`).
+
+### Diversity vs Optimization
+
+`diversity` spreads probes across as many distinct paths as possible;
+`optimization` prioritises probes most likely to catch regressions. The
+copy surfaced next to the toggle in `KnobPanel` is the authoritative
+wording — update this doc and the component together.
+
+### MTR
+
+Not a campaign protocol. Operators run MTR via the per-pair **Detail**
+action in the results view.
+
+### Force measurement
+
+When the toggle is on, the scheduler ignores the 24 h reuse cache; the
+"reusable" count collapses to zero and every pair is measured fresh.
+
+### Size preview
+
+Before **Start**, the page shows `~{sources × destinations}` as an
+approximate count (the `~` disappears once the destination set is
+committed via **Add all**). After **Create**, the backend returns an
+exact `total / reusable / fresh` triple. When `fresh` exceeds
+`[campaigns] size_warning_threshold` in
+`crates/service/src/config.rs` (default 1000), a confirmation dialog
+gates **Start**.
+
+### Stop and edit
+
+A running campaign can be stopped mid-run — pending pairs flip to
+`skipped` server-side and the writer finishes draining any in-flight
+dispatches. From terminal states (`completed`, `stopped`, or
+`evaluated`), operators can delta-edit the pair set (add/remove IPs
+with an optional "force re-measurement" toggle), update metadata, or
+delete the campaign outright.
+
 ## See also
 
 - [Architecture](architecture.md) — data model, scheduler, 24 h reuse,
