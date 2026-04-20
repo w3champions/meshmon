@@ -143,10 +143,12 @@ describe("EntryDrawer", () => {
 
     render(<EntryDrawer entry={ENTRY} onClose={onClose} />, { wrapper: wrap() });
     await user.click(screen.getByRole("button", { name: "Delete" }));
-    // Confirm dialog is visible before mutation fires.
+    // Confirm dialog is visible before mutation fires (nested Dialog portals to body).
     expect(deleteMutation.mutate).not.toHaveBeenCalled();
-    const dialog = screen.getByRole("alertdialog");
-    await user.click(within(dialog).getByRole("button", { name: "Confirm delete" }));
+    // The nested confirm dialog is the second dialog in the document.
+    const dialogs = within(document.body).getAllByRole("dialog");
+    const confirmDialog = dialogs[dialogs.length - 1];
+    await user.click(within(confirmDialog).getByRole("button", { name: "Confirm delete" }));
     expect(deleteMutation.mutate).toHaveBeenCalledTimes(1);
     expect(deleteMutation.mutate.mock.calls[0][0]).toBe(ENTRY.id);
     expect(onClose).toHaveBeenCalled();
@@ -157,11 +159,13 @@ describe("EntryDrawer", () => {
     const onClose = vi.fn();
     render(<EntryDrawer entry={ENTRY} onClose={onClose} />, { wrapper: wrap() });
     await user.click(screen.getByRole("button", { name: "Delete" }));
-    const dialog = screen.getByRole("alertdialog");
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    const dialogs = within(document.body).getAllByRole("dialog");
+    const confirmDialog = dialogs[dialogs.length - 1];
+    await user.click(within(confirmDialog).getByRole("button", { name: "Cancel" }));
     expect(deleteMutation.mutate).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    // After cancel the confirm dialog closes; only the outer edit dialog remains.
+    expect(within(document.body).getAllByRole("dialog")).toHaveLength(1);
   });
 
   test("Revert to auto is disabled while a PATCH is already in flight", () => {

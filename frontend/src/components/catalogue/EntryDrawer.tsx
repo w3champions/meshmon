@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -273,41 +273,48 @@ function EditableFieldRow({
   );
 }
 
-interface DeleteConfirmProps {
+interface DeleteConfirmDialogProps {
+  open: boolean;
   pending: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-function DeleteConfirm({ pending, onConfirm, onCancel }: DeleteConfirmProps) {
+function DeleteConfirmDialog({ open, pending, onConfirm, onCancel }: DeleteConfirmDialogProps) {
+  const confirmRef = useRef<HTMLButtonElement>(null);
+
   return (
-    <div
-      role="alertdialog"
-      aria-modal="true"
-      aria-labelledby="entry-drawer-delete-title"
-      className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3"
-    >
-      <p id="entry-drawer-delete-title" className="text-sm font-medium text-foreground">
-        Delete this catalogue entry?
-      </p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        This removes the row and its enrichment history. This action cannot be undone.
-      </p>
-      <div className="mt-3 flex justify-end gap-2">
-        <Button variant="outline" size="sm" type="button" onClick={onCancel} disabled={pending}>
-          Cancel
-        </Button>
-        <Button
-          variant="destructive"
-          size="sm"
-          type="button"
-          onClick={onConfirm}
-          disabled={pending}
-        >
-          Confirm delete
-        </Button>
-      </div>
-    </div>
+    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <DialogContent
+        className="sm:max-w-md"
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          confirmRef.current?.focus();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>Delete this catalogue entry?</DialogTitle>
+          <DialogDescription>
+            This removes the row and its enrichment history. This action cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" size="sm" type="button" onClick={onCancel} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            ref={confirmRef}
+            variant="destructive"
+            size="sm"
+            type="button"
+            onClick={onConfirm}
+            disabled={pending}
+          >
+            Confirm delete
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -483,15 +490,14 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
               Save
             </Button>
           </DialogFooter>
-
-          {deleteOpen && (
-            <DeleteConfirm
-              pending={deleteMutation.isPending}
-              onConfirm={handleConfirmDelete}
-              onCancel={() => setDeleteOpen(false)}
-            />
-          )}
         </form>
+
+        <DeleteConfirmDialog
+          open={deleteOpen}
+          pending={deleteMutation.isPending}
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setDeleteOpen(false)}
+        />
       </DialogContent>
     </Dialog>
   );
