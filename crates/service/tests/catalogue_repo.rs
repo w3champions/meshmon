@@ -417,3 +417,292 @@ async fn apply_enrichment_returns_none_when_row_deleted_concurrently() {
 
     db.close().await;
 }
+
+/// Assemble a fully-populated [`repo::BulkMetadata`] for tests.
+fn test_metadata() -> repo::BulkMetadata {
+    repo::BulkMetadata {
+        display_name: Some("fastly-sfo".into()),
+        city: Some("San Francisco".into()),
+        country_code: Some("US".into()),
+        country_name: Some("United States".into()),
+        latitude: Some(37.7749),
+        longitude: Some(-122.4194),
+        website: Some("https://example.com/status".into()),
+        notes: Some("operator-seeded during bulk paste".into()),
+    }
+}
+
+#[tokio::test]
+async fn bulk_metadata_applies_to_new_rows_and_locks_fields() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec![
+        "198.51.100.141".parse().unwrap(),
+        "198.51.100.142".parse().unwrap(),
+    ];
+    let md = test_metadata();
+
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        Some("operator@example.com"),
+        Some(&md),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.created.len(), 2);
+    assert!(outcome.existing.is_empty());
+    assert!(
+        outcome.skips.iter().all(|(_, v)| v.is_empty()),
+        "new rows carry no prior locks — nothing to skip, got {:?}",
+        outcome.skips
+    );
+
+    for row in &outcome.created {
+        assert_eq!(row.display_name.as_deref(), Some("fastly-sfo"));
+        assert_eq!(row.city.as_deref(), Some("San Francisco"));
+        assert_eq!(row.country_code.as_deref(), Some("US"));
+        assert_eq!(row.country_name.as_deref(), Some("United States"));
+        assert_eq!(row.latitude, Some(37.7749));
+        assert_eq!(row.longitude, Some(-122.4194));
+        assert_eq!(
+            row.website.as_deref(),
+            Some("https://example.com/status")
+        );
+        assert_eq!(
+            row.notes.as_deref(),
+            Some("operator-seeded during bulk paste")
+        );
+
+        for expected in [
+            Field::DisplayName,
+            Field::City,
+            Field::CountryCode,
+            Field::CountryName,
+            Field::Latitude,
+            Field::Longitude,
+            Field::Website,
+            Field::Notes,
+        ] {
+            assert!(
+                row.is_locked(expected),
+                "expected {} to be locked on new row, got {:?}",
+                expected.as_str(),
+                row.operator_edited_fields
+            );
+        }
+    }
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn bulk_metadata_skips_locked_fields_on_existing_rows() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    // Seed a pre-existing row with a locked City (operator PATCH).
+    let ips: Vec<IpAddr> = vec!["198.51.100.143".parse().unwrap()];
+    let seeded = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = seeded.created[0].id;
+    repo::patch(
+        &db.pool,
+        id,
+        repo::PatchSet {
+            city: Some(Some("Berlin".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Re-paste with metadata that proposes a different city.
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        None,
+        Some(&test_metadata()),
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.created.is_empty());
+    assert_eq!(outcome.existing.len(), 1);
+    let row = &outcome.existing[0];
+
+    // City stays locked at the pre-paste value.
+    assert_eq!(row.city.as_deref(), Some("Berlin"));
+    assert!(row.is_locked(Field::City));
+
+    // Unlocked fields picked up the metadata values.
+    assert_eq!(row.display_name.as_deref(), Some("fastly-sfo"));
+    assert_eq!(row.country_code.as_deref(), Some("US"));
+    assert_eq!(row.latitude, Some(37.7749));
+
+    // Skip log records exactly one "City" entry for this row.
+    let skip_for_row = outcome
+        .skips
+        .iter()
+        .find(|(rid, _)| *rid == id)
+        .expect("expected a skip entry for the locked row");
+    assert_eq!(
+        skip_for_row.1,
+        vec!["City".to_string()],
+        "expected exactly one City skip, got {:?}",
+        skip_for_row.1
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn bulk_metadata_paired_lat_lon_skip_if_either_locked() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["198.51.100.144".parse().unwrap()];
+    let seeded = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = seeded.created[0].id;
+
+    // Lock only Latitude.
+    repo::patch(
+        &db.pool,
+        id,
+        repo::PatchSet {
+            latitude: Some(Some(10.0)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        None,
+        Some(&test_metadata()),
+    )
+    .await
+    .unwrap();
+
+    let row = &outcome.existing[0];
+
+    // Paired atomicity: neither column moves.
+    assert_eq!(row.latitude, Some(10.0));
+    assert!(row.longitude.is_none());
+    assert!(row.is_locked(Field::Latitude));
+    assert!(
+        !row.is_locked(Field::Longitude),
+        "Longitude must stay unlocked when the write was skipped, got {:?}",
+        row.operator_edited_fields
+    );
+
+    let skip_for_row = outcome
+        .skips
+        .iter()
+        .find(|(rid, _)| *rid == id)
+        .expect("expected a paired-location skip entry");
+    assert_eq!(
+        skip_for_row.1,
+        vec!["Location".to_string()],
+        "expected exactly one composite Location skip, got {:?}",
+        skip_for_row.1
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn bulk_metadata_paired_country_skip_if_either_locked() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["198.51.100.145".parse().unwrap()];
+    let seeded = repo::insert_many(&db.pool, &ips, CatalogueSource::Operator, None)
+        .await
+        .unwrap();
+    let id = seeded.created[0].id;
+
+    // Lock only CountryName (the less-obvious half).
+    repo::patch(
+        &db.pool,
+        id,
+        repo::PatchSet {
+            country_name: Some(Some("Germany".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        None,
+        Some(&test_metadata()),
+    )
+    .await
+    .unwrap();
+
+    let row = &outcome.existing[0];
+
+    // Paired atomicity: neither half moves.
+    assert!(row.country_code.is_none());
+    assert_eq!(row.country_name.as_deref(), Some("Germany"));
+    assert!(row.is_locked(Field::CountryName));
+    assert!(
+        !row.is_locked(Field::CountryCode),
+        "CountryCode must stay unlocked when the write was skipped, got {:?}",
+        row.operator_edited_fields
+    );
+
+    let skip_for_row = outcome
+        .skips
+        .iter()
+        .find(|(rid, _)| *rid == id)
+        .expect("expected a paired-country skip entry");
+    assert_eq!(
+        skip_for_row.1,
+        vec!["Country".to_string()],
+        "expected exactly one composite Country skip, got {:?}",
+        skip_for_row.1
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn bulk_metadata_none_mirrors_legacy_insert_many() {
+    let db = common::acquire(false).await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    let ips: Vec<IpAddr> = vec!["198.51.100.146".parse().unwrap()];
+    let outcome = repo::insert_many_with_metadata(
+        &db.pool,
+        &ips,
+        CatalogueSource::Operator,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.created.len(), 1);
+    assert!(outcome.existing.is_empty());
+    assert!(outcome.skips.is_empty());
+    // No metadata → no fields locked, no enrichment state touched.
+    assert!(outcome.created[0].operator_edited_fields.is_empty());
+    assert_eq!(outcome.created[0].enrichment_status, EnrichmentStatus::Pending);
+
+    db.close().await;
+}
