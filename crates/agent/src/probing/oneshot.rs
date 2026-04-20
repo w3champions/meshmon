@@ -1058,16 +1058,130 @@ mod tests {
         );
     }
 
+    // --- Shared-resource audit & coexistence -------------------------------
+
+    /// 400 concurrent calls to the shared `next_trace_id()` allocator must
+    /// yield 400 unique non-zero `u16` values. Proves the allocator is the
+    /// single source of truth and that the wrap-skip-zero guard holds
+    /// under contention — the foundation on which the coexistence
+    /// invariant from spec 03 §6 rests.
     #[test]
-    fn mtr_state_with_no_hops_emits_timeout_failure() {
-        // We can't easily construct a real `trippy_core::State` without
-        // running a tracer, but we can test the logic fingerprint via the
-        // dispatch path: pair a loopback MTR request against the internal
-        // check. Covered by the loopback integration test above; this
-        // place-holder unit asserts the failure arm is reachable when the
-        // aggregator is wired.
-        //
-        // Left as an integration-only assertion because State's fields
-        // are pub(crate) to trippy-core.
+    fn next_trace_id_is_unique_under_contention() {
+        use std::collections::HashSet;
+        use std::thread;
+
+        const TOTAL: usize = 400;
+        let mut handles = Vec::with_capacity(TOTAL);
+        for _ in 0..TOTAL {
+            handles.push(thread::spawn(crate::probing::next_trace_id));
+        }
+        let ids: HashSet<u16> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread panicked"))
+            .collect();
+        assert_eq!(ids.len(), TOTAL, "all {TOTAL} ids must be unique");
+        assert!(!ids.contains(&0), "zero is reserved (wildcard)");
+    }
+
+    /// The oneshot module must never reach into the continuous UDP
+    /// prober's shared infrastructure. A compile-time grep over the
+    /// module's source proves this; any future edit that imports or
+    /// names the forbidden symbols trips this test.
+    #[test]
+    fn oneshot_source_avoids_continuous_udp_symbols() {
+        const SRC: &str = include_str!("oneshot.rs");
+        // Scan only up to the audit-cutoff marker so the assertions
+        // below don't match their own literals.
+        const CUTOFF: &str = "audit-cutoff-anchor-do-not-delete";
+        let idx = SRC
+            .find(CUTOFF)
+            .expect("cutoff marker must appear before the assertions");
+        let preceding = &SRC[..idx];
+        let pool_symbol = [
+            'U', 'd', 'p', 'P', 'r', 'o', 'b', 'e', 'r', 'P', 'o', 'o', 'l',
+        ]
+        .iter()
+        .collect::<String>();
+        let echo_symbol = ['e', 'c', 'h', 'o', '_', 'u', 'd', 'p']
+            .iter()
+            .collect::<String>();
+        assert!(
+            !preceding.contains(&pool_symbol),
+            "oneshot.rs must not reach into the continuous UDP pool",
+        );
+        assert!(
+            !preceding.contains(&echo_symbol),
+            "oneshot.rs must not import the UDP echo module",
+        );
+        // audit-cutoff-anchor-do-not-delete
+    }
+
+    /// Coexistence: two OneshotProber batches running concurrently against
+    /// loopback both return results, share the `next_trace_id()` allocator,
+    /// and leave the collision counter at 0. Self-skips on hosts without
+    /// CAP_NET_RAW.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn oneshot_coexists_with_concurrent_oneshot() {
+        crate::probing::icmp_pool::skip_unless_raw_ip_socket!();
+
+        reset_oneshot_collisions_for_test();
+        crate::probing::trippy::reset_contamination_state_for_test();
+
+        let batch = |pair_base: u64| RunMeasurementBatchRequest {
+            batch_id: pair_base,
+            kind: MeasurementKind::Latency as i32,
+            protocol: Protocol::Icmp as i32,
+            probe_count: 3,
+            timeout_ms: 500,
+            probe_stagger_ms: 20,
+            targets: vec![MeasurementTarget {
+                pair_id: pair_base,
+                destination_ip: vec![127, 0, 0, 1].into(),
+                destination_port: 0,
+            }],
+        };
+
+        let prober_a = Arc::new(OneshotProber::new(2));
+        let prober_b = Arc::new(OneshotProber::new(2));
+        let (tx_a, mut rx_a) = mpsc::channel(4);
+        let (tx_b, mut rx_b) = mpsc::channel(4);
+        let cancel_a = CancellationToken::new();
+        let cancel_b = CancellationToken::new();
+
+        let run_a = {
+            let prober = prober_a.clone();
+            tokio::spawn(async move { prober.run_batch(batch(200), cancel_a, tx_a).await })
+        };
+        let run_b = {
+            let prober = prober_b.clone();
+            tokio::spawn(async move { prober.run_batch(batch(201), cancel_b, tx_b).await })
+        };
+
+        let res_a = rx_a
+            .recv()
+            .await
+            .expect("A result")
+            .expect("A no rpc error");
+        let res_b = rx_b
+            .recv()
+            .await
+            .expect("B result")
+            .expect("B no rpc error");
+        run_a.await.unwrap();
+        run_b.await.unwrap();
+
+        assert_eq!(res_a.pair_id, 200);
+        assert_eq!(res_b.pair_id, 201);
+        // Every tracer observed only its own replies.
+        assert_eq!(
+            oneshot_probe_collisions_total(),
+            0,
+            "oneshot collision counter must stay at 0",
+        );
+        assert_eq!(
+            crate::probing::trippy::cross_contamination_total(),
+            0,
+            "continuous cross-contamination counter must stay at 0",
+        );
     }
 }
