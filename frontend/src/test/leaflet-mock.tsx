@@ -14,7 +14,9 @@ interface MapContainerProps {
 interface MarkerProps {
   children?: ReactNode;
   position: [number, number];
-  eventHandlers?: Record<string, unknown>;
+  eventHandlers?: Record<string, (...args: unknown[]) => void>;
+  // L.DivIcon / L.Icon — opaque in the mock.
+  icon?: unknown;
 }
 
 interface TileLayerProps {
@@ -45,6 +47,11 @@ export interface MockLeafletMap {
   getContainer: () => HTMLElement;
   getZoom: () => number;
   setZoom: (zoom: number) => void;
+  /** Stub that returns the seeded `__bounds` as an `L.LatLngBounds`-like. */
+  getBounds: () => {
+    getSouthWest: () => { lat: number; lng: number };
+    getNorthEast: () => { lat: number; lng: number };
+  };
   options: { zoomSnap: number };
   pm: {
     addControls: () => void;
@@ -60,6 +67,11 @@ export interface MockLeafletMap {
   __handlers: Map<string, Set<EventHandler>>;
   __container: HTMLElement;
   __zoom: number;
+  /**
+   * Seed the bbox returned by `getBounds()`. Tuple order matches the
+   * frontend `Bbox` wire contract: `[minLat, minLng, maxLat, maxLng]`.
+   */
+  __bounds: [number, number, number, number];
 }
 
 function createMockMap(): MockLeafletMap {
@@ -68,6 +80,9 @@ function createMockMap(): MockLeafletMap {
   const container =
     typeof document !== "undefined" ? document.createElement("div") : ({} as HTMLElement);
   let zoom = 2;
+  // Default viewport: world-ish bounds. Tests seed `__bounds` to pin
+  // the emitted viewport for assertions on `onViewportChange`.
+  let bounds: [number, number, number, number] = [-60, -180, 70, 180];
 
   const map: MockLeafletMap = {
     fitBounds: () => {},
@@ -92,6 +107,10 @@ function createMockMap(): MockLeafletMap {
     setZoom: (next) => {
       zoom = next;
     },
+    getBounds: () => ({
+      getSouthWest: () => ({ lat: bounds[0], lng: bounds[1] }),
+      getNorthEast: () => ({ lat: bounds[2], lng: bounds[3] }),
+    }),
     options: { zoomSnap: 1 },
     pm: {
       addControls: () => {},
@@ -115,6 +134,12 @@ function createMockMap(): MockLeafletMap {
     },
     set __zoom(next: number) {
       zoom = next;
+    },
+    get __bounds() {
+      return bounds;
+    },
+    set __bounds(next: [number, number, number, number]) {
+      bounds = next;
     },
   };
 
@@ -148,11 +173,39 @@ export const LeafletMock = {
   TileLayer: ({ url, attribution }: TileLayerProps) => (
     <div data-testid="tile-layer" data-url={url} data-attribution={attribution} />
   ),
-  Marker: ({ children, position }: MarkerProps) => (
-    <div data-testid="marker" data-lat={position[0]} data-lon={position[1]}>
-      {children}
-    </div>
-  ),
+  Marker: ({ children, position, eventHandlers, icon }: MarkerProps) => {
+    const onClick = eventHandlers?.click;
+    // Non-interactive container when the marker has no click handler;
+    // otherwise delegate to the interactive Marker below so a11y rules
+    // are not violated by attaching click handlers to a plain div.
+    if (!onClick) {
+      return (
+        <div
+          data-testid="marker"
+          data-lat={position[0]}
+          data-lon={position[1]}
+          data-has-icon={icon ? "true" : "false"}
+        >
+          {children}
+        </div>
+      );
+    }
+    return (
+      <button
+        type="button"
+        data-testid="marker"
+        data-lat={position[0]}
+        data-lon={position[1]}
+        data-has-icon={icon ? "true" : "false"}
+        // Marker clicks in Leaflet come through `eventHandlers.click`.
+        // Surfacing them via a real button so accessible-role queries
+        // and `userEvent.click` both work through the mock.
+        onClick={() => onClick()}
+      >
+        {children}
+      </button>
+    );
+  },
   Popup: ({ children }: PopupProps) => <div data-testid="popup">{children}</div>,
   // Stub react-leaflet's useMap so components calling fitBounds (or
   // geoman's map.pm) don't crash under jsdom. The map is never rendered

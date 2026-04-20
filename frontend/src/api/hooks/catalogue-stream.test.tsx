@@ -1,10 +1,25 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type InfiniteData, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import type { CatalogueEntry, CatalogueListResponse } from "@/api/hooks/catalogue";
 import { useCatalogueStream } from "@/api/hooks/catalogue-stream";
+
+/**
+ * Build an `InfiniteData<CatalogueListResponse>`-shaped cache fixture. The
+ * list cache is seeded by `useCatalogueListInfinite`, whose stored value is
+ * `{ pages, pageParams }` rather than a flat `ListResponse`.
+ */
+function infinite(
+  entries: CatalogueEntry[],
+  overrides: Partial<CatalogueListResponse> = {},
+): InfiniteData<CatalogueListResponse> {
+  return {
+    pages: [{ entries, total: entries.length, ...overrides }],
+    pageParams: [undefined],
+  };
+}
 
 /** Minimal in-memory EventSource stand-in for deterministic tests. */
 class MockEventSource {
@@ -122,7 +137,7 @@ describe("useCatalogueStream", () => {
 
   test("patches list cache and invalidates on terminal `enrichment_progress`", () => {
     const qc = makeQueryClient();
-    qc.setQueryData(["catalogue", "list", {}], { entries: [ENTRY], total: 1 });
+    qc.setQueryData(["catalogue", "list", {}, 100], infinite([ENTRY]));
     qc.setQueryData(["catalogue", "facets"], { enrichment_status: [] });
 
     renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
@@ -134,21 +149,22 @@ describe("useCatalogueStream", () => {
       });
     });
 
-    const list = qc.getQueryData<{ entries: CatalogueEntry[]; total: number }>([
+    const list = qc.getQueryData<InfiniteData<CatalogueListResponse>>([
       "catalogue",
       "list",
       {},
+      100,
     ]);
-    // Status patched in place for immediate UI feedback.
-    expect(list?.entries[0]?.enrichment_status).toBe("failed");
+    // Status patched in place across every page for immediate UI feedback.
+    expect(list?.pages[0]?.entries[0]?.enrichment_status).toBe("failed");
     // Terminal — list must refetch to pick up any fields the runner wrote.
-    expect(qc.getQueryState(["catalogue", "list", {}])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["catalogue", "list", {}, 100])?.isInvalidated).toBe(true);
   });
 
   test("does not invalidate on non-terminal `enrichment_progress` status", () => {
     const qc = makeQueryClient();
     qc.setQueryData(["catalogue", "entry", ENTRY.id], ENTRY);
-    qc.setQueryData(["catalogue", "list", {}], { entries: [ENTRY], total: 1 });
+    qc.setQueryData(["catalogue", "list", {}, 100], infinite([ENTRY]));
 
     renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
     act(() => {
@@ -163,16 +179,16 @@ describe("useCatalogueStream", () => {
     // refetch. The in-place patch keeps the cache coherent without a
     // network round-trip.
     expect(qc.getQueryState(["catalogue", "entry", ENTRY.id])?.isInvalidated).toBe(false);
-    expect(qc.getQueryState(["catalogue", "list", {}])?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(["catalogue", "list", {}, 100])?.isInvalidated).toBe(false);
   });
 
   test("list cache is untouched when no entry matches `enrichment_progress`", () => {
     const qc = makeQueryClient();
     const otherEntry: CatalogueEntry = { ...ENTRY, id: "22222222-2222-2222-2222-222222222222" };
-    qc.setQueryData(["catalogue", "list", {}], { entries: [otherEntry], total: 1 });
+    qc.setQueryData(["catalogue", "list", {}, 100], infinite([otherEntry]));
 
     renderHook(() => useCatalogueStream(), { wrapper: wrapWith(qc) });
-    const beforeRef = qc.getQueryData(["catalogue", "list", {}]);
+    const beforeRef = qc.getQueryData(["catalogue", "list", {}, 100]);
     act(() => {
       MockEventSource.instances[0]?.emit({
         kind: "enrichment_progress",
@@ -182,7 +198,7 @@ describe("useCatalogueStream", () => {
     });
 
     // Same reference — updater must return the original object when no entry matched
-    const afterRef = qc.getQueryData(["catalogue", "list", {}]);
+    const afterRef = qc.getQueryData(["catalogue", "list", {}, 100]);
     expect(afterRef).toBe(beforeRef);
   });
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            ip AS \"ip: IpNetwork\",\n            display_name, city, country_code, country_name,\n            latitude, longitude, asn, network_operator, website, notes,\n            enrichment_status AS \"enrichment_status: EnrichmentStatus\",\n            enriched_at,\n            operator_edited_fields,\n            source AS \"source: CatalogueSource\",\n            created_at, created_by\n        FROM ip_catalogue c\n        WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))\n          AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))\n          AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))\n          AND ($4::INET IS NULL OR c.ip <<= $4::INET)\n          AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)\n          AND (NOT $6::BOOL OR (\n                latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION\n            AND longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION\n          ))\n        ORDER BY created_at DESC, id DESC\n        LIMIT $11\n        ",
+  "query": "SELECT c.id, c.ip AS \"ip: IpNetwork\", c.display_name, c.city, c.country_code, c.country_name, c.latitude, c.longitude, c.asn, c.network_operator, c.website, c.notes, c.enrichment_status AS \"enrichment_status: EnrichmentStatus\", c.enriched_at, c.operator_edited_fields, c.source AS \"source: CatalogueSource\", c.created_at, c.created_by FROM ip_catalogue c WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[])) AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[])) AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[])) AND ($4::INET IS NULL OR c.ip <<= $4::INET) AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT) AND (NOT $6::BOOL OR (  c.latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION AND   c.longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION )) AND ($11::TEXT[] = '{}' OR c.city = ANY($11::TEXT[])) AND ($12::BOOL = FALSE OR (  ($13::BOOL AND c.created_at IS NULL AND c.id < $15::UUID) OR   (NOT $13::BOOL AND (    c.created_at > $14::TIMESTAMPTZ OR     (c.created_at = $14::TIMESTAMPTZ AND c.id < $15::UUID) OR     c.created_at IS NULL  )))) ORDER BY c.created_at ASC NULLS LAST, c.id DESC LIMIT $16",
   "describe": {
     "columns": [
       {
@@ -127,6 +127,11 @@
         "Float8",
         "Float8",
         "Float8",
+        "TextArray",
+        "Bool",
+        "Bool",
+        "Timestamptz",
+        "Uuid",
         "Int8"
       ]
     },
@@ -151,5 +156,5 @@
       true
     ]
   },
-  "hash": "e821c3f43d8986080303fde9b7363ea5ee3c78aca7538a241780afd15a6e998f"
+  "hash": "bf3ac03da0f699c9f5aafbd809ae86bdb22f05834ba2b70d4aeb9f65fa5ff7b6"
 }

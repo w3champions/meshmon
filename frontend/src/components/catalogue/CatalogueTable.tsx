@@ -1,24 +1,18 @@
 import {
+  type Column,
   type ColumnDef,
   flexRender,
   getCoreRowModel,
   useReactTable,
   type VisibilityState,
 } from "@tanstack/react-table";
-import { RefreshCw, Settings2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ChevronDown, ChevronsUpDown, ChevronUp, RefreshCw, Settings2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CatalogueEntry, CatalogueSortBy, CatalogueSortDir } from "@/api/hooks/catalogue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 import { StatusChip } from "./StatusChip";
@@ -42,6 +36,21 @@ export function formatWebsiteHost(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Sort types
+// ---------------------------------------------------------------------------
+
+export type CatalogueSortCol = CatalogueSortBy;
+
+/**
+ * Table sort state. `col`/`dir` are both `null` only together (unsorted —
+ * the server falls back to `created_at DESC` tiebroken on `id DESC`).
+ */
+export interface CatalogueTableSort {
+  col: CatalogueSortCol | null;
+  dir: CatalogueSortDir | null;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -62,12 +71,109 @@ const DEFAULT_VISIBLE: string[] = [
 /** All optional (hideable) columns — off by default. */
 const OPTIONAL_COLUMNS: string[] = ["location", "website", "notes"];
 
+/**
+ * Map from UI column id to backend `SortBy`. Only columns whose id differs
+ * from the backend column name appear here; sortable columns whose id
+ * already matches the backend variant are handled by the identity fallback
+ * in {@link columnToSortBy}. Columns absent from this surface entirely
+ * (e.g. `notes`, `actions`) yield `null` and render as plain headers.
+ */
+const COLUMN_TO_SORT_BY: Record<string, CatalogueSortCol> = {
+  ip: "ip",
+  display_name: "display_name",
+  city: "city",
+  country: "country_code",
+  asn: "asn",
+  network: "network_operator",
+  status: "enrichment_status",
+  website: "website",
+  location: "location",
+};
+
+function columnToSortBy(columnId: string): CatalogueSortCol | null {
+  return COLUMN_TO_SORT_BY[columnId] ?? null;
+}
+
+/** Estimated row height in px — matches the shadcn `TableRow` default. */
+export const ROW_HEIGHT_ESTIMATE = 44;
+
+/** Max height of the virtualized scroll container. */
+const SCROLL_MAX_HEIGHT = "70vh";
+
+/**
+ * Per-column CSS grid track expressions. Dense columns (monospace IP,
+ * badge, button) use fixed px widths; columns carrying longer text use
+ * `minmax(<min>, <fr>)` so the overall table flexes to fit the viewport
+ * and no column clips off the right edge. Both header and virtualized
+ * body render as CSS grids and share the same track string emitted by
+ * {@link buildGridTemplate}, so they always line up. Every cell
+ * renderer clips overflow via `truncate` so narrow viewports remain
+ * visually safe.
+ */
+const COLUMN_TRACKS: Record<string, string> = {
+  ip: "120px",
+  display_name: "minmax(140px, 1.2fr)",
+  city: "minmax(100px, 1fr)",
+  country: "minmax(110px, 1fr)",
+  asn: "80px",
+  network: "minmax(140px, 1.5fr)",
+  status: "110px",
+  location: "100px",
+  website: "minmax(120px, 1fr)",
+  notes: "minmax(100px, 1.5fr)",
+  actions: "70px",
+};
+
+/** Fallback track for any column that doesn't appear in {@link COLUMN_TRACKS}. */
+const DEFAULT_COLUMN_TRACK = "minmax(120px, 1fr)";
+
+function columnTrack(columnId: string): string {
+  return COLUMN_TRACKS[columnId] ?? DEFAULT_COLUMN_TRACK;
+}
+
+/**
+ * CSS grid-template-columns value shared by the header and the
+ * virtualized body. Emits one track per visible column in the
+ * configured order so header cells and row cells line up visually
+ * while the table as a whole flexes with the viewport.
+ */
+function buildGridTemplate(columns: ReadonlyArray<Column<CatalogueEntry, unknown>>): string {
+  return columns.map((col) => columnTrack(col.id)).join(" ");
+}
+
+/**
+ * Initial viewport rect fed to the virtualizer before the ResizeObserver
+ * fires its first callback. jsdom never measures layout, so a zero rect
+ * would leave the virtualizer with nothing to render under tests. Picking
+ * a generous window here keeps production correct (the observer
+ * supersedes this value within a frame) while giving jsdom enough
+ * virtual items to commit rows on the first render pass.
+ */
+const INITIAL_SCROLL_RECT = { width: 1024, height: 800 };
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
 
 export interface CatalogueTableProps {
-  entries: CatalogueEntry[];
+  /** Flattened rows across every page of the infinite query. */
+  rows: CatalogueEntry[];
+  /** Server-reported total for the active filter (pre-page). */
+  total: number;
+  /** True while the next-page fetch can be triggered. */
+  hasNextPage: boolean;
+  /** True while a next-page fetch is in flight. */
+  isFetchingNextPage: boolean;
+  /** Trigger the next-page fetch. */
+  fetchNextPage: () => void;
+  /** Active sort state (parent-owned — URL round-trip happens upstream). */
+  sort: CatalogueTableSort;
+  /**
+   * Called when the operator cycles a sort header. Fires with
+   * `(col, dir)` for `asc`/`desc`, or `(null, null)` when the cycle
+   * returns to unsorted.
+   */
+  onSortChange: (col: CatalogueSortCol | null, dir: CatalogueSortDir | null) => void;
   onRowClick: (id: string) => void;
   onReenrich: (id: string) => void;
   className?: string;
@@ -125,6 +231,77 @@ function getInitialVisibility(): VisibilityState {
 }
 
 // ---------------------------------------------------------------------------
+// SortIcon / SortableHeader
+// ---------------------------------------------------------------------------
+
+interface SortIconProps {
+  active: CatalogueSortDir | null;
+}
+
+function SortIcon({ active }: SortIconProps) {
+  if (active === "asc") return <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />;
+  if (active === "desc") return <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />;
+  return <ChevronsUpDown className="h-3.5 w-3.5 opacity-50" aria-hidden="true" />;
+}
+
+interface SortableHeaderProps {
+  col: CatalogueSortCol;
+  label: string;
+  sort: CatalogueTableSort;
+  onSortChange: CatalogueTableProps["onSortChange"];
+}
+
+/**
+ * Returns the next sort tuple in the three-state cycle
+ * `none → asc → desc → none` for the given column.
+ */
+function nextSort(
+  col: CatalogueSortCol,
+  active: CatalogueSortDir | null,
+): [CatalogueSortCol | null, CatalogueSortDir | null] {
+  if (active === null) return [col, "asc"];
+  if (active === "asc") return [col, "desc"];
+  return [null, null];
+}
+
+/**
+ * Interactive header contents. `aria-sort` lives on the enclosing `<th>`
+ * (see call site) so assistive tech tracks the active column; this button
+ * only owns the click + focus ring. Negative left margin lines the
+ * chevron up with plain-text column titles.
+ */
+function SortableHeader({ col, label, sort, onSortChange }: SortableHeaderProps) {
+  const active = sort.col === col ? sort.dir : null;
+  const [nextCol, nextDir] = nextSort(col, active);
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSortChange(nextCol, nextDir)}
+      className="-ml-1 flex items-center gap-1 rounded-sm px-1 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {label}
+      <SortIcon active={active} />
+    </button>
+  );
+}
+
+/**
+ * `aria-sort` value for a header cell given the active column and direction.
+ * `ascending` / `descending` only on the currently-sorted column; every
+ * other sortable header reports `none`.
+ */
+function ariaSortForColumn(
+  col: CatalogueSortCol,
+  sort: CatalogueTableSort,
+): "ascending" | "descending" | "none" {
+  if (sort.col !== col) return "none";
+  if (sort.dir === "asc") return "ascending";
+  if (sort.dir === "desc") return "descending";
+  return "none";
+}
+
+// ---------------------------------------------------------------------------
 // Column definitions
 // ---------------------------------------------------------------------------
 
@@ -138,19 +315,37 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       id: "ip",
       accessorKey: "ip",
       header: "IP",
-      cell: ({ row }) => <span className="font-mono text-xs">{row.original.ip}</span>,
+      cell: ({ row }) => (
+        <span className="block truncate font-mono text-xs" title={row.original.ip}>
+          {row.original.ip}
+        </span>
+      ),
     },
     {
       id: "display_name",
       accessorKey: "display_name",
       header: "Name",
-      cell: ({ row }) => row.original.display_name ?? "—",
+      cell: ({ row }) => {
+        const name = row.original.display_name;
+        return (
+          <span className="block truncate" title={name ?? undefined}>
+            {name ?? "—"}
+          </span>
+        );
+      },
     },
     {
       id: "city",
       accessorKey: "city",
       header: "City",
-      cell: ({ row }) => row.original.city ?? "—",
+      cell: ({ row }) => {
+        const city = row.original.city;
+        return (
+          <span className="block truncate" title={city ?? undefined}>
+            {city ?? "—"}
+          </span>
+        );
+      },
     },
     {
       id: "country",
@@ -159,20 +354,39 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       cell: ({ row }) => {
         const code = row.original.country_code;
         const name = lookupCountryName(code);
-        return <span title={code ?? undefined}>{name ?? code ?? "—"}</span>;
+        const display = name ?? code ?? "—";
+        return (
+          <span className="block truncate" title={code ?? undefined}>
+            {display}
+          </span>
+        );
       },
     },
     {
       id: "asn",
       accessorKey: "asn",
       header: "ASN",
-      cell: ({ row }) => (row.original.asn != null ? String(row.original.asn) : "—"),
+      cell: ({ row }) => {
+        const asn = row.original.asn != null ? String(row.original.asn) : "—";
+        return (
+          <span className="block truncate" title={asn}>
+            {asn}
+          </span>
+        );
+      },
     },
     {
       id: "network",
       accessorKey: "network_operator",
       header: "Network",
-      cell: ({ row }) => row.original.network_operator ?? "—",
+      cell: ({ row }) => {
+        const net = row.original.network_operator;
+        return (
+          <span className="block truncate" title={net ?? undefined}>
+            {net ?? "—"}
+          </span>
+        );
+      },
     },
     {
       id: "status",
@@ -203,7 +417,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       header: "Website",
       cell: ({ row }) => {
         const website = row.original.website;
-        if (!website) return "—";
+        if (!website) return <span className="block truncate">—</span>;
         // Operators may save "example.com" as well as a full URL; normalise
         // so the href is always absolute. Assume https when no scheme is set.
         const href = /^https?:\/\//i.test(website) ? website : `https://${website}`;
@@ -214,7 +428,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="block max-w-[12rem] truncate text-primary underline-offset-2 hover:underline"
+            className="block truncate text-primary underline-offset-2 hover:underline"
             title={website}
           >
             {displayHost}
@@ -227,7 +441,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       accessorKey: "notes",
       header: "Notes",
       cell: ({ row }) => (
-        <span className="block max-w-[16rem] truncate" title={row.original.notes ?? undefined}>
+        <span className="block truncate" title={row.original.notes ?? undefined}>
           {row.original.notes ?? "—"}
         </span>
       ),
@@ -273,7 +487,13 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
 // ---------------------------------------------------------------------------
 
 export function CatalogueTable({
-  entries,
+  rows,
+  total,
+  hasNextPage,
+  isFetchingNextPage,
+  fetchNextPage,
+  sort,
+  onSortChange,
   onRowClick,
   onReenrich,
   className,
@@ -288,15 +508,36 @@ export function CatalogueTable({
   const columns = useMemo(() => buildColumns(onReenrich), [onReenrich]);
 
   const table = useReactTable({
-    data: entries,
+    data: rows,
     columns,
     state: { columnVisibility },
     onColumnVisibilityChange: setColumnVisibility,
     getCoreRowModel: getCoreRowModel(),
   });
 
-  // All toggleable columns (default visible + optional)
+  // Visible columns in the configured order. react-table owns column
+  // definitions + visibility here; we drive row rendering ourselves via the
+  // virtualizer so the existing column-chooser plumbing is preserved.
+  const visibleColumns = table.getVisibleLeafColumns();
+  // All toggleable columns (default visible + optional) — feeds the chooser.
   const toggleableColumns = table.getAllLeafColumns();
+  // react-table's core row model, indexable by the virtualizer's `index`.
+  const tableRows = table.getRowModel().rows;
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: tableRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT_ESTIMATE,
+    overscan: 8,
+    // jsdom-friendly fallback: the ResizeObserver replaces this with the
+    // real element rect once layout runs in a browser. See constant
+    // docstring for rationale.
+    initialRect: INITIAL_SCROLL_RECT,
+  });
+
+  const virtualItems = virtualizer.getVirtualItems();
+  const totalSize = virtualizer.getTotalSize();
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -334,47 +575,116 @@ export function CatalogueTable({
         </Popover>
       </div>
 
-      {/* Table */}
-      <Table>
-        <TableHeader>
-          {table.getHeaderGroups().map((hg) => (
-            <TableRow key={hg.id}>
-              {hg.headers.map((h) => (
-                <TableHead key={h.id}>
-                  {flexRender(h.column.columnDef.header, h.getContext())}
-                </TableHead>
-              ))}
-            </TableRow>
-          ))}
-        </TableHeader>
-        <TableBody>
-          {table.getRowModel().rows.map((row) => {
-            const handleClick = () => onRowClick(row.original.id);
+      {/* Table — header and body are both CSS grids sharing one
+          `grid-template-columns` string (see `buildGridTemplate`) so
+          cells line up regardless of viewport width. Fixed-px tracks
+          handle dense content (IP, ASN, badges, action button) while
+          text-heavy columns use `minmax(<min>, <fr>)` so the table
+          flexes to the container instead of clipping past the right
+          edge. ARIA semantics preserved via role="table" / "row" /
+          "columnheader" / "cell". A real `<table>` can't carry `fr`
+          tracks (table-layout needs absolute widths), so the div+grid
+          approach is load-bearing — keep the role attributes. */}
+      {/* biome-ignore lint/a11y/useSemanticElements: CSS grid needs div roots; see block comment above. Switching to <table> would force `table-layout: fixed` which forbids `fr` tracks and reintroduces the clip-past-right-edge regression. */}
+      <div role="table" className="rounded-md border">
+        {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale above. */}
+        {/* biome-ignore lint/a11y/useFocusableInteractive: role="row" is a grouping role in the ARIA table pattern — not an interactive control, no keyboard focus needed. */}
+        <div
+          role="row"
+          className="grid w-full border-b bg-muted/30 text-sm font-medium text-muted-foreground"
+          style={{ gridTemplateColumns: buildGridTemplate(visibleColumns) }}
+        >
+          {visibleColumns.map((col) => {
+            const sortCol = columnToSortBy(col.id);
+            const header = col.columnDef.header;
+            const label = typeof header === "string" ? header : col.id;
             return (
-              <TableRow
-                key={row.id}
-                role="button"
-                tabIndex={0}
-                aria-label={`Open entry ${row.original.ip}`}
-                onClick={handleClick}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    handleClick();
-                  }
-                }}
-                className="cursor-pointer hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+              /* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale above. */
+              /* biome-ignore lint/a11y/useFocusableInteractive: role="columnheader" is a non-interactive structural role; sortable headers own their own focusable <button> inside SortableHeader. */
+              <div
+                key={col.id}
+                role="columnheader"
+                aria-sort={sortCol ? ariaSortForColumn(sortCol, sort) : undefined}
+                className="overflow-hidden px-4 py-3"
               >
-                {row.getVisibleCells().map((cell) => (
-                  <TableCell key={cell.id}>
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </TableCell>
-                ))}
-              </TableRow>
+                {sortCol ? (
+                  <SortableHeader
+                    col={sortCol}
+                    label={label}
+                    sort={sort}
+                    onSortChange={onSortChange}
+                  />
+                ) : (
+                  label
+                )}
+              </div>
             );
           })}
-        </TableBody>
-      </Table>
+        </div>
+        <div
+          ref={scrollRef}
+          className="relative overflow-auto"
+          style={{ maxHeight: SCROLL_MAX_HEIGHT }}
+        >
+          <div style={{ position: "relative", height: `${totalSize}px` }}>
+            {virtualItems.map((virtualItem) => {
+              const row = tableRows[virtualItem.index];
+              if (!row) return null;
+              const handleClick = () => onRowClick(row.original.id);
+              return (
+                /* biome-ignore lint/a11y/useSemanticElements: virtualized row is a CSS-grid parent for cell tracks (see block comment above); a <button> would not accept grid children semantically and nesting the grid inside a <button> would break the ARIA row/cell structure. role="button" keeps keyboard+click affordance. */
+                <div
+                  key={row.original.id}
+                  data-index={virtualItem.index}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Open entry ${row.original.ip}`}
+                  onClick={handleClick}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      handleClick();
+                    }
+                  }}
+                  className="absolute top-0 left-0 grid w-full cursor-pointer items-center overflow-hidden border-b text-sm hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+                  style={{
+                    transform: `translateY(${virtualItem.start}px)`,
+                    height: `${virtualItem.size}px`,
+                    gridTemplateColumns: buildGridTemplate(visibleColumns),
+                  }}
+                >
+                  {row.getVisibleCells().map((cell) => (
+                    /* biome-ignore lint/a11y/useSemanticElements: virtualized body is pure-div CSS grid (see block comment above); a <td> here would require a <tr>/<table> ancestor and reintroduce the Chrome flex-tr layout bug. role="cell" keeps ARIA table semantics for screen readers. */
+                    <div
+                      key={cell.id}
+                      role="cell"
+                      className="overflow-hidden px-4"
+                      style={{ minWidth: 0 }}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        {/* Load-more + total counter */}
+        <div className="flex items-center justify-between border-t bg-muted/20 px-4 py-3 text-sm">
+          <span className="text-muted-foreground">
+            {rows.length} of {total} entries
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!hasNextPage || isFetchingNextPage}
+            onClick={() => fetchNextPage()}
+          >
+            {isFetchingNextPage ? "Loading…" : hasNextPage ? "Load more" : "All loaded"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

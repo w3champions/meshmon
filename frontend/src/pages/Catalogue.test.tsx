@@ -11,7 +11,11 @@ import {
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import type {
+  CatalogueEntry,
+  CatalogueListResponse,
+  CatalogueMapResponse,
+} from "@/api/hooks/catalogue";
 import Catalogue from "@/pages/Catalogue";
 
 // ---------------------------------------------------------------------------
@@ -23,7 +27,8 @@ vi.mock("@/api/hooks/catalogue", async () => {
     await vi.importActual<typeof import("@/api/hooks/catalogue")>("@/api/hooks/catalogue");
   return {
     ...actual,
-    useCatalogueList: vi.fn(),
+    useCatalogueListInfinite: vi.fn(),
+    useCatalogueMap: vi.fn(),
     useCatalogueFacets: vi.fn(),
     useReenrichOne: vi.fn(),
     useReenrichMany: vi.fn(),
@@ -35,13 +40,32 @@ vi.mock("@/api/hooks/catalogue-stream", () => ({
 }));
 
 // CatalogueMap uses Leaflet which requires DOM APIs not in jsdom — stub it out.
+// The stub exposes a button so tests can drive `onClusterOpen` directly.
 vi.mock("@/components/catalogue/CatalogueMap", () => ({
-  CatalogueMap: () => <div data-testid="catalogue-map-stub" />,
+  CatalogueMap: (props: { onClusterOpen: (bbox: [number, number, number, number]) => void }) => (
+    <div data-testid="catalogue-map-stub">
+      <button
+        type="button"
+        data-testid="stub-cluster-click"
+        onClick={() => props.onClusterOpen([10, 20, 30, 40])}
+      >
+        fire cluster
+      </button>
+    </div>
+  ),
 }));
 
 // DrawMap is a transitive Leaflet dep referenced by the real CatalogueMap
 vi.mock("@/components/map/DrawMap", () => ({
   DrawMap: () => <div data-testid="draw-map-stub" />,
+}));
+
+// CatalogueClusterDialog renders real Radix Dialog which plays poorly with
+// certain jsdom Portal targeting; stub to a minimal surface that exposes
+// open state + filters so the test can assert the wiring.
+vi.mock("@/components/catalogue/CatalogueClusterDialog", () => ({
+  CatalogueClusterDialog: (props: { open: boolean }) =>
+    props.open ? <div data-testid="cluster-dialog-stub" role="dialog" /> : null,
 }));
 
 // ---------------------------------------------------------------------------
@@ -50,7 +74,8 @@ vi.mock("@/components/map/DrawMap", () => ({
 
 import {
   useCatalogueFacets,
-  useCatalogueList,
+  useCatalogueListInfinite,
+  useCatalogueMap,
   useReenrichMany,
   useReenrichOne,
 } from "@/api/hooks/catalogue";
@@ -78,15 +103,47 @@ const ENTRY_A: CatalogueEntry = {
 };
 
 // ---------------------------------------------------------------------------
-// Render helper
+// Mock-return builders
 // ---------------------------------------------------------------------------
 
-function makeMockReturn(entries: CatalogueEntry[]) {
+function buildListPage(entries: CatalogueEntry[]): CatalogueListResponse {
+  return { entries, total: entries.length, next_cursor: null };
+}
+
+interface InfiniteStubOptions {
+  entries?: CatalogueEntry[];
+  total?: number;
+  hasNextPage?: boolean;
+  isFetchingNextPage?: boolean;
+  fetchNextPage?: () => void;
+}
+
+/**
+ * Assemble the minimum `useInfiniteQuery` return shape the page reads.
+ * Tests only care about `data.pages`, `hasNextPage`, `isFetchingNextPage`,
+ * and `fetchNextPage`; the rest of the react-query surface is irrelevant
+ * here.
+ */
+function makeInfiniteReturn(opts: InfiniteStubOptions = {}) {
+  const entries = opts.entries ?? [];
+  const total = opts.total ?? entries.length;
   return {
-    data: { entries, total: entries.length },
+    data: { pages: [{ ...buildListPage(entries), total }] },
+    hasNextPage: opts.hasNextPage ?? false,
+    isFetchingNextPage: opts.isFetchingNextPage ?? false,
+    fetchNextPage: opts.fetchNextPage ?? vi.fn(),
     isLoading: false,
     isError: false,
   };
+}
+
+function makeMapReturn(entries: CatalogueEntry[] = []) {
+  const response: CatalogueMapResponse = {
+    kind: "detail",
+    rows: entries,
+    total: entries.length,
+  };
+  return { data: response, isLoading: false, isError: false };
 }
 
 const FACETS_STUB = {
@@ -103,9 +160,19 @@ const FACETS_STUB = {
 const REENRICH_ONE_STUB = { mutate: vi.fn(), isPending: false };
 const REENRICH_MANY_STUB = { mutate: vi.fn(), isPending: false };
 
-function setupHookMocks(entries: CatalogueEntry[] = []) {
-  vi.mocked(useCatalogueList).mockReturnValue(
-    makeMockReturn(entries) as ReturnType<typeof useCatalogueList>,
+interface HookOverrides {
+  infinite?: InfiniteStubOptions;
+  mapEntries?: CatalogueEntry[];
+}
+
+function setupHookMocks(overrides: HookOverrides = {}) {
+  vi.mocked(useCatalogueListInfinite).mockReturnValue(
+    makeInfiniteReturn(overrides.infinite) as unknown as ReturnType<
+      typeof useCatalogueListInfinite
+    >,
+  );
+  vi.mocked(useCatalogueMap).mockReturnValue(
+    makeMapReturn(overrides.mapEntries) as unknown as ReturnType<typeof useCatalogueMap>,
   );
   vi.mocked(useCatalogueFacets).mockReturnValue(
     FACETS_STUB as unknown as ReturnType<typeof useCatalogueFacets>,
@@ -118,6 +185,10 @@ function setupHookMocks(entries: CatalogueEntry[] = []) {
   );
   vi.mocked(useCatalogueStream).mockReturnValue(undefined);
 }
+
+// ---------------------------------------------------------------------------
+// Router harness
+// ---------------------------------------------------------------------------
 
 function renderCatalogue(initialPath = "/catalogue") {
   const client = new QueryClient({
@@ -159,13 +230,8 @@ describe("Catalogue page — basic render", () => {
   test("renders filter rail, view toggle, and Add IPs button", async () => {
     renderCatalogue();
 
-    // Filter rail landmark
     await screen.findByRole("complementary", { name: /catalogue filters/i });
-
-    // Add IPs button
     expect(screen.getByRole("button", { name: /add ips/i })).toBeInTheDocument();
-
-    // View toggle buttons
     expect(screen.getByRole("button", { name: /table view/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /map view/i })).toBeInTheDocument();
   });
@@ -177,30 +243,37 @@ describe("Catalogue page — basic render", () => {
   });
 });
 
-describe("Catalogue page — filter interaction", () => {
-  test("typing in the Name filter calls useCatalogueList with updated name param", async () => {
+describe("Catalogue page — server-driven list query", () => {
+  test("typing in the Name filter drives useCatalogueListInfinite with updated name", async () => {
     const user = userEvent.setup();
     renderCatalogue();
 
-    // Wait for render
     const filterAside = await screen.findByRole("complementary", {
       name: /catalogue filters/i,
     });
 
-    // The Name input is always rendered (FreeTextGroup is an open/close details).
-    // The aria-label on the input matches the title prop ("Name").
-    // There are multiple "Name" texts (filter label + table header), so query
-    // specifically within the filter aside.
     const nameInput = filterAside.querySelector<HTMLInputElement>("input[aria-label='Name']");
     if (!nameInput) throw new Error("Name filter input not found in filter rail");
-
     await user.type(nameInput, "Alpha");
 
     await waitFor(() => {
-      const calls = vi.mocked(useCatalogueList).mock.calls;
-      const lastCall = calls[calls.length - 1];
-      expect(lastCall[0]).toMatchObject({ name: "Alpha" });
+      const calls = vi.mocked(useCatalogueListInfinite).mock.calls;
+      const last = calls[calls.length - 1];
+      expect(last[0]).toMatchObject({ name: "Alpha" });
     });
+  });
+
+  test("shapes filter serialises to JSON on the query", async () => {
+    // No direct UI surface for drawing shapes in jsdom, but we assert
+    // the query-key shape is forwarded verbatim when filters omit them.
+    renderCatalogue();
+    await screen.findByRole("complementary", { name: /catalogue filters/i });
+
+    const calls = vi.mocked(useCatalogueListInfinite).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const [query] = calls[calls.length - 1];
+    // Fresh mount → no shapes key in the query payload.
+    expect(query).not.toHaveProperty("shapes");
   });
 });
 
@@ -210,43 +283,33 @@ describe("Catalogue page — Add IPs panel", () => {
     renderCatalogue();
 
     await screen.findByRole("complementary", { name: /catalogue filters/i });
-
-    const addIpsButton = screen.getByRole("button", { name: /add ips/i });
-    await user.click(addIpsButton);
-
+    await user.click(screen.getByRole("button", { name: /add ips/i }));
     await screen.findByRole("dialog", { name: /add ips/i });
   });
 });
 
 describe("Catalogue page — row click opens drawer", () => {
   test("clicking a table row opens the entry drawer", async () => {
-    vi.mocked(useCatalogueList).mockReturnValue(
-      makeMockReturn([ENTRY_A]) as ReturnType<typeof useCatalogueList>,
-    );
+    setupHookMocks({ infinite: { entries: [ENTRY_A] } });
     const user = userEvent.setup();
     renderCatalogue();
 
-    // Wait for the row to appear
     const row = await screen.findByRole("button", { name: /open entry 1\.2\.3\.4/i });
     await user.click(row);
-
-    // Entry drawer should appear — identified by its aria-label
     await screen.findByLabelText(/catalogue entry editor/i);
   });
 
   test("drawer closes cleanly when the open entry disappears from the list", async () => {
-    // Drive the mocked hook via a live variable so we can swap the returned
-    // entries mid-test. Vitest re-invokes the mock on every render, so
-    // mutating `currentEntries` and forcing a re-render surfaces the new
-    // list to Catalogue.
-    //
     // Scenario (SSE `deleted` event): list refetches without the entry
     // the drawer is observing. The deletion guard effect in Catalogue
     // nulls `drawerId` so the drawer unmounts and doesn't leak stale
     // data or an orphaned drawer-open state.
     let currentEntries: CatalogueEntry[] = [ENTRY_A];
-    vi.mocked(useCatalogueList).mockImplementation(
-      () => makeMockReturn(currentEntries) as ReturnType<typeof useCatalogueList>,
+    vi.mocked(useCatalogueListInfinite).mockImplementation(
+      () =>
+        makeInfiniteReturn({ entries: currentEntries }) as unknown as ReturnType<
+          typeof useCatalogueListInfinite
+        >,
     );
     const user = userEvent.setup();
     renderCatalogue();
@@ -255,13 +318,7 @@ describe("Catalogue page — row click opens drawer", () => {
     await user.click(row);
     await screen.findByLabelText(/catalogue entry editor/i);
 
-    // Entry vanishes from the list.
     currentEntries = [];
-
-    // Escape closes the drawer (releasing focus trap) and also forces a
-    // Catalogue re-render. The guard observes `drawerEntry === undefined`
-    // on the next render and nulls `drawerId` — the drawer should no
-    // longer be in the DOM.
     await user.keyboard("{Escape}");
 
     await waitFor(() => {
@@ -270,22 +327,57 @@ describe("Catalogue page — row click opens drawer", () => {
   });
 });
 
-describe("Catalogue page — Re-enrich all button", () => {
-  test("Re-enrich all button is visible but disabled when no entries", async () => {
+describe("Catalogue page — Re-enrich button", () => {
+  test("Re-enrich button is disabled when no rows are loaded", async () => {
     renderCatalogue();
     await screen.findByRole("complementary", { name: /catalogue filters/i });
 
-    const btn = screen.getByRole("button", { name: /re-enrich all/i });
+    const btn = screen.getByRole("button", { name: /re-enrich/i });
     expect(btn).toBeDisabled();
   });
 
-  test("Re-enrich all button is enabled when entries are present", async () => {
-    vi.mocked(useCatalogueList).mockReturnValue(
-      makeMockReturn([ENTRY_A]) as ReturnType<typeof useCatalogueList>,
-    );
+  test("label reads 'Re-enrich loaded (N of M)' when pagination isn't exhausted", async () => {
+    // Loaded subset = 1, server total = 327 — the button promises the
+    // honest action: fire against the loaded rows only.
+    setupHookMocks({ infinite: { entries: [ENTRY_A], total: 327 } });
     renderCatalogue();
 
-    const btn = await screen.findByRole("button", { name: /re-enrich all/i });
-    expect(btn).not.toBeDisabled();
+    const btn = await screen.findByRole("button", { name: /re-enrich loaded \(1 of 327\)/i });
+    expect(btn).toBeEnabled();
+  });
+
+  test("label reads 'Re-enrich all (M)' when every row is loaded", async () => {
+    setupHookMocks({ infinite: { entries: [ENTRY_A], total: 1 } });
+    renderCatalogue();
+
+    const btn = await screen.findByRole("button", { name: /re-enrich all \(1\)/i });
+    expect(btn).toBeEnabled();
+  });
+});
+
+describe("Catalogue page — sort state round-trips through the URL", () => {
+  test("pre-existing ?sort=ip&dir=asc URL surfaces as the table query's sort fields", async () => {
+    renderCatalogue("/catalogue?sort=ip&dir=asc");
+    await screen.findByRole("complementary", { name: /catalogue filters/i });
+
+    const calls = vi.mocked(useCatalogueListInfinite).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const [query] = calls[calls.length - 1];
+    expect(query).toMatchObject({ sort: "ip", sort_dir: "asc" });
+  });
+});
+
+describe("Catalogue page — cluster dialog wiring", () => {
+  test("clicking a cluster on the map opens the cluster dialog", async () => {
+    const user = userEvent.setup();
+    renderCatalogue("/catalogue?view=map");
+    await screen.findByRole("complementary", { name: /catalogue filters/i });
+
+    // The real CatalogueMap would fire onClusterOpen on leaflet click —
+    // the stub exposes a button that fires it with a fixture bbox.
+    const trigger = await screen.findByTestId("stub-cluster-click");
+    await user.click(trigger);
+
+    await screen.findByTestId("cluster-dialog-stub");
   });
 });

@@ -10,4 +10,6 @@ pub mod handlers;
 pub mod model;
 pub mod parse;
 pub mod repo;
+pub mod shapes;
+pub mod sort;
 pub(crate) mod sse;

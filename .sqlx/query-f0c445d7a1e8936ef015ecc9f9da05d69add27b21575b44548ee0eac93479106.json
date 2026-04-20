@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) AS \"total!\"\n        FROM ip_catalogue c\n        WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))\n          AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))\n          AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))\n          AND ($4::INET IS NULL OR c.ip <<= $4::INET)\n          AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)\n          AND (NOT $6::BOOL OR (\n                c.latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION\n            AND c.longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION\n          ))\n          AND ($11::TEXT[] = '{}' OR c.city = ANY($11::TEXT[]))\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int4Array",
+        "TextArray",
+        "Inet",
+        "Text",
+        "Bool",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f0c445d7a1e8936ef015ecc9f9da05d69add27b21575b44548ee0eac93479106"
+}

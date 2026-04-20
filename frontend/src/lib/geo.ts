@@ -32,6 +32,18 @@ export type GeoShape =
   | { kind: "rectangle"; sw: [number, number]; ne: [number, number] }
   | { kind: "circle"; center: [number, number]; radiusMeters: number };
 
+/**
+ * Axis-aligned bounding box used by the catalogue map surface.
+ *
+ * Tuple ordering: `[minLat, minLng, maxLat, maxLng]` — matches the
+ * `MapBucket.bbox` wire type emitted by the backend (`lat` first, `lng`
+ * second). Consumers that interoperate with Leaflet `LatLngBounds` can
+ * read the tuple directly; turf helpers in this module keep their own
+ * `[lng, lat]` ordering, so do not mix them with `Bbox` without an
+ * explicit conversion.
+ */
+export type Bbox = [number, number, number, number];
+
 const CIRCLE_STEPS = 64;
 
 function closeRing(ring: Position[]): Position[] {
@@ -117,6 +129,24 @@ export function pointInShapes(lat: number, lon: number, shapes: GeoShape[]): boo
     if (booleanPointInPolygon(point, polygon)) return true;
   }
   return false;
+}
+
+/**
+ * Serialises `GeoShape[]` into the backend's `Polygon[]` wire form for
+ * the `shapes` query parameter.
+ *
+ * Rectangles expand to their four corners (closed ring), circles are
+ * polygonalised via `@turf/circle` with the same 64-step discretisation
+ * {@link pointInShapes} uses, and free-form polygons pass through with
+ * their ring closed. Every ring is emitted in GeoJSON order
+ * `[lng, lat]` to match `crates/service/src/catalogue/shapes.rs`'s
+ * `Polygon(Vec<[f64; 2]>)` wire shape.
+ */
+export function shapesToPolygons(shapes: GeoShape[]): [number, number][][] {
+  return shapes.map((shape) => {
+    const ring = shapeToPolygon(shape).geometry.coordinates[0];
+    return ring.map((position) => [position[0], position[1]] as [number, number]);
+  });
 }
 
 /**

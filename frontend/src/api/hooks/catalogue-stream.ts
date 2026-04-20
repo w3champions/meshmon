@@ -1,8 +1,9 @@
-import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { type InfiniteData, type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import {
   CATALOGUE_FACETS_KEY,
   CATALOGUE_LIST_KEY,
+  CATALOGUE_MAP_KEY,
   type CatalogueEntry,
   type CatalogueListResponse,
   catalogueEntryKey,
@@ -43,23 +44,57 @@ function isCatalogueStreamEvent(value: unknown): value is CatalogueStreamEvent {
   );
 }
 
+/**
+ * Patch `enrichment_status` in-place across every page of a cached infinite
+ * list. Returns the same `old` reference when no page contains the entry so
+ * consumers that don't show this IP don't re-render.
+ */
+function patchListStatus(
+  old: InfiniteData<CatalogueListResponse> | undefined,
+  id: string,
+  status: CatalogueEntry["enrichment_status"],
+): InfiniteData<CatalogueListResponse> | undefined {
+  if (!old) return old;
+  let changed = false;
+  const pages = old.pages.map((page) => {
+    let pageChanged = false;
+    const entries = page.entries.map((e) => {
+      if (e.id === id) {
+        pageChanged = true;
+        return { ...e, enrichment_status: status };
+      }
+      return e;
+    });
+    if (pageChanged) {
+      changed = true;
+      return { ...page, entries };
+    }
+    return page;
+  });
+  return changed ? { ...old, pages } : old;
+}
+
 function applyEvent(queryClient: QueryClient, event: CatalogueStreamEvent): void {
   switch (event.kind) {
     case "created": {
-      // New rows shift the current list window and facet counts. Don't
-      // touch individual entry keys — they don't exist yet for a fresh
-      // row, and the list refetch carries the new entry naturally.
+      // New rows shift the current list window, the map view, and facet
+      // counts. Don't touch individual entry keys — they don't exist yet
+      // for a fresh row, and the list refetch carries the new entry
+      // naturally.
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
       return;
     }
     case "updated": {
       // The single entry cache is stale. Field changes can also change
-      // sort order or filter membership inside the current list window,
-      // so we invalidate the list prefix too. Facets may shift when an
-      // operator corrects geo/ASN fields — invalidate conservatively.
+      // sort order or filter membership inside the current list window
+      // and move a dot on the map, so we invalidate those prefixes too.
+      // Facets may shift when an operator corrects geo/ASN fields —
+      // invalidate conservatively.
       queryClient.invalidateQueries({ queryKey: catalogueEntryKey(event.id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
       return;
     }
@@ -74,29 +109,23 @@ function applyEvent(queryClient: QueryClient, event: CatalogueStreamEvent): void
           enrichment_status: event.status,
         });
       }
-      // Also walk every cached list query and patch the matching entry in
-      // place. Returning the same `old` reference when no entry matches
-      // prevents unnecessary re-renders in consumers that don't show this IP.
-      queryClient.setQueriesData<CatalogueListResponse>({ queryKey: CATALOGUE_LIST_KEY }, (old) => {
-        if (!old) return old;
-        let changed = false;
-        const entries = old.entries.map((e) => {
-          if (e.id === event.id) {
-            changed = true;
-            return { ...e, enrichment_status: event.status };
-          }
-          return e;
-        });
-        return changed ? { ...old, entries } : old;
-      });
+      // Also walk every cached infinite-list query and patch the matching
+      // entry across all loaded pages. The updater returns the same `old`
+      // reference when no page carries the id so unrelated consumers don't
+      // re-render.
+      queryClient.setQueriesData<InfiniteData<CatalogueListResponse>>(
+        { queryKey: CATALOGUE_LIST_KEY },
+        (old) => patchListStatus(old, event.id, event.status),
+      );
       // On terminal status, the runner has just written new country/ASN/
       // network/geo fields. The SSE frame only carries the status, so
-      // invalidate both the list and the per-entry cache to pick up the
-      // freshly enriched fields. The in-place status patch above keeps the
-      // chip responsive while the refetch is in flight.
+      // invalidate the list, the map, and the per-entry cache to pick up
+      // the freshly enriched fields. The in-place status patch above keeps
+      // the chip responsive while the refetch is in flight.
       if (event.status === "enriched" || event.status === "failed") {
         queryClient.invalidateQueries({ queryKey: catalogueEntryKey(event.id) });
         queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+        queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       }
       // `enrichment_status` drives a facet bucket — counts change.
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
@@ -105,15 +134,17 @@ function applyEvent(queryClient: QueryClient, event: CatalogueStreamEvent): void
     case "deleted": {
       queryClient.removeQueries({ queryKey: catalogueEntryKey(event.id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
       return;
     }
     case "lag": {
       // Buffer overflow — our cached view may be missing events. Force a
-      // refetch of the list and facets; individual entries can stay
-      // whatever they are until the user navigates.
+      // refetch of the list, the map, and facets; individual entries can
+      // stay whatever they are until the user navigates.
       console.warn(`[catalogue-stream] missed ${event.missed} event(s); forcing list refetch`);
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
       return;
     }

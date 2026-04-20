@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { renderWithProviders } from "@/test/query-wrapper";
-import { CatalogueTable, formatWebsiteHost, LS_KEY } from "./CatalogueTable";
+import {
+  CatalogueTable,
+  type CatalogueTableProps,
+  type CatalogueTableSort,
+  formatWebsiteHost,
+  LS_KEY,
+  ROW_HEIGHT_ESTIMATE,
+} from "./CatalogueTable";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -47,6 +54,26 @@ const ENTRY_B: CatalogueEntry = {
 
 const ENTRIES = [ENTRY_A, ENTRY_B];
 
+const UNSORTED: CatalogueTableSort = { col: null, dir: null };
+
+type PartialProps = Partial<CatalogueTableProps>;
+
+/** Build a full props object with sensible defaults for the table. */
+function buildProps(overrides: PartialProps = {}): CatalogueTableProps {
+  return {
+    rows: ENTRIES,
+    total: ENTRIES.length,
+    hasNextPage: false,
+    isFetchingNextPage: false,
+    fetchNextPage: vi.fn(),
+    sort: UNSORTED,
+    onSortChange: vi.fn(),
+    onRowClick: vi.fn(),
+    onReenrich: vi.fn(),
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
@@ -67,26 +94,23 @@ afterEach(() => {
 describe("CatalogueTable", () => {
   describe("default columns visible", () => {
     test("renders the expected column headers", async () => {
-      const onRowClick = vi.fn();
-      const onReenrich = vi.fn();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={onReenrich} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      expect(await screen.findByRole("columnheader", { name: "IP" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "City" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Country" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "ASN" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+      // SortableHeader wraps each sortable column label in a button, so we
+      // look up the text inside the columnheader cell rather than rely on
+      // accessible-name matching.
+      expect(await screen.findByRole("columnheader", { name: /IP/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Name/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /City/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Country/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /ASN/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Network/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Status/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Actions/ })).toBeInTheDocument();
     });
 
     test("renders IP and display_name cell values", async () => {
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
       expect(await screen.findByText("1.2.3.4")).toBeInTheDocument();
       expect(screen.getByText("Alpha Node")).toBeInTheDocument();
@@ -95,11 +119,8 @@ describe("CatalogueTable", () => {
     });
 
     test("renders country name in Country column (resolved from code)", async () => {
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      // Country column now shows the full name; the raw code is in the title attribute.
       expect(await screen.findByText("Netherlands")).toBeInTheDocument();
       expect(screen.getByText("Germany")).toBeInTheDocument();
     });
@@ -110,9 +131,7 @@ describe("CatalogueTable", () => {
         id: "fixture-id-null",
         display_name: null,
       };
-      renderWithProviders(
-        <CatalogueTable entries={[entry]} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ rows: [entry], total: 1 })} />);
 
       await screen.findByText("1.2.3.4");
       expect(screen.getByText("—")).toBeInTheDocument();
@@ -124,14 +143,9 @@ describe("CatalogueTable", () => {
         id: "fixture-id-null-net",
         network_operator: null,
       };
-      renderWithProviders(
-        <CatalogueTable entries={[entry]} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ rows: [entry], total: 1 })} />);
 
       await screen.findByText("1.2.3.4");
-      // The Network column cell for this row should show an em-dash
-      const rows = screen.getAllByRole("button");
-      expect(rows.length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("—")).toBeInTheDocument();
     });
   });
@@ -139,12 +153,8 @@ describe("CatalogueTable", () => {
   describe("row click fires onRowClick(id)", () => {
     test("clicking a row calls onRowClick with the row id", async () => {
       const onRowClick = vi.fn();
-      const onReenrich = vi.fn();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={onReenrich} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ onRowClick })} />);
 
-      // Find the row for ENTRY_A
       const row = await screen.findByRole("button", { name: /Open entry 1\.2\.3\.4/i });
       fireEvent.click(row);
 
@@ -155,9 +165,7 @@ describe("CatalogueTable", () => {
     test("pressing Enter on a focused row calls onRowClick", async () => {
       const user = userEvent.setup();
       const onRowClick = vi.fn();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ onRowClick })} />);
 
       const row = await screen.findByRole("button", { name: /Open entry 1\.2\.3\.4/i });
       row.focus();
@@ -170,9 +178,7 @@ describe("CatalogueTable", () => {
     test("pressing Space on a focused row calls onRowClick", async () => {
       const user = userEvent.setup();
       const onRowClick = vi.fn();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ onRowClick })} />);
 
       const row = await screen.findByRole("button", { name: /Open entry 1\.2\.3\.4/i });
       row.focus();
@@ -183,9 +189,7 @@ describe("CatalogueTable", () => {
     });
 
     test("rows expose button role, tabIndex=0, and aria-label", async () => {
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
       const rowA = await screen.findByRole("button", { name: /Open entry 1\.2\.3\.4/i });
       expect(rowA).toHaveAttribute("tabindex", "0");
@@ -197,13 +201,9 @@ describe("CatalogueTable", () => {
 
   describe("re-enrich button fires onReenrich(id)", () => {
     test("clicking the Actions re-enrich icon button calls onReenrich with the row id", async () => {
-      const onRowClick = vi.fn();
       const onReenrich = vi.fn();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={onReenrich} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ onReenrich })} />);
 
-      // Actions column renders an icon button with aria-label="Re-enrich {ip}".
       const reenrichBtn = await screen.findByRole("button", { name: "Re-enrich 1.2.3.4" });
       fireEvent.click(reenrichBtn);
 
@@ -214,9 +214,7 @@ describe("CatalogueTable", () => {
     test("clicking re-enrich does NOT fire onRowClick (stopPropagation)", async () => {
       const onRowClick = vi.fn();
       const onReenrich = vi.fn();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={onRowClick} onReenrich={onReenrich} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps({ onRowClick, onReenrich })} />);
 
       const reenrichBtn = await screen.findByRole("button", { name: "Re-enrich 1.2.3.4" });
       fireEvent.click(reenrichBtn);
@@ -228,14 +226,12 @@ describe("CatalogueTable", () => {
     test("ENTRY_B with operator_edited_fields shows failed status chip and Actions re-enrich", async () => {
       const onReenrich = vi.fn();
       renderWithProviders(
-        <CatalogueTable entries={[ENTRY_B]} onRowClick={vi.fn()} onReenrich={onReenrich} />,
+        <CatalogueTable {...buildProps({ rows: [ENTRY_B], total: 1, onReenrich })} />,
       );
 
-      // Status column shows the enrichment status only — no operator-locked badge
       expect(await screen.findByText("Failed")).toBeInTheDocument();
       expect(screen.queryByLabelText("Operator-edited")).not.toBeInTheDocument();
 
-      // Actions column carries the re-enrich button
       const reenrichBtn = screen.getByRole("button", { name: "Re-enrich 5.6.7.8" });
       fireEvent.click(reenrichBtn);
       expect(onReenrich).toHaveBeenCalledWith("fixture-id-b");
@@ -245,23 +241,16 @@ describe("CatalogueTable", () => {
   describe("column chooser persists per-operator in localStorage", () => {
     test("toggling a column off writes to localStorage", async () => {
       const user = userEvent.setup();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      // Open the column chooser
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
 
-      // Toggle the "City" column off
       const cityCheckbox = screen.getByRole("checkbox", { name: /city/i });
       expect(cityCheckbox).toBeChecked();
       await user.click(cityCheckbox);
       expect(cityCheckbox).not.toBeChecked();
 
-      // localStorage should reflect the change — stored as a Record<string, boolean>
-      // map; City explicitly set to false so future reads can tell "user hid it"
-      // apart from "column didn't exist when saved."
       const stored = localStorage.getItem(LS_KEY);
       expect(stored).not.toBeNull();
       // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
@@ -273,44 +262,32 @@ describe("CatalogueTable", () => {
 
     test("hidden column persists across remount (localStorage restore)", async () => {
       const user = userEvent.setup();
-      const { unmount } = renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      const { unmount } = renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      // Open chooser and hide City
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
       const cityCheckbox = screen.getByRole("checkbox", { name: /city/i });
       await user.click(cityCheckbox);
 
-      // Confirm City header was removed
-      expect(screen.queryByRole("columnheader", { name: "City" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("columnheader", { name: /City/ })).not.toBeInTheDocument();
 
-      // Unmount and remount
       unmount();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      // City column should still be hidden after remount
-      await screen.findByRole("columnheader", { name: "IP" });
-      expect(screen.queryByRole("columnheader", { name: "City" })).not.toBeInTheDocument();
+      await screen.findByRole("columnheader", { name: /IP/ });
+      expect(screen.queryByRole("columnheader", { name: /City/ })).not.toBeInTheDocument();
     });
 
     test("optional columns are off by default (Location not visible initially)", async () => {
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      await screen.findByRole("columnheader", { name: "IP" });
-      expect(screen.queryByRole("columnheader", { name: "Location" })).not.toBeInTheDocument();
+      await screen.findByRole("columnheader", { name: /IP/ });
+      expect(screen.queryByRole("columnheader", { name: /Location/ })).not.toBeInTheDocument();
     });
 
     test("optional column can be toggled on via chooser", async () => {
       const user = userEvent.setup();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
@@ -319,7 +296,7 @@ describe("CatalogueTable", () => {
       expect(locationCheckbox).not.toBeChecked();
       await user.click(locationCheckbox);
 
-      expect(screen.getByRole("columnheader", { name: "Location" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Location/ })).toBeInTheDocument();
     });
 
     test("Location cell renders Present when both lat and lon exist, Unset otherwise", async () => {
@@ -334,9 +311,7 @@ describe("CatalogueTable", () => {
       };
       renderWithProviders(
         <CatalogueTable
-          entries={[entryWithCoords, entryWithoutCoords]}
-          onRowClick={vi.fn()}
-          onReenrich={vi.fn()}
+          {...buildProps({ rows: [entryWithCoords, entryWithoutCoords], total: 2 })}
         />,
       );
 
@@ -349,26 +324,17 @@ describe("CatalogueTable", () => {
     });
 
     test("first-time users (no stored preferences) see compile-time default columns", async () => {
-      // No localStorage entry → getInitialVisibility seeds from DEFAULT_VISIBLE /
-      // OPTIONAL_COLUMNS. Covers the "new install" baseline.
       expect(localStorage.getItem(LS_KEY)).toBeNull();
 
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      await screen.findByRole("columnheader", { name: "IP" });
-      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
+      await screen.findByRole("columnheader", { name: /IP/ });
+      expect(screen.getByRole("columnheader", { name: /Actions/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Status/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Network/ })).toBeInTheDocument();
     });
 
     test("newly added default-visible column stays visible for users with older saved preferences", async () => {
-      // Simulate a pre-existing user whose saved map predates the "actions"
-      // column. The map shape lets us distinguish "explicit false" (hidden)
-      // from "not in map" (column didn't exist when saved). For `actions`,
-      // the column is missing from the map → hydration must fall back to
-      // the compile-time default, which for DEFAULT_VISIBLE is `true`.
       const legacyMap: Record<string, boolean> = {
         ip: true,
         display_name: true,
@@ -377,42 +343,29 @@ describe("CatalogueTable", () => {
         asn: true,
         network: true,
         status: true,
-        // NB: no `actions` key — the column didn't exist at save time.
       };
       localStorage.setItem(LS_KEY, JSON.stringify(legacyMap));
 
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      await screen.findByRole("columnheader", { name: "IP" });
-      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+      await screen.findByRole("columnheader", { name: /IP/ });
+      expect(screen.getByRole("columnheader", { name: /Actions/ })).toBeInTheDocument();
     });
 
     test("legacy array-shaped localStorage payload is ignored and defaults apply", async () => {
-      // An older build serialized an array of visible column IDs. On load,
-      // the new map-shaped parser must reject the array (because it cannot
-      // distinguish missing-from-set from hidden) and fall through to the
-      // compile-time defaults. After mount, writes replace it with the new
-      // map shape.
       const legacyArray = ["ip", "display_name"];
       localStorage.setItem(LS_KEY, JSON.stringify(legacyArray));
 
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      await screen.findByRole("columnheader", { name: "IP" });
-      // All DEFAULT_VISIBLE columns should be visible, not just the two
-      // in the legacy array.
-      expect(screen.getByRole("columnheader", { name: "City" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Country" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "ASN" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
-      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+      await screen.findByRole("columnheader", { name: /IP/ });
+      expect(screen.getByRole("columnheader", { name: /City/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Country/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /ASN/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Network/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Status/ })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: /Actions/ })).toBeInTheDocument();
 
-      // And the write path should have replaced the legacy array with the map shape.
       const stored = localStorage.getItem(LS_KEY);
       expect(stored).not.toBeNull();
       // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
@@ -423,11 +376,8 @@ describe("CatalogueTable", () => {
 
     test("Actions column is always the rightmost header with all optional columns enabled", async () => {
       const user = userEvent.setup();
-      renderWithProviders(
-        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-      );
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
 
-      // Enable all optional columns via the chooser
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
       for (const label of ["Location", "Website", "Notes"]) {
@@ -437,10 +387,223 @@ describe("CatalogueTable", () => {
         }
       }
 
-      // Read all visible column headers in DOM order
       const headers = screen.getAllByRole("columnheader");
-      const headerNames = headers.map((h) => h.textContent?.trim());
+      const headerNames = headers.map((h) => h.textContent?.trim() ?? "");
+      // The last header contains "Actions" (plain text, no sort button).
       expect(headerNames.at(-1)).toBe("Actions");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Sortable headers
+  // -----------------------------------------------------------------------
+
+  describe("sortable headers", () => {
+    test("clicking an unsorted column header sends (col, 'asc')", async () => {
+      const onSortChange = vi.fn();
+      renderWithProviders(<CatalogueTable {...buildProps({ onSortChange })} />);
+
+      // Each sortable header renders a button with text-label content.
+      const ipHeaderButton = await screen.findByRole("button", { name: /^IP/ });
+      fireEvent.click(ipHeaderButton);
+      expect(onSortChange).toHaveBeenCalledWith("ip", "asc");
+    });
+
+    test("clicking again while ascending sends (col, 'desc')", async () => {
+      const onSortChange = vi.fn();
+      const sort: CatalogueTableSort = { col: "ip", dir: "asc" };
+      renderWithProviders(<CatalogueTable {...buildProps({ sort, onSortChange })} />);
+
+      const ipHeaderButton = await screen.findByRole("button", { name: /^IP/ });
+      fireEvent.click(ipHeaderButton);
+      expect(onSortChange).toHaveBeenCalledWith("ip", "desc");
+    });
+
+    test("clicking again while descending returns to unsorted (null, null)", async () => {
+      const onSortChange = vi.fn();
+      const sort: CatalogueTableSort = { col: "ip", dir: "desc" };
+      renderWithProviders(<CatalogueTable {...buildProps({ sort, onSortChange })} />);
+
+      const ipHeaderButton = await screen.findByRole("button", { name: /^IP/ });
+      fireEvent.click(ipHeaderButton);
+      expect(onSortChange).toHaveBeenCalledWith(null, null);
+    });
+
+    test("aria-sort reflects the current sort state on the active column", async () => {
+      const sort: CatalogueTableSort = { col: "ip", dir: "asc" };
+      renderWithProviders(<CatalogueTable {...buildProps({ sort })} />);
+
+      // aria-sort sits on the <th> (columnheader role) — the enclosing
+      // cell for each sortable column.
+      const ipHeader = await screen.findByRole("columnheader", { name: /^IP/ });
+      expect(ipHeader).toHaveAttribute("aria-sort", "ascending");
+
+      const nameHeader = screen.getByRole("columnheader", { name: /^Name/ });
+      expect(nameHeader).toHaveAttribute("aria-sort", "none");
+    });
+
+    test("aria-sort flips to descending when dir is 'desc'", async () => {
+      const sort: CatalogueTableSort = { col: "ip", dir: "desc" };
+      renderWithProviders(<CatalogueTable {...buildProps({ sort })} />);
+
+      const ipHeader = await screen.findByRole("columnheader", { name: /^IP/ });
+      expect(ipHeader).toHaveAttribute("aria-sort", "descending");
+    });
+
+    test("country header sort maps to the backend 'country_code' column", async () => {
+      const onSortChange = vi.fn();
+      renderWithProviders(<CatalogueTable {...buildProps({ onSortChange })} />);
+
+      const countryButton = await screen.findByRole("button", { name: /^Country/ });
+      fireEvent.click(countryButton);
+      expect(onSortChange).toHaveBeenCalledWith("country_code", "asc");
+    });
+
+    test("Actions column header is plain text (not sortable)", async () => {
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
+
+      const actionsHeader = await screen.findByRole("columnheader", { name: /Actions/ });
+      // No sort button inside the Actions header cell.
+      const buttons = actionsHeader.querySelectorAll("button");
+      expect(buttons.length).toBe(0);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Load-more + total counter
+  // -----------------------------------------------------------------------
+
+  describe("Load-more and total counter", () => {
+    test("shows the server-reported total count next to the Load-more control", async () => {
+      renderWithProviders(<CatalogueTable {...buildProps({ total: 327 })} />);
+
+      expect(await screen.findByText(/2 of 327 entries/)).toBeInTheDocument();
+    });
+
+    test("Load-more button is disabled when hasNextPage is false", async () => {
+      renderWithProviders(<CatalogueTable {...buildProps({ hasNextPage: false })} />);
+
+      const button = await screen.findByRole("button", { name: /all loaded/i });
+      expect(button).toBeDisabled();
+    });
+
+    test("Load-more button is enabled and labelled 'Load more' when hasNextPage is true", async () => {
+      renderWithProviders(<CatalogueTable {...buildProps({ hasNextPage: true })} />);
+
+      const button = await screen.findByRole("button", { name: /^load more$/i });
+      expect(button).toBeEnabled();
+    });
+
+    test("Load-more button shows 'Loading…' while isFetchingNextPage", async () => {
+      renderWithProviders(
+        <CatalogueTable {...buildProps({ hasNextPage: true, isFetchingNextPage: true })} />,
+      );
+
+      const button = await screen.findByRole("button", { name: /loading…/i });
+      expect(button).toBeDisabled();
+    });
+
+    test("clicking Load-more invokes fetchNextPage", async () => {
+      const fetchNextPage = vi.fn();
+      renderWithProviders(<CatalogueTable {...buildProps({ hasNextPage: true, fetchNextPage })} />);
+
+      const button = await screen.findByRole("button", { name: /^load more$/i });
+      fireEvent.click(button);
+      expect(fetchNextPage).toHaveBeenCalledOnce();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Virtualization smoke test
+  // -----------------------------------------------------------------------
+
+  describe("virtualization", () => {
+    test("renders without hanging with 2000 rows and keeps the header reachable", async () => {
+      // jsdom doesn't compute layout, so the virtualizer may render a
+      // conservative default window. We assert the weaker invariant: the
+      // table mounts, the header renders, and the DOM row count stays
+      // finite (data-index rows are << rows.length). Body rows are
+      // div-based (role="button") rather than <tr> so we query by the
+      // data-index attribute the virtualizer stamps onto every row.
+      const rows: CatalogueEntry[] = Array.from({ length: 2000 }, (_, i) => ({
+        ...ENTRY_A,
+        id: `bulk-${i}`,
+        ip: `10.${Math.floor(i / 256)}.${i % 256}.1`,
+        display_name: `Bulk ${i}`,
+      }));
+      renderWithProviders(<CatalogueTable {...buildProps({ rows, total: rows.length })} />);
+
+      await screen.findByRole("columnheader", { name: /IP/ });
+
+      const rendered = document.querySelectorAll("[data-index]");
+      // With a 2000-row dataset, the virtualizer should never commit all
+      // of them at once regardless of layout measurements.
+      expect(rendered.length).toBeGreaterThan(0);
+      expect(rendered.length).toBeLessThan(2000);
+    });
+
+    test("rows with very long cell content keep the fixed virtualizer row height", async () => {
+      // Regression guard for the T51 layout bug: a row carrying a
+      // massively-long notes string would grow past the 44px the
+      // virtualizer pinned in its translateY math, causing neighbouring
+      // rows to overlap visually. The fix truncates every cell to a
+      // single line, so the inline style on the virtualized row div
+      // must always report exactly `ROW_HEIGHT_ESTIMATE`.
+      const longNotes = "qwdqwo;as ".repeat(50);
+      const longCity = "A really very absurdly long city name ".repeat(10);
+      const rows: CatalogueEntry[] = [
+        {
+          ...ENTRY_A,
+          id: "long-row",
+          ip: "8.8.8.8",
+          notes: longNotes,
+          city: longCity,
+        },
+      ];
+      const user = userEvent.setup();
+      renderWithProviders(<CatalogueTable {...buildProps({ rows, total: 1 })} />);
+
+      // Enable notes so the long cell is actually in the DOM.
+      const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+      await user.click(chooserBtn);
+      await user.click(screen.getByRole("checkbox", { name: /notes/i }));
+
+      const renderedRow = await screen.findByRole("button", { name: /Open entry 8\.8\.8\.8/i });
+      expect(renderedRow.style.height).toBe(`${ROW_HEIGHT_ESTIMATE}px`);
+    });
+
+    test("rendered column widths match between header and body via shared grid template", async () => {
+      // Header and body are both CSS grids sharing one
+      // `grid-template-columns` string so columns line up regardless
+      // of viewport width. Dense columns use fixed px widths; text
+      // columns use `minmax(<min>, <fr>)` so the table flexes.
+      renderWithProviders(<CatalogueTable {...buildProps()} />);
+      await screen.findByRole("columnheader", { name: /IP/ });
+
+      // The first row-role element is the header row; the first
+      // data-index element is the first committed body row.
+      const headerRow = document.querySelector('[role="row"]') as HTMLElement | null;
+      expect(headerRow).not.toBeNull();
+      const bodyRow = document.querySelector("[data-index]") as HTMLElement | null;
+      expect(bodyRow).not.toBeNull();
+
+      // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+      const headerTemplate = headerRow!.style.gridTemplateColumns;
+      // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+      const bodyTemplate = bodyRow!.style.gridTemplateColumns;
+
+      // Header and body must share the exact same track string —
+      // otherwise columns would drift as the viewport resizes.
+      expect(headerTemplate).toBe(bodyTemplate);
+
+      // Sanity-check a handful of known per-column tracks so a stray
+      // rename silently breaks the visual contract.
+      expect(headerTemplate).toContain("120px"); // ip
+      expect(headerTemplate).toContain("80px"); // asn
+      expect(headerTemplate).toContain("110px"); // status
+      expect(headerTemplate).toContain("70px"); // actions
+      expect(headerTemplate).toContain("minmax(140px, 1.2fr)"); // display_name
+      expect(headerTemplate).toContain("minmax(140px, 1.5fr)"); // network
     });
   });
 });
@@ -463,7 +626,6 @@ describe("formatWebsiteHost", () => {
   });
 
   test("returns the raw string when parsing fails (truly malformed input)", () => {
-    // An un-parseable value that even https:// prepending can't fix.
     expect(formatWebsiteHost("not a url at all ://???")).toBe("not a url at all ://???");
   });
 
@@ -484,24 +646,16 @@ describe("website column display", () => {
       id: "website-test",
       website: "https://google.com/blah/blah?ssd",
     };
-    renderWithProviders(
-      <CatalogueTable entries={[entry]} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
-    );
+    renderWithProviders(<CatalogueTable {...buildProps({ rows: [entry], total: 1 })} />);
 
-    // Enable the Website column via the column chooser
     const chooserBtn = await screen.findByRole("button", { name: /columns/i });
     await user.click(chooserBtn);
     const websiteCheckbox = screen.getByRole("checkbox", { name: /website/i });
     await user.click(websiteCheckbox);
 
-    // The anchor should show only the hostname.
     const link = await screen.findByRole("link");
     expect(link).toHaveTextContent("google.com");
-
-    // The href must be the full normalized URL.
     expect(link).toHaveAttribute("href", "https://google.com/blah/blah?ssd");
-
-    // The title must be the raw value the operator entered.
     expect(link).toHaveAttribute("title", "https://google.com/blah/blah?ssd");
   });
 });

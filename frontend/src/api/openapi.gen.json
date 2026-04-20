@@ -998,8 +998,8 @@
         "tags": [
           "catalogue"
         ],
-        "summary": "`GET /api/catalogue` — filtered, size-bounded list.",
-        "description": "The handler converts [`ListQuery`] straight into [`repo::ListFilter`]\nand returns a [`ListResponse`]. Cursor pagination is accepted on the\nwire but ignored until T13 — the repo implementation clamps the\nresponse to the first `limit.min(500)` rows in\n`(created_at DESC, id DESC)` order.",
+        "summary": "`GET /api/catalogue` — filtered, size-bounded, keyset-paginated list.",
+        "description": "The handler converts [`ListQuery`] straight into [`repo::ListFilter`]\nand returns a [`ListResponse`]. The repo layer orders by the selected\n`(sort, sort_dir)` with `id DESC` as the invariant tiebreaker and\n`NULLS LAST` for every column; `shapes` run a cheap bbox pre-filter\nin SQL plus exact point-in-polygon in Rust over the returned page\n(see [`super::repo::list`] for the `total`-is-approximate caveat).\n\nThe wire `after` string is decoded via [`super::sort::Cursor::decode`].\nA decode error (malformed base64 or JSON) silently degrades to \"no\ncursor\" — the handler serves the first page rather than returning a\n400. The repo additionally discards a decoded cursor whose\n`(sort, dir)` disagrees with the request's `(sort, dir)`, so a sort\nchange on the client naturally invalidates stale cursors.",
         "operationId": "list",
         "parameters": [
           {
@@ -1079,23 +1079,53 @@
             "explode": false
           },
           {
-            "name": "cursor_created_at",
+            "name": "city",
             "in": "query",
-            "description": "TODO(T13): cursor pagination by `created_at`.",
+            "description": "Zero-or-more city names. ANY semantics; exact match.\n\nCSV string; e.g. `?city=Berlin,Paris`. See `country_code` for\nrationale; repeat-key form is not accepted.",
             "required": false,
             "schema": {
-              "type": "string",
-              "format": "date-time"
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "shapes",
+            "in": "query",
+            "description": "Zero-or-more polygon shapes (point-in-any OR semantics).\n\nAccepts an inline JSON array of `[[lng, lat], ...]` rings, URL-\nencoded into the query string. The server computes the union\nbbox as a cheap SQL pre-filter and then runs exact point-in-\npolygon over the returned page — see [`super::shapes`] (Task 2).\n\nMalformed JSON is rejected with a 400 via\n[`serde::de::Error::custom`], matching the `asn` CSV-of-ints\nbehaviour: filter *values* may be advisory elsewhere, but once a\nvalue is present and structurally typed, a parse failure is a\ncaller bug we surface rather than silently drop.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
-            "name": "cursor_id",
+            "name": "sort",
             "in": "query",
-            "description": "TODO(T13): cursor pagination by `id` (tie-breaker).",
+            "description": "Sort column — defaults to [`SortBy::CreatedAt`]. `NULLS LAST`\napplies; `id DESC` is the invariant tiebreaker.",
             "required": false,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "$ref": "#/components/schemas/SortBy"
+            }
+          },
+          {
+            "name": "sort_dir",
+            "in": "query",
+            "description": "Sort direction — defaults to [`SortDir::Desc`].",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SortDir"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque keyset cursor returned by a prior call's `next_cursor`.\nAbsent for the first page. See [`super::sort::Cursor`] for the\nwire format and the server-side revalidation rules.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -1194,6 +1224,140 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FacetsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalogue/map": {
+      "get": {
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "`GET /api/catalogue/map` — adaptive map view.",
+        "description": "Returns raw rows when the filtered viewport count is at or below\n[`repo::MAP_DETAIL_THRESHOLD`]; otherwise returns grid-aggregated\ncluster buckets sized by [`repo::cell_size_for_zoom`]. The wire body\ncarries a `kind` discriminator so the client can branch on a single\nfield.\n\nDifferences from [`list`]:\n- `bbox` is required — missing/malformed is a 400 via\n  [`super::dto::MapQuery::bbox`]'s strict deserializer.\n- `shapes`/`sort`/`sort_dir`/`after`/`city` are intentionally not\n  part of the filter surface — see [`super::dto::MapQuery`].",
+        "operationId": "map",
+        "parameters": [
+          {
+            "name": "country_code",
+            "in": "query",
+            "description": "Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics. CSV form\n(`?country_code=US,DE`) — see [`ListQuery::country_code`] for the\nrationale; repeat-key form is not accepted.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "asn",
+            "in": "query",
+            "description": "Zero-or-more ASN numbers. ANY semantics. CSV form.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "description": "Zero-or-more `network_operator` ILIKE patterns. ANY semantics.\nCSV form.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "ip_prefix",
+            "in": "query",
+            "description": "Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`;\nunparseable values are silently dropped (mirrors [`ListQuery`]).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Optional `display_name` substring. Same `%…%` wrap happens in\nthe handler before it hits the repo.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "description": "Viewport bounds — `minLat,minLon,maxLat,maxLon`. **Required.**\nA malformed or missing value surfaces as a 400 via serde, unlike\n[`ListQuery::bbox`] which permissively drops the filter.",
+            "required": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "zoom",
+            "in": "query",
+            "description": "Zoom level (0..=20). Controls the grid cell size for\ncluster aggregation when the filtered count crosses\n[`super::repo::MAP_DETAIL_THRESHOLD`]. See\n[`super::repo::cell_size_for_zoom`] for the mapping.\nValues above 20 surface as 400 — leaflet doesn't advertise\nzooms beyond that on any of our tile backends.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalogue map view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/malformed bbox or zoom",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -2982,12 +3146,19 @@
             "items": {
               "$ref": "#/components/schemas/CatalogueEntryDto"
             },
-            "description": "Matching rows in `created_at DESC, id DESC` order."
+            "description": "Matching rows ordered by the request's `sort` / `sort_dir` with\n`id DESC` as the tiebreaker; nullable sort columns place NULLs\nat the tail regardless of direction."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Forward-paging token. `Some` when the server filled `limit`\nrows and a subsequent page may exist; `None` when the end of\nthe result set has been reached. See [`super::sort::Cursor`]\nfor the wire format."
           },
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Count of all rows matching the filter (ignores `limit`)."
+            "description": "Count of all rows matching the filter (ignores `limit`).\n\nWhen the `shapes` filter is non-empty, `total` is an upper-\nbound approximation: SQL can only pre-filter by the shapes'\nunion bounding box, so rows inside the bbox but outside every\npolygon are counted here while the corresponding point-in-\npolygon pass drops them from `entries`. Clients that need an\nexact post-shape count must sum `entries.len()` across every\npage."
           }
         }
       },
@@ -3021,6 +3192,116 @@
             "description": "Echoed username on success."
           }
         }
+      },
+      "MapBucket": {
+        "type": "object",
+        "description": "One grid-aggregated cluster cell surfaced by [`MapResponse::Clusters`].",
+        "required": [
+          "lat",
+          "lng",
+          "count",
+          "sample_id",
+          "bbox"
+        ],
+        "properties": {
+          "bbox": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "Cell bounding box as `[min_lat, min_lng, max_lat, max_lng]`."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows inside the cell."
+          },
+          "lat": {
+            "type": "number",
+            "format": "double",
+            "description": "Cell center latitude."
+          },
+          "lng": {
+            "type": "number",
+            "format": "double",
+            "description": "Cell center longitude."
+          },
+          "sample_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A deterministically-chosen row id from inside the cell — useful\nfor client-side drill-down without re-querying the whole cell."
+          }
+        }
+      },
+      "MapResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Raw rows — returned when the filtered count stays at or below\nthe detail threshold.",
+            "required": [
+              "rows",
+              "total",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "detail"
+                ]
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CatalogueEntryDto"
+                },
+                "description": "Matching rows, ordered by `(created_at DESC, id DESC)`."
+              },
+              "total": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Count of all rows matching the filter within the viewport."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Grid-aggregated buckets — returned when the filtered count\nexceeds the detail threshold.",
+            "required": [
+              "buckets",
+              "total",
+              "cell_size",
+              "kind"
+            ],
+            "properties": {
+              "buckets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MapBucket"
+                },
+                "description": "One bucket per occupied grid cell."
+              },
+              "cell_size": {
+                "type": "number",
+                "format": "double",
+                "description": "Grid cell size in degrees; matches\n[`super::repo::cell_size_for_zoom`] for the request's `zoom`."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clusters"
+                ]
+              },
+              "total": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Total row count in the viewport before aggregation."
+              }
+            }
+          }
+        ],
+        "description": "Adaptive response for `GET /api/catalogue/map`.\n\n- `detail` — raw rows — when the filtered count in the request bbox\n  is at or below [`super::repo::MAP_DETAIL_THRESHOLD`].\n- `clusters` — grid-aggregated buckets — when above the threshold.\n\nThe wire form carries a `kind` discriminator (`\"detail\"` /\n`\"clusters\"`) so clients can branch without inspecting the variant's\nfields. See [`super::repo::map_detail_or_clusters`] for the\nserver-side selection logic."
       },
       "MeasurementKind": {
         "type": "string",
@@ -3473,6 +3754,17 @@
           }
         }
       },
+      "Polygon": {
+        "type": "array",
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "description": "GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.\n\nThe ring is implicitly closed — the `TryFrom` impl below does not\nrequire an explicit closing vertex. A minimum of three *distinct*\npoints is required; shorter rings (two vertices or all-identical\npoints) are rejected as [`ShapeError::TooFewPoints`].\n\nThe `[lng, lat]` order matches GeoJSON and `@turf/helpers`, so the\nfrontend can feed Turf outputs straight through without reordering."
+      },
       "PreviewDispatchResponse": {
         "type": "object",
         "description": "Response body for `POST /api/campaigns/preview`.",
@@ -3681,6 +3973,30 @@
             "description": "`CARGO_PKG_VERSION` of the running service — surfaced so the SPA\ncan warn when the user's loaded bundle is older than the server."
           }
         }
+      },
+      "SortBy": {
+        "type": "string",
+        "description": "Sort columns accepted by `GET /api/catalogue`.\n\nThe list handler always appends `id DESC` as the tiebreaker so the\nordering is total even when multiple rows share the same sort\nvalue, and every variant treats nullable columns as `NULLS LAST`\nregardless of direction. Both invariants are load-bearing for the\nkeyset cursor — see [`super::sort::Cursor`].",
+        "enum": [
+          "created_at",
+          "ip",
+          "display_name",
+          "city",
+          "country_code",
+          "asn",
+          "network_operator",
+          "enrichment_status",
+          "website",
+          "location"
+        ]
+      },
+      "SortDir": {
+        "type": "string",
+        "description": "Sort direction for [`SortBy`]. `NULLS LAST` applies to both arms.",
+        "enum": [
+          "asc",
+          "desc"
+        ]
       },
       "WindowBounds": {
         "type": "object",

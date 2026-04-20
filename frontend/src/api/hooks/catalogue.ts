@@ -1,6 +1,9 @@
 import {
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -15,30 +18,137 @@ export type CataloguePasteRequest = components["schemas"]["PasteRequest"];
 export type CataloguePasteResponse = components["schemas"]["PasteResponse"];
 export type CataloguePatchRequest = components["schemas"]["PatchRequest"];
 export type CatalogueBulkReenrichRequest = components["schemas"]["BulkReenrichRequest"];
+export type CatalogueMapResponse = components["schemas"]["MapResponse"];
+export type CatalogueMapBucket = components["schemas"]["MapBucket"];
+export type CatalogueSortBy = components["schemas"]["SortBy"];
+export type CatalogueSortDir = components["schemas"]["SortDir"];
 
 /**
- * Query shape for `GET /api/catalogue`, sourced directly from the generated
- * OpenAPI spec so there is a single source of truth for supported filters.
+ * Query shape for `GET /api/catalogue`, minus the `after` cursor and `limit`
+ * (both are owned by `useCatalogueListInfinite`). Sourced directly from the
+ * generated OpenAPI spec so there is a single source of truth for supported
+ * filters.
  */
-export type CatalogueListQuery = NonNullable<operations["list"]["parameters"]["query"]>;
+export type CatalogueListQuery = Omit<
+  NonNullable<operations["list"]["parameters"]["query"]>,
+  "after" | "limit"
+>;
+
+/**
+ * Query shape for `GET /api/catalogue/map`, minus the viewport (`bbox`) and
+ * `zoom` — those are always supplied at call sites because the map is
+ * viewport-driven. `shapes`, `sort`, `sort_dir`, `after`, `city` are not part
+ * of the map surface server-side, so they do not appear here either.
+ */
+export type CatalogueMapQuery = Omit<
+  NonNullable<operations["map"]["parameters"]["query"]>,
+  "bbox" | "zoom"
+>;
 
 export const CATALOGUE_LIST_KEY = ["catalogue", "list"] as const;
+export const CATALOGUE_MAP_KEY = ["catalogue", "map"] as const;
 export const CATALOGUE_FACETS_KEY = ["catalogue", "facets"] as const;
 
 export function catalogueEntryKey(id: string) {
   return ["catalogue", "entry", id] as const;
 }
 
-export function useCatalogueList(
+export interface CatalogueListInfiniteOptions {
+  /** Page size; clamped server-side to `1..=500`. Default 100. */
+  pageSize?: number;
+  /**
+   * When `false`, the underlying `useInfiniteQuery` stays idle. Callers
+   * that can only supply a complete query after a user action (e.g. the
+   * cluster dialog, which needs a `bbox` from a cluster click) gate the
+   * hook on this flag instead of calling it conditionally, which would
+   * violate the Rules of Hooks. Defaults to `true`.
+   */
+  enabled?: boolean;
+}
+
+/** Default `limit` used when no `pageSize` option is supplied. */
+const DEFAULT_PAGE_SIZE = 100;
+
+/**
+ * Cursor through `GET /api/catalogue` using keyset paging.
+ *
+ * Each page's `next_cursor` is fed back in as the `after` query param of the
+ * following page; a `null` cursor terminates the sequence. The query key
+ * embeds the full filter object plus `pageSize`, so a filter change spawns a
+ * fresh cursor chain rather than polluting the previous one's pages.
+ */
+export function useCatalogueListInfinite(
   query: CatalogueListQuery = {},
-): UseQueryResult<CatalogueListResponse, Error> {
-  return useQuery({
-    queryKey: [...CATALOGUE_LIST_KEY, query],
-    queryFn: async (): Promise<CatalogueListResponse> => {
+  options: CatalogueListInfiniteOptions = {},
+): UseInfiniteQueryResult<InfiniteData<CatalogueListResponse>, Error> {
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
+  const enabled = options.enabled ?? true;
+  return useInfiniteQuery<
+    CatalogueListResponse,
+    Error,
+    InfiniteData<CatalogueListResponse>,
+    readonly unknown[],
+    string | undefined
+  >({
+    queryKey: [...CATALOGUE_LIST_KEY, query, pageSize],
+    enabled,
+    initialPageParam: undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    queryFn: async ({ pageParam }): Promise<CatalogueListResponse> => {
       const { data, error } = await api.GET("/api/catalogue", {
-        params: { query },
+        params: {
+          query: {
+            ...query,
+            limit: pageSize,
+            after: pageParam,
+          },
+        },
       });
       if (error) throw new Error("failed to fetch catalogue", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data;
+    },
+  });
+}
+
+/**
+ * Fetch the adaptive map response for a given viewport.
+ *
+ * Disabled while `bbox` is absent so a just-mounted map doesn't emit a bad
+ * `bbox=` query (the backend treats missing/malformed `bbox` as a 400). Also
+ * disabled explicitly via `options.enabled` — callers must gate the query on
+ * the map view being visible, otherwise SSE invalidations will keep firing
+ * hidden `/api/catalogue/map` refetches after the operator switches to the
+ * table view. Once both gates are satisfied the query refires whenever the
+ * viewport, zoom, or any filter changes — query-key equality handles it
+ * automatically.
+ *
+ * The backend picks detail-vs-cluster internally; consumers branch on
+ * `data.kind` which narrows the union to the right shape.
+ */
+export function useCatalogueMap(
+  bbox: readonly [number, number, number, number] | undefined,
+  zoom: number,
+  filters: CatalogueMapQuery = {},
+  options: { enabled?: boolean } = {},
+): UseQueryResult<CatalogueMapResponse, Error> {
+  const { enabled = true } = options;
+  return useQuery({
+    queryKey: [...CATALOGUE_MAP_KEY, bbox, zoom, filters],
+    enabled: enabled && bbox !== undefined,
+    queryFn: async (): Promise<CatalogueMapResponse> => {
+      // queryFn only runs when enabled → bbox is defined.
+      const bboxValue = bbox as readonly [number, number, number, number];
+      const { data, error } = await api.GET("/api/catalogue/map", {
+        params: {
+          query: {
+            ...filters,
+            bbox: [...bboxValue],
+            zoom,
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch catalogue map", { cause: error });
       if (!data) throw new Error("empty response");
       return data;
     },
@@ -93,6 +203,7 @@ export function usePasteCatalogue(): UseMutationResult<
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -153,6 +264,7 @@ export function usePatchCatalogueEntry(): UseMutationResult<
     onSuccess: (data, { id }) => {
       queryClient.setQueryData(catalogueEntryKey(id), data);
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -170,6 +282,7 @@ export function useDeleteCatalogueEntry(): UseMutationResult<void, Error, string
     onSuccess: (_data, id) => {
       queryClient.removeQueries({ queryKey: catalogueEntryKey(id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
@@ -187,10 +300,19 @@ export function useReenrichOne(): UseMutationResult<void, Error, string> {
     onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: catalogueEntryKey(id) });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });
 }
+
+/**
+ * Maximum number of ids the bulk re-enrich endpoint accepts per call.
+ * Matches `MAX_BULK_REENRICH_IDS` in `crates/service/src/catalogue/handlers.rs`
+ * — the server returns 400 when a request exceeds this. Exported so callers
+ * that assemble ids client-side can chunk before dispatching.
+ */
+export const MAX_BULK_REENRICH_IDS = 512;
 
 export function useReenrichMany(): UseMutationResult<void, Error, CatalogueBulkReenrichRequest> {
   const queryClient = useQueryClient();
@@ -204,6 +326,7 @@ export function useReenrichMany(): UseMutationResult<void, Error, CatalogueBulkR
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: CATALOGUE_LIST_KEY });
+      queryClient.invalidateQueries({ queryKey: CATALOGUE_MAP_KEY });
       queryClient.invalidateQueries({ queryKey: CATALOGUE_FACETS_KEY });
     },
   });

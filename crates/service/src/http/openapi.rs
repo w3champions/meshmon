@@ -62,10 +62,15 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::catalogue::dto::CatalogueEntryDto,
         crate::catalogue::dto::ErrorEnvelope,
         crate::catalogue::dto::ListResponse,
+        crate::catalogue::dto::MapBucket,
+        crate::catalogue::dto::MapResponse,
         crate::catalogue::dto::PasteInvalid,
         crate::catalogue::dto::PasteRequest,
         crate::catalogue::dto::PasteResponse,
         crate::catalogue::dto::PatchRequest,
+        crate::catalogue::dto::SortBy,
+        crate::catalogue::dto::SortDir,
+        crate::catalogue::shapes::Polygon,
         crate::catalogue::events::CatalogueEvent,
         crate::catalogue::model::CatalogueSource,
         crate::catalogue::model::EnrichmentStatus,
@@ -136,8 +141,10 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::paste))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::list))
         // Static segments are matched before `{id}` path params by `matchit`
-        // regardless of insertion order; registering `/api/catalogue/facets`
-        // before `/api/catalogue/{id}` here is a readability convention.
+        // regardless of insertion order; registering `/api/catalogue/map`
+        // and `/api/catalogue/facets` before `/api/catalogue/{id}` here is
+        // a readability convention.
+        .routes(utoipa_axum::routes!(crate::catalogue::handlers::map))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::facets))
         // SSE stream lives alongside the other catalogue routes. The static
         // `/stream` segment is matched before the `{id}` path param by

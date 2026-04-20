@@ -23,6 +23,59 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+// Re-exported so callers keep importing `dto::Polygon` while the wire
+// type's home module is `shapes` (which owns both the struct and the
+// conversion into `geo::Polygon`).
+pub use super::shapes::Polygon;
+
+/// Sort columns accepted by `GET /api/catalogue`.
+///
+/// The list handler always appends `id DESC` as the tiebreaker so the
+/// ordering is total even when multiple rows share the same sort
+/// value, and every variant treats nullable columns as `NULLS LAST`
+/// regardless of direction. Both invariants are load-bearing for the
+/// keyset cursor — see [`super::sort::Cursor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SortBy {
+    /// Row creation timestamp — the default.
+    #[default]
+    CreatedAt,
+    /// Catalogued IP address (text form for ordering).
+    Ip,
+    /// Operator-supplied display label.
+    DisplayName,
+    /// City name.
+    City,
+    /// ISO 3166-1 alpha-2 country code.
+    CountryCode,
+    /// Autonomous system number.
+    Asn,
+    /// Network operator / ISP name.
+    NetworkOperator,
+    /// Enrichment pipeline status. Ordered alphabetically by the text
+    /// rendering of the enum (`enriched` < `failed` < `pending`), not
+    /// by Postgres enum declaration order — the repo layer casts the
+    /// column to `text` before comparing.
+    EnrichmentStatus,
+    /// Operator-supplied external link.
+    Website,
+    /// Derived "row has coordinates" boolean — rows with lat+lng land
+    /// before rows without, regardless of direction; `NULLS LAST` applies.
+    Location,
+}
+
+/// Sort direction for [`SortBy`]. `NULLS LAST` applies to both arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDir {
+    /// Ascending — smallest first, NULLs at the tail.
+    Asc,
+    /// Descending — largest first, NULLs at the tail.
+    #[default]
+    Desc,
+}
+
 /// Operator-facing view of a single catalogue row.
 ///
 /// This is the wire shape returned by `GET /api/catalogue/{id}` and
@@ -192,12 +245,40 @@ pub struct ListQuery {
     #[serde(default, deserialize_with = "deserialize_bbox")]
     #[param(style = Form, explode = false)]
     pub bbox: Option<[f64; 4]>,
-    /// TODO(T13): cursor pagination by `created_at`.
+    /// Zero-or-more city names. ANY semantics; exact match.
+    ///
+    /// CSV string; e.g. `?city=Berlin,Paris`. See `country_code` for
+    /// rationale; repeat-key form is not accepted.
+    #[serde(default, deserialize_with = "deserialize_csv_string")]
+    #[param(style = Form, explode = false)]
+    pub city: Vec<String>,
+    /// Zero-or-more polygon shapes (point-in-any OR semantics).
+    ///
+    /// Accepts an inline JSON array of `[[lng, lat], ...]` rings, URL-
+    /// encoded into the query string. The server computes the union
+    /// bbox as a cheap SQL pre-filter and then runs exact point-in-
+    /// polygon over the returned page — see [`super::shapes`] (Task 2).
+    ///
+    /// Malformed JSON is rejected with a 400 via
+    /// [`serde::de::Error::custom`], matching the `asn` CSV-of-ints
+    /// behaviour: filter *values* may be advisory elsewhere, but once a
+    /// value is present and structurally typed, a parse failure is a
+    /// caller bug we surface rather than silently drop.
+    #[serde(default, deserialize_with = "deserialize_shapes_json")]
+    #[param(value_type = String)]
+    pub shapes: Vec<Polygon>,
+    /// Sort column — defaults to [`SortBy::CreatedAt`]. `NULLS LAST`
+    /// applies; `id DESC` is the invariant tiebreaker.
     #[serde(default)]
-    pub cursor_created_at: Option<DateTime<Utc>>,
-    /// TODO(T13): cursor pagination by `id` (tie-breaker).
+    pub sort: SortBy,
+    /// Sort direction — defaults to [`SortDir::Desc`].
     #[serde(default)]
-    pub cursor_id: Option<Uuid>,
+    pub sort_dir: SortDir,
+    /// Opaque keyset cursor returned by a prior call's `next_cursor`.
+    /// Absent for the first page. See [`super::sort::Cursor`] for the
+    /// wire format and the server-side revalidation rules.
+    #[serde(default)]
+    pub after: Option<String>,
     /// Page size. Clamped to `1..=500` internally; default 100.
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -265,13 +346,185 @@ where
     Ok(Some([parts[0], parts[1], parts[2], parts[3]]))
 }
 
+/// Parse `minLat,minLon,maxLat,maxLon` into `[f64; 4]` — **required**.
+///
+/// Unlike [`deserialize_bbox`], a missing or malformed bbox surfaces as
+/// a serde error (→ 400). The map endpoint always scopes to a viewport,
+/// so there is no "silently drop the filter" fallback to lean on. See
+/// [`MapQuery::bbox`] for the contract.
+///
+/// Additional validation beyond parse: every component must be finite
+/// (no NaN / Infinity), latitudes in [-90, 90], longitudes in
+/// [-180, 180], and `min_lat ≤ max_lat` / `min_lon ≤ max_lon`. Absent
+/// these guards, callers panning past the antimeridian (Leaflet
+/// `worldCopyJump`) or typoing the component order silently return
+/// empty result sets because the SQL `BETWEEN` matches nothing —
+/// which looks identical to "no rows in this viewport" to operators.
+fn deserialize_bbox_required<'de, D>(de: D) -> Result<[f64; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    if raw.is_empty() {
+        return Err(serde::de::Error::custom("bbox is required"));
+    }
+    let parts: Result<Vec<f64>, _> = raw
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<f64>)
+        .collect();
+    let parts =
+        parts.map_err(|e| serde::de::Error::custom(format!("invalid bbox component: {e}")))?;
+    if parts.len() != 4 {
+        return Err(serde::de::Error::custom(format!(
+            "bbox must have exactly 4 components, got {}",
+            parts.len()
+        )));
+    }
+    let bbox = [parts[0], parts[1], parts[2], parts[3]];
+    validate_bbox_geometry(&bbox).map_err(serde::de::Error::custom)?;
+    Ok(bbox)
+}
+
+/// Enforce bbox invariants shared by every caller that supplies a
+/// required bbox. Returns a human-readable error suitable for the
+/// serde `custom` path. Extracted so the list endpoint can reuse the
+/// same guard in a follow-up without duplicating the literals.
+fn validate_bbox_geometry(bbox: &[f64; 4]) -> Result<(), String> {
+    if !bbox.iter().all(|v| v.is_finite()) {
+        return Err("bbox components must be finite".into());
+    }
+    let [min_lat, min_lon, max_lat, max_lon] = *bbox;
+    if !(-90.0..=90.0).contains(&min_lat) || !(-90.0..=90.0).contains(&max_lat) {
+        return Err(format!(
+            "bbox latitudes must be in [-90, 90]; got min_lat={min_lat}, max_lat={max_lat}"
+        ));
+    }
+    if !(-180.0..=180.0).contains(&min_lon) || !(-180.0..=180.0).contains(&max_lon) {
+        return Err(format!(
+            "bbox longitudes must be in [-180, 180]; got min_lon={min_lon}, max_lon={max_lon}"
+        ));
+    }
+    if min_lat > max_lat {
+        return Err(format!(
+            "bbox min_lat ({min_lat}) exceeds max_lat ({max_lat})"
+        ));
+    }
+    if min_lon > max_lon {
+        return Err(format!(
+            "bbox min_lon ({min_lon}) exceeds max_lon ({max_lon})"
+        ));
+    }
+    Ok(())
+}
+
+/// Maximum zoom the map endpoint answers. Zooms above this all fall
+/// into the finest cell band, so clamping here also normalises the
+/// wire format and keeps `zoom: 255` from looking like an invariant
+/// violation when `cell_size_for_zoom` returns a sane number anyway.
+const MAP_ZOOM_MAX: u8 = 20;
+
+/// Reject zoom values above [`MAP_ZOOM_MAX`] — the finest cluster cell
+/// band already covers zoom 15+, so anything beyond 20 is either a
+/// client bug or a probe. Surfaces as 400 rather than silently mapping
+/// to the bottom band.
+fn deserialize_zoom<'de, D>(de: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let z = u8::deserialize(de)?;
+    if z > MAP_ZOOM_MAX {
+        return Err(serde::de::Error::custom(format!(
+            "zoom must be in 0..={MAP_ZOOM_MAX}; got {z}"
+        )));
+    }
+    Ok(z)
+}
+
+/// Upper bound on the number of polygons a single request may carry.
+/// Defence-in-depth: the rings feed an O(vertices × rows) point-in-
+/// polygon scan, so combining many rings with many vertices is quadratic
+/// on the happy path and linear in request size. Operators draw a
+/// handful of AOIs at a time; 16 is well above observed UX need.
+const MAX_SHAPES_PER_REQUEST: usize = 16;
+
+/// Upper bound on vertices per polygon. See `MAX_SHAPES_PER_REQUEST`
+/// for the shape-count counterpart; leaflet-geoman's draw tool caps
+/// typical hand-drawn rings far below this, so this limit only fires
+/// for programmatic callers or abuse.
+const MAX_VERTICES_PER_SHAPE: usize = 1024;
+
+/// Parse the `shapes` query parameter into `Vec<Polygon>`.
+///
+/// Accepts either an inline JSON array (`?shapes=[[[lng,lat],…]]`) or
+/// an absent / empty value. An absent / empty value yields an empty
+/// vec (no filter). Malformed JSON surfaces as a 400 via
+/// [`serde::de::Error::custom`], matching the `asn` CSV-of-ints
+/// behaviour: once the caller supplies a structurally-typed value, a
+/// parse failure is surfaced rather than silently dropped.
+///
+/// Additional validation: rejects requests carrying more than
+/// [`MAX_SHAPES_PER_REQUEST`] polygons or any single polygon over
+/// [`MAX_VERTICES_PER_SHAPE`] vertices, and every polygon must pass
+/// [`geo::Polygon::try_from`] (≥ 3 distinct vertices). Without the
+/// try_from gate here, structurally-valid rings that can't form a
+/// polygon (e.g. three colinear points, two-point rings) used to reach
+/// the repo layer where they'd be silently dropped — producing empty
+/// result pages whose `total` (SQL count) disagreed with the returned
+/// `entries` (post-PIP filter).
+fn deserialize_shapes_json<'de, D>(de: D) -> Result<Vec<Polygon>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = Option::deserialize(de)?;
+    let Some(s) = raw else { return Ok(Vec::new()) };
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    let polys: Vec<Polygon> = serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
+    if polys.len() > MAX_SHAPES_PER_REQUEST {
+        return Err(serde::de::Error::custom(format!(
+            "too many shapes: {} exceeds limit of {MAX_SHAPES_PER_REQUEST}",
+            polys.len()
+        )));
+    }
+    for (i, p) in polys.iter().enumerate() {
+        if p.0.len() > MAX_VERTICES_PER_SHAPE {
+            return Err(serde::de::Error::custom(format!(
+                "shape {i}: {} vertices exceeds limit of {MAX_VERTICES_PER_SHAPE}",
+                p.0.len()
+            )));
+        }
+        if let Err(e) = geo::Polygon::<f64>::try_from(p) {
+            return Err(serde::de::Error::custom(format!("shape {i}: {e}")));
+        }
+    }
+    Ok(polys)
+}
+
 /// Response body for `GET /api/catalogue`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListResponse {
-    /// Matching rows in `created_at DESC, id DESC` order.
+    /// Matching rows ordered by the request's `sort` / `sort_dir` with
+    /// `id DESC` as the tiebreaker; nullable sort columns place NULLs
+    /// at the tail regardless of direction.
     pub entries: Vec<CatalogueEntryDto>,
     /// Count of all rows matching the filter (ignores `limit`).
+    ///
+    /// When the `shapes` filter is non-empty, `total` is an upper-
+    /// bound approximation: SQL can only pre-filter by the shapes'
+    /// union bounding box, so rows inside the bbox but outside every
+    /// polygon are counted here while the corresponding point-in-
+    /// polygon pass drops them from `entries`. Clients that need an
+    /// exact post-shape count must sum `entries.len()` across every
+    /// page.
     pub total: i64,
+    /// Forward-paging token. `Some` when the server filled `limit`
+    /// rows and a subsequent page may exist; `None` when the end of
+    /// the result set has been reached. See [`super::sort::Cursor`]
+    /// for the wire format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Error envelope used by every non-2xx catalogue response.
@@ -285,6 +538,107 @@ pub struct ErrorEnvelope {
     /// Stable error code. Clients should match on this string, not on
     /// the HTTP status alone.
     pub error: String,
+}
+
+/// Filters for `GET /api/catalogue/map`.
+///
+/// Same filter set as [`ListQuery`] **minus** `sort` / `sort_dir` /
+/// `after` / `shapes` / `city` — the map view is intentionally shape-
+/// blind (operators still want to draw shapes against the unfiltered
+/// geography of the fleet) and is not paginated. `bbox` is **required**
+/// here — the map endpoint always scopes to a viewport. `zoom` drives
+/// the grid cell size when the server falls back to cluster aggregation
+/// (see [`MapResponse`]).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct MapQuery {
+    /// Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics. CSV form
+    /// (`?country_code=US,DE`) — see [`ListQuery::country_code`] for the
+    /// rationale; repeat-key form is not accepted.
+    #[serde(default, deserialize_with = "deserialize_csv_string")]
+    #[param(style = Form, explode = false)]
+    pub country_code: Vec<String>,
+    /// Zero-or-more ASN numbers. ANY semantics. CSV form.
+    #[serde(default, deserialize_with = "deserialize_csv_i32")]
+    #[param(style = Form, explode = false)]
+    pub asn: Vec<i32>,
+    /// Zero-or-more `network_operator` ILIKE patterns. ANY semantics.
+    /// CSV form.
+    #[serde(default, deserialize_with = "deserialize_csv_string")]
+    #[param(style = Form, explode = false)]
+    pub network: Vec<String>,
+    /// Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`;
+    /// unparseable values are silently dropped (mirrors [`ListQuery`]).
+    #[serde(default)]
+    pub ip_prefix: Option<String>,
+    /// Optional `display_name` substring. Same `%…%` wrap happens in
+    /// the handler before it hits the repo.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Viewport bounds — `minLat,minLon,maxLat,maxLon`. **Required.**
+    /// A malformed or missing value surfaces as a 400 via serde, unlike
+    /// [`ListQuery::bbox`] which permissively drops the filter.
+    #[serde(deserialize_with = "deserialize_bbox_required")]
+    #[param(style = Form, explode = false)]
+    pub bbox: [f64; 4],
+    /// Zoom level (0..=20). Controls the grid cell size for
+    /// cluster aggregation when the filtered count crosses
+    /// [`super::repo::MAP_DETAIL_THRESHOLD`]. See
+    /// [`super::repo::cell_size_for_zoom`] for the mapping.
+    /// Values above 20 surface as 400 — leaflet doesn't advertise
+    /// zooms beyond that on any of our tile backends.
+    #[serde(deserialize_with = "deserialize_zoom")]
+    pub zoom: u8,
+}
+
+/// Adaptive response for `GET /api/catalogue/map`.
+///
+/// - `detail` — raw rows — when the filtered count in the request bbox
+///   is at or below [`super::repo::MAP_DETAIL_THRESHOLD`].
+/// - `clusters` — grid-aggregated buckets — when above the threshold.
+///
+/// The wire form carries a `kind` discriminator (`"detail"` /
+/// `"clusters"`) so clients can branch without inspecting the variant's
+/// fields. See [`super::repo::map_detail_or_clusters`] for the
+/// server-side selection logic.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MapResponse {
+    /// Raw rows — returned when the filtered count stays at or below
+    /// the detail threshold.
+    Detail {
+        /// Matching rows, ordered by `(created_at DESC, id DESC)`.
+        rows: Vec<CatalogueEntryDto>,
+        /// Count of all rows matching the filter within the viewport.
+        total: i64,
+    },
+    /// Grid-aggregated buckets — returned when the filtered count
+    /// exceeds the detail threshold.
+    Clusters {
+        /// One bucket per occupied grid cell.
+        buckets: Vec<MapBucket>,
+        /// Total row count in the viewport before aggregation.
+        total: i64,
+        /// Grid cell size in degrees; matches
+        /// [`super::repo::cell_size_for_zoom`] for the request's `zoom`.
+        cell_size: f64,
+    },
+}
+
+/// One grid-aggregated cluster cell surfaced by [`MapResponse::Clusters`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MapBucket {
+    /// Cell center latitude.
+    pub lat: f64,
+    /// Cell center longitude.
+    pub lng: f64,
+    /// Rows inside the cell.
+    pub count: i64,
+    /// A deterministically-chosen row id from inside the cell — useful
+    /// for client-side drill-down without re-querying the whole cell.
+    pub sample_id: Uuid,
+    /// Cell bounding box as `[min_lat, min_lng, max_lat, max_lng]`.
+    pub bbox: [f64; 4],
 }
 
 /// PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12
@@ -357,4 +711,133 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<T>::deserialize(de).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Focused coverage for the custom query deserializers that guard
+    //! the `shapes` wire surface and the map endpoint's `bbox` / `zoom`.
+    //! Each function carries its own adversarial inputs so a regression
+    //! in one validator can't silently leak through another. Tests use
+    //! `serde_json::from_value` because it matches the deserializers'
+    //! `Option<String>` / `String` / `u8` input shape without pulling
+    //! in an extra url-encoding dev-dep.
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Debug, Deserialize)]
+    struct ShapesEnvelope {
+        #[serde(default, deserialize_with = "deserialize_shapes_json")]
+        shapes: Vec<Polygon>,
+    }
+
+    fn parse_shapes(raw: &str) -> Result<Vec<Polygon>, String> {
+        serde_json::from_value::<ShapesEnvelope>(json!({ "shapes": raw }))
+            .map(|e| e.shapes)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn shapes_rejects_below_three_distinct_vertices() {
+        // Two-point ring. Previously silently dropped in repo::list,
+        // producing empty entries with non-zero total.
+        let err = parse_shapes("[[[0,0],[1,1]]]").unwrap_err();
+        assert!(err.contains("shape 0"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shapes_rejects_excessive_polygon_count() {
+        let one = "[[0,0],[1,0],[1,1],[0,0]]";
+        let many: Vec<&str> = std::iter::repeat_n(one, MAX_SHAPES_PER_REQUEST + 1).collect();
+        let raw = format!("[{}]", many.join(","));
+        let err = parse_shapes(&raw).unwrap_err();
+        assert!(err.contains("too many shapes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shapes_rejects_excessive_vertex_count() {
+        let mut verts = String::from("[");
+        for i in 0..(MAX_VERTICES_PER_SHAPE + 2) {
+            let x = (i as f64) * 0.001;
+            verts.push_str(&format!("[{x},0],"));
+        }
+        verts.push_str("[0,0]]");
+        let raw = format!("[{verts}]");
+        let err = parse_shapes(&raw).unwrap_err();
+        assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shapes_accepts_well_formed_polygon() {
+        let polys = parse_shapes("[[[0,0],[1,0],[1,1],[0,1],[0,0]]]").unwrap();
+        assert_eq!(polys.len(), 1);
+        assert_eq!(polys[0].0.len(), 5);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct BboxEnvelope {
+        #[serde(deserialize_with = "deserialize_bbox_required")]
+        bbox: [f64; 4],
+    }
+
+    fn parse_bbox(raw: &str) -> Result<[f64; 4], String> {
+        serde_json::from_value::<BboxEnvelope>(json!({ "bbox": raw }))
+            .map(|e| e.bbox)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn bbox_rejects_nan() {
+        let err = parse_bbox("NaN,0,10,10").unwrap_err();
+        assert!(err.contains("finite"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bbox_rejects_out_of_range_latitude() {
+        let err = parse_bbox("-100,0,100,10").unwrap_err();
+        assert!(err.contains("latitudes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bbox_rejects_out_of_range_longitude() {
+        // Mirrors what `worldCopyJump` produces when the operator pans
+        // past the antimeridian — before this guard the server silently
+        // returned an empty page, now the client gets a 400 it can
+        // clamp against.
+        let err = parse_bbox("-10,-200,10,200").unwrap_err();
+        assert!(err.contains("longitudes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bbox_rejects_inverted_axes() {
+        let err_lat = parse_bbox("30,0,10,10").unwrap_err();
+        assert!(err_lat.contains("min_lat"), "unexpected error: {err_lat}");
+        let err_lon = parse_bbox("0,30,10,10").unwrap_err();
+        assert!(err_lon.contains("min_lon"), "unexpected error: {err_lon}");
+    }
+
+    #[test]
+    fn bbox_accepts_canonical_viewport() {
+        let bbox = parse_bbox("-10,-20,10,20").unwrap();
+        assert_eq!(bbox, [-10.0, -20.0, 10.0, 20.0]);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ZoomEnvelope {
+        #[serde(deserialize_with = "deserialize_zoom")]
+        zoom: u8,
+    }
+
+    #[test]
+    fn zoom_rejects_above_max() {
+        let err = serde_json::from_value::<ZoomEnvelope>(json!({ "zoom": 21 })).unwrap_err();
+        assert!(err.to_string().contains("0..=20"));
+    }
+
+    #[test]
+    fn zoom_accepts_within_range() {
+        let z = serde_json::from_value::<ZoomEnvelope>(json!({ "zoom": 12 })).unwrap();
+        assert_eq!(z.zoom, 12);
+    }
 }
