@@ -242,3 +242,50 @@ udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
 # udp_pps   = 0.05
 #
 # # ... repeat for every (primary, health) combination in your priority list
+
+# ---------------------------------------------------------------------------
+# [enrichment] — IP catalogue enrichment provider chain.
+#
+# Providers run in a fixed order and populate missing fields (country,
+# ASN, network operator, coordinates) on paste and on operator-triggered
+# re-enrich. Each sub-section's `enabled` flag toggles that provider;
+# disabled providers are skipped without error. SIGHUP reloads this
+# section through the ArcSwap without a service restart.
+
+[enrichment.ipgeolocation]
+# IPGeolocation.io — commercial geo / ASN / network-operator lookups.
+# The free tier has a strict rate limit and requires acknowledging the
+# provider's terms of service.
+#
+# Boot-time constraint: `enabled = true` requires BOTH a resolved API
+# key AND `acknowledged_tos = true`. The service refuses to start
+# otherwise.
+enabled = false
+# Provide inline OR via env indirection (mutually exclusive). The env
+# form keeps the key out of the committed config.
+# api_key = "paste-the-key-here"
+# api_key_env = "MESHMON_IPGEO_API_KEY"
+# acknowledged_tos = true
+
+[enrichment.rdap]
+# RDAP — registry allocation metadata (country, net-name, network
+# operator). Free, no API key. Bootstraps from IANA → RIR via
+# `icann-rdap-client`. RDAP does NOT populate ASN directly (the typed
+# response drops ARIN's origin-AS extension); WHOIS fills the ASN gap
+# later in the chain when its feature flag is enabled.
+enabled = true
+
+[enrichment.maxmind]
+# MaxMind GeoLite2 — local mmdb lookups for city and ASN. Requires
+# building the service with the `enrichment-maxmind` feature flag AND
+# paths to operator-provided mmdb files. Useful for air-gapped
+# deployments that cannot reach ipgeolocation.io or RDAP.
+enabled = false
+# city_mmdb = "/etc/meshmon/GeoLite2-City.mmdb"
+# asn_mmdb  = "/etc/meshmon/GeoLite2-ASN.mmdb"
+
+[enrichment.whois]
+# WHOIS — legacy ASN / netblock fallback. Requires building with the
+# `enrichment-whois` feature flag. Runs last in the chain to fill gaps
+# (notably ASN) that RDAP could not resolve.
+enabled = false
