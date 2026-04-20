@@ -68,18 +68,6 @@ pub enum SortDir {
     Desc,
 }
 
-/// Default [`SortBy`] when the query omits `sort` — newest rows first.
-pub fn default_sort() -> SortBy {
-    SortBy::CreatedAt
-}
-
-/// Default [`SortDir`] when the query omits `sort_dir` — pairs with
-/// [`default_sort`] to produce the historical `(created_at DESC, id DESC)`
-/// ordering.
-pub fn default_sort_dir() -> SortDir {
-    SortDir::Desc
-}
-
 /// GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.
 ///
 /// The ring is implicitly closed — the server appends the closing
@@ -275,17 +263,20 @@ pub struct ListQuery {
     /// bbox as a cheap SQL pre-filter and then runs exact point-in-
     /// polygon over the returned page — see [`super::shapes`] (Task 2).
     ///
-    /// Malformed JSON silently yields no filter, matching the other
-    /// filter-input permissiveness on this endpoint.
+    /// Malformed JSON is rejected with a 400 via
+    /// [`serde::de::Error::custom`], matching the `asn` CSV-of-ints
+    /// behaviour: filter *values* may be advisory elsewhere, but once a
+    /// value is present and structurally typed, a parse failure is a
+    /// caller bug we surface rather than silently drop.
     #[serde(default, deserialize_with = "deserialize_shapes_json")]
     #[param(value_type = String)]
     pub shapes: Vec<Polygon>,
     /// Sort column — defaults to [`SortBy::CreatedAt`]. `NULLS LAST`
     /// applies; `id DESC` is the invariant tiebreaker.
-    #[serde(default = "default_sort")]
+    #[serde(default)]
     pub sort: SortBy,
     /// Sort direction — defaults to [`SortDir::Desc`].
-    #[serde(default = "default_sort_dir")]
+    #[serde(default)]
     pub sort_dir: SortDir,
     /// Opaque keyset cursor returned by a prior call's `next_cursor`.
     /// Absent for the first page. See [`super::sort::Cursor`] for the
@@ -362,10 +353,11 @@ where
 /// Parse the `shapes` query parameter into `Vec<Polygon>`.
 ///
 /// Accepts either an inline JSON array (`?shapes=[[[lng,lat],…]]`) or
-/// an absent / empty value. Malformed JSON silently yields an empty
-/// vec — the endpoint's filter inputs are advisory and the caller
-/// gets a successful response with no shape filter rather than a 400,
-/// matching the `ip_prefix` / `bbox` silent-drop semantics.
+/// an absent / empty value. An absent / empty value yields an empty
+/// vec (no filter). Malformed JSON surfaces as a 400 via
+/// [`serde::de::Error::custom`], matching the `asn` CSV-of-ints
+/// behaviour: once the caller supplies a structurally-typed value, a
+/// parse failure is surfaced rather than silently dropped.
 fn deserialize_shapes_json<'de, D>(de: D) -> Result<Vec<Polygon>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -375,7 +367,7 @@ where
     if s.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(serde_json::from_str(&s).unwrap_or_default())
+    serde_json::from_str::<Vec<Polygon>>(&s).map_err(serde::de::Error::custom)
 }
 
 /// Response body for `GET /api/catalogue`.

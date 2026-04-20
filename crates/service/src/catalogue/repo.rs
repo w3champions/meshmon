@@ -599,9 +599,10 @@ where
 /// is treated as "no filter" (falling through to `$N IS NULL`). The
 /// bounding box is `[minLat, minLon, maxLat, maxLon]`.
 ///
-/// `cursor_created_at` / `cursor_id` are accepted for forward
-/// compatibility with T13 (cursor-paginated list). T11 ignores them —
-/// the list returns the first `limit.min(500)` rows sorted by
+/// `cursor_created_at` / `cursor_id` are vestigial and slated for
+/// deletion in Task 3, when `list` is rewritten to take the generic
+/// keyset [`super::sort::Cursor`] instead. Until then they are ignored
+/// — the list returns the first `limit.min(500)` rows sorted by
 /// `created_at DESC, id DESC` and a separate `COUNT(*)` over the same
 /// filter set.
 #[derive(Debug, Default)]
@@ -628,9 +629,9 @@ pub struct ListFilter {
     pub bounding_box: Option<[f64; 4]>,
     /// Max rows to return. Clamped to `500` internally.
     pub limit: i64,
-    /// TODO(T13): cursor pagination. Ignored in T11.
+    /// Vestigial — slated for deletion in Task 3. Currently ignored.
     pub cursor_created_at: Option<DateTime<Utc>>,
-    /// TODO(T13): cursor pagination. Ignored in T11.
+    /// Vestigial — slated for deletion in Task 3. Currently ignored.
     pub cursor_id: Option<Uuid>,
 }
 
@@ -640,9 +641,10 @@ pub const LIST_MAX_LIMIT: i64 = 500;
 /// List catalogue rows matching `filter`, returning the rows and the
 /// unpaged `COUNT(*)` over the same WHERE clauses.
 ///
-/// T11 returns the first `limit.min(LIST_MAX_LIMIT)` matching rows in
-/// `(created_at DESC, id DESC)` order. Cursor pagination is deferred to
-/// T13 (see [`ListFilter::cursor_created_at`]).
+/// Currently returns the first `limit.min(LIST_MAX_LIMIT)` matching
+/// rows in `(created_at DESC, id DESC)` order. The rewrite to honour
+/// [`ListFilter::cursor_created_at`] / `cursor_id` and the keyset
+/// cursor on [`super::dto::ListQuery::after`] lands in Task 3.
 pub async fn list(
     pool: &PgPool,
     filter: ListFilter,

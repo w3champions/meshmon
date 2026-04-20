@@ -4,8 +4,10 @@
 //!   the accepted IPs, splits the result into created / existing /
 //!   invalid buckets and enqueues each newly-created id for enrichment.
 //! - `GET /api/catalogue` — filtered list. Multi-valued filters use ANY
-//!   semantics (see [`super::dto::ListQuery`]); cursor pagination is
-//!   deferred to T13.
+//!   semantics (see [`super::dto::ListQuery`]); `sort` / `sort_dir` /
+//!   `after` / `city` / `shapes` are accepted on the wire (Task 1), but
+//!   the repo layer still returns the first `limit.min(500)` rows in
+//!   `(created_at DESC, id DESC)` — keyset paging lands in Task 3.
 //! - `GET /api/catalogue/{id}` — single-row fetch.
 //! - `PATCH /api/catalogue/{id}` — partial update with revert-to-auto
 //!   support. Touched fields flip into `operator_edited_fields`; names
@@ -166,10 +168,11 @@ pub async fn paste(
 /// `GET /api/catalogue` — filtered, size-bounded list.
 ///
 /// The handler converts [`ListQuery`] straight into [`repo::ListFilter`]
-/// and returns a [`ListResponse`]. Cursor pagination is accepted on the
-/// wire but ignored until T13 — the repo implementation clamps the
-/// response to the first `limit.min(500)` rows in
-/// `(created_at DESC, id DESC)` order.
+/// and returns a [`ListResponse`]. `sort` / `sort_dir` / `after`
+/// (keyset cursor) / `city` / `shapes` are accepted on the wire (Task 1),
+/// but the repo implementation still clamps the response to the first
+/// `limit.min(500)` rows in `(created_at DESC, id DESC)` order — the
+/// keyset rewrite lands in Task 3.
 #[utoipa::path(
     get,
     path = "/api/catalogue",
