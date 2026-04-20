@@ -854,8 +854,7 @@ mod tests {
             Duration::from_millis(25),
             Duration::default(),
         ];
-        let filtered: Vec<Duration> =
-            mixed.iter().copied().filter(|d| !d.is_zero()).collect();
+        let filtered: Vec<Duration> = mixed.iter().copied().filter(|d| !d.is_zero()).collect();
         assert_eq!(filtered.len(), 2);
         let s = build_summary(4, 2, &filtered);
         assert!((s.latency_min_ms - 15.0).abs() < 1e-3);
