@@ -26,10 +26,17 @@ pub mod echo_udp;
 pub mod icmp;
 mod icmp_pool;
 pub use icmp_pool::IcmpClientPool;
+pub mod oneshot;
 pub mod tcp;
 pub mod trippy;
 pub mod udp;
 pub mod wire;
+
+// Re-export the shared allocator so `oneshot` can reach it via
+// `crate::probing::next_trace_id()` without importing from trippy directly.
+// Consumed by `probing::oneshot` once Task 3 wires real ICMP tracers.
+#[allow(unused_imports)]
+pub(crate) use trippy::next_trace_id;
 
 use std::net::IpAddr;
 

@@ -78,7 +78,7 @@ static NEXT_ICMP_TRACE_ID: LazyLock<AtomicU16> = LazyLock::new(|| {
     AtomicU16::new(seed)
 });
 
-fn next_trace_id() -> u16 {
+pub(crate) fn next_trace_id() -> u16 {
     let mut id = NEXT_ICMP_TRACE_ID.fetch_add(1, Ordering::Relaxed);
     if id == 0 {
         // Counter wrapped to 0; consume one more slot to skip the wildcard value.
