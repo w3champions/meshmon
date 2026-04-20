@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -92,6 +92,62 @@ describe("LocationPicker", () => {
     }
   });
 
+  test("mounting with a supplied value recenters from world → continent-level", async () => {
+    // First render frames the operator at the world overview
+    // (DEFAULT_CENTER / DEFAULT_ZOOM) and only then animates in to
+    // the supplied point at FIRST_PICK_ZOOM. This keeps the visible
+    // mount framing identical to the value=null case and lets the
+    // post-mount `setView` carry the meaningful transition.
+    renderWithProviders(
+      <LocationPicker value={{ latitude: 10, longitude: 20 }} onChange={() => {}} />,
+    );
+    await screen.findByTestId("map-container");
+    const map = getLeafletMock();
+    const last = map.__setViewCalls.at(-1);
+    expect(last?.center).toEqual([10, 20]);
+    expect(last?.zoom).toBe(4);
+  });
+
+  test("plain wheel bubbles (page scrolls) and flashes the modifier hint", async () => {
+    renderWithProviders(<LocationPicker value={null} onChange={() => {}} />);
+    await screen.findByTestId("map-container");
+    const map = getLeafletMock();
+    const container = map.getContainer();
+    const beforeZoom = map.getZoom();
+
+    const hint = screen.getByTestId("zoom-hint");
+    expect(hint.className).toMatch(/opacity-0/);
+
+    container.dispatchEvent(new WheelEvent("wheel", { deltaY: 100, bubbles: true }));
+
+    // Plain wheel does not zoom the map — the browser is free to scroll
+    // the page instead.
+    expect(map.getZoom()).toBe(beforeZoom);
+    // Hint overlay flashes visible. The state update propagates on the
+    // next React commit, so wait for the className to flip.
+    await waitFor(() => {
+      expect(hint.className).toMatch(/opacity-100/);
+    });
+  });
+
+  test("Cmd/Ctrl+wheel consumes the event and nudges map zoom", async () => {
+    renderWithProviders(<LocationPicker value={null} onChange={() => {}} />);
+    await screen.findByTestId("map-container");
+    const map = getLeafletMock();
+    const container = map.getContainer();
+    const beforeZoom = map.getZoom();
+
+    container.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: -100, ctrlKey: true, bubbles: true }),
+    );
+    // ctrlKey held → zoom in by one snap.
+    expect(map.getZoom()).toBe(beforeZoom + 1);
+
+    container.dispatchEvent(new WheelEvent("wheel", { deltaY: 100, metaKey: true, bubbles: true }));
+    // metaKey held → zoom back out by one snap.
+    expect(map.getZoom()).toBe(beforeZoom);
+  });
+
   test("recenters the viewport when the controlled value changes", async () => {
     // `MapContainer` reads `center` / `zoom` only on initial mount, so
     // without `RecenterOnValueChange` a parent swapping `value` (e.g.
@@ -110,10 +166,11 @@ describe("LocationPicker", () => {
     rerender(
       <LocationPicker value={{ latitude: 37.77, longitude: -122.42 }} onChange={() => {}} />,
     );
-    // null → point zooms in from the world overview.
+    // null → point zooms in from the world overview to continent-level
+    // framing (zoom 4) so the operator sees surrounding landmass.
     const afterFirstPoint = map.__setViewCalls.at(-1);
     expect(afterFirstPoint?.center).toEqual([37.77, -122.42]);
-    expect(afterFirstPoint?.zoom).toBe(6);
+    expect(afterFirstPoint?.zoom).toBe(4);
 
     rerender(<LocationPicker value={{ latitude: 48.14, longitude: 11.58 }} onChange={() => {}} />);
     // point → point keeps the operator's current zoom (undefined ⇒ leave

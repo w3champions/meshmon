@@ -1,7 +1,7 @@
 import "./leaflet-setup";
 
 import type { LeafletMouseEvent } from "leaflet";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -54,6 +54,26 @@ const TILE_SUBDOMAINS = "abcd";
 const DEFAULT_CENTER: [number, number] = [20, 0];
 const DEFAULT_ZOOM = 2;
 
+// How long the "hold ⌘/Ctrl to zoom" hint stays visible after a plain-
+// wheel attempt. Matches DrawMap so the two pickers feel identical.
+const ZOOM_HINT_FADE_MS = 1500;
+
+function detectIsMac(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+    .userAgentData?.platform;
+  if (typeof platform === "string" && platform.length > 0) {
+    return /mac/i.test(platform);
+  }
+  if (typeof navigator.platform === "string" && navigator.platform.length > 0) {
+    return /mac/i.test(navigator.platform);
+  }
+  if (typeof navigator.userAgent === "string") {
+    return /mac/i.test(navigator.userAgent);
+  }
+  return false;
+}
+
 /**
  * Format a signed decimal coordinate with four fractional digits —
  * same precision the Lat/Lng inputs in the entry drawer accepted.
@@ -76,8 +96,13 @@ function ClickToPlace({ onPick }: { onPick(next: LocationPickerValue): void }) {
   return null;
 }
 
-/** Zoom level used when the picker first receives a non-null value. */
-const FIRST_PICK_ZOOM = 6;
+/**
+ * Zoom level used when the picker first receives a non-null value —
+ * continent-level framing so the operator still sees surrounding
+ * landmass and can orient themselves before fine-tuning the pick.
+ * (Zoom 6 used to snap to mid-country and hid context.)
+ */
+const FIRST_PICK_ZOOM = 4;
 
 /**
  * Keep the Leaflet viewport tracking controlled `value` updates.
@@ -101,6 +126,49 @@ const FIRST_PICK_ZOOM = 6;
  * when the controlled `value` prop itself changes, not on map
  * interaction.
  */
+interface ModifierZoomControllerProps {
+  onHintNeeded(): void;
+}
+
+/**
+ * Default page scroll when hovering the map; modifier-gated wheel zoom.
+ *
+ * Matches DrawMap so the two map surfaces behave identically. Plain
+ * scroll bubbles (the page scrolls) and flashes the hint overlay;
+ * ⌘ (macOS) or Ctrl held consumes the wheel and nudges zoom.
+ */
+function ModifierZoomController({ onHintNeeded }: ModifierZoomControllerProps) {
+  const map = useMap();
+  const onHintNeededRef = useRef(onHintNeeded);
+  useEffect(() => {
+    onHintNeededRef.current = onHintNeeded;
+  }, [onHintNeeded]);
+
+  useEffect(() => {
+    const container = map.getContainer();
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const delta = event.deltaY;
+        if (delta === 0) return;
+        const snap = map.options.zoomSnap ?? 1;
+        const step = delta < 0 ? snap : -snap;
+        map.setZoom(map.getZoom() + step);
+        return;
+      }
+      onHintNeededRef.current();
+    };
+
+    container.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      container.removeEventListener("wheel", handleWheel);
+    };
+  }, [map]);
+
+  return null;
+}
+
 function RecenterOnValueChange({ value }: { value: LocationPickerValue | null }) {
   const map = useMap();
   // Snapshot the value we last re-centred on so marker-drag round-trips
@@ -129,6 +197,16 @@ function RecenterOnValueChange({ value }: { value: LocationPickerValue | null })
   return null;
 }
 
+/**
+ * Seed the mount-time viewport. We always open at
+ * [`DEFAULT_CENTER`]+[`DEFAULT_ZOOM`] even when a `value` is already
+ * supplied so the operator sees continent-level context; the
+ * `RecenterOnValueChange` helper then animates in to the supplied
+ * point at [`FIRST_PICK_ZOOM`] on the first effect tick. Centralising
+ * this lets the tests keep asserting `null → point` transitions via
+ * `__setViewCalls` rather than mount-time `center` snapshots.
+ */
+
 export function LocationPicker({
   value,
   onChange,
@@ -156,6 +234,26 @@ export function LocationPicker({
     ? `Selected: ${formatCoord(value.latitude)}, ${formatCoord(value.longitude)}`
     : "No location selected";
 
+  const [hintVisible, setHintVisible] = useState(false);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMac = useMemo(() => detectIsMac(), []);
+  const hintKeyLabel = isMac ? "\u2318" : "Ctrl";
+
+  const flashHint = useCallback(() => {
+    setHintVisible(true);
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = setTimeout(() => {
+      setHintVisible(false);
+      hintTimerRef.current = null;
+    }, ZOOM_HINT_FADE_MS);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    };
+  }, []);
+
   return (
     <div className={cn("flex flex-col gap-2", className)}>
       <div
@@ -166,8 +264,12 @@ export function LocationPicker({
         data-testid="location-picker-shell"
       >
         <MapContainer
-          center={value ? [value.latitude, value.longitude] : DEFAULT_CENTER}
-          zoom={value ? 6 : DEFAULT_ZOOM}
+          // Always mount at world overview; `RecenterOnValueChange`
+          // nudges in to `FIRST_PICK_ZOOM` (continent-level) when the
+          // controlled `value` is non-null so the operator always sees
+          // surrounding context on initial render.
+          center={DEFAULT_CENTER}
+          zoom={DEFAULT_ZOOM}
           minZoom={1}
           worldCopyJump
           scrollWheelZoom={false}
@@ -184,6 +286,7 @@ export function LocationPicker({
           />
           <ClickToPlace onPick={onChange} />
           <RecenterOnValueChange value={value} />
+          <ModifierZoomController onHintNeeded={flashHint} />
           {value ? (
             <Marker
               position={[value.latitude, value.longitude]}
@@ -200,6 +303,19 @@ export function LocationPicker({
             />
           ) : null}
         </MapContainer>
+        <div
+          data-testid="zoom-hint"
+          aria-hidden={!hintVisible}
+          className={cn(
+            "pointer-events-none absolute inset-0 z-[1000] flex items-center justify-center transition-opacity duration-200",
+            hintVisible ? "opacity-100" : "opacity-0",
+          )}
+        >
+          <div className="rounded-md bg-black/70 px-4 py-2 text-sm font-medium text-white shadow-lg">
+            Hold <kbd className="rounded bg-white/20 px-1.5 py-0.5 font-mono">{hintKeyLabel}</kbd>{" "}
+            to zoom
+          </div>
+        </div>
       </div>
       <div className="flex items-center justify-between gap-3">
         <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
