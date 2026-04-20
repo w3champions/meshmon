@@ -1,6 +1,54 @@
 @import "leaflet/dist/leaflet.css";
 @import "tailwindcss";
 
+/* Leaflet ships a fixed-white popup chrome and a green/yellow/red cluster
+   badge palette via its own stylesheets. Both look out of place inside our
+   themed shell: white-on-dark in dark mode makes popup text unreadable, and
+   the traffic-light cluster colours have no semantic meaning in this UI.
+   Override at global scope — Leaflet injects its own markup, so there's no
+   component class to scope to. */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--color-popover);
+  color: var(--color-popover-foreground);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.3);
+}
+
+.leaflet-popup-content {
+  color: inherit;
+}
+
+.leaflet-popup-close-button {
+  color: var(--color-muted-foreground);
+}
+
+.leaflet-popup-close-button:hover {
+  color: var(--color-foreground);
+}
+
+/* Cluster-badge palette — consistent blue across all three tiers so the
+   colour is not read as a severity signal. Fixed RGB (rather than theme
+   tokens) keeps the translucent ring visible against both light Voyager
+   and dark Dark-Matter basemaps, and the white numeric label stays
+   legible on the 75%-opacity inner circle. */
+.marker-cluster-small,
+.marker-cluster-medium,
+.marker-cluster-large {
+  background-color: rgba(42, 129, 203, 0.35);
+}
+
+.marker-cluster-small div,
+.marker-cluster-medium div,
+.marker-cluster-large div {
+  background-color: rgba(42, 129, 203, 0.75);
+}
+
+.marker-cluster span {
+  color: white;
+  font-weight: 600;
+}
+
 /* Dark is our default palette (see `@theme` below); `.light` on <html> is the
    override class. Tailwind v4's built-in `dark` variant is bound to
    `prefers-color-scheme: dark`, which is NOT what we want — `dark:` utilities
