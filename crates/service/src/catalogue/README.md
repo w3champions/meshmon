@@ -109,3 +109,31 @@ The response is one of two shapes, discriminated by `kind`:
 The bucket carries a sample catalogue id, a `lat`/`lng` centroid, a
 count, and the bucket's own bbox — the frontend uses the bbox as the
 `bbox` filter when it opens the cluster dialog.
+
+## `POST /api/catalogue` — bulk metadata on paste
+
+`PasteRequest` carries an optional `metadata` block applying one set
+of operator values to every accepted IP. The handler routes through
+`repo::insert_many_with_metadata`, which shares the same lock-aware
+`CASE WHEN 'Field' = ANY(operator_edited_fields)` merge pattern as
+`apply_enrichment_result`.
+
+- **New rows** always receive every supplied field; the supplied
+  field names are appended to `operator_edited_fields`.
+- **Existing rows** receive a field only when it is not already in
+  `operator_edited_fields`. Paired fields apply atomically: if either
+  half of `CountryCode` + `CountryName` or `Latitude` + `Longitude`
+  is locked, neither half is written and the skip log records the
+  composite label (`"Country"` / `"Location"`).
+
+The handler validates the same invariants as `PATCH` (finite lat/lon
+in range, 2-char ASCII country code) plus the paste-specific paired-
+presence rule — a half-supplied pair returns 400
+`paired_metadata_half_missing` before touching the DB.
+
+`PasteResponse.existing` reflects the post-merge state, so the UI
+does not need a follow-up fetch. `PasteResponse.skipped_summary` is
+present whenever the request carried `metadata` (absent otherwise)
+and aggregates per-field skip counts with composite keys for paired
+skips. An `Updated` event fires on the SSE broker for every existing
+row whose merge actually wrote at least one column.

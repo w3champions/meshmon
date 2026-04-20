@@ -23,6 +23,315 @@ pub struct InsertOutcome {
     pub existing: Vec<CatalogueEntry>,
 }
 
+/// Operator-set default metadata applied during a bulk paste.
+///
+/// Paired fields (`country_code`+`country_name`, `latitude`+
+/// `longitude`) are expected to be supplied together — the paste
+/// handler rejects half-supplied pairs before reaching the repo, so
+/// the repo's paired-atomicity logic can assume either both halves are
+/// `Some` or both are `None`. Each optional field is independent of
+/// the others.
+#[derive(Debug, Clone, Default)]
+pub struct BulkMetadata {
+    /// Operator-facing display label.
+    pub display_name: Option<String>,
+    /// City name.
+    pub city: Option<String>,
+    /// ISO 3166-1 alpha-2 country code. Paired with `country_name`.
+    pub country_code: Option<String>,
+    /// Country human-readable name. Paired with `country_code`.
+    pub country_name: Option<String>,
+    /// Decimal latitude. Paired with `longitude`.
+    pub latitude: Option<f64>,
+    /// Decimal longitude. Paired with `latitude`.
+    pub longitude: Option<f64>,
+    /// Operator-supplied external link.
+    pub website: Option<String>,
+    /// Free-form operator notes.
+    pub notes: Option<String>,
+}
+
+impl BulkMetadata {
+    /// True when no field is set. Caller can skip the merge pass
+    /// entirely in this case.
+    pub fn is_empty(&self) -> bool {
+        self.display_name.is_none()
+            && self.city.is_none()
+            && self.country_code.is_none()
+            && self.latitude.is_none()
+            && self.website.is_none()
+            && self.notes.is_none()
+    }
+}
+
+/// Outcome of [`insert_many_with_metadata`].
+///
+/// `existing` entries reflect the **post-merge** row state so callers
+/// do not need a follow-up fetch. `skips` carries a per-row log of
+/// fields (or paired-field labels `"Location"` / `"Country"`) that
+/// were refused because they were already in
+/// `operator_edited_fields`. Rows whose metadata was applied cleanly
+/// do not appear in `skips`; rows where every supplied field was
+/// skipped appear with their full skip list.
+#[derive(Debug, Default)]
+pub struct BulkInsertOutcome {
+    /// Newly-inserted rows, with any supplied metadata already applied
+    /// and the corresponding field names appended to
+    /// `operator_edited_fields`.
+    pub created: Vec<CatalogueEntry>,
+    /// Rows that were already present, each carrying its post-merge
+    /// state (values on unlocked fields, prior values on locked ones).
+    pub existing: Vec<CatalogueEntry>,
+    /// Per-row skip log — only present for rows that refused at least
+    /// one metadata write. `"Location"` / `"Country"` appear as
+    /// composite keys for paired-field skips.
+    pub skips: Vec<(Uuid, Vec<String>)>,
+    /// Ids of existing rows whose merge actually wrote at least one
+    /// column. Lets the handler fan out `Updated` SSE events without
+    /// double-counting rows whose supplied fields were all locked.
+    pub updated_existing: std::collections::HashSet<Uuid>,
+}
+
+/// Per-row write plan distilled from a [`BulkMetadata`] and the
+/// target row's current `operator_edited_fields`.
+#[derive(Debug, Default)]
+struct RowWritePlan {
+    display_name: Option<String>,
+    city: Option<String>,
+    country_code: Option<String>,
+    country_name: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    website: Option<String>,
+    notes: Option<String>,
+    /// Canonical field names to append to `operator_edited_fields`.
+    added_locks: Vec<String>,
+    /// Field / pair labels this plan refused to write because the
+    /// target field was already locked.
+    skipped: Vec<String>,
+}
+
+impl RowWritePlan {
+    /// Compute the per-row plan for a given metadata + existing
+    /// lock set. Paired fields apply atomically — when either half
+    /// is already locked, both halves are dropped from the write and
+    /// a composite `"Location"` / `"Country"` entry is appended to
+    /// `skipped`.
+    fn compute(md: &BulkMetadata, locks: &[String]) -> Self {
+        let locked: std::collections::HashSet<&str> = locks.iter().map(String::as_str).collect();
+        let mut plan = RowWritePlan::default();
+
+        fn apply_single(
+            plan_field: &mut Option<String>,
+            plan_added: &mut Vec<String>,
+            plan_skipped: &mut Vec<String>,
+            locked: &std::collections::HashSet<&str>,
+            field: Field,
+            value: &Option<String>,
+        ) {
+            if let Some(v) = value.as_ref() {
+                if locked.contains(field.as_str()) {
+                    plan_skipped.push(field.as_str().to_string());
+                } else {
+                    *plan_field = Some(v.clone());
+                    plan_added.push(field.as_str().to_string());
+                }
+            }
+        }
+
+        apply_single(
+            &mut plan.display_name,
+            &mut plan.added_locks,
+            &mut plan.skipped,
+            &locked,
+            Field::DisplayName,
+            &md.display_name,
+        );
+        apply_single(
+            &mut plan.city,
+            &mut plan.added_locks,
+            &mut plan.skipped,
+            &locked,
+            Field::City,
+            &md.city,
+        );
+        apply_single(
+            &mut plan.website,
+            &mut plan.added_locks,
+            &mut plan.skipped,
+            &locked,
+            Field::Website,
+            &md.website,
+        );
+        apply_single(
+            &mut plan.notes,
+            &mut plan.added_locks,
+            &mut plan.skipped,
+            &locked,
+            Field::Notes,
+            &md.notes,
+        );
+
+        // Paired: Country — atomic on CountryCode + CountryName.
+        if md.country_code.is_some() {
+            let locked_either = locked.contains(Field::CountryCode.as_str())
+                || locked.contains(Field::CountryName.as_str());
+            if locked_either {
+                plan.skipped.push("Country".to_string());
+            } else {
+                plan.country_code = md.country_code.clone();
+                plan.country_name = md.country_name.clone();
+                plan.added_locks
+                    .push(Field::CountryCode.as_str().to_string());
+                plan.added_locks
+                    .push(Field::CountryName.as_str().to_string());
+            }
+        }
+
+        // Paired: Location — atomic on Latitude + Longitude.
+        if md.latitude.is_some() {
+            let locked_either = locked.contains(Field::Latitude.as_str())
+                || locked.contains(Field::Longitude.as_str());
+            if locked_either {
+                plan.skipped.push("Location".to_string());
+            } else {
+                plan.latitude = md.latitude;
+                plan.longitude = md.longitude;
+                plan.added_locks.push(Field::Latitude.as_str().to_string());
+                plan.added_locks.push(Field::Longitude.as_str().to_string());
+            }
+        }
+
+        plan
+    }
+
+    /// True when the plan would actually write any column. Rows whose
+    /// every proposed field was skipped can skip the UPDATE entirely.
+    fn has_writes(&self) -> bool {
+        !self.added_locks.is_empty()
+    }
+}
+
+/// Apply a [`RowWritePlan`] to a single row.
+///
+/// Single-field SQL guards mirror [`apply_enrichment_result`] — they
+/// re-check locks at write time so a concurrent operator PATCH cannot
+/// silently escape the plan. Paired fields (`CountryCode`+`CountryName`,
+/// `Latitude`+`Longitude`) are guarded by a **composite** predicate:
+/// each half's CASE arm references both halves' lock state, so if
+/// either half becomes locked between plan computation and UPDATE the
+/// whole pair is skipped atomically. Without this, the narrow window
+/// where a concurrent PATCH locks only one half could leave a row
+/// with (say) the new `country_name` but the old `country_code` — a
+/// violation of the T52 paired-atomicity contract.
+///
+/// The `operator_edited_fields` array is similarly filtered: the
+/// supplied `added_locks` are trimmed of `CountryCode` / `CountryName`
+/// when the country pair's composite guard fires, and likewise for
+/// the latitude / longitude pair. This keeps the lock bookkeeping in
+/// lockstep with the values it protects.
+async fn apply_metadata_update(
+    pool: &PgPool,
+    id: Uuid,
+    plan: &RowWritePlan,
+) -> Result<CatalogueEntry, sqlx::Error> {
+    let country_code = plan.country_code.clone();
+    let row = sqlx::query_as!(
+        CatalogueEntryRow,
+        r#"
+        UPDATE ip_catalogue SET
+            display_name = CASE
+                WHEN 'DisplayName' = ANY(operator_edited_fields) THEN display_name
+                ELSE COALESCE($2, display_name)
+            END,
+            city = CASE
+                WHEN 'City' = ANY(operator_edited_fields) THEN city
+                ELSE COALESCE($3, city)
+            END,
+            country_code = CASE
+                WHEN 'CountryCode' = ANY(operator_edited_fields)
+                  OR 'CountryName' = ANY(operator_edited_fields)
+                    THEN country_code
+                ELSE COALESCE($4::char(2), country_code)
+            END,
+            country_name = CASE
+                WHEN 'CountryCode' = ANY(operator_edited_fields)
+                  OR 'CountryName' = ANY(operator_edited_fields)
+                    THEN country_name
+                ELSE COALESCE($5, country_name)
+            END,
+            latitude = CASE
+                WHEN 'Latitude' = ANY(operator_edited_fields)
+                  OR 'Longitude' = ANY(operator_edited_fields)
+                    THEN latitude
+                ELSE COALESCE($6, latitude)
+            END,
+            longitude = CASE
+                WHEN 'Latitude' = ANY(operator_edited_fields)
+                  OR 'Longitude' = ANY(operator_edited_fields)
+                    THEN longitude
+                ELSE COALESCE($7, longitude)
+            END,
+            website = CASE
+                WHEN 'Website' = ANY(operator_edited_fields) THEN website
+                ELSE COALESCE($8, website)
+            END,
+            notes = CASE
+                WHEN 'Notes' = ANY(operator_edited_fields) THEN notes
+                ELSE COALESCE($9, notes)
+            END,
+            operator_edited_fields = ARRAY(
+                SELECT DISTINCT f
+                FROM UNNEST(operator_edited_fields || (
+                    SELECT COALESCE(array_agg(g), ARRAY[]::text[])
+                    FROM UNNEST($10::text[]) AS g
+                    WHERE
+                        -- Drop paired-field locks when the composite
+                        -- guard above already skipped the pair.
+                        NOT (
+                            g IN ('CountryCode', 'CountryName')
+                            AND (
+                                'CountryCode' = ANY(operator_edited_fields)
+                                OR 'CountryName' = ANY(operator_edited_fields)
+                            )
+                        )
+                        AND NOT (
+                            g IN ('Latitude', 'Longitude')
+                            AND (
+                                'Latitude' = ANY(operator_edited_fields)
+                                OR 'Longitude' = ANY(operator_edited_fields)
+                            )
+                        )
+                )) AS f
+            )
+        WHERE id = $1
+        RETURNING
+            id,
+            ip AS "ip: IpNetwork",
+            display_name, city, country_code, country_name,
+            latitude, longitude, asn, network_operator, website, notes,
+            enrichment_status AS "enrichment_status: EnrichmentStatus",
+            enriched_at,
+            operator_edited_fields,
+            source AS "source: CatalogueSource",
+            created_at, created_by
+        "#,
+        id,
+        plan.display_name,
+        plan.city,
+        country_code,
+        plan.country_name,
+        plan.latitude,
+        plan.longitude,
+        plan.website,
+        plan.notes,
+        &plan.added_locks as &[String],
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.into())
+}
+
 /// Three-valued sentinel encoding the wire semantics of a PATCH field:
 /// - outer `None`          — leave column untouched
 /// - outer `Some(None)`    — set column to NULL
@@ -62,19 +371,58 @@ pub struct PatchSet {
     pub revert_to_auto: Vec<Field>,
 }
 
-/// Bulk idempotent insert.
+/// Bulk idempotent insert — legacy wrapper around
+/// [`insert_many_with_metadata`].
 ///
 /// Uses `ON CONFLICT (ip) DO NOTHING` to tolerate concurrent paste
 /// requests without turning a unique-violation into a 500. Rows that
 /// already existed are re-fetched and returned under `existing`.
+/// Retained as the default entry-point for call sites that do not
+/// carry operator metadata (agent registration, the enrichment runner).
 pub async fn insert_many(
     pool: &PgPool,
     ips: &[IpAddr],
     source: CatalogueSource,
     created_by: Option<&str>,
 ) -> Result<InsertOutcome, sqlx::Error> {
+    let out =
+        insert_many_with_metadata(pool, ips, source, created_by, None, &Default::default()).await?;
+    Ok(InsertOutcome {
+        created: out.created,
+        existing: out.existing,
+    })
+}
+
+/// Bulk idempotent insert with optional operator-supplied metadata.
+///
+/// When `md` is `None` the behaviour matches the legacy
+/// [`insert_many`]: rows are inserted with `ON CONFLICT (ip) DO
+/// NOTHING`, and existing rows come back untouched in the `existing`
+/// bucket.
+///
+/// When `md` is `Some`, each supplied field applies to every accepted
+/// IP:
+/// - **Newly-created rows** always receive the values and have the
+///   corresponding field names appended to `operator_edited_fields`.
+/// - **Existing rows** receive a field only if it is not already in
+///   `operator_edited_fields`. Paired fields
+///   (`CountryCode`+`CountryName`, `Latitude`+`Longitude`) apply
+///   atomically — if either half of a pair is locked, neither half
+///   is written and the skip log records the composite label
+///   (`"Country"` / `"Location"`).
+///
+/// The returned `existing` entries reflect the post-merge row state so
+/// callers do not need a follow-up fetch.
+pub async fn insert_many_with_metadata(
+    pool: &PgPool,
+    ips: &[IpAddr],
+    source: CatalogueSource,
+    created_by: Option<&str>,
+    md: Option<&BulkMetadata>,
+    per_ip_display_names: &std::collections::HashMap<IpAddr, String>,
+) -> Result<BulkInsertOutcome, sqlx::Error> {
     if ips.is_empty() {
-        return Ok(InsertOutcome::default());
+        return Ok(BulkInsertOutcome::default());
     }
 
     let ipnets: Vec<IpNetwork> = ips.iter().copied().map(IpNetwork::from).collect();
@@ -104,7 +452,7 @@ pub async fn insert_many(
     .fetch_all(pool)
     .await?;
 
-    let created: Vec<CatalogueEntry> = created_rows.into_iter().map(Into::into).collect();
+    let mut created: Vec<CatalogueEntry> = created_rows.into_iter().map(Into::into).collect();
     let created_ips: std::collections::HashSet<IpAddr> = created.iter().map(|e| e.ip).collect();
 
     let missing_ips: Vec<IpNetwork> = ips
@@ -114,7 +462,7 @@ pub async fn insert_many(
         .map(IpNetwork::from)
         .collect();
 
-    let existing = if missing_ips.is_empty() {
+    let mut existing: Vec<CatalogueEntry> = if missing_ips.is_empty() {
         Vec::new()
     } else {
         let existing_rows = sqlx::query_as!(
@@ -140,7 +488,71 @@ pub async fn insert_many(
         existing_rows.into_iter().map(Into::into).collect()
     };
 
-    Ok(InsertOutcome { created, existing })
+    let mut skips: Vec<(Uuid, Vec<String>)> = Vec::new();
+    let mut updated_existing: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
+    // Short-circuit only when neither a global `md` nor any per-IP
+    // override carries a write. `per_ip_display_names` lets the caller
+    // supply per-row display names without setting the panel-wide
+    // default, so an empty `md` does not imply "no work to do".
+    let has_any_per_ip = !per_ip_display_names.is_empty();
+    let has_any_md = md.map(|m| !m.is_empty()).unwrap_or(false);
+    if has_any_md || has_any_per_ip {
+        // For a given row, compute the effective [`BulkMetadata`]:
+        // starts from the global default (or all-None when absent),
+        // then overlays the per-IP display-name override if set for
+        // this row's IP. The override wins over `md.display_name`.
+        let effective_for = |row_ip: IpAddr| -> BulkMetadata {
+            let mut eff = md.cloned().unwrap_or_default();
+            if let Some(name) = per_ip_display_names.get(&row_ip) {
+                eff.display_name = Some(name.clone());
+            }
+            eff
+        };
+
+        // New rows start with an empty lock set, so the plan's
+        // `skipped` is always empty for this bucket — record the
+        // `added_locks` and overwrite the row with the post-merge
+        // state so callers see the metadata they supplied.
+        for row in created.iter_mut() {
+            let eff = effective_for(row.ip);
+            if eff.is_empty() {
+                continue;
+            }
+            let plan = RowWritePlan::compute(&eff, &row.operator_edited_fields);
+            if plan.has_writes() {
+                let updated = apply_metadata_update(pool, row.id, &plan).await?;
+                *row = updated;
+            }
+        }
+
+        // Existing rows may have locks; the plan encodes the per-row
+        // skip decision. Issue the UPDATE only when at least one field
+        // would actually be written, otherwise record the skip and
+        // leave the row untouched.
+        for row in existing.iter_mut() {
+            let eff = effective_for(row.ip);
+            if eff.is_empty() {
+                continue;
+            }
+            let plan = RowWritePlan::compute(&eff, &row.operator_edited_fields);
+            if plan.has_writes() {
+                let updated = apply_metadata_update(pool, row.id, &plan).await?;
+                *row = updated;
+                updated_existing.insert(row.id);
+            }
+            if !plan.skipped.is_empty() {
+                skips.push((row.id, plan.skipped.clone()));
+            }
+        }
+    }
+
+    Ok(BulkInsertOutcome {
+        created,
+        existing,
+        skips,
+        updated_existing,
+    })
 }
 
 /// Look up a row by primary key.

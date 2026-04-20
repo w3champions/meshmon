@@ -31,7 +31,8 @@
 
 use super::dto::{
     BulkReenrichRequest, CatalogueEntryDto, ErrorEnvelope, ListQuery, ListResponse, MapQuery,
-    MapResponse, PasteInvalid, PasteRequest, PasteResponse, PatchRequest,
+    MapResponse, PasteInvalid, PasteMetadata, PasteRequest, PasteResponse, PasteSkippedSummary,
+    PatchRequest,
 };
 use super::events::CatalogueEvent;
 use super::model::{CatalogueSource, Field};
@@ -90,14 +91,85 @@ fn reason_label(reason: ParseReason) -> String {
     }
 }
 
+/// Validate + translate wire metadata into the repo-layer type.
+///
+/// Enforces the same invariants as the PATCH handler (lat/lon range,
+/// ASCII-alphabetic 2-char country code) plus the paste-specific
+/// paired-field rule: `country_code`+`country_name` and
+/// `latitude`+`longitude` must each be supplied as a pair or not at
+/// all. Returns a stable snake_case error code on rejection so the
+/// caller builds the 400 [`Response`]; surfacing the full `Response`
+/// here would inflate the `Result` variant (clippy
+/// `result_large_err`).
+fn validate_metadata(md: &PasteMetadata) -> Result<repo::BulkMetadata, &'static str> {
+    if let Some(lat) = md.latitude {
+        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            return Err("invalid_latitude");
+        }
+    }
+    if let Some(lon) = md.longitude {
+        if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+            return Err("invalid_longitude");
+        }
+    }
+    if let Some(code) = md.country_code.as_ref() {
+        if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err("invalid_country_code");
+        }
+    }
+    // Paired-field presence. Enforced here (before the DB round-trip)
+    // so the repo-layer atomicity logic can trust the invariant.
+    if md.country_code.is_some() != md.country_name.is_some() {
+        return Err("paired_metadata_half_missing");
+    }
+    if md.latitude.is_some() != md.longitude.is_some() {
+        return Err("paired_metadata_half_missing");
+    }
+
+    Ok(repo::BulkMetadata {
+        display_name: md.display_name.clone(),
+        city: md.city.clone(),
+        country_code: md.country_code.clone(),
+        country_name: md.country_name.clone(),
+        latitude: md.latitude,
+        longitude: md.longitude,
+        website: md.website.clone(),
+        notes: md.notes.clone(),
+    })
+}
+
+/// Aggregate a per-row skip log into the wire-shape [`PasteSkippedSummary`].
+fn aggregate_skipped_summary(skips: &[(Uuid, Vec<String>)]) -> PasteSkippedSummary {
+    let mut summary = PasteSkippedSummary::default();
+    for (_id, fields) in skips {
+        if !fields.is_empty() {
+            summary.rows_with_skips += 1;
+            for f in fields {
+                *summary.skipped_field_counts.entry(f.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    summary
+}
+
 /// `POST /api/catalogue` — operator paste flow.
 ///
 /// Tokens are concatenated with spaces and run through
 /// [`parse_ip_tokens`]; accepted IPs become catalogue rows via
-/// [`repo::insert_many`], and each newly-created id is enqueued for
-/// enrichment. Existing rows come back under `existing` so the UI can
-/// surface their current enrichment state without a follow-up fetch.
-/// Rejected tokens land in `invalid`.
+/// [`repo::insert_many_with_metadata`], and each newly-created id is
+/// enqueued for enrichment. Existing rows come back under `existing`
+/// so the UI can surface their current enrichment state without a
+/// follow-up fetch. Rejected tokens land in `invalid`.
+///
+/// When the request carries a [`PasteMetadata`] block, each supplied
+/// field applies to every accepted IP. Newly-created rows always
+/// receive the values and have the field names appended to
+/// `operator_edited_fields`. Existing rows receive a field only if it
+/// is not already locked; paired fields
+/// (`CountryCode`+`CountryName`, `Latitude`+`Longitude`) apply
+/// atomically — if either half of a pair is locked, neither half is
+/// written and the response's [`PasteSkippedSummary`] records a
+/// composite `"Country"` / `"Location"` skip.
 #[utoipa::path(
     post,
     path = "/api/catalogue",
@@ -105,6 +177,7 @@ fn reason_label(reason: ParseReason) -> String {
     request_body = PasteRequest,
     responses(
         (status = 200, description = "Paste outcome", body = PasteResponse),
+        (status = 400, description = "Invalid metadata", body = ErrorEnvelope),
         (status = 401, description = "No active session"),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
@@ -121,6 +194,21 @@ pub async fn paste(
         return (StatusCode::UNAUTHORIZED, "not authenticated").into_response();
     };
 
+    // Validate and convert metadata before any DB work so obvious
+    // client mistakes (bad range, half-supplied pair) come back as a
+    // 400 rather than either surfacing a Postgres error or silently
+    // dropping half of a paired write.
+    let md_for_repo = match body.metadata.as_ref() {
+        Some(md) => match validate_metadata(md) {
+            Ok(parsed) => Some(parsed),
+            Err(code) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": code }))).into_response();
+            }
+        },
+        None => None,
+    };
+    let metadata_present = md_for_repo.is_some();
+
     // `parse_ip_tokens` accepts any delimiter; join the array so the
     // parser sees one blob regardless of how the client split tokens.
     // T11 does not expose `parsed.duplicates` on the wire; parse.rs
@@ -129,16 +217,40 @@ pub async fn paste(
     let joined = body.ips.join(" ");
     let parsed = parse_ip_tokens(&joined);
 
-    let outcome = match repo::insert_many(
+    // Translate the wire-side `per_ip_display_names` map (string-keyed
+    // so JSON can round-trip cleanly) into the repo-layer
+    // `HashMap<IpAddr, String>` it expects. Keys that fail to parse as
+    // an IP are silently dropped — matches the permissive parse
+    // posture used for `ips` tokens and the keyset cursor.
+    // Whitespace-only display-name values collapse to "no override"
+    // so the panel default still applies when the operator typed then
+    // cleared the inline input.
+    let per_ip_display_names: std::collections::HashMap<std::net::IpAddr, String> = body
+        .per_ip_display_names
+        .iter()
+        .filter_map(|(k, v)| {
+            let name = v.trim();
+            if name.is_empty() {
+                return None;
+            }
+            k.parse::<std::net::IpAddr>()
+                .ok()
+                .map(|ip| (ip, name.to_string()))
+        })
+        .collect();
+
+    let outcome = match repo::insert_many_with_metadata(
         &state.pool,
         &parsed.accepted,
         CatalogueSource::Operator,
         Some(&principal.username),
+        md_for_repo.as_ref(),
+        &per_ip_display_names,
     )
     .await
     {
         Ok(o) => o,
-        Err(e) => return db_error("catalogue paste: insert_many failed", e),
+        Err(e) => return db_error("catalogue paste: insert_many_with_metadata failed", e),
     };
 
     // Publish `Created` per inserted row and enqueue each for
@@ -153,10 +265,21 @@ pub async fn paste(
         let _ = state.enrichment_queue.enqueue(row.id);
     }
 
-    // New rows shift the facet bucket counts — invalidate the cache so
-    // the next GET /api/catalogue/facets reflects the paste immediately
-    // rather than waiting up to 30 s for the TTL to expire.
-    if !outcome.created.is_empty() {
+    // Metadata may have changed fields on existing rows. The repo
+    // returns an explicit `updated_existing` set — we only publish
+    // `Updated` for rows that actually wrote at least one column, so
+    // SSE subscribers are never woken on a full-skip no-op.
+    for id in &outcome.updated_existing {
+        state
+            .catalogue_broker
+            .publish(CatalogueEvent::Updated { id: *id });
+    }
+    let touched_existing = !outcome.updated_existing.is_empty();
+
+    // New rows or any existing-row write can shift facet bucket counts
+    // (country / city / network). Invalidate once after the full merge
+    // lands so the next GET /api/catalogue/facets reflects the paste.
+    if !outcome.created.is_empty() || touched_existing {
         state.facets_cache.invalidate().await;
     }
 
@@ -168,6 +291,27 @@ pub async fn paste(
             reason: reason_label(reason),
         })
         .collect();
+
+    // `skipped_summary` is absent when the request did not carry
+    // metadata (pre-T52 contract). Present even when empty otherwise,
+    // so the client can render a "nothing skipped" confirmation.
+    let skipped_summary = if metadata_present {
+        Some(aggregate_skipped_summary(&outcome.skips))
+    } else {
+        None
+    };
+
+    let rows_with_skips = skipped_summary
+        .as_ref()
+        .map(|s| s.rows_with_skips)
+        .unwrap_or(0);
+    tracing::info!(
+        created = outcome.created.len(),
+        existing = outcome.existing.len(),
+        rows_with_skips,
+        metadata = metadata_present,
+        "catalogue paste",
+    );
 
     let response = PasteResponse {
         created: outcome
@@ -181,6 +325,7 @@ pub async fn paste(
             .map(CatalogueEntryDto::from)
             .collect(),
         invalid,
+        skipped_summary,
     };
     (StatusCode::OK, Json(response)).into_response()
 }

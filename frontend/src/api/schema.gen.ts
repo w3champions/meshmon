@@ -365,10 +365,20 @@ export interface paths {
          * `POST /api/catalogue` — operator paste flow.
          * @description Tokens are concatenated with spaces and run through
          *     [`parse_ip_tokens`]; accepted IPs become catalogue rows via
-         *     [`repo::insert_many`], and each newly-created id is enqueued for
-         *     enrichment. Existing rows come back under `existing` so the UI can
-         *     surface their current enrichment state without a follow-up fetch.
-         *     Rejected tokens land in `invalid`.
+         *     [`repo::insert_many_with_metadata`], and each newly-created id is
+         *     enqueued for enrichment. Existing rows come back under `existing`
+         *     so the UI can surface their current enrichment state without a
+         *     follow-up fetch. Rejected tokens land in `invalid`.
+         *
+         *     When the request carries a [`PasteMetadata`] block, each supplied
+         *     field applies to every accepted IP. Newly-created rows always
+         *     receive the values and have the field names appended to
+         *     `operator_edited_fields`. Existing rows receive a field only if it
+         *     is not already locked; paired fields
+         *     (`CountryCode`+`CountryName`, `Latitude`+`Longitude`) apply
+         *     atomically — if either half of a pair is locked, neither half is
+         *     written and the response's [`PasteSkippedSummary`] records a
+         *     composite `"Country"` / `"Location"` skip.
          */
         post: operations["paste"];
         delete?: never;
@@ -1415,30 +1425,129 @@ export interface components {
             token: string;
         };
         /**
+         * @description Operator-set default metadata applied to every accepted IP in a
+         *     paste.
+         *
+         *     Each field is independently optional — absent means "don't touch
+         *     this column". Two pairings are **atomic**: `latitude`+`longitude`
+         *     must be supplied together (or both omitted), and
+         *     `country_code`+`country_name` must be supplied together. The
+         *     paste handler rejects half-supplied pairs with 400
+         *     `paired_metadata_half_missing`.
+         */
+        PasteMetadata: {
+            /** @description City name. */
+            city?: string | null;
+            /**
+             * @description ISO 3166-1 alpha-2 country code. Must be paired with
+             *     [`PasteMetadata::country_name`]. Validated as a 2-character
+             *     ASCII-alphabetic string by the handler.
+             */
+            country_code?: string | null;
+            /**
+             * @description Country human-readable name. Must be paired with
+             *     [`PasteMetadata::country_code`].
+             */
+            country_name?: string | null;
+            /** @description Operator-facing display label. */
+            display_name?: string | null;
+            /**
+             * Format: double
+             * @description Decimal latitude in [-90, 90]. Must be paired with
+             *     [`PasteMetadata::longitude`].
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Decimal longitude in [-180, 180]. Must be paired with
+             *     [`PasteMetadata::latitude`].
+             */
+            longitude?: number | null;
+            /** @description Free-form operator notes. */
+            notes?: string | null;
+            /** @description Operator-supplied external link. */
+            website?: string | null;
+        };
+        /**
          * @description Paste payload — a raw list of IP tokens. Each token is parsed by
          *     [`super::parse::parse_ip_tokens`]; tokens may be bare IPs or host
          *     CIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable
          *     tokens fall into [`PasteResponse::invalid`] instead of aborting the
          *     whole request.
+         *
+         *     An optional [`PasteMetadata`] applies the same operator-set fields
+         *     to every accepted IP. Newly-created rows always receive the values
+         *     and have the corresponding field names appended to
+         *     `operator_edited_fields`. Existing rows receive a field only if it
+         *     is not already locked; paired fields (`Latitude`+`Longitude` and
+         *     `CountryCode`+`CountryName`) apply atomically — if either half of
+         *     a pair is locked, neither half is written. Requests without
+         *     `metadata` preserve the pre-T52 behaviour exactly (no writes to
+         *     `existing` rows, no `skipped_summary` on the response).
          */
         PasteRequest: {
             /** @description Raw tokens to parse and (when valid) insert into the catalogue. */
             ips: string[];
+            metadata?: null | components["schemas"]["PasteMetadata"];
+            /**
+             * @description Optional per-IP display-name overrides, keyed by the caller's
+             *     literal IP string (same form as it appears in `ips`). An
+             *     override supplies the display name for a single IP and wins
+             *     over `metadata.display_name`; it still honours the lock rule on
+             *     existing rows (an existing `DisplayName` lock blocks the
+             *     override just like it blocks the panel default). Keys that do
+             *     not parse as IPs, or that are not in the accepted set, are
+             *     silently ignored — matches the permissive posture used by the
+             *     keyset cursor and `ip_prefix` filter.
+             */
+            per_ip_display_names?: {
+                [key: string]: string;
+            };
         };
         /**
          * @description Response body for `POST /api/catalogue` — a three-way split of the
-         *     paste outcome.
+         *     paste outcome plus an optional aggregate describing metadata
+         *     writes that were skipped against existing rows.
          */
         PasteResponse: {
             /** @description Rows newly inserted by this call. */
             created: components["schemas"]["CatalogueEntryDto"][];
             /**
-             * @description Rows already present in the catalogue. Surfaces the existing
-             *     enrichment state without a follow-up fetch.
+             * @description Rows already present in the catalogue. When the request
+             *     carried a [`PasteMetadata`], each entry here reflects the
+             *     post-merge row state — so the UI does not need a follow-up
+             *     fetch to observe writes that survived the lock check.
              */
             existing: components["schemas"]["CatalogueEntryDto"][];
             /** @description Tokens rejected during parse. */
             invalid: components["schemas"]["PasteInvalid"][];
+            skipped_summary?: null | components["schemas"]["PasteSkippedSummary"];
+        };
+        /**
+         * @description Aggregate describing metadata writes the server refused to apply
+         *     because the target row already carried operator locks on the
+         *     affected fields.
+         *
+         *     Keys in [`PasteSkippedSummary::skipped_field_counts`] are canonical
+         *     [`super::model::Field::as_str`] names, plus two composite labels
+         *     for paired fields:
+         *     - `"Location"` — either half of `Latitude`/`Longitude` was locked.
+         *     - `"Country"`  — either half of `CountryCode`/`CountryName` was
+         *       locked.
+         *
+         *     The composite names let the UI narrate skips without reconstructing
+         *     the pairing client-side.
+         */
+        PasteSkippedSummary: {
+            /**
+             * Format: int32
+             * @description Count of rows that kept at least one operator-locked field.
+             */
+            rows_with_skips: number;
+            /** @description Per-field skip counts; zero-count keys are omitted. */
+            skipped_field_counts: {
+                [key: string]: number;
+            };
         };
         /**
          * @description PATCH body for `/api/campaigns/{id}`.
@@ -2676,6 +2785,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PasteResponse"];
+                };
+            };
+            /** @description Invalid metadata */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description No active session */

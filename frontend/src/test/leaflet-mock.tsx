@@ -40,7 +40,18 @@ type EventHandler = (...args: unknown[]) => void;
  */
 export interface MockLeafletMap {
   fitBounds: () => void;
-  setView: () => void;
+  /**
+   * `setView` accepts the real Leaflet shape (`[lat, lng]` + optional
+   * zoom) so assertions can inspect `__setViewCalls` and verify the
+   * viewport followed a controlled value change.
+   */
+  setView: (center: [number, number], zoom?: number) => void;
+  /**
+   * Ordered log of every `setView` call since `resetLeafletMock()` —
+   * used by `LocationPicker` tests to assert the viewport recenters
+   * when the controlled `value` prop changes.
+   */
+  __setViewCalls: Array<{ center: [number, number]; zoom?: number }>;
   on: (event: string, handler: EventHandler) => void;
   off: (event: string, handler: EventHandler) => void;
   removeLayer: (layer: L.Layer) => void;
@@ -84,9 +95,14 @@ function createMockMap(): MockLeafletMap {
   // the emitted viewport for assertions on `onViewportChange`.
   let bounds: [number, number, number, number] = [-60, -180, 70, 180];
 
+  const setViewCalls: Array<{ center: [number, number]; zoom?: number }> = [];
+
   const map: MockLeafletMap = {
     fitBounds: () => {},
-    setView: () => {},
+    setView: (center, zoom) => {
+      setViewCalls.push({ center, zoom });
+    },
+    __setViewCalls: setViewCalls,
     on: (event, handler) => {
       let set = handlers.get(event);
       if (!set) {
@@ -157,7 +173,35 @@ export function getLeafletMock(): MockLeafletMap {
 
 export function resetLeafletMock(): void {
   currentMap = createMockMap();
+  latestMapEventsHandlers = {};
+  latestMarkerDragEnd = null;
 }
+
+/**
+ * Fire a synthetic map click through the handler most recently registered
+ * via `useMapEvents({ click })`. Mirrors the real react-leaflet shape:
+ * handlers receive a `LeafletMouseEvent` with `latlng.lat` / `latlng.lng`.
+ */
+export function fireMapClick(lat: number, lng: number): void {
+  const handler = latestMapEventsHandlers.click;
+  if (!handler) return;
+  handler({ latlng: { lat, lng } });
+}
+
+/**
+ * Fire a synthetic marker `dragend` through the handler supplied via
+ * `<Marker eventHandlers={{ dragend }}>`. Real Leaflet dragend hands the
+ * handler a `DragEndEvent` whose `target.getLatLng()` yields the new
+ * position; the mock matches that shape.
+ */
+export function fireMarkerDragEnd(lat: number, lng: number): void {
+  const handler = latestMarkerDragEnd;
+  if (!handler) return;
+  handler({ target: { getLatLng: () => ({ lat, lng }) } });
+}
+
+let latestMapEventsHandlers: Record<string, (event: unknown) => void> = {};
+let latestMarkerDragEnd: ((event: unknown) => void) | null = null;
 
 export const LeafletMock = {
   MapContainer: ({ children, center, zoom, className }: MapContainerProps) => (
@@ -173,8 +217,15 @@ export const LeafletMock = {
   TileLayer: ({ url, attribution }: TileLayerProps) => (
     <div data-testid="tile-layer" data-url={url} data-attribution={attribution} />
   ),
+  useMapEvents: (handlers: Record<string, (event: unknown) => void>) => {
+    latestMapEventsHandlers = { ...handlers };
+    return currentMap;
+  },
   Marker: ({ children, position, eventHandlers, icon }: MarkerProps) => {
     const onClick = eventHandlers?.click;
+    // Capture the most recent dragend handler so `fireMarkerDragEnd`
+    // can drive it from tests.
+    latestMarkerDragEnd = eventHandlers?.dragend ?? null;
     // Non-interactive container when the marker has no click handler;
     // otherwise delegate to the interactive Marker below so a11y rules
     // are not violated by attaching click handlers to a plain div.

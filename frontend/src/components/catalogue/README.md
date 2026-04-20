@@ -10,8 +10,9 @@ catalogue route and share a single SSE connection opened at the page level.
 | `CatalogueTable.tsx` | `@tanstack/react-table` table with sortable headers, row virtualization (`@tanstack/react-virtual`), column-visibility toggle (persisted to `localStorage`), and a Load-more control that pulls the next cursor. Rows are keyboard-accessible; clicking a row fires `onRowClick`. The per-row re-enrich button calls `onReenrich` without opening the drawer. |
 | `CatalogueMap.tsx` | Branches on the server map response `kind`: `detail` renders one pin per row through the standard cluster wrapper; `clusters` renders one pre-aggregated bubble per bucket with the cluster wrapper bypassed. Pin popups include an "Open details" link that fires `onRowClick`; cluster bubbles fire `onClusterOpen(bbox)`. The `onViewportChange` callback feeds the parent's `useCatalogueMap(bbox, zoom, filters)` hook. |
 | `CatalogueClusterDialog.tsx` | Modal opened when the operator clicks a server cluster bubble. Owns its own `useCatalogueListInfinite` scoped to the cluster's bbox + the active non-shape filters. Rows stream in pages of 50 via Load-more. |
-| `EntryDrawer.tsx` | Right-side `Sheet` for editing a single entry. Uses `react-hook-form` + Zod; sends diff-only PATCH requests (only dirty fields are sent). Provides per-field "Revert to auto" links for operator-locked fields. Surfaces re-enrich and delete actions. |
-| `PasteStaging.tsx` | Paste panel for bulk IP ingestion. Runs the client-side parser (`lib/catalogue-parse`) before POST so rejections surface immediately. After a successful POST, seeds the TanStack Query cache with server-returned entries and renders `StagingChip` per row, which reads enrichment status live from the cache as SSE events arrive. |
+| `EntryDrawer.tsx` | Right-side `Sheet` for editing a single entry. Uses `react-hook-form` + Zod; sends diff-only PATCH requests (only dirty fields are sent). Latitude + Longitude render as a single composite Location row via `components/map/LocationPicker`. Provides per-field "Revert to auto" links for operator-locked fields. Surfaces re-enrich and delete actions. |
+| `PasteStaging.tsx` | Paste panel for bulk IP ingestion. Runs the client-side parser (`lib/catalogue-parse`) before POST so rejections surface immediately. An optional "Default metadata" panel applies display name, city, country, location, website, and notes to every accepted IP. After a successful POST, seeds the TanStack Query cache with server-returned entries, renders `StagingChip` per row (reads enrichment status live from the cache as SSE events arrive), and surfaces any `skipped_summary` the server returned. |
+| `CountryPicker.tsx` | Thin wrapper around the `COUNTRIES` table that emits `{code, name}` atomically. Used by the paste-metadata panel so `country_code` and `country_name` travel as a pair — half-filled pairs would fail the backend's paired-atomicity rule. |
 | `StatusChip.tsx` | Compact badge for the `enrichment_status` field (`pending`, `enriched`, `failed`). Appends an "Operator-edited" lock badge when `operatorLocked` is true. Optionally actionable (`onReenrich` prop) for `enriched` and `failed` states. |
 | `ReenrichConfirm.tsx` | Modal confirmation dialog for bulk re-enrich. Parent owns the threshold logic (25-row gate); the dialog receives `selectionSize` and displays "~N ipgeolocation credits". |
 
@@ -112,3 +113,33 @@ next enrichment pass can repopulate it.
 
 The `StatusChip` reflects the presence of any lock (`operatorLocked`)
 with a secondary badge — it does not enumerate which fields are locked.
+
+## Location editing
+
+Latitude and Longitude render as a single composite row inside the
+entry drawer (`LocationSection`), backed by the reusable
+`components/map/LocationPicker`. Clicks, drags, and the Clear button
+flow through two paired `Controller`s so a single picker change flags
+both `latitude` and `longitude` dirty. "Revert to auto" on the
+Location row sends both `Latitude` and `Longitude` in
+`revert_to_auto` and nulls both columns — the two halves always
+travel together, matching the backend's paired-atomicity rule.
+
+## Bulk metadata on Add IPs
+
+`PasteStaging` exposes an optional "Default metadata (optional)"
+disclosure above the invalid-tokens list. Operators can set
+display name, city, country (`CountryPicker`), location
+(`LocationPicker`), website, and notes once to apply the values to
+every pasted IP. The panel starts collapsed; blank fields are
+omitted from the wire body, and the disclosure's initial state
+preserves the dialog's existing height layout.
+
+On submit, `toMetadataWire` builds a `PasteRequest.metadata` block
+that sends `country_code`+`country_name` atomically and
+`latitude`+`longitude` atomically — half-filled pairs would return
+400 `paired_metadata_half_missing` from the server. When the paste
+response carries `skipped_summary.rows_with_skips > 0`, the
+component renders a `role="status"` notice above the staged table
+with the row count and the skipped-field label list; composite keys
+(`Location`, `Country`) flow through to the UI verbatim.

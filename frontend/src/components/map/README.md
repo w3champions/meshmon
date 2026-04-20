@@ -1,14 +1,51 @@
 # `components/map`
 
-Leaflet-based draw-and-display map primitive. Used by
-`components/catalogue/CatalogueMap` to render catalogue pins and to
-accept drawn filter shapes.
+Leaflet-based map primitives shared across the catalogue experience.
+`DrawMap` backs the filter overlay on `components/catalogue/CatalogueMap`.
+`LocationPicker` is the single-pin picker used for the Latitude /
+Longitude field on the catalogue entry drawer and in the Add IPs
+bulk-metadata panel.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `DrawMap.tsx` | Controlled/uncontrolled map with geoman draw toolbar. Accepts `shapes` + `onShapesChange` for drawn regions, optional `pins` for markers, `onClusterClick` for the client-side cluster wrapper, and `onViewportChange` for server-side map queries. The `clusterMode` flag bypasses client clustering when the server has already aggregated. |
+| `DrawMap.tsx` | Multi-shape map with geoman draw toolbar. Accepts `shapes` + `onShapesChange` for drawn regions, optional `pins` for markers, `onClusterClick` for the client-side cluster wrapper, and `onViewportChange` for server-side map queries. The `clusterMode` flag bypasses client clustering when the server has already aggregated. |
+| `LocationPicker.tsx` | Single-pin map picker. Click drops a marker, drag moves it, Clear nulls it. Emits `{latitude, longitude} \| null` via `onChange`. Reuses the same tile config and theme-switching that `DrawMap` uses. |
+
+## Which to use
+
+- **`DrawMap`** — the operator needs to pick one or more **regions**
+  (rectangle, polygon, circle) for filtering or selection. Multi-shape,
+  geoman-driven, wired to viewport paging for server-aggregated pins.
+- **`LocationPicker`** — the operator needs a **single coordinate**
+  (one address, one datacenter, one probe). Simpler controls, no
+  toolbar, no clustering.
+
+## `LocationPicker` API
+
+```tsx
+<LocationPicker
+  value={{ latitude: number; longitude: number } | null}
+  onChange={(next) => void}           // called for click / drag / clear
+  clearLabel={string}                 // optional — aria-label on Clear
+  heightClassName={string}            // optional — default `h-64`
+  className={string}                  // optional
+/>
+```
+
+- **`value`** — fully controlled. Pass `null` for the empty state;
+  pass the concrete pair to render the marker.
+- **`onChange`** fires on three intents: map click (drop marker),
+  marker drag-end (move marker), Clear button (null out). Parents
+  map these directly onto their wire shape — the entry drawer sends
+  both halves to PATCH, the Add IPs dialog packs them into
+  `PasteMetadata.latitude` / `longitude`.
+- The coordinate readout is a `role="status"` region announced to
+  assistive tech; the Clear button is keyboard-operable and disabled
+  when no location is selected.
+- Respects `prefers-reduced-motion`: when set, zoom and marker-zoom
+  animations are disabled.
 
 ## `DrawMap` API
 

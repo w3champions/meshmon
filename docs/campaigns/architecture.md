@@ -52,6 +52,13 @@ rendering (`Latitude`, `NetworkOperator`, …). The lock rule is:
 
 - **UI edits** append every touched field to the array (via the PATCH
   handler and the repo `patch` write).
+- **Paste metadata** (`PasteRequest.metadata` on `POST /api/catalogue`)
+  runs through the same lock-aware merge as PATCH: new rows always
+  accept the supplied values and lock them; existing rows receive a
+  field only when it is not already in `operator_edited_fields`.
+  Paired fields (`Latitude`+`Longitude`, `CountryCode`+`CountryName`)
+  apply atomically — skipping both halves when either is locked — and
+  the response's `skipped_summary` aggregates what was refused.
 - **Agent self-report** on `AgentApi.Register` appends `Latitude` and
   `Longitude` — the agent's config was set by someone who knows where it
   physically sits, and that value wins over any provider geo.

@@ -17,6 +17,35 @@ vi.mock("@/api/hooks/catalogue", () => ({
   useDeleteCatalogueEntry: vi.fn(),
 }));
 
+// Stub the Leaflet-backed picker — jsdom can't render the real map and
+// these tests only care about the prop wiring. The two buttons drive
+// the onChange handler the drawer passes in.
+vi.mock("@/components/map/LocationPicker", () => ({
+  LocationPicker: ({
+    value,
+    onChange,
+  }: {
+    value: { latitude: number; longitude: number } | null;
+    onChange(next: { latitude: number; longitude: number } | null): void;
+  }) => (
+    <div data-testid="location-picker-stub">
+      <button
+        type="button"
+        aria-label="test pick location"
+        onClick={() => onChange({ latitude: 1.5, longitude: 2.5 })}
+      >
+        Pick
+      </button>
+      <button type="button" aria-label="test clear location" onClick={() => onChange(null)}>
+        Clear
+      </button>
+      <span data-testid="location-picker-value">
+        {value ? `${value.latitude},${value.longitude}` : "null"}
+      </span>
+    </div>
+  ),
+}));
+
 type Mutation = {
   mutate: ReturnType<typeof vi.fn>;
   isPending: boolean;
@@ -87,8 +116,11 @@ describe("EntryDrawer", () => {
     expect(countryTrigger).toBeInTheDocument();
     expect(countryTrigger).toHaveTextContent("Germany (DE)");
     expect(screen.getByLabelText("City")).toHaveValue("San Francisco");
-    expect(screen.getByLabelText("Latitude")).toHaveValue(37.77);
-    expect(screen.getByLabelText("Longitude")).toHaveValue(-122.42);
+    // Location no longer renders raw number inputs — the picker stub
+    // surfaces the current coordinates in a status readout.
+    expect(screen.queryByLabelText("Latitude")).toBeNull();
+    expect(screen.queryByLabelText("Longitude")).toBeNull();
+    expect(screen.getByTestId("location-picker-value").textContent).toBe("37.77,-122.42");
     expect(screen.getByLabelText("Network operator")).toHaveValue("ExampleNet");
     expect(screen.getByLabelText("Website")).toHaveValue("https://example.com");
     expect(screen.getByLabelText("Notes")).toHaveValue("primary anchor");
@@ -214,6 +246,54 @@ describe("EntryDrawer", () => {
     render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
     const revert = screen.getByRole("button", { name: "Revert to auto" });
     expect(revert).toBeDisabled();
+  });
+
+  test("picking a new location dirties both latitude and longitude and PATCHes both", async () => {
+    const user = userEvent.setup();
+    render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+    await user.click(screen.getByRole("button", { name: /test pick location/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(patchMutation.mutate).toHaveBeenCalledTimes(1);
+    const [variables] = patchMutation.mutate.mock.calls[0];
+    expect(variables.id).toBe(ENTRY.id);
+    // Both halves land on the wire, atomically.
+    expect(variables.patch).toEqual({ latitude: 1.5, longitude: 2.5 });
+  });
+
+  test("Location row shows Operator-edited when either half is locked", () => {
+    // Pre-lock only Latitude — Longitude is still unlocked, but the
+    // paired semantics mean the row must read as operator-edited.
+    render(
+      <EntryDrawer entry={{ ...ENTRY, operator_edited_fields: ["Latitude"] }} onClose={vi.fn()} />,
+      { wrapper: wrap() },
+    );
+    const reverts = screen.getAllByRole("button", { name: "Revert to auto" });
+    // One button for the Latitude-only lock (on the composite Location row).
+    expect(reverts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("Reverting Location PATCHes both Latitude and Longitude at once", async () => {
+    const user = userEvent.setup();
+    render(
+      <EntryDrawer
+        entry={{ ...ENTRY, operator_edited_fields: ["Latitude", "Longitude"] }}
+        onClose={vi.fn()}
+      />,
+      { wrapper: wrap() },
+    );
+    // The locked Location row is the only row that renders a Revert
+    // button in this entry (the other fields are unlocked).
+    const revert = screen.getByRole("button", { name: "Revert to auto" });
+    await user.click(revert);
+
+    expect(patchMutation.mutate).toHaveBeenCalledTimes(1);
+    const [variables] = patchMutation.mutate.mock.calls[0];
+    expect(variables.patch).toEqual({
+      revert_to_auto: ["Latitude", "Longitude"],
+      latitude: null,
+      longitude: null,
+    });
   });
 
   test("dialog primitive smoke: renders role=dialog with the expected title", () => {
