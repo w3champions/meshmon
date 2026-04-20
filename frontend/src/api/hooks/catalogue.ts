@@ -300,6 +300,14 @@ export function useReenrichOne(): UseMutationResult<void, Error, string> {
   });
 }
 
+/**
+ * Maximum number of ids the bulk re-enrich endpoint accepts per call.
+ * Matches `MAX_BULK_REENRICH_IDS` in `crates/service/src/catalogue/handlers.rs`
+ * — the server returns 400 when a request exceeds this. Exported so callers
+ * that assemble ids client-side can chunk before dispatching.
+ */
+export const MAX_BULK_REENRICH_IDS = 512;
+
 export function useReenrichMany(): UseMutationResult<void, Error, CatalogueBulkReenrichRequest> {
   const queryClient = useQueryClient();
   return useMutation<void, Error, CatalogueBulkReenrichRequest>({

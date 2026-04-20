@@ -6,6 +6,7 @@ import {
   type CatalogueMapQuery,
   type CatalogueSortBy,
   type CatalogueSortDir,
+  MAX_BULK_REENRICH_IDS,
   useCatalogueEntry,
   useCatalogueFacets,
   useCatalogueListInfinite,
@@ -359,11 +360,29 @@ export default function Catalogue() {
 
   // Bulk re-enrich fires against currently-loaded rows only; the button
   // label below reflects the loaded subset whenever pagination isn't
-  // exhausted so the action matches what the operator sees.
-  const handleReenrichMany = useCallback((): void => {
+  // exhausted so the action matches what the operator sees. The server
+  // caps each request at `MAX_BULK_REENRICH_IDS` ids and 400s anything
+  // larger, so we chunk here rather than clamp — otherwise operators
+  // with >512 loaded rows would see silently-dropped work.
+  const handleReenrichMany = useCallback(async (): Promise<void> => {
     const ids = rows.map((e) => e.id);
-    reenrichManyMutation.mutate({ ids });
     setReenrichConfirmOpen(false);
+    for (let i = 0; i < ids.length; i += MAX_BULK_REENRICH_IDS) {
+      const chunk = ids.slice(i, i + MAX_BULK_REENRICH_IDS);
+      try {
+        await reenrichManyMutation.mutateAsync({ ids: chunk });
+      } catch (error) {
+        console.error("[catalogue] bulk re-enrich chunk failed", {
+          chunkStart: i,
+          chunkSize: chunk.length,
+          error,
+        });
+        // Stop on first failure rather than proceeding with partial
+        // state — the surviving chunks already dispatched will still
+        // be picked up by the enrichment runner.
+        return;
+      }
+    }
   }, [rows, reenrichManyMutation]);
 
   // Stable row-click & shape-change handlers for memoized heavy children.
