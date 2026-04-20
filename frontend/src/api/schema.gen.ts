@@ -167,6 +167,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/campaigns/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * SSE stream of campaign lifecycle events.
+         * @description Requires an authenticated session (the enclosing router applies
+         *     `login_required!`). The response never ends on its own — the server
+         *     closes it on shutdown or when the client disconnects.
+         */
+        get: operations["campaign_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/campaigns/{id}": {
         parameters: {
             query?: never;
@@ -928,6 +950,32 @@ export interface components {
          * @enum {string}
          */
         CampaignState: "draft" | "running" | "completed" | "evaluated" | "stopped";
+        /**
+         * @description Campaign lifecycle event delivered to every SSE subscriber.
+         *
+         *     The `tag = "kind"` serde representation matches the wire shape the
+         *     frontend expects: one top-level `kind` discriminant plus flat
+         *     per-variant fields. Keep variant names in `snake_case` on the wire.
+         */
+        CampaignStreamEvent: {
+            /**
+             * Format: uuid
+             * @description Primary key of the campaign whose state changed.
+             */
+            campaign_id: string;
+            /** @enum {string} */
+            kind: "state_changed";
+            /** @description New lifecycle state. */
+            state: components["schemas"]["CampaignState"];
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the campaign owning the settled pair.
+             */
+            campaign_id: string;
+            /** @enum {string} */
+            kind: "pair_settled";
+        };
         /**
          * @description Latitude / longitude pair sourced from the IP catalogue join.
          *
@@ -2169,6 +2217,31 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
+            };
+        };
+    };
+    campaign_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE stream of campaign changes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
