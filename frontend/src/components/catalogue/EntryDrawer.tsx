@@ -12,26 +12,26 @@ import {
 } from "@/api/hooks/catalogue";
 import { StatusChip } from "@/components/catalogue/StatusChip";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 
 export interface EntryDrawerProps {
-  /** Undefined closes the drawer. A defined entry opens it and seeds the form. */
+  /** Undefined closes the dialog. A defined entry opens it and seeds the form. */
   entry: CatalogueEntry | undefined;
-  /** Fires when the drawer should close (overlay click, escape, explicit close). */
+  /** Fires when the dialog should close (overlay click, escape, explicit close). */
   onClose: () => void;
 }
 
 /**
- * Editable form fields on the drawer. Keys map 1:1 to `CatalogueEntryDto`
+ * Editable form fields on the dialog. Keys map 1:1 to `CatalogueEntryDto`
  * camelCase columns and drive both the Zod schema and the PascalCase map.
  */
 type EditableField =
@@ -67,12 +67,14 @@ const FIELD_PASCAL_MAP: Record<EditableField, string> = {
 interface EditableFieldConfig {
   field: EditableField;
   label: string;
+  /** When true the field spans both grid columns on sm+ viewports. */
+  colSpan?: boolean;
   extraProps?: Omit<React.ComponentProps<typeof Input>, "name" | "ref">;
 }
 
 /**
  * Ordered render-and-serialisation list for editable fields. The array order
- * is the visible order in the drawer; it also drives `buildPatchBody` so the
+ * is the visible order in the dialog; it also drives `buildPatchBody` so the
  * diff traversal stays stable.
  */
 const EDITABLE_FIELD_CONFIGS: readonly EditableFieldConfig[] = [
@@ -97,7 +99,7 @@ const EDITABLE_FIELD_CONFIGS: readonly EditableFieldConfig[] = [
   },
   { field: "network_operator", label: "Network operator" },
   { field: "website", label: "Website" },
-  { field: "notes", label: "Notes" },
+  { field: "notes", label: "Notes", colSpan: true },
 ];
 
 const EDITABLE_FIELDS: readonly EditableField[] = EDITABLE_FIELD_CONFIGS.map((c) => c.field);
@@ -194,7 +196,7 @@ function buildPatchBody(
 
 /**
  * Returns `prefix: err.message` when a useful message is available, otherwise
- * just `prefix`. Keeps toast copy consistent across the drawer's three
+ * just `prefix`. Keeps toast copy consistent across the dialog's three
  * mutations without relying on a portal-rendered custom component.
  */
 function toastMessage(prefix: string, err: unknown): string {
@@ -231,6 +233,7 @@ function ReadonlyRow({ label, children }: ReadonlyRowProps) {
 interface EditableFieldRowProps {
   field: EditableField;
   label: string;
+  colSpan?: boolean;
   locked: boolean;
   isPending: boolean;
   errorMessage?: string;
@@ -241,6 +244,7 @@ interface EditableFieldRowProps {
 function EditableFieldRow({
   field,
   label,
+  colSpan,
   locked,
   isPending,
   errorMessage,
@@ -249,7 +253,7 @@ function EditableFieldRow({
 }: EditableFieldRowProps) {
   const id = `entry-drawer-${field}`;
   return (
-    <div className="space-y-1">
+    <div className={colSpan ? "space-y-1 sm:col-span-2" : "space-y-1"}>
       <div className="flex items-center justify-between">
         <Label htmlFor={id}>{label}</Label>
         {locked && (
@@ -308,8 +312,8 @@ function DeleteConfirm({ pending, onConfirm, onCancel }: DeleteConfirmProps) {
 }
 
 /**
- * Renders the operator-edit drawer for a single catalogue entry. The parent
- * supplies the current `entry` (undefined closes the drawer); inside, a
+ * Renders the operator-edit dialog for a single catalogue entry. The parent
+ * supplies the current `entry` (undefined closes the dialog); inside, a
  * react-hook-form form manages editable columns, exposes per-field
  * "Revert to auto" links for operator-locked fields, and issues diff-only
  * PATCH requests via `usePatchCatalogueEntry`.
@@ -345,9 +349,9 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
 
   if (!entry) {
     return (
-      <Sheet open={false} onOpenChange={(next) => !next && onClose()}>
-        <SheetContent side="right" />
-      </Sheet>
+      <Dialog open={false} onOpenChange={(next) => !next && onClose()}>
+        <DialogContent />
+      </Dialog>
     );
   }
 
@@ -411,40 +415,42 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
   };
 
   return (
-    <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent
-        side="right"
-        className="w-full overflow-y-auto sm:max-w-lg"
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent
+        className="w-[95vw] sm:max-w-3xl max-h-[90vh] overflow-y-auto"
         aria-label="Catalogue entry editor"
       >
-        <SheetHeader>
-          <SheetTitle>Edit catalogue entry</SheetTitle>
-          <SheetDescription>
+        <DialogHeader>
+          <DialogTitle>Edit catalogue entry</DialogTitle>
+          <DialogDescription>
             Operator edits lock individual fields against automatic enrichment.
-          </SheetDescription>
-        </SheetHeader>
+          </DialogDescription>
+        </DialogHeader>
 
         <form onSubmit={onSubmit} className="mt-4 space-y-4">
-          <section className="space-y-2 rounded-md border bg-muted/30 p-3">
-            <ReadonlyRow label="IP">{entry.ip}</ReadonlyRow>
-            <ReadonlyRow label="Status">
-              <StatusChip
-                status={entry.enrichment_status}
-                operatorLocked={entry.operator_edited_fields.length > 0}
-              />
-            </ReadonlyRow>
-            <ReadonlyRow label="Source">{entry.source}</ReadonlyRow>
-            <ReadonlyRow label="Created">{formatTimestamp(entry.created_at)}</ReadonlyRow>
-            <ReadonlyRow label="Created by">{entry.created_by ?? "—"}</ReadonlyRow>
-            <ReadonlyRow label="Enriched at">{formatTimestamp(entry.enriched_at)}</ReadonlyRow>
+          <section className="rounded-md border bg-muted/30 p-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+              <ReadonlyRow label="IP">{entry.ip}</ReadonlyRow>
+              <ReadonlyRow label="Created">{formatTimestamp(entry.created_at)}</ReadonlyRow>
+              <ReadonlyRow label="Status">
+                <StatusChip
+                  status={entry.enrichment_status}
+                  operatorLocked={entry.operator_edited_fields.length > 0}
+                />
+              </ReadonlyRow>
+              <ReadonlyRow label="Created by">{entry.created_by ?? "—"}</ReadonlyRow>
+              <ReadonlyRow label="Source">{entry.source}</ReadonlyRow>
+              <ReadonlyRow label="Enriched at">{formatTimestamp(entry.enriched_at)}</ReadonlyRow>
+            </div>
           </section>
 
-          <section className="space-y-3">
-            {EDITABLE_FIELD_CONFIGS.map(({ field, label, extraProps }) => (
+          <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {EDITABLE_FIELD_CONFIGS.map(({ field, label, colSpan, extraProps }) => (
               <EditableFieldRow
                 key={field}
                 field={field}
                 label={label}
+                colSpan={colSpan}
                 locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
                 isPending={patchMutation.isPending}
                 errorMessage={errors[field]?.message}
@@ -454,7 +460,7 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
             ))}
           </section>
 
-          <SheetFooter className="flex flex-col gap-2 sm:flex-row sm:justify-between">
+          <DialogFooter className="flex flex-col gap-2 sm:flex-row sm:justify-between">
             <div className="flex gap-2">
               <Button
                 type="button"
@@ -476,7 +482,7 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
             <Button type="submit" disabled={patchMutation.isPending}>
               Save
             </Button>
-          </SheetFooter>
+          </DialogFooter>
 
           {deleteOpen && (
             <DeleteConfirm
@@ -486,13 +492,13 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
             />
           )}
         </form>
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 /**
- * Zero-value entry used solely to seed RHF defaults when the drawer opens
+ * Zero-value entry used solely to seed RHF defaults when the dialog opens
  * with `entry === undefined`. It is never rendered.
  */
 const EMPTY_ENTRY: CatalogueEntry = {

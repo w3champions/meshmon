@@ -173,4 +173,11 @@ describe("EntryDrawer", () => {
     const revert = screen.getByRole("button", { name: "Revert to auto" });
     expect(revert).toBeDisabled();
   });
+
+  test("dialog primitive smoke: renders role=dialog with the expected title", () => {
+    render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByText("Edit catalogue entry")).toBeInTheDocument();
+  });
 });
