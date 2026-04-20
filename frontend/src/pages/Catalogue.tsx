@@ -300,17 +300,27 @@ export default function Catalogue() {
   // up first in the main table's loaded pages; if it isn't there — for
   // example when the operator opened the drawer from a cluster dialog
   // hit that falls outside the main table's filter — we fall back to
-  // `drawerSeedEntry`, which the cluster dialog handed in at open time.
+  // `drawerSeedEntry`, but ONLY when the seed's id matches the current
+  // `drawerId`. Without the id gate, this sequence would leak:
+  //   1. open cluster entry A  → drawerId=A, seed=A
+  //   2. click table row B     → drawerId=B, seed stays A (table clicks
+  //      don't touch the seed path since table rows are already in
+  //      `rows`)
+  //   3. filter change drops B out of `rows`
+  //   → fallback would surface the stale A seed for drawer B.
   const drawerEntry = useMemo(() => {
     if (drawerId === null) return undefined;
-    return rows.find((e) => e.id === drawerId) ?? drawerSeedEntry ?? undefined;
+    const fromRows = rows.find((e) => e.id === drawerId);
+    if (fromRows) return fromRows;
+    return drawerSeedEntry?.id === drawerId ? drawerSeedEntry : undefined;
   }, [rows, drawerId, drawerSeedEntry]);
 
   // Drawer deletion guard: if the list refetches (e.g. after an SSE
   // `deleted` event) and the open entry is gone from every loaded page
-  // AND we have no seed fallback, clear `drawerId` so the drawer state
-  // stays consistent. The seed check keeps cluster-dialog-opened entries
-  // alive — they're legitimately outside `rows` and must not be closed.
+  // AND the seed doesn't cover it (same id gate as `drawerEntry`),
+  // clear `drawerId` so the drawer state stays consistent. Cluster-
+  // dialog-opened entries stay alive via the seed — they're
+  // legitimately outside `rows` and must not be closed.
   useEffect(() => {
     if (
       drawerId !== null &&
