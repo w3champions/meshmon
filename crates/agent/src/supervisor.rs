@@ -899,10 +899,10 @@ mod tests {
     /// Build a real `UdpProberPool` + `TrippyProber` + `IcmpClientPool` for use in
     /// supervisor tests.
     ///
-    /// `IcmpClientPool::new` requires `CAP_NET_RAW` on Linux but works without
-    /// root on macOS (surge-ping uses `SOCK_DGRAM` ICMP there). Tests that
-    /// call `build_test_pool` are therefore implicitly `CAP_NET_RAW`-gated on
-    /// Linux CI; the test binary skips them when the raw socket cannot be opened.
+    /// `IcmpClientPool::new` is infallible (sockets open lazily), so this
+    /// helper itself runs on any host. Tests that drive the pool to actually
+    /// ping should call `skip_unless_raw_icmp!()` so they self-skip on
+    /// unprivileged CI runners.
     async fn build_test_pool(
         cancel: CancellationToken,
     ) -> (Arc<UdpProberPool>, Arc<TrippyProber>, Arc<IcmpClientPool>) {
@@ -914,7 +914,7 @@ mod tests {
             .await
             .expect("udp pool bind");
         let trippy = TrippyProber::new(1, cancel);
-        let icmp_pool = Arc::new(IcmpClientPool::new().expect("icmp pool"));
+        let icmp_pool = Arc::new(IcmpClientPool::new());
         (pool, trippy, icmp_pool)
     }
 

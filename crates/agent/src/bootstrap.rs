@@ -140,9 +140,16 @@ impl<A: ServiceApi> AgentRuntime<A> {
             .await
             .context("UDP prober pool bind failed")?;
         let trippy_prober = TrippyProber::new(env.icmp_target_concurrency, child.clone());
-        let icmp_pool = Arc::new(IcmpClientPool::new().context(
-            "ICMP client pool init failed (raw ICMP socket bind requires CAP_NET_RAW on Linux)",
-        )?);
+        // Pool construction is infallible; the raw v4 socket is opened by
+        // `preflight()` so production aborts at boot if `CAP_NET_RAW` is
+        // missing. Tests skip the preflight so the same `bootstrap` entry
+        // point works on unprivileged CI runners.
+        let icmp_pool = Arc::new(IcmpClientPool::new());
+        if !cfg!(test) {
+            icmp_pool.preflight().await.context(
+                "ICMP client pool init failed (raw ICMP socket bind requires CAP_NET_RAW on Linux)",
+            )?;
+        }
 
         // Shared route-snapshot channel. Every supervisor clones the sender;
         // the emitter drains the receiver. Capacity 8 is deliberately small:

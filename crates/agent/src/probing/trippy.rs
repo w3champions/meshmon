@@ -736,10 +736,10 @@ mod tests {
     }
 
     /// Smoke test that `run_one_round` can build + run a tracer on
-    /// loopback. Requires `CAP_NET_RAW` (or root), so ignored by default.
+    /// loopback. Self-skips on hosts without `CAP_NET_RAW` / root.
     #[tokio::test]
-    #[ignore = "requires CAP_NET_RAW"]
     async fn trippy_loopback_icmp_round() {
+        crate::probing::icmp_pool::skip_unless_raw_ip_socket!();
         let obs = tokio::task::spawn_blocking(|| {
             run_one_round(
                 "self",
@@ -1271,11 +1271,11 @@ mod tests {
     }
 
     /// Verifies the persistent tracer loop emits multiple RouteTraceMsgs on
-    /// loopback. Requires `CAP_NET_RAW` (or root), so ignored by default.
-    /// Run with: `cargo test -p meshmon-agent -- --ignored persistent_tracer_emits_multiple_rounds_on_loopback`
+    /// loopback. Self-skips on hosts without `CAP_NET_RAW` / root so the
+    /// test runs by default wherever it can.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "requires CAP_NET_RAW; run with `cargo test -- --ignored`"]
     async fn persistent_tracer_emits_multiple_rounds_on_loopback() {
+        crate::probing::icmp_pool::skip_unless_raw_ip_socket!();
         use std::collections::HashSet;
         use std::sync::Arc;
 

@@ -67,13 +67,16 @@ Key patterns:
   - Topology: `probing/trippy.rs` emits `RouteTraceMsg` on the dedicated
     `route_trace_tx`, routed into the route tracker and thence into
     snapshots. Trippy never feeds `RollingStats`.
-- Shared `IcmpClientPool` (`probing/icmp_pool.rs`) owns one v4
-  `surge-ping::Client` (eager) and one lazy v6 Client for the whole
-  process. Per-target pingers borrow a `Pinger` from the pool; identifier
-  allocation is a process-wide monotonic non-zero `AtomicU16` (skip 0
-  because `PingIdentifier(0)` is surge-ping's wildcard fallback). Caps
-  raw-socket count at one per address family regardless of target count;
-  requires `CAP_NET_RAW`.
+- Shared `IcmpClientPool` (`probing/icmp_pool.rs`) owns one
+  `surge-ping::Client` per address family for the whole process. Both v4
+  and v6 Clients are built lazily on first matching target so unit tests
+  can construct a pool without `CAP_NET_RAW`; production `bootstrap`
+  calls `pool.preflight()` to force v4 creation eagerly and abort
+  startup if the raw-socket bind is denied. Per-target pingers borrow a
+  `Pinger` from the pool; identifier allocation is a process-wide
+  monotonic non-zero `AtomicU16` (skip 0 because `PingIdentifier(0)` is
+  surge-ping's wildcard fallback). Caps raw-socket count at one per
+  address family regardless of target count.
 - Trippy uses one persistent `Tracer` per (target, protocol) via
   `Tracer::run_with(callback)` inside a single `spawn_blocking`. The
   callback snapshots state, forwards aggregated hops via a sync→async

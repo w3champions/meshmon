@@ -149,13 +149,13 @@ mod tests {
         }
     }
 
-    /// Loopback ping — requires `CAP_NET_RAW` (or macOS SOCK_DGRAM
-    /// ICMP support). On CI without raw-socket permission this test
-    /// fails at `IcmpClientPool::new`; `#[ignore]` keeps it opt-in.
+    /// Loopback ping. The spawned task acquires a real `Pinger` from the
+    /// pool, which hits the kernel and needs `CAP_NET_RAW` (or macOS
+    /// SOCK_DGRAM). Self-skips when the bind would fail.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires CAP_NET_RAW; run on a local dev box with `cargo test -- --ignored`"]
     async fn loopback_icmp_ping_succeeds() {
-        let pool = Arc::new(IcmpClientPool::new().expect("icmp pool"));
+        crate::probing::icmp_pool::skip_unless_raw_icmp!();
+        let pool = Arc::new(IcmpClientPool::new());
         let cancel = CancellationToken::new();
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(10.0));
         let (obs_tx, mut obs_rx) = mpsc::channel::<ProbeObservation>(32);
@@ -185,13 +185,13 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
-    /// Invalid IP (all zeros — not a meaningful ICMP target). This one
-    /// doesn't require raw socket privileges at the client-build level
-    /// but still can't be guaranteed on CI; keep `#[ignore]`.
+    /// Invalid IP (all zeros — not a meaningful ICMP target). The pool's
+    /// lazy v4 init still hits the kernel before the kernel rejects the
+    /// route; self-skip when the bind itself isn't permitted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires CAP_NET_RAW"]
     async fn invalid_ip_emits_timeout_or_error() {
-        let pool = Arc::new(IcmpClientPool::new().expect("icmp pool"));
+        crate::probing::icmp_pool::skip_unless_raw_icmp!();
+        let pool = Arc::new(IcmpClientPool::new());
         let cancel = CancellationToken::new();
         let mut target = test_target("bogus");
         target.ip = vec![0, 0, 0, 0].into(); // 0.0.0.0 — kernel won't route
@@ -216,13 +216,13 @@ mod tests {
     }
 
     /// Cancellation test doesn't actually ping — it only verifies the
-    /// task exits promptly on `cancel`. Works without raw-socket
-    /// privileges because `IcmpClientPool::new` may still succeed in CI (it's
-    /// just that `ping()` would fail); the cancel races the ping.
+    /// task exits promptly on `cancel`. Still needs CAP_NET_RAW because
+    /// the spawned task acquires a real `Pinger` from the pool before it
+    /// reaches the cancel-vs-tick select; self-skips when it can't.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires CAP_NET_RAW for IcmpClientPool::new on most CI"]
     async fn honors_cancellation() {
-        let pool = Arc::new(IcmpClientPool::new().expect("icmp pool"));
+        crate::probing::icmp_pool::skip_unless_raw_icmp!();
+        let pool = Arc::new(IcmpClientPool::new());
         let cancel = CancellationToken::new();
         let (_rate_tx, rate_rx) = watch::channel(ProbeRate(0.0)); // idle rate
         let (obs_tx, _obs_rx) = mpsc::channel::<ProbeObservation>(32);
