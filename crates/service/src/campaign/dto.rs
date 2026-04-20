@@ -332,3 +332,183 @@ where
         })
         .collect::<Result<Vec<_>, _>>()
 }
+
+/// Wire shape for `GET /api/campaigns/{id}/evaluation`.
+///
+/// Also the exact JSON persisted into `campaign_evaluations.results` —
+/// the evaluator serialises [`EvaluationResultsDto`] directly into the
+/// JSONB column so the read handler can hand the stored document back
+/// to the client without rehydrating through a domain model.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EvaluationDto {
+    /// Owning campaign.
+    pub campaign_id: Uuid,
+    /// When the evaluator produced this result set.
+    pub evaluated_at: chrono::DateTime<chrono::Utc>,
+    /// Loss-rate threshold (percent) that was applied.
+    pub loss_threshold_pct: f32,
+    /// Weight applied to RTT stddev during scoring.
+    pub stddev_weight: f32,
+    /// Evaluation strategy that produced this result.
+    pub evaluation_mode: EvaluationMode,
+    /// Number of `(source, destination)` baseline pairs considered.
+    pub baseline_pair_count: i32,
+    /// Total candidate transit destinations scored.
+    pub candidates_total: i32,
+    /// Candidate transit destinations that cleared the `qualifies` bar.
+    pub candidates_good: i32,
+    /// Average end-to-end improvement (ms) across qualifying candidates;
+    /// negative means faster. `None` when no candidate qualified.
+    pub avg_improvement_ms: Option<f32>,
+    /// Full candidate breakdown + unqualified-reason map.
+    pub results: EvaluationResultsDto,
+}
+
+/// Candidate breakdown persisted in `campaign_evaluations.results`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EvaluationResultsDto {
+    /// Per-candidate scoring rows, ordered by composite score.
+    pub candidates: Vec<EvaluationCandidateDto>,
+    /// Keyed by destination IP (string); value is an explanatory
+    /// sentence the UI renders verbatim.
+    #[serde(default)]
+    pub unqualified_reasons: std::collections::BTreeMap<String, String>,
+}
+
+/// Per-candidate transit destination scoring row.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EvaluationCandidateDto {
+    /// Transit destination IP as a bare host string.
+    pub destination_ip: String,
+    /// Operator-facing label from the catalogue, when present.
+    pub display_name: Option<String>,
+    /// Catalogue city, when present.
+    pub city: Option<String>,
+    /// Catalogue ISO country code, when present.
+    pub country_code: Option<String>,
+    /// Catalogue ASN, when present.
+    pub asn: Option<i64>,
+    /// Catalogue network operator, when present.
+    pub network_operator: Option<String>,
+    /// True when destination_ip appears in agents.ip. UI renders a
+    /// "mesh member — no acquisition needed" badge.
+    pub is_mesh_member: bool,
+    /// Number of baseline pairs this candidate improved.
+    pub pairs_improved: i32,
+    /// Number of baseline pairs this candidate was scored against.
+    pub pairs_total_considered: i32,
+    /// Average improvement (ms) across considered pairs; negative means faster.
+    pub avg_improvement_ms: Option<f32>,
+    /// Average observed loss (percent) on the direct leg during scoring.
+    pub avg_loss_pct: Option<f32>,
+    /// Composite score; lower is better.
+    pub composite_score: f32,
+    /// Per-pair scoring detail for this candidate.
+    pub pair_details: Vec<EvaluationPairDetailDto>,
+}
+
+/// Per-pair scoring row inside an [`EvaluationCandidateDto`].
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EvaluationPairDetailDto {
+    /// Source agent id of the baseline pair.
+    pub source_agent_id: String,
+    /// Destination agent id of the baseline pair.
+    pub destination_agent_id: String,
+    /// Transit destination IP (also a candidate key).
+    pub destination_ip: String,
+    /// Direct A→B RTT (ms).
+    pub direct_rtt_ms: f32,
+    /// Direct A→B RTT stddev (ms).
+    pub direct_stddev_ms: f32,
+    /// Direct A→B observed loss (percent).
+    pub direct_loss_pct: f32,
+    /// Composed A→X→B transit RTT (ms).
+    pub transit_rtt_ms: f32,
+    /// Composed A→X→B transit RTT stddev (ms).
+    pub transit_stddev_ms: f32,
+    /// Composed A→X→B transit observed loss (percent).
+    pub transit_loss_pct: f32,
+    /// Transit minus direct RTT (ms); negative means faster via transit.
+    pub improvement_ms: f32,
+    /// Whether this pair cleared the evaluator's qualify predicate.
+    pub qualifies: bool,
+    /// FK to the `measurements` row covering A→X, when available.
+    pub mtr_measurement_id_ax: Option<i64>,
+    /// FK to the `measurements` row covering X→B, when available.
+    pub mtr_measurement_id_xb: Option<i64>,
+}
+
+/// Which slice of candidates the detail-trigger handler should re-measure.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DetailScope {
+    /// Every candidate in the evaluation result.
+    All,
+    /// Only candidates the evaluator flagged as qualifying.
+    GoodCandidates,
+    /// A single pair identified by `DetailRequest::pair`.
+    Pair,
+}
+
+/// Pair coordinates for [`DetailScope::Pair`] requests.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DetailPairIdentifier {
+    /// Source agent id of the pair to re-measure.
+    pub source_agent_id: String,
+    /// Destination IP of the pair to re-measure.
+    pub destination_ip: String,
+}
+
+/// Body for `POST /api/campaigns/{id}/detail`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DetailRequest {
+    /// Which slice of candidates to enqueue for re-measurement.
+    pub scope: DetailScope,
+    /// Required iff scope == "pair". Rejected on other scopes.
+    #[serde(default)]
+    pub pair: Option<DetailPairIdentifier>,
+}
+
+/// Response body for `POST /api/campaigns/{id}/detail`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct DetailResponse {
+    /// Number of detail pairs enqueued by this request.
+    pub pairs_enqueued: i32,
+    /// Campaign state after enqueueing (typically `running`).
+    pub campaign_state: CampaignState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluation_dto_round_trips() {
+        let v = EvaluationDto {
+            campaign_id: Uuid::nil(),
+            evaluated_at: chrono::Utc::now(),
+            loss_threshold_pct: 2.0,
+            stddev_weight: 1.0,
+            evaluation_mode: EvaluationMode::Optimization,
+            baseline_pair_count: 24,
+            candidates_total: 10,
+            candidates_good: 3,
+            avg_improvement_ms: Some(-58.0),
+            results: EvaluationResultsDto {
+                candidates: vec![],
+                unqualified_reasons: Default::default(),
+            },
+        };
+        let j = serde_json::to_string(&v).unwrap();
+        let r: EvaluationDto = serde_json::from_str(&j).unwrap();
+        assert_eq!(r.baseline_pair_count, 24);
+    }
+
+    #[test]
+    fn detail_scope_snake_case_on_wire() {
+        assert_eq!(
+            serde_json::to_string(&DetailScope::GoodCandidates).unwrap(),
+            "\"good_candidates\"",
+        );
+    }
+}
