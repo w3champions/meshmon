@@ -743,3 +743,267 @@ async fn patch_revert_wins_over_concurrent_set() {
         "City must not be locked after revert-wins; got {edited:?}"
     );
 }
+
+// --- Bulk metadata on paste ------------------------------------------------
+//
+// These tests share the shared-DB harness, so each one picks an IP
+// subrange disjoint from every other catalogue test. Fresh per test:
+// `198.51.100.151–157`.
+
+fn full_metadata_value() -> serde_json::Value {
+    serde_json::json!({
+        "display_name": "fastly-sfo",
+        "city": "San Francisco",
+        "country_code": "US",
+        "country_name": "United States",
+        "latitude": 37.7749,
+        "longitude": -122.4194,
+        "website": "https://example.com/status",
+        "notes": "bulk paste seed",
+    })
+}
+
+fn locks(resp: &serde_json::Value) -> Vec<&str> {
+    resp["operator_edited_fields"]
+        .as_array()
+        .expect("operator_edited_fields is array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn paste_with_metadata_creates_and_locks_fields() {
+    let h = common::HttpHarness::start().await;
+
+    let body = serde_json::json!({
+        "ips": ["198.51.100.151", "198.51.100.152"],
+        "metadata": full_metadata_value(),
+    });
+    let resp: serde_json::Value = h.post_json("/api/catalogue", &body).await;
+
+    // Rows land in `created` or `existing` depending on earlier runs
+    // against the shared DB, but every accepted IP must carry the
+    // metadata because new rows always receive it and existing rows
+    // with no prior locks accept it too.
+    let total = resp["created"].as_array().map(|a| a.len()).unwrap_or(0)
+        + resp["existing"].as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(total, 2, "body = {resp}");
+
+    for row in resp["created"]
+        .as_array()
+        .into_iter()
+        .chain(resp["existing"].as_array())
+        .flatten()
+    {
+        assert_eq!(row["display_name"], "fastly-sfo", "row = {row}");
+        assert_eq!(row["city"], "San Francisco", "row = {row}");
+        assert_eq!(row["country_code"], "US", "row = {row}");
+        assert_eq!(row["country_name"], "United States", "row = {row}");
+        assert_eq!(row["latitude"], 37.7749, "row = {row}");
+        assert_eq!(row["longitude"], -122.4194, "row = {row}");
+        assert_eq!(row["website"], "https://example.com/status", "row = {row}");
+        assert_eq!(row["notes"], "bulk paste seed", "row = {row}");
+
+        let edited = locks(row);
+        for expected in [
+            "DisplayName",
+            "City",
+            "CountryCode",
+            "CountryName",
+            "Latitude",
+            "Longitude",
+            "Website",
+            "Notes",
+        ] {
+            assert!(
+                edited.contains(&expected),
+                "expected {expected} in lock set on row = {row}; got {edited:?}"
+            );
+        }
+    }
+
+    // Summary must be present (metadata was supplied) even when every
+    // row accepted every field — the UI shows a "nothing skipped"
+    // confirmation in that case.
+    assert!(
+        resp.get("skipped_summary").is_some(),
+        "skipped_summary must be present when metadata was supplied; body = {resp}"
+    );
+    assert_eq!(resp["skipped_summary"]["rows_with_skips"], 0);
+}
+
+#[tokio::test]
+async fn paste_with_metadata_applies_to_unlocked_existing_rows() {
+    let h = common::HttpHarness::start().await;
+
+    // Pre-seed without metadata so the row exists with zero locks.
+    let _seed: serde_json::Value = h
+        .post_json(
+            "/api/catalogue",
+            &serde_json::json!({ "ips": ["198.51.100.153"] }),
+        )
+        .await;
+
+    // Re-paste with metadata. The row lands in `existing` and must
+    // come back with the metadata applied and the lock set populated.
+    let body = serde_json::json!({
+        "ips": ["198.51.100.153"],
+        "metadata": full_metadata_value(),
+    });
+    let resp: serde_json::Value = h.post_json("/api/catalogue", &body).await;
+
+    let row = resp["existing"]
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or_else(|| panic!("expected existing entry; body = {resp}"));
+    assert_eq!(row["city"], "San Francisco", "row = {row}");
+    assert_eq!(row["country_code"], "US", "row = {row}");
+    assert_eq!(row["latitude"], 37.7749, "row = {row}");
+    for expected in ["City", "Latitude", "CountryCode"] {
+        assert!(
+            locks(row).contains(&expected),
+            "expected {expected} in lock set on existing row = {row}"
+        );
+    }
+    assert_eq!(
+        resp["skipped_summary"]["rows_with_skips"], 0,
+        "no locks were set before paste — nothing should be skipped; body = {resp}"
+    );
+}
+
+#[tokio::test]
+async fn paste_with_metadata_skips_locked_existing_rows() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.154").await;
+
+    // Lock City at a pre-paste value.
+    let _patched: serde_json::Value = h
+        .patch_json(
+            &format!("/api/catalogue/{id}"),
+            &serde_json::json!({ "city": "Berlin" }),
+        )
+        .await;
+
+    // Re-paste with metadata that wants a different city.
+    let body = serde_json::json!({
+        "ips": ["198.51.100.154"],
+        "metadata": full_metadata_value(),
+    });
+    let resp: serde_json::Value = h.post_json("/api/catalogue", &body).await;
+
+    let row = resp["existing"]
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or_else(|| panic!("expected existing entry; body = {resp}"));
+
+    // City stays at the pre-paste value, lock preserved.
+    assert_eq!(row["city"], "Berlin", "row = {row}");
+    assert!(
+        locks(row).contains(&"City"),
+        "City must still be locked after skip; row = {row}"
+    );
+    // Unlocked fields pick up the metadata values.
+    assert_eq!(row["display_name"], "fastly-sfo", "row = {row}");
+    assert_eq!(row["latitude"], 37.7749, "row = {row}");
+
+    // Skip summary: exactly one row skipped with a City entry.
+    assert_eq!(
+        resp["skipped_summary"]["rows_with_skips"], 1,
+        "body = {resp}"
+    );
+    assert_eq!(
+        resp["skipped_summary"]["skipped_field_counts"]["City"], 1,
+        "body = {resp}"
+    );
+}
+
+#[tokio::test]
+async fn paste_with_metadata_paired_lat_lon_half_locked_skips_pair() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.155").await;
+
+    // Lock only Latitude.
+    let _patched: serde_json::Value = h
+        .patch_json(
+            &format!("/api/catalogue/{id}"),
+            &serde_json::json!({ "latitude": 10.0 }),
+        )
+        .await;
+
+    // Re-paste with a full lat/lon pair. Paired atomicity drops both.
+    let body = serde_json::json!({
+        "ips": ["198.51.100.155"],
+        "metadata": full_metadata_value(),
+    });
+    let resp: serde_json::Value = h.post_json("/api/catalogue", &body).await;
+
+    let row = resp["existing"]
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or_else(|| panic!("expected existing entry; body = {resp}"));
+
+    // Latitude stays at pre-paste value; Longitude stays absent.
+    assert_eq!(row["latitude"], 10.0, "row = {row}");
+    assert!(
+        row.get("longitude").is_none() || row["longitude"].is_null(),
+        "Longitude must stay unwritten; row = {row}"
+    );
+    // Latitude remains locked; Longitude must NOT have gained a lock.
+    let edited = locks(row);
+    assert!(edited.contains(&"Latitude"), "row = {row}");
+    assert!(
+        !edited.contains(&"Longitude"),
+        "Longitude must stay unlocked after paired skip; row = {row}"
+    );
+
+    // Composite Location skip is recorded.
+    assert_eq!(
+        resp["skipped_summary"]["skipped_field_counts"]["Location"], 1,
+        "body = {resp}"
+    );
+}
+
+#[tokio::test]
+async fn paste_without_metadata_preserves_pre_t52_contract() {
+    let h = common::HttpHarness::start().await;
+
+    let body = serde_json::json!({ "ips": ["198.51.100.156"] });
+    let resp: serde_json::Value = h.post_json("/api/catalogue", &body).await;
+
+    assert!(
+        resp.get("skipped_summary").is_none() || resp["skipped_summary"].is_null(),
+        "skipped_summary must be absent when metadata was not supplied; body = {resp}"
+    );
+}
+
+#[tokio::test]
+async fn paste_with_half_location_rejects_400() {
+    use axum::http::{header, Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    let h = common::HttpHarness::start().await;
+    let body = serde_json::json!({
+        "ips": ["198.51.100.157"],
+        "metadata": {
+            // Latitude without Longitude — half of the paired rule.
+            "latitude": 10.0,
+        },
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/catalogue")
+        .header(header::COOKIE, &h.cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("build POST request");
+    let resp = h.app.clone().oneshot(req).await.expect("oneshot dispatch");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("collect body");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("parse body");
+    assert_eq!(parsed["error"], "paired_metadata_half_missing");
+}
