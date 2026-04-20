@@ -135,7 +135,8 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
 
       <FreeTextGroup
         title="IP prefix"
-        placeholder="e.g. 10.0.0. or 10.0.0.0/24"
+        placeholder="e.g. 10.0.0."
+        hint="Prefix or CIDR (10.0.0.0/24)"
         value={value.ipPrefix ?? ""}
         onCommit={(next) => onChange({ ...value, ipPrefix: next })}
       />
@@ -352,9 +353,11 @@ interface FreeTextGroupProps {
   placeholder: string;
   value: string;
   onCommit(next: string | undefined): void;
+  /** Short hint rendered below the input — useful when the placeholder alone can't fit every accepted form. */
+  hint?: string;
 }
 
-function FreeTextGroup({ title, placeholder, value, onCommit }: FreeTextGroupProps) {
+function FreeTextGroup({ title, placeholder, value, onCommit, hint }: FreeTextGroupProps) {
   return (
     <GroupShell title={title} summary={value.length > 0 ? value : undefined} defaultOpen={false}>
       <div className="flex flex-col gap-1">
@@ -369,6 +372,7 @@ function FreeTextGroup({ title, placeholder, value, onCommit }: FreeTextGroupPro
           }}
           className="h-8"
         />
+        {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
       </div>
     </GroupShell>
   );
