@@ -615,13 +615,15 @@ fn warn_contamination_if_due(target_id: &str, hit: &ContaminationHit) {
     );
 }
 
-/// Run one trippy round synchronously. Callers must wrap this in
-/// `spawn_blocking` — trippy-core 0.13 performs raw-socket I/O on the
-/// calling thread.
+/// One-shot trippy round helper used exclusively by the loopback unit
+/// tests below. Wraps `Builder::build()` + `Tracer::run()` (chained with
+/// `max_rounds(Some(1))` so the tracer exits after a single round) and
+/// returns the round's hops + destination outcome as a `ProbeObservation`
+/// so test assertions stay simple.
 ///
-/// Returns a `ProbeObservation` so the existing `Builder::build()`-driven
-/// loopback tests below can keep their shape. `max_rounds(Some(1))` is set
-/// internally so this helper always stops after a single round.
+/// Production trippy never goes through this path — the persistent tracer
+/// in `run` uses `Tracer::run_with` instead. Kept under `#[cfg(test)]` so
+/// it cannot accidentally be reached from non-test code.
 #[cfg(test)]
 fn run_one_round(
     target_id: &str,

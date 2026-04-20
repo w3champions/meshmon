@@ -1,9 +1,25 @@
-// crates/agent/src/probing/mod.rs
-//! Probing shared types.
+//! Probing shared types and prober modules.
 //!
-//! Each prober task (T12: trippy, TCP, UDP) emits `ProbeObservation`s into
-//! the per-target supervisor's mpsc channel. This module owns the shared
-//! data types; prober implementations live in sibling files.
+//! The agent runs four probers per target: ICMP reachability (`icmp.rs`,
+//! surge-ping), TCP echo (`tcp.rs`), UDP echo (`udp.rs`), and trippy MTR
+//! (`trippy.rs`). They feed the supervisor over two distinct channels
+//! that carry different signal types:
+//!
+//! - **Reachability** — ICMP/TCP/UDP probers emit [`ProbeObservation`]s
+//!   on the supervisor's `obs_tx`. One probe → one outcome → one sample
+//!   in `RollingStats[Protocol]`. This is what `meshmon_path_failure_rate`
+//!   reflects.
+//! - **Topology** — trippy emits [`RouteTraceMsg`] on a dedicated
+//!   `route_trace_tx`. One MTR round → many per-hop observations →
+//!   one route-tracker update. Trippy never feeds `RollingStats`.
+//!
+//! Sharing a transport between the two would conflate per-round trippy
+//! false-timeouts (a topology artifact of intermediate-hop behavior) with
+//! per-probe reachability outcomes — the kind of conflation that turns a
+//! healthy ICMP path's metric into double-digit phantom loss.
+//!
+//! ICMP pingers borrow from the process-wide [`IcmpClientPool`] so the
+//! raw-socket count is one per address family regardless of target count.
 
 pub mod echo_tcp;
 pub mod echo_udp;
