@@ -52,6 +52,7 @@ async fn register_agent(state: meshmon_service::state::AppState, id: &str, ip4: 
         agent_version: "0.1.0".into(),
         tcp_probe_port: 3555,
         udp_probe_port: 3552,
+        campaign_max_concurrency: None,
     })
     .await
     .expect("register");

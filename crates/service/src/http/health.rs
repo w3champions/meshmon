@@ -170,6 +170,7 @@ mod tests {
                 agent_version: version.map(str::to_string),
                 registered_at: Utc::now(),
                 last_seen_at: DateTime::from_timestamp(ts, 0).expect("valid timestamp"),
+                campaign_max_concurrency: None,
             }
         }
 

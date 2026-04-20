@@ -45,6 +45,13 @@ pub struct AgentInfo {
     pub registered_at: DateTime<Utc>,
     /// Last successful push (register/metrics/snapshot).
     pub last_seen_at: DateTime<Utc>,
+    /// Optional per-agent override of the cluster-wide campaign
+    /// concurrency cap. `None` means "follow cluster default"
+    /// (`[campaigns].default_agent_concurrency`). Values of `0` are
+    /// rejected at the Register handler; a stale zero still stored in
+    /// the DB is coerced to `None` here so a corrupt row cannot cap an
+    /// agent at zero concurrency.
+    pub campaign_max_concurrency: Option<u32>,
 }
 
 /// Immutable snapshot of the registry.
@@ -141,6 +148,10 @@ struct AgentRow {
     udp_probe_port: i32,
     registered_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
+    /// Per-agent cap on concurrent in-flight campaign measurement batches.
+    /// Stored as `SMALLINT NULL`; `None`/non-positive values fall back to
+    /// the cluster-wide `default_agent_concurrency`.
+    campaign_max_concurrency: Option<i16>,
 }
 
 /// Free function: read the current `agents` table (joined with the IP
@@ -154,7 +165,8 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
                c.latitude, c.longitude,
                a.agent_version,
                a.tcp_probe_port, a.udp_probe_port,
-               a.registered_at, a.last_seen_at
+               a.registered_at, a.last_seen_at,
+               a.campaign_max_concurrency
         FROM agents a
         LEFT JOIN ip_catalogue c ON c.ip = a.ip
         "#,
@@ -205,6 +217,15 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
                 udp_probe_port,
                 registered_at: row.registered_at,
                 last_seen_at: row.last_seen_at,
+                // `Option<i16>` -> `Option<u32>`. Negative or zero
+                // values are coerced to `None` so a malformed DB row
+                // does not pin the agent at zero concurrency; the
+                // Register handler rejects zero at the API boundary
+                // but defense in depth is cheap here.
+                campaign_max_concurrency: row
+                    .campaign_max_concurrency
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v > 0),
             })
         })
         .collect();
