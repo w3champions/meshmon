@@ -54,11 +54,9 @@ pub struct Config {
 /// Campaigns scheduler, size-guard, and per-destination-rate-limit settings.
 #[derive(Debug, Clone)]
 pub struct CampaignsSection {
-    /// Enable the background scheduler. Defaults to `false` until T45
-    /// wires the real RPC dispatcher — with the T44 `NoopDispatcher`
-    /// active, pairs flip `pending → dispatched` but never settle, so
-    /// production must keep the scheduler off until a real transport
-    /// is available. HTTP CRUD and pair preview work regardless.
+    /// Enable the background scheduler. T45 flips to `true` now that the
+    /// RpcDispatcher replaces the T44 `NoopDispatcher`. Ops that want
+    /// the scheduler off must set `[campaigns] enabled = false`.
     pub enabled: bool,
     /// Soft warning threshold on the composer's expected-dispatch count.
     /// Above this the frontend shows a confirm dialog. No hard cap.
@@ -74,16 +72,26 @@ pub struct CampaignsSection {
     /// bucket. T45 replaces this with the dispatch-transport's own
     /// granularity; T44 uses it as the initial value.
     pub per_destination_rps: u32,
+    /// Cluster-wide default per-agent concurrent-measurement cap. A
+    /// `RegisterRequest.campaign_max_concurrency` override persisted on
+    /// `agents.campaign_max_concurrency` wins per agent.
+    pub default_agent_concurrency: u32,
+    /// Maximum number of targets in a single
+    /// `AgentCommand.RunMeasurementBatch` RPC. Caps `chunk_size` on
+    /// `take_pending_batch` so one RPC cannot monopolise an agent.
+    pub max_batch_size: u32,
 }
 
 impl Default for CampaignsSection {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             size_warning_threshold: 1000,
             scheduler_tick_ms: 500,
             max_pair_attempts: 3,
             per_destination_rps: 2,
+            default_agent_concurrency: 16,
+            max_batch_size: 50,
         }
     }
 }
@@ -381,6 +389,10 @@ struct RawCampaigns {
     max_pair_attempts: Option<u16>,
     #[serde(default)]
     per_destination_rps: Option<u32>,
+    #[serde(default)]
+    default_agent_concurrency: Option<u32>,
+    #[serde(default)]
+    max_batch_size: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -803,6 +815,26 @@ impl Config {
                 }
                 Some(n) => n,
                 None => campaigns_defaults.per_destination_rps,
+            },
+            default_agent_concurrency: match raw.campaigns.default_agent_concurrency {
+                Some(0) => {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: "campaigns.default_agent_concurrency must be > 0".to_string(),
+                    });
+                }
+                Some(n) => n,
+                None => campaigns_defaults.default_agent_concurrency,
+            },
+            max_batch_size: match raw.campaigns.max_batch_size {
+                Some(0) => {
+                    return Err(BootError::ConfigInvalid {
+                        path: path.to_string(),
+                        reason: "campaigns.max_batch_size must be > 0".to_string(),
+                    });
+                }
+                Some(n) => n,
+                None => campaigns_defaults.max_batch_size,
             },
         };
 
@@ -1739,11 +1771,13 @@ per_destination_rps = 4
         assert_eq!(cfg.campaigns.max_pair_attempts, 5);
         assert_eq!(cfg.campaigns.per_destination_rps, 4);
 
-        // Defaults apply when the section is omitted.
+        // Defaults apply when the section is omitted. T45 flips
+        // `enabled` to `true` because the RpcDispatcher replaces the
+        // T44 NoopDispatcher.
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
         assert!(
-            !cfg.campaigns.enabled,
-            "scheduler off by default until T45 real dispatcher lands"
+            cfg.campaigns.enabled,
+            "T45 enables the scheduler by default"
         );
         assert_eq!(cfg.campaigns.size_warning_threshold, 1000);
         assert_eq!(cfg.campaigns.scheduler_tick_ms, 500);
@@ -1761,5 +1795,56 @@ scheduler_tick_ms = 0
         );
         let err = Config::from_str(&toml, "t.toml").unwrap_err().to_string();
         assert!(err.contains("scheduler_tick_ms"), "err = {err}");
+    }
+
+    #[test]
+    fn campaigns_defaults_flip_to_enabled_with_dispatch_knobs() {
+        // T45 ships the real RpcDispatcher and flips the safety-gate default
+        // so cargo-built binaries run the scheduler by default. Ops that
+        // want the scheduler off must set `[campaigns] enabled = false`.
+        let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
+        assert!(cfg.campaigns.enabled, "T45 ships enabled=true by default");
+        assert_eq!(cfg.campaigns.default_agent_concurrency, 16);
+        assert_eq!(cfg.campaigns.max_batch_size, 50);
+    }
+
+    #[test]
+    fn campaigns_overrides_respect_ops_settings() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[campaigns]
+enabled = false
+default_agent_concurrency = 8
+max_batch_size = 20
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert!(!cfg.campaigns.enabled);
+        assert_eq!(cfg.campaigns.default_agent_concurrency, 8);
+        assert_eq!(cfg.campaigns.max_batch_size, 20);
+    }
+
+    #[test]
+    fn campaigns_rejects_zero_agent_concurrency() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[campaigns]
+default_agent_concurrency = 0
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").unwrap_err().to_string();
+        assert!(err.contains("default_agent_concurrency"), "err = {err}");
+    }
+
+    #[test]
+    fn campaigns_rejects_zero_batch_size() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[campaigns]
+max_batch_size = 0
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").unwrap_err().to_string();
+        assert!(err.contains("max_batch_size"), "err = {err}");
     }
 }
