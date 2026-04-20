@@ -168,6 +168,20 @@ describe("EntryDrawer", () => {
     expect(within(document.body).getAllByRole("dialog")).toHaveLength(1);
   });
 
+  test("locked field shows Operator-edited badge; unlocked field does not", () => {
+    render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+    // DisplayName is locked → "Operator-edited" badge is present (rendered as a div by Badge).
+    expect(
+      within(document.body).getByText("Operator-edited", { selector: "div" }),
+    ).toBeInTheDocument();
+    // The locked input carries the ring accent class.
+    const displayNameInput = screen.getByLabelText("Display name");
+    expect(displayNameInput).toHaveClass("ring-1");
+    // City is not locked → no accent ring.
+    const cityInput = screen.getByLabelText("City");
+    expect(cityInput).not.toHaveClass("ring-1");
+  });
+
   test("Revert to auto is disabled while a PATCH is already in flight", () => {
     // Simulate a pending PATCH: the mutate call fires once but never resolves,
     // so the button should be rendered `disabled` — protecting against a

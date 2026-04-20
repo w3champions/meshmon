@@ -11,6 +11,7 @@ import {
   useReenrichOne,
 } from "@/api/hooks/catalogue";
 import { StatusChip } from "@/components/catalogue/StatusChip";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -255,7 +256,14 @@ function EditableFieldRow({
   return (
     <div className={colSpan ? "space-y-1 sm:col-span-2" : "space-y-1"}>
       <div className="flex items-center justify-between">
-        <Label htmlFor={id}>{label}</Label>
+        <div className="flex items-center gap-2">
+          <Label htmlFor={id}>{label}</Label>
+          {locked && (
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-5">
+              Operator-edited
+            </Badge>
+          )}
+        </div>
         {locked && (
           <button
             type="button"
@@ -267,7 +275,7 @@ function EditableFieldRow({
           </button>
         )}
       </div>
-      <Input id={id} {...inputProps} />
+      <Input id={id} {...inputProps} className={locked ? "ring-1 ring-primary/30" : undefined} />
       {errorMessage && <p className="text-xs text-destructive">{errorMessage}</p>}
     </div>
   );
@@ -450,6 +458,12 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
               <ReadonlyRow label="Enriched at">{formatTimestamp(entry.enriched_at)}</ReadonlyRow>
             </div>
           </section>
+
+          {lockedFields.size > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Operator-edited fields override automatic enrichment.
+            </p>
+          )}
 
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {EDITABLE_FIELD_CONFIGS.map(({ field, label, colSpan, extraProps }) => (
