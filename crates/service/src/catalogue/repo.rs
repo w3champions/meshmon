@@ -731,10 +731,18 @@ pub async fn list(
     // with the request — a sort change invalidates in-flight cursors and
     // the request is served as a fresh page. This keeps the client-side
     // state machine simple: flip the sort, forget the cursor.
+    //
+    // A second gate rejects cursors whose `value` JSON type doesn't match
+    // what the sort column expects (e.g. `value: "Berlin"` arrives with
+    // `sort = Asn`). Without this, the typed decode below collapses to
+    // `Option::None`, which Postgres reduces to `col IS NULL` — silently
+    // jumping the client to the NULLS LAST tail instead of serving a
+    // fresh page. Same posture as a sort-mismatched cursor.
     let effective_after: Option<&super::sort::Cursor> = filter
         .after
         .as_ref()
-        .filter(|c| c.sort == filter.sort && c.dir == filter.sort_dir);
+        .filter(|c| c.sort == filter.sort && c.dir == filter.sort_dir)
+        .filter(|c| cursor_value_matches_sort(&c.value, filter.sort));
 
     let after_set = effective_after.is_some();
     let after_null = effective_after.map(|c| c.value.is_null()).unwrap_or(false);
@@ -948,6 +956,11 @@ pub async fn list(
             value_ty = String,
             after_val = val_str,
         )?,
+        // `enrichment_status` is cast to `text` so the order is
+        // alphabetical on the rendered value (`enriched` < `failed` <
+        // `pending`), not Postgres enum declaration order. This gives
+        // operators a stable, obvious sort when staring at the column
+        // header and keeps the cursor value a plain JSON string.
         (SortBy::EnrichmentStatus, SortDir::Desc) => list_variant!(
             sort_col = "c.enrichment_status::text",
             dir = "DESC",
@@ -1121,6 +1134,43 @@ fn cursor_value_for_sort(row: &CatalogueEntryRow, sort: super::dto::SortBy) -> s
     }
 }
 
+/// True when a cursor's `value` JSON type is coherent with the sort
+/// column. `Value::Null` is always accepted — it signals the NULLS LAST
+/// tail and is valid for every column. The accepted non-null types
+/// mirror the output of [`cursor_value_for_sort`]:
+///
+/// | Sort column                                                   | Expected `value` type |
+/// |---------------------------------------------------------------|-----------------------|
+/// | `CreatedAt`, `Ip`, `DisplayName`, `City`, `CountryCode`,      | `String`              |
+/// | `NetworkOperator`, `EnrichmentStatus`, `Website`              |                       |
+/// | `Asn`                                                         | `Number`              |
+/// | `Location`                                                    | `Bool`                |
+///
+/// A mismatch (e.g. `value: "Berlin"` sent against `sort = Asn`)
+/// returns `false` so the repo layer can discard the cursor and serve
+/// a fresh page — same posture as a `(sort, dir)` mismatch. Without
+/// this gate the typed decode collapses to `None`, which Postgres
+/// reduces to `col IS NULL`, silently jumping the client to the NULLS
+/// LAST tail instead of resetting to the first page.
+fn cursor_value_matches_sort(value: &serde_json::Value, sort: super::dto::SortBy) -> bool {
+    use super::dto::SortBy;
+    if value.is_null() {
+        return true;
+    }
+    match sort {
+        SortBy::CreatedAt
+        | SortBy::Ip
+        | SortBy::DisplayName
+        | SortBy::City
+        | SortBy::CountryCode
+        | SortBy::NetworkOperator
+        | SortBy::EnrichmentStatus
+        | SortBy::Website => value.is_string(),
+        SortBy::Asn => value.is_number(),
+        SortBy::Location => value.is_boolean(),
+    }
+}
+
 // --- Facets ----------------------------------------------------------------
 
 /// Per-country occurrence count.
@@ -1289,5 +1339,105 @@ impl From<CatalogueEntryRow> for CatalogueEntry {
             created_at: r.created_at,
             created_by: r.created_by,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::dto::SortBy;
+    use super::*;
+    use serde_json::json;
+
+    /// Every sort column accepts a `Value::Null` cursor value — that's
+    /// how a cursor in the NULLS LAST tail is represented.
+    #[test]
+    fn cursor_value_matches_sort_accepts_null_for_every_sort() {
+        for sort in [
+            SortBy::CreatedAt,
+            SortBy::Ip,
+            SortBy::DisplayName,
+            SortBy::City,
+            SortBy::CountryCode,
+            SortBy::Asn,
+            SortBy::NetworkOperator,
+            SortBy::EnrichmentStatus,
+            SortBy::Website,
+            SortBy::Location,
+        ] {
+            assert!(
+                cursor_value_matches_sort(&serde_json::Value::Null, sort),
+                "Null must be accepted for {sort:?}"
+            );
+        }
+    }
+
+    /// String-typed columns accept a `Value::String` cursor and reject
+    /// every other non-null JSON type.
+    #[test]
+    fn cursor_value_matches_sort_accepts_string_for_string_columns() {
+        let string_sorts = [
+            SortBy::CreatedAt,
+            SortBy::Ip,
+            SortBy::DisplayName,
+            SortBy::City,
+            SortBy::CountryCode,
+            SortBy::NetworkOperator,
+            SortBy::EnrichmentStatus,
+            SortBy::Website,
+        ];
+        for sort in string_sorts {
+            assert!(cursor_value_matches_sort(&json!("Berlin"), sort));
+            assert!(!cursor_value_matches_sort(&json!(42), sort));
+            assert!(!cursor_value_matches_sort(&json!(true), sort));
+        }
+    }
+
+    /// `Asn` accepts numbers and rejects strings — a cursor minted
+    /// against `City` whose value is `"Berlin"` must not survive when
+    /// the request's sort flips to `Asn`.
+    #[test]
+    fn cursor_value_matches_sort_asn_rejects_string_value() {
+        assert!(cursor_value_matches_sort(&json!(64500), SortBy::Asn));
+        assert!(!cursor_value_matches_sort(&json!("Berlin"), SortBy::Asn));
+        assert!(!cursor_value_matches_sort(&json!(true), SortBy::Asn));
+    }
+
+    /// `Location` accepts booleans and rejects everything non-null.
+    #[test]
+    fn cursor_value_matches_sort_location_requires_bool() {
+        assert!(cursor_value_matches_sort(&json!(true), SortBy::Location));
+        assert!(cursor_value_matches_sort(&json!(false), SortBy::Location));
+        assert!(!cursor_value_matches_sort(
+            &json!("Berlin"),
+            SortBy::Location
+        ));
+        assert!(!cursor_value_matches_sort(&json!(1), SortBy::Location));
+    }
+
+    /// Regression pin for the gate's reason for existing: a cursor
+    /// that *matches* on `(sort, dir)` but whose `value` has the wrong
+    /// JSON type for the requested column must be rejected. This mirrors
+    /// the `(SortBy::Asn, Value::String("Berlin"))` scenario from the
+    /// T51 Task 3 review: without the gate, the typed decode collapses
+    /// to `None`, Postgres reduces `col > NULL OR (col = NULL AND …)`
+    /// to `col IS NULL`, and the client silently lands in the NULLS
+    /// LAST tail instead of serving a fresh page.
+    #[test]
+    fn cursor_with_mismatched_value_type_rejected_like_no_cursor() {
+        // A cursor minted against `City` with value "Berlin", replayed
+        // against a request whose sort is `Asn`. `(sort, dir)` would be
+        // `(Asn, Desc)` on both sides (the prior gate passes), but the
+        // value-type gate must reject.
+        let bad = json!("Berlin");
+        assert!(!cursor_value_matches_sort(&bad, SortBy::Asn));
+        // The "no cursor" posture corresponds to `Value::Null`; a Null
+        // value on `Asn` is permitted because it means the NULL-tail.
+        // So a bad cursor and a no-cursor request diverge on what
+        // reaches the query layer, but both result in "serve a fresh
+        // page" — the bad cursor is dropped before any typed decode.
+        assert!(cursor_value_matches_sort(
+            &serde_json::Value::Null,
+            SortBy::Asn
+        ));
     }
 }

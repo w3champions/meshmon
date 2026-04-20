@@ -53,7 +53,10 @@ pub enum SortBy {
     Asn,
     /// Network operator / ISP name.
     NetworkOperator,
-    /// Enrichment pipeline status.
+    /// Enrichment pipeline status. Ordered alphabetically by the text
+    /// rendering of the enum (`enriched` < `failed` < `pending`), not
+    /// by Postgres enum declaration order — the repo layer casts the
+    /// column to `text` before comparing.
     EnrichmentStatus,
     /// Operator-supplied external link.
     Website,
