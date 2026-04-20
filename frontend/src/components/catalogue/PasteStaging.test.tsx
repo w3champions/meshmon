@@ -35,11 +35,7 @@ vi.mock("@/components/map/LocationPicker", () => ({
       >
         Pick
       </button>
-      <button
-        type="button"
-        aria-label="test clear location"
-        onClick={() => onChange(null)}
-      >
+      <button type="button" aria-label="test clear location" onClick={() => onChange(null)}>
         Clear
       </button>
       <span data-testid="location-picker-value">
@@ -270,28 +266,19 @@ describe("PasteStaging", () => {
     await user.type(textarea, "1.2.3.4");
 
     // Expand panel and fill fields.
-    await user.click(
-      within(document.body).getByRole("button", { name: /default metadata/i }),
-    );
+    await user.click(within(document.body).getByRole("button", { name: /default metadata/i }));
     await user.type(
       within(document.body).getByRole("textbox", { name: /display name/i }),
       "fastly-sfo",
     );
     await user.type(within(document.body).getByRole("textbox", { name: /^city$/i }), "SF");
-    await user.click(
-      within(document.body).getByRole("button", { name: /test pick country/i }),
-    );
-    await user.click(
-      within(document.body).getByRole("button", { name: /test pick location/i }),
-    );
+    await user.click(within(document.body).getByRole("button", { name: /test pick country/i }));
+    await user.click(within(document.body).getByRole("button", { name: /test pick location/i }));
     await user.type(
       within(document.body).getByRole("textbox", { name: /website/i }),
       "https://example.com",
     );
-    await user.type(
-      within(document.body).getByRole("textbox", { name: /^notes$/i }),
-      "seeded",
-    );
+    await user.type(within(document.body).getByRole("textbox", { name: /^notes$/i }), "seeded");
 
     await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
 
@@ -331,12 +318,8 @@ describe("PasteStaging", () => {
     const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "1.2.3.4\n5.6.7.8");
     // Expand + pick location so `metadata` is sent.
-    await user.click(
-      within(document.body).getByRole("button", { name: /default metadata/i }),
-    );
-    await user.click(
-      within(document.body).getByRole("button", { name: /test pick location/i }),
-    );
+    await user.click(within(document.body).getByRole("button", { name: /default metadata/i }));
+    await user.click(within(document.body).getByRole("button", { name: /test pick location/i }));
     await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
 
     // Notice carries the row count and the skipped field label.
