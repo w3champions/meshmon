@@ -1633,6 +1633,20 @@ mod tests {
 
         tokio::task::yield_now().await;
 
+        // Pre-seed ICMP rolling stats so the state machine can elect ICMP
+        // as primary on the first eval tick. The real ICMP prober would
+        // normally do this, but unprivileged CI runners can't open a raw
+        // ICMP socket — `observation_tx` injection bypasses the kernel
+        // and keeps the test deterministic across hosts.
+        for _ in 0..3 {
+            handle
+                .observation_tx
+                .send(icmp_success("steady", 1_000))
+                .await
+                .expect("seed icmp sample");
+        }
+        yield_many(10).await;
+
         // Seed the tracker with ICMP primary via the first eval tick.
         tokio::time::advance(Duration::from_secs(11)).await;
         yield_many(10).await;
