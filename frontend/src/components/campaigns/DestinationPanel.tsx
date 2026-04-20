@@ -1,15 +1,14 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
-import type { CatalogueEntry, CatalogueListQuery } from "@/api/hooks/catalogue";
+import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { useCatalogueListInfinite } from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
 import { PasteStaging } from "@/components/catalogue/PasteStaging";
 import { FilterRail, type FilterValue } from "@/components/filter/FilterRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { destinationFilterToQuery } from "@/lib/catalogue-query";
 import { lookupCountryName } from "@/lib/countries";
-import { shapesToPolygons } from "@/lib/geo";
-import { normalizeIpPrefix } from "@/lib/ip-prefix";
 import { cn } from "@/lib/utils";
 
 type FacetsResponse = components["schemas"]["FacetsResponse"];
@@ -35,31 +34,6 @@ export interface DestinationPanelProps {
   onOpenMap(): void;
 }
 
-/**
- * Mirror of `Catalogue.tsx`'s `filter → CatalogueListQuery` projection so
- * both surfaces exercise the same backend path. Shape filters are
- * serialized as the GeoJSON ring array the backend's
- * `catalogue/shapes.rs` parser expects; IP prefixes are CIDR-normalised
- * so natural operator input like `10.0.0.` doesn't silently match
- * everything.
- */
-function buildQuery(filter: FilterValue): CatalogueListQuery {
-  const q: CatalogueListQuery = {};
-  if (filter.countryCodes.length > 0) q.country_code = filter.countryCodes;
-  if (filter.asns.length > 0) q.asn = filter.asns;
-  if (filter.networks.length > 0) q.network = filter.networks;
-  if (filter.cities.length > 0) q.city = filter.cities;
-  if (filter.ipPrefix) {
-    const normalized = normalizeIpPrefix(filter.ipPrefix);
-    if (normalized) q.ip_prefix = normalized;
-  }
-  if (filter.nameSearch) q.name = filter.nameSearch;
-  if (filter.shapes.length > 0) {
-    q.shapes = JSON.stringify(shapesToPolygons(filter.shapes));
-  }
-  return q;
-}
-
 export function DestinationPanel({
   selected,
   onSelectedChange,
@@ -68,7 +42,7 @@ export function DestinationPanel({
   facets,
   onOpenMap,
 }: DestinationPanelProps) {
-  const query = useMemo(() => buildQuery(filter), [filter]);
+  const query = useMemo(() => destinationFilterToQuery(filter), [filter]);
   const listQuery = useCatalogueListInfinite(query, { pageSize: PAGE_SIZE });
   const [pasteOpen, setPasteOpen] = useState(false);
 

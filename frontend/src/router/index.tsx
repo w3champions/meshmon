@@ -13,6 +13,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
 import Alerts from "@/pages/Alerts";
+import CampaignComposer from "@/pages/CampaignComposer";
 import Campaigns from "@/pages/Campaigns";
 import Catalogue from "@/pages/Catalogue";
 import Login from "@/pages/Login";
@@ -182,6 +183,15 @@ export const campaignsRoute = createRoute({
   validateSearch: (search) => campaignsSearchSchema.parse(search),
 });
 
+// The composer page owns all draft state in memory — the URL does not
+// persist selections, knobs, or the pending create campaign id across
+// navigation. No `validateSearch` is needed.
+export const campaignNewRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/campaigns/new",
+  component: CampaignComposer,
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   authRoute.addChildren([
@@ -194,6 +204,7 @@ const routeTree = rootRoute.addChildren([
     alertsRoute,
     catalogueRoute,
     campaignsRoute,
+    campaignNewRoute,
   ]),
 ]);
 

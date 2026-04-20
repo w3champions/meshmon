@@ -1,4 +1,4 @@
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCampaignStream } from "@/api/hooks/campaign-stream";
@@ -399,11 +399,8 @@ export default function Campaigns() {
           />
         </div>
         <div className="ml-auto">
-          {/* TODO(Phase F): `/campaigns/new` is not registered until the
-              composer lands. Use a bare anchor so TanStack Router's typed
-              `Link` doesn't reject the path. */}
           <Button asChild>
-            <a href="/campaigns/new">Create campaign</a>
+            <Link to="/campaigns/new">Create campaign</Link>
           </Button>
         </div>
       </header>
@@ -432,11 +429,8 @@ export default function Campaigns() {
         ) : (
           <Card className="flex flex-col items-center gap-3 p-8 text-center">
             <p className="text-sm">No campaigns yet.</p>
-            {/* TODO(Phase F): `/campaigns/new` is not registered until the
-                composer lands. Use a bare anchor so TanStack Router's typed
-                `Link` doesn't reject the path. */}
             <Button asChild>
-              <a href="/campaigns/new">Create campaign</a>
+              <Link to="/campaigns/new">Create campaign</Link>
             </Button>
           </Card>
         )
