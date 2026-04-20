@@ -1,8 +1,17 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
-import type { CatalogueEntry, CataloguePasteResponse } from "@/api/hooks/catalogue";
+import type {
+  CatalogueEntry,
+  CataloguePasteRequest,
+  CataloguePasteResponse,
+} from "@/api/hooks/catalogue";
 import { catalogueEntryKey, usePasteCatalogue } from "@/api/hooks/catalogue";
+import type { CountryValue } from "@/components/catalogue/CountryPicker";
+import { CountryPicker } from "@/components/catalogue/CountryPicker";
 import { StatusChip } from "@/components/catalogue/StatusChip";
+import type { LocationPickerValue } from "@/components/map/LocationPicker";
+import { LocationPicker } from "@/components/map/LocationPicker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Table,
@@ -24,6 +34,49 @@ import {
 } from "@/components/ui/table";
 import type { ParseOutcome } from "@/lib/catalogue-parse";
 import { parsePasteInput } from "@/lib/catalogue-parse";
+
+type PasteMetadataBody = NonNullable<CataloguePasteRequest["metadata"]>;
+
+interface MetadataDraft {
+  displayName: string;
+  city: string;
+  country: CountryValue | null;
+  location: LocationPickerValue | null;
+  website: string;
+  notes: string;
+}
+
+const EMPTY_METADATA: MetadataDraft = {
+  displayName: "",
+  city: "",
+  country: null,
+  location: null,
+  website: "",
+  notes: "",
+};
+
+/**
+ * Build the wire-shape metadata body from the panel draft. Blank text
+ * fields and nulled pickers collapse to an omitted key; when nothing
+ * is set the function returns `undefined` so the caller can leave
+ * `metadata` off the paste body entirely (pre-T52 contract).
+ */
+function toMetadataWire(d: MetadataDraft): PasteMetadataBody | undefined {
+  const body: PasteMetadataBody = {};
+  if (d.displayName.trim()) body.display_name = d.displayName.trim();
+  if (d.city.trim()) body.city = d.city.trim();
+  if (d.country) {
+    body.country_code = d.country.code;
+    body.country_name = d.country.name;
+  }
+  if (d.location) {
+    body.latitude = d.location.latitude;
+    body.longitude = d.location.longitude;
+  }
+  if (d.website.trim()) body.website = d.website.trim();
+  if (d.notes.trim()) body.notes = d.notes.trim();
+  return Object.keys(body).length > 0 ? body : undefined;
+}
 
 export interface PasteStagingProps {
   open: boolean;
@@ -79,10 +132,128 @@ function StagingChip({ id }: { id: string }) {
   return <StatusChip status={status} />;
 }
 
+interface MetadataPanelProps {
+  value: MetadataDraft;
+  onChange(next: MetadataDraft): void;
+  open: boolean;
+  onOpenChange(next: boolean): void;
+}
+
+/**
+ * Collapsible "Default metadata (optional)" panel shown inside the
+ * Add IPs dialog. Each filled field applies to every accepted IP via
+ * `PasteRequest.metadata`; empty fields are omitted from the wire
+ * body. Paired pickers (Country, Location) emit both halves together
+ * so the server's paired-atomicity rule never rejects a half-filled
+ * submission.
+ */
+function MetadataPanel({ value, onChange, open, onOpenChange }: MetadataPanelProps) {
+  const panelId = "paste-metadata-panel";
+  return (
+    <div className="rounded-md border border-border">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => onOpenChange(!open)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-left hover:bg-muted/50"
+      >
+        {open ? (
+          <ChevronDownIcon className="h-4 w-4" aria-hidden />
+        ) : (
+          <ChevronRightIcon className="h-4 w-4" aria-hidden />
+        )}
+        Default metadata (optional)
+      </button>
+      {open && (
+        <div id={panelId} className="grid gap-3 border-t border-border p-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label htmlFor="paste-metadata-display-name">Display name</Label>
+            <Input
+              id="paste-metadata-display-name"
+              value={value.displayName}
+              onChange={(e) => onChange({ ...value, displayName: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="paste-metadata-city">City</Label>
+            <Input
+              id="paste-metadata-city"
+              value={value.city}
+              onChange={(e) => onChange({ ...value, city: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1 sm:col-span-2">
+            <Label htmlFor="paste-metadata-country">Country</Label>
+            <CountryPicker
+              id="paste-metadata-country"
+              value={value.country}
+              onChange={(next) => onChange({ ...value, country: next })}
+            />
+          </div>
+          <div className="space-y-1 sm:col-span-2">
+            <span className="text-sm font-medium">Location</span>
+            <LocationPicker
+              value={value.location}
+              onChange={(next) => onChange({ ...value, location: next })}
+              heightClassName="h-48"
+            />
+          </div>
+          <div className="space-y-1 sm:col-span-2">
+            <Label htmlFor="paste-metadata-website">Website</Label>
+            <Input
+              id="paste-metadata-website"
+              value={value.website}
+              onChange={(e) => onChange({ ...value, website: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1 sm:col-span-2">
+            <Label htmlFor="paste-metadata-notes">Notes</Label>
+            <textarea
+              id="paste-metadata-notes"
+              value={value.notes}
+              onChange={(e) => onChange({ ...value, notes: e.target.value })}
+              rows={2}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface SkippedSummaryNoticeProps {
+  summary: NonNullable<CataloguePasteResponse["skipped_summary"]>;
+}
+
+/**
+ * Inline confirmation shown when the server refused one or more
+ * metadata writes because the target fields were already operator-
+ * locked on existing rows. The message is `role="status"` so it
+ * auto-announces without stealing focus.
+ */
+function SkippedSummaryNotice({ summary }: SkippedSummaryNoticeProps) {
+  const fields = Object.keys(summary.skipped_field_counts).sort();
+  const fieldList = fields.length > 0 ? ` (${fields.join(", ")})` : "";
+  const plural = summary.rows_with_skips === 1 ? "row" : "rows";
+  return (
+    <p role="status" aria-label="Metadata skip summary" className="text-sm text-muted-foreground">
+      Applied defaults. {summary.rows_with_skips} existing {plural} kept their operator-locked
+      values{fieldList}.
+    </p>
+  );
+}
+
 export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
   const [text, setText] = useState("");
   const [stagingRows, setStagingRows] = useState<StagingRow[]>([]);
   const [hasPosted, setHasPosted] = useState(false);
+  const [metadata, setMetadata] = useState<MetadataDraft>(EMPTY_METADATA);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [skippedSummary, setSkippedSummary] = useState<
+    CataloguePasteResponse["skipped_summary"] | null
+  >(null);
   const queryClient = useQueryClient();
   const pasteMutation = usePasteCatalogue();
 
@@ -92,17 +263,21 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
   const handleAdd = async () => {
     if (outcome.accepted.length === 0) return;
     const ips = outcome.accepted.map((a) => a.ip);
+    const metadataBody = toMetadataWire(metadata);
+    const body: CataloguePasteRequest = metadataBody ? { ips, metadata: metadataBody } : { ips };
     let result: CataloguePasteResponse;
     try {
-      result = await pasteMutation.mutateAsync({ ips });
+      result = await pasteMutation.mutateAsync(body);
     } catch {
       // `pasteMutation.isError` drives the error banner. Clear stale rows from
       // a previous successful paste so the UI doesn't show a half-populated
       // staging table alongside the error.
       setStagingRows([]);
       setHasPosted(false);
+      setSkippedSummary(null);
       return;
     }
+    setSkippedSummary(result.skipped_summary ?? null);
 
     // Build a map from ip → id from the response
     const ipToId = new Map<string, string>();
@@ -176,6 +351,17 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
               </ul>
             )}
           </div>
+
+          <MetadataPanel
+            value={metadata}
+            onChange={setMetadata}
+            open={metadataOpen}
+            onOpenChange={setMetadataOpen}
+          />
+
+          {skippedSummary && skippedSummary.rows_with_skips > 0 && (
+            <SkippedSummaryNotice summary={skippedSummary} />
+          )}
 
           {!hasPosted && outcome.accepted.length > 0 && (
             <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
