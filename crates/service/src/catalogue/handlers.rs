@@ -5,9 +5,11 @@
 //!   invalid buckets and enqueues each newly-created id for enrichment.
 //! - `GET /api/catalogue` — filtered list. Multi-valued filters use ANY
 //!   semantics (see [`super::dto::ListQuery`]); `sort` / `sort_dir` /
-//!   `after` / `city` / `shapes` are accepted on the wire (Task 1), but
-//!   the repo layer still returns the first `limit.min(500)` rows in
-//!   `(created_at DESC, id DESC)` — keyset paging lands in Task 3.
+//!   `after` / `city` / `shapes` drive the keyset-paginated query in
+//!   [`super::repo::list`]. The handler decodes the opaque `after`
+//!   cursor via [`super::sort::Cursor::decode`]; a decode failure is
+//!   treated as "no cursor" and the handler serves the first page —
+//!   same posture as a sort-mismatched cursor (see repo-level docs).
 //! - `GET /api/catalogue/{id}` — single-row fetch.
 //! - `PATCH /api/catalogue/{id}` — partial update with revert-to-auto
 //!   support. Touched fields flip into `operator_edited_fields`; names
@@ -165,14 +167,21 @@ pub async fn paste(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-/// `GET /api/catalogue` — filtered, size-bounded list.
+/// `GET /api/catalogue` — filtered, size-bounded, keyset-paginated list.
 ///
 /// The handler converts [`ListQuery`] straight into [`repo::ListFilter`]
-/// and returns a [`ListResponse`]. `sort` / `sort_dir` / `after`
-/// (keyset cursor) / `city` / `shapes` are accepted on the wire (Task 1),
-/// but the repo implementation still clamps the response to the first
-/// `limit.min(500)` rows in `(created_at DESC, id DESC)` order — the
-/// keyset rewrite lands in Task 3.
+/// and returns a [`ListResponse`]. The repo layer orders by the selected
+/// `(sort, sort_dir)` with `id DESC` as the invariant tiebreaker and
+/// `NULLS LAST` for every column; `shapes` run a cheap bbox pre-filter
+/// in SQL plus exact point-in-polygon in Rust over the returned page
+/// (see [`super::repo::list`] for the `total`-is-approximate caveat).
+///
+/// The wire `after` string is decoded via [`super::sort::Cursor::decode`].
+/// A decode error (malformed base64 or JSON) silently degrades to "no
+/// cursor" — the handler serves the first page rather than returning a
+/// 400. The repo additionally discards a decoded cursor whose
+/// `(sort, dir)` disagrees with the request's `(sort, dir)`, so a sort
+/// change on the client naturally invalidates stale cursors.
 #[utoipa::path(
     get,
     path = "/api/catalogue",
@@ -198,6 +207,17 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| format!("%{s}%"));
+
+    // Decode the opaque cursor. Decode failures (malformed base64 or
+    // JSON) silently degrade to "no cursor" — the repo then serves the
+    // first page. This matches the wire-contract note in the
+    // `super::sort` module-level docs and keeps the client-side state
+    // machine simple.
+    let after = q
+        .after
+        .as_deref()
+        .and_then(|raw| super::sort::Cursor::decode(raw).ok());
+
     let filter = repo::ListFilter {
         country_code: q.country_code,
         asn: q.asn,
@@ -205,23 +225,19 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
         ip_prefix: q.ip_prefix,
         name: name_filter,
         bounding_box: q.bbox,
+        city: q.city,
+        shapes: q.shapes,
+        sort: q.sort,
+        sort_dir: q.sort_dir,
+        after,
         limit: q.limit,
-        // Task 3 rewrites `repo::list` with the `list_variant!` macro
-        // and drops these fields from `ListFilter`. Until then, the
-        // repo still expects them — pass `None` so the handler keeps
-        // compiling while `ListQuery` already speaks the new surface.
-        cursor_created_at: None,
-        cursor_id: None,
     };
     match repo::list(&state.pool, filter).await {
-        Ok((entries, total)) => {
+        Ok((entries, total, next_cursor)) => {
             let body = ListResponse {
                 entries: entries.into_iter().map(CatalogueEntryDto::from).collect(),
                 total,
-                // Task 3 derives the cursor from the last row of the
-                // page; `None` is the only value the legacy repo can
-                // produce.
-                next_cursor: None,
+                next_cursor: next_cursor.map(|c| c.encode()),
             };
             (StatusCode::OK, Json(body)).into_response()
         }

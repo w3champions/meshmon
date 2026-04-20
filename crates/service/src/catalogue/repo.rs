@@ -594,17 +594,33 @@ where
 /// Filter set accepted by [`list`].
 ///
 /// Empty `Vec` filters mean "no restriction" — the query compiles this
-/// as `$N::TEXT[] = '{}' OR column = ANY($N::TEXT[])`. `ip_prefix`
+/// as `$N::<elem>[] = '{}' OR column = ANY($N::<elem>[])`. `ip_prefix`
 /// accepts any Postgres-parseable CIDR or bare IP; an unparseable value
 /// is treated as "no filter" (falling through to `$N IS NULL`). The
 /// bounding box is `[minLat, minLon, maxLat, maxLon]`.
 ///
-/// `cursor_created_at` / `cursor_id` are vestigial and slated for
-/// deletion in Task 3, when `list` is rewritten to take the generic
-/// keyset [`super::sort::Cursor`] instead. Until then they are ignored
-/// — the list returns the first `limit.min(500)` rows sorted by
-/// `created_at DESC, id DESC` and a separate `COUNT(*)` over the same
-/// filter set.
+/// ### Shapes
+///
+/// When [`ListFilter::shapes`] is non-empty the repo layer uses the
+/// polygon-union bbox as a cheap SQL pre-filter (intersected with
+/// [`ListFilter::bounding_box`] when both are set) and runs exact
+/// point-in-polygon over the returned page via
+/// [`super::shapes::point_in_any`]. SQL can only reason about the bbox,
+/// so `total` is an **upper-bound approximation** whenever `shapes` is
+/// non-empty: rows inside the bbox but outside every polygon are counted
+/// in `total` while the PIP pass drops them from the returned page.
+/// Clients that need the exact post-shape count must sum page sizes
+/// across `next_cursor` walks.
+///
+/// ### Cursor
+///
+/// `after` carries the keyset cursor from a prior page. The repo layer
+/// silently discards a cursor whose `(sort, dir)` does not match the
+/// request's `(sort, dir)` — i.e. a sort-change invalidates in-flight
+/// cursors and the request is served as a fresh page. The caller
+/// (handler) is responsible for decoding the wire form via
+/// [`super::sort::Cursor::decode`] and for converting decode errors
+/// into "ignore and serve first page".
 #[derive(Debug, Default)]
 pub struct ListFilter {
     /// Exact country-code match, ANY semantics across the vector.
@@ -627,28 +643,53 @@ pub struct ListFilter {
     pub name: Option<String>,
     /// `[minLat, minLon, maxLat, maxLon]` geographic bounding box.
     pub bounding_box: Option<[f64; 4]>,
-    /// Max rows to return. Clamped to `500` internally.
+    /// Exact city match, ANY semantics across the vector.
+    pub city: Vec<String>,
+    /// Polygon shapes (point-in-any OR semantics). The union bbox feeds
+    /// the SQL pre-filter; exact PIP runs in Rust after the page returns.
+    /// Malformed polygons (fewer than 3 distinct vertices) are silently
+    /// dropped by the wire layer before reaching this struct.
+    pub shapes: Vec<super::dto::Polygon>,
+    /// Sort column.
+    pub sort: super::dto::SortBy,
+    /// Sort direction.
+    pub sort_dir: super::dto::SortDir,
+    /// Keyset cursor from a prior page. The repo discards a cursor whose
+    /// `(sort, dir)` disagrees with the request's `(sort, dir)` — see the
+    /// struct doc for the rationale.
+    pub after: Option<super::sort::Cursor>,
+    /// Max rows to return. Clamped to [`LIST_MAX_LIMIT`] internally.
     pub limit: i64,
-    /// Vestigial — slated for deletion in Task 3. Currently ignored.
-    pub cursor_created_at: Option<DateTime<Utc>>,
-    /// Vestigial — slated for deletion in Task 3. Currently ignored.
-    pub cursor_id: Option<Uuid>,
 }
 
 /// Maximum page size for [`list`] — larger inputs are silently clamped.
 pub const LIST_MAX_LIMIT: i64 = 500;
 
-/// List catalogue rows matching `filter`, returning the rows and the
-/// unpaged `COUNT(*)` over the same WHERE clauses.
+/// List catalogue rows matching `filter`.
 ///
-/// Currently returns the first `limit.min(LIST_MAX_LIMIT)` matching
-/// rows in `(created_at DESC, id DESC)` order. The rewrite to honour
-/// [`ListFilter::cursor_created_at`] / `cursor_id` and the keyset
-/// cursor on [`super::dto::ListQuery::after`] lands in Task 3.
+/// Returns `(rows, total, next_cursor)`.
+///
+/// - `rows` — up to `filter.limit.clamp(1, LIST_MAX_LIMIT)` rows ordered
+///   by the selected `(sort, sort_dir)` with `id DESC` as the invariant
+///   tiebreaker and `NULLS LAST` for every column regardless of
+///   direction. When `filter.shapes` is non-empty the page is
+///   additionally filtered in Rust by [`super::shapes::point_in_any`];
+///   rows with NULL lat/lng are dropped from the shapes post-filter
+///   since they cannot satisfy a geographic predicate.
+/// - `total` — `COUNT(*)` over the same WHERE (excluding the cursor
+///   predicate and the Rust PIP). When `filter.shapes` is non-empty
+///   `total` is an upper-bound approximation — see the struct doc.
+/// - `next_cursor` — derived from the **SQL-returned** last row when
+///   the SQL page is exactly `limit` long. The PIP post-filter can
+///   shrink the returned page below `limit` without terminating the
+///   walk: the client keeps following `next_cursor` until the SQL
+///   layer returns fewer than `limit` rows (signalling exhaustion).
 pub async fn list(
     pool: &PgPool,
     filter: ListFilter,
-) -> Result<(Vec<CatalogueEntry>, i64), sqlx::Error> {
+) -> Result<(Vec<CatalogueEntry>, i64, Option<super::sort::Cursor>), sqlx::Error> {
+    use super::dto::{SortBy, SortDir};
+
     let limit = filter.limit.clamp(1, LIST_MAX_LIMIT);
 
     // `ip_prefix` may be user-supplied; tolerate unparseable values by
@@ -659,73 +700,365 @@ pub async fn list(
         .as_deref()
         .and_then(|s| s.parse::<IpNetwork>().ok());
 
-    // Bounding box parts. When absent or all-NULL, the SQL arm collapses
-    // to the always-true `$bbox_set IS NULL` branch.
-    let (bbox_set, min_lat, min_lon, max_lat, max_lon) = match filter.bounding_box {
+    // Bounding box: intersect the request-supplied bbox (if any) with
+    // the shapes' union bbox (if any). The INTERSECTION semantics are
+    // load-bearing — both filters must hold for a row to match, which
+    // matches the AND-of-filters posture of every other list filter.
+    let shapes_bbox = super::shapes::union_bbox(&filter.shapes);
+    let bbox = match (filter.bounding_box, shapes_bbox) {
+        (Some(a), Some(b)) => Some([
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+            a[2].min(b[2]),
+            a[3].min(b[3]),
+        ]),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let (bbox_set, min_lat, min_lon, max_lat, max_lon) = match bbox {
         Some([a, b, c, d]) => (true, Some(a), Some(b), Some(c), Some(d)),
         None => (false, None, None, None, None),
     };
 
     let name_like = filter.name.as_deref();
+    let country_code: &[String] = &filter.country_code;
+    let asn: &[i32] = &filter.asn;
+    let network: &[String] = &filter.network;
+    let city: &[String] = &filter.city;
 
-    let rows = sqlx::query_as!(
-        CatalogueEntryRow,
-        r#"
-        SELECT
-            id,
-            ip AS "ip: IpNetwork",
-            display_name, city, country_code, country_name,
-            latitude, longitude, asn, network_operator, website, notes,
-            enrichment_status AS "enrichment_status: EnrichmentStatus",
-            enriched_at,
-            operator_edited_fields,
-            source AS "source: CatalogueSource",
-            created_at, created_by
-        FROM ip_catalogue c
-        WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))
-          AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))
-          AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))
-          AND ($4::INET IS NULL OR c.ip <<= $4::INET)
-          AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)
-          AND (NOT $6::BOOL OR (
-                latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
-            AND longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION
-          ))
-        ORDER BY created_at DESC, id DESC
-        LIMIT $11
-        "#,
-        &filter.country_code as &[String],
-        &filter.asn as &[i32],
-        &filter.network as &[String],
-        ip_prefix as Option<IpNetwork>,
-        name_like,
-        bbox_set,
-        min_lat,
-        min_lon,
-        max_lat,
-        max_lon,
-        limit,
-    )
-    .fetch_all(pool)
-    .await?;
+    // Cursor is silently discarded when the `(sort, dir)` doesn't agree
+    // with the request — a sort change invalidates in-flight cursors and
+    // the request is served as a fresh page. This keeps the client-side
+    // state machine simple: flip the sort, forget the cursor.
+    let effective_after: Option<&super::sort::Cursor> = filter
+        .after
+        .as_ref()
+        .filter(|c| c.sort == filter.sort && c.dir == filter.sort_dir);
 
+    let after_set = effective_after.is_some();
+    let after_null = effective_after.map(|c| c.value.is_null()).unwrap_or(false);
+    let after_id: Option<Uuid> = effective_after.map(|c| c.id);
+
+    // Expand one (sort, dir) pair into a fully-parameterised
+    // `sqlx::query_as!`. The macro composes the SQL via sqlx's built-in
+    // `LitStr + LitStr + ...` concatenation syntax — concat!()-based
+    // composition does NOT work because sqlx's proc-macro parses its
+    // `source` with `Punctuated::<LitStr, Token![+]>::parse_separated_nonempty`,
+    // which rejects any token that isn't a string literal.
+    //
+    // The keyset WHERE handles three cases in one SQL template:
+    //   1. No cursor present               → $12::BOOL = FALSE short-circuits.
+    //   2. Cursor with NULL-tail value     → $13::BOOL enables the
+    //      "col IS NULL AND c.id < $15" arm (continues the NULLS LAST tail).
+    //   3. Cursor with concrete value      → normal `col <cmp_op> $14`
+    //      keyset plus the same-value tiebreaker and the "col IS NULL"
+    //      spill for rows in the NULLS LAST tail.
+    // The `id DESC` tiebreaker is invariant across both sort directions;
+    // we always page "downward" through a stable id ordering regardless
+    // of whether the sort column is ascending or descending.
+    //
+    // `$sort_col_sql` is substituted as a literal SQL fragment (e.g.
+    // `"c.city"` or `"(c.latitude IS NOT NULL AND c.longitude IS NOT NULL)"`
+    // for the derived `Location` sort). NOT NULL columns (ip,
+    // enrichment_status, created_at, location) render the `col IS NULL`
+    // branches dead; they stay in the template for uniformity — the
+    // planner removes them.
+    macro_rules! list_variant {
+        (
+            sort_col   = $sort_col_sql:literal,
+            dir        = $dir_sql:literal,
+            cmp_op     = $cmp_op:literal,
+            value_cast = $value_cast:literal,
+            value_ty   = $value_ty:ty,
+            after_val  = $after_val:expr $(,)?
+        ) => {{
+            let after_value_typed: Option<$value_ty> = $after_val;
+            sqlx::query_as!(
+                CatalogueEntryRow,
+                "SELECT c.id, c.ip AS \"ip: IpNetwork\", c.display_name, c.city, c.country_code, c.country_name, c.latitude, c.longitude, c.asn, c.network_operator, c.website, c.notes, c.enrichment_status AS \"enrichment_status: EnrichmentStatus\", c.enriched_at, c.operator_edited_fields, c.source AS \"source: CatalogueSource\", c.created_at, c.created_by FROM ip_catalogue c WHERE "
+                + "($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[])) AND "
+                + "($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[])) AND "
+                + "($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[])) AND "
+                + "($4::INET IS NULL OR c.ip <<= $4::INET) AND "
+                + "($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT) AND "
+                + "(NOT $6::BOOL OR ("
+                + "  c.latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION AND "
+                + "  c.longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION "
+                + ")) AND "
+                + "($11::TEXT[] = '{}' OR c.city = ANY($11::TEXT[])) AND "
+                + "($12::BOOL = FALSE OR ("
+                + "  ($13::BOOL AND " + $sort_col_sql + " IS NULL AND c.id < $15::UUID) OR "
+                + "  (NOT $13::BOOL AND ("
+                + "    " + $sort_col_sql + " " + $cmp_op + " $14::" + $value_cast + " OR "
+                + "    (" + $sort_col_sql + " = $14::" + $value_cast + " AND c.id < $15::UUID) OR "
+                + "    " + $sort_col_sql + " IS NULL"
+                + "  ))"
+                + ")) "
+                + "ORDER BY " + $sort_col_sql + " " + $dir_sql + " NULLS LAST, c.id DESC "
+                + "LIMIT $16",
+                country_code as &[String],
+                asn as &[i32],
+                network as &[String],
+                ip_prefix as Option<IpNetwork>,
+                name_like,
+                bbox_set,
+                min_lat,
+                min_lon,
+                max_lat,
+                max_lon,
+                city as &[String],
+                after_set,
+                after_null,
+                after_value_typed as Option<$value_ty>,
+                after_id as Option<Uuid>,
+                limit,
+            )
+            .fetch_all(pool)
+            .await
+        }};
+    }
+
+    // Decode the cursor's `value` into the type the current sort column
+    // expects. Shape-incoherent cursors (wrong JSON type for the column)
+    // are treated as "no cursor" — same posture as a sort-mismatched
+    // cursor. Keeps the client-side state machine simple and keeps
+    // malformed inputs from reaching the query layer.
+    let val_i32: Option<i32> = effective_after
+        .and_then(|c| c.value.as_i64())
+        .and_then(|n| i32::try_from(n).ok());
+    let val_str: Option<String> =
+        effective_after.and_then(|c| c.value.as_str().map(str::to_string));
+    let val_bool: Option<bool> = effective_after.and_then(|c| c.value.as_bool());
+    let val_ts: Option<DateTime<Utc>> = effective_after
+        .and_then(|c| c.value.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
+    let rows_sql = match (filter.sort, filter.sort_dir) {
+        (SortBy::CreatedAt, SortDir::Desc) => list_variant!(
+            sort_col   = "c.created_at",
+            dir        = "DESC",
+            cmp_op     = "<",
+            value_cast = "TIMESTAMPTZ",
+            value_ty   = DateTime<Utc>,
+            after_val  = val_ts,
+        )?,
+        (SortBy::CreatedAt, SortDir::Asc) => list_variant!(
+            sort_col   = "c.created_at",
+            dir        = "ASC",
+            cmp_op     = ">",
+            value_cast = "TIMESTAMPTZ",
+            value_ty   = DateTime<Utc>,
+            after_val  = val_ts,
+        )?,
+        (SortBy::Ip, SortDir::Desc) => list_variant!(
+            sort_col = "host(c.ip)",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::Ip, SortDir::Asc) => list_variant!(
+            sort_col = "host(c.ip)",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::DisplayName, SortDir::Desc) => list_variant!(
+            sort_col = "c.display_name",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::DisplayName, SortDir::Asc) => list_variant!(
+            sort_col = "c.display_name",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::City, SortDir::Desc) => list_variant!(
+            sort_col = "c.city",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::City, SortDir::Asc) => list_variant!(
+            sort_col = "c.city",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::CountryCode, SortDir::Desc) => list_variant!(
+            sort_col = "c.country_code",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::CountryCode, SortDir::Asc) => list_variant!(
+            sort_col = "c.country_code",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::Asn, SortDir::Desc) => list_variant!(
+            sort_col = "c.asn",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "INTEGER",
+            value_ty = i32,
+            after_val = val_i32,
+        )?,
+        (SortBy::Asn, SortDir::Asc) => list_variant!(
+            sort_col = "c.asn",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "INTEGER",
+            value_ty = i32,
+            after_val = val_i32,
+        )?,
+        (SortBy::NetworkOperator, SortDir::Desc) => list_variant!(
+            sort_col = "c.network_operator",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::NetworkOperator, SortDir::Asc) => list_variant!(
+            sort_col = "c.network_operator",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::EnrichmentStatus, SortDir::Desc) => list_variant!(
+            sort_col = "c.enrichment_status::text",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::EnrichmentStatus, SortDir::Asc) => list_variant!(
+            sort_col = "c.enrichment_status::text",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::Website, SortDir::Desc) => list_variant!(
+            sort_col = "c.website",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::Website, SortDir::Asc) => list_variant!(
+            sort_col = "c.website",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "TEXT",
+            value_ty = String,
+            after_val = val_str,
+        )?,
+        (SortBy::Location, SortDir::Desc) => list_variant!(
+            sort_col = "(c.latitude IS NOT NULL AND c.longitude IS NOT NULL)",
+            dir = "DESC",
+            cmp_op = "<",
+            value_cast = "BOOLEAN",
+            value_ty = bool,
+            after_val = val_bool,
+        )?,
+        (SortBy::Location, SortDir::Asc) => list_variant!(
+            sort_col = "(c.latitude IS NOT NULL AND c.longitude IS NOT NULL)",
+            dir = "ASC",
+            cmp_op = ">",
+            value_cast = "BOOLEAN",
+            value_ty = bool,
+            after_val = val_bool,
+        )?,
+    };
+
+    // Derive the next cursor from the SQL-layer page (pre-PIP). When
+    // the SQL page is shorter than `limit` the result set is exhausted
+    // and there's no further cursor; otherwise encode the last row's
+    // sort-column value plus its id. See the function doc for why we
+    // use the SQL-layer row here, not the post-PIP row.
+    let next_cursor = if rows_sql.len() as i64 == limit {
+        rows_sql.last().map(|last| super::sort::Cursor {
+            sort: filter.sort,
+            dir: filter.sort_dir,
+            value: cursor_value_for_sort(last, filter.sort),
+            id: last.id,
+        })
+    } else {
+        None
+    };
+
+    // Point-in-polygon post-filter. Pre-convert each wire polygon once
+    // so the row loop doesn't re-pay the conversion cost. Polygons that
+    // fail `TryFrom` (fewer than 3 distinct vertices) are dropped —
+    // the wire layer already rejects those, so any failure here is a
+    // defensive safeguard rather than a normal path.
+    let rows: Vec<CatalogueEntry> = if filter.shapes.is_empty() {
+        rows_sql.into_iter().map(Into::into).collect()
+    } else {
+        let polys: Vec<geo::Polygon<f64>> = filter
+            .shapes
+            .iter()
+            .filter_map(|p| geo::Polygon::<f64>::try_from(p).ok())
+            .collect();
+        rows_sql
+            .into_iter()
+            .filter(|r| match (r.latitude, r.longitude) {
+                (Some(lat), Some(lng)) => super::shapes::point_in_any(&polys, lat, lng),
+                _ => false,
+            })
+            .map(Into::into)
+            .collect()
+    };
+
+    // Total count — shared WHERE with the keyset stripped. Uses the same
+    // filter surface (including the shapes bbox pre-filter) so it lines
+    // up with the entries returned, modulo the PIP post-filter (see the
+    // struct doc for the "approximate when shapes is non-empty" caveat).
     let total = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*) AS "total!"
         FROM ip_catalogue c
-        WHERE ($1::TEXT[] = '{}' OR country_code = ANY($1::TEXT[]))
-          AND ($2::INT[]  = '{}' OR asn          = ANY($2::INT[]))
-          AND ($3::TEXT[] = '{}' OR network_operator ILIKE ANY($3::TEXT[]))
+        WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))
+          AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))
+          AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))
           AND ($4::INET IS NULL OR c.ip <<= $4::INET)
-          AND ($5::TEXT IS NULL OR display_name ILIKE $5::TEXT)
+          AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)
           AND (NOT $6::BOOL OR (
-                latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
-            AND longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION
+                c.latitude  BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+            AND c.longitude BETWEEN $8::DOUBLE PRECISION AND $10::DOUBLE PRECISION
           ))
+          AND ($11::TEXT[] = '{}' OR c.city = ANY($11::TEXT[]))
         "#,
-        &filter.country_code as &[String],
-        &filter.asn as &[i32],
-        &filter.network as &[String],
+        country_code as &[String],
+        asn as &[i32],
+        network as &[String],
         ip_prefix as Option<IpNetwork>,
         name_like,
         bbox_set,
@@ -733,11 +1066,59 @@ pub async fn list(
         min_lon,
         max_lat,
         max_lon,
+        city as &[String],
     )
     .fetch_one(pool)
     .await?;
 
-    Ok((rows.into_iter().map(Into::into).collect(), total))
+    Ok((rows, total, next_cursor))
+}
+
+/// Extract the sort-column value from a row as a `serde_json::Value` for
+/// embedding in the next cursor. Nullable columns return `Value::Null`;
+/// the derived `Location` sort returns a `Value::Bool`.
+fn cursor_value_for_sort(row: &CatalogueEntryRow, sort: super::dto::SortBy) -> serde_json::Value {
+    use super::dto::SortBy;
+    use serde_json::Value;
+    match sort {
+        SortBy::CreatedAt => Value::String(row.created_at.to_rfc3339()),
+        SortBy::Ip => Value::String(row.ip.ip().to_string()),
+        SortBy::DisplayName => row
+            .display_name
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+        SortBy::City => row
+            .city
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+        SortBy::CountryCode => row
+            .country_code
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+        SortBy::Asn => row
+            .asn
+            .map(|a| Value::Number(a.into()))
+            .unwrap_or(Value::Null),
+        SortBy::NetworkOperator => row
+            .network_operator
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+        SortBy::EnrichmentStatus => Value::String(match row.enrichment_status {
+            EnrichmentStatus::Pending => "pending".to_string(),
+            EnrichmentStatus::Enriched => "enriched".to_string(),
+            EnrichmentStatus::Failed => "failed".to_string(),
+        }),
+        SortBy::Website => row
+            .website
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+        SortBy::Location => Value::Bool(row.latitude.is_some() && row.longitude.is_some()),
+    }
 }
 
 // --- Facets ----------------------------------------------------------------
