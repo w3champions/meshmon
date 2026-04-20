@@ -240,6 +240,17 @@ pub async fn patch(
     Path(id): Path<Uuid>,
     Json(body): Json<PatchCampaignRequest>,
 ) -> Response {
+    // Mirror the `create` invariant: if a title is supplied, it must
+    // be non-blank. `None` leaves the stored title untouched.
+    if let Some(t) = body.title.as_ref() {
+        if t.trim().is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "title_required" })),
+            )
+                .into_response();
+        }
+    }
     match repo::patch(
         &state.pool,
         id,
@@ -506,7 +517,14 @@ pub async fn preview_dispatch_count(
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
     };
 
-    match repo::preview_dispatch_count_for_campaign(&state.pool, id, camp.protocol).await {
+    match repo::preview_dispatch_count_for_campaign(
+        &state.pool,
+        id,
+        camp.protocol,
+        camp.force_measurement,
+    )
+    .await
+    {
         Ok(counts) => (
             StatusCode::OK,
             Json(PreviewDispatchResponse {

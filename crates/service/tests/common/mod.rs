@@ -1366,6 +1366,38 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         (status, body)
     }
 
+    /// Fire a `PATCH` with a JSON body and return raw status + body.
+    /// Use this when asserting on a non-200 response (e.g. 400 on
+    /// validation failure) — [`Self::patch_json`] panics on non-200.
+    pub async fn patch_raw(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (axum::http::StatusCode, String) {
+        use axum::http::{header, Request};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("build PATCH request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        let body = String::from_utf8(bytes.to_vec()).expect("response body must be valid UTF-8");
+        (status, body)
+    }
+
     /// Fire a `GET` and deserialize the response body into `T`. Panics
     /// on non-200 status — callers use this when they expect success
     /// and want the parsed body; for status-specific assertions (404

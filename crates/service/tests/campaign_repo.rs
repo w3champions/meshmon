@@ -793,12 +793,25 @@ async fn preview_dispatch_count_for_campaign_uses_actual_pair_set() {
     .unwrap();
 
     let counts =
-        repo::preview_dispatch_count_for_campaign(&pool, row.id, ProbeProtocol::Icmp)
+        repo::preview_dispatch_count_for_campaign(&pool, row.id, ProbeProtocol::Icmp, false)
             .await
             .unwrap();
     assert_eq!(counts.total, 2, "total reflects actual pair set, not AxB");
     assert_eq!(counts.reusable, 1, "one reusable measurement");
     assert_eq!(counts.fresh, 1, "total - reusable");
+
+    // force_measurement=true must skip reuse — scheduler disables reuse
+    // for those campaigns, preview must agree.
+    let forced_counts =
+        repo::preview_dispatch_count_for_campaign(&pool, row.id, ProbeProtocol::Icmp, true)
+            .await
+            .unwrap();
+    assert_eq!(forced_counts.total, 2);
+    assert_eq!(
+        forced_counts.reusable, 0,
+        "force_measurement disables reuse in preview"
+    );
+    assert_eq!(forced_counts.fresh, 2);
 
     repo::delete(&pool, row.id).await.unwrap();
     sqlx::query("DELETE FROM measurements WHERE source_agent_id IN ($1, $2)")

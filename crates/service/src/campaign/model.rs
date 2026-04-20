@@ -66,6 +66,17 @@ impl PairResolutionState {
             Self::Skipped => "skipped",
         }
     }
+
+    /// Every variant. Used by metric samplers to reset labels whose
+    /// count dropped to zero (Postgres `GROUP BY` omits zero rows).
+    pub const ALL: &'static [Self] = &[
+        Self::Pending,
+        Self::Dispatched,
+        Self::Reused,
+        Self::Succeeded,
+        Self::Unreachable,
+        Self::Skipped,
+    ];
 }
 
 impl CampaignState {
@@ -80,6 +91,16 @@ impl CampaignState {
             Self::Stopped => "stopped",
         }
     }
+
+    /// Every variant. Used by metric samplers to reset labels whose
+    /// count dropped to zero (Postgres `GROUP BY` omits zero rows).
+    pub const ALL: &'static [Self] = &[
+        Self::Draft,
+        Self::Running,
+        Self::Completed,
+        Self::Evaluated,
+        Self::Stopped,
+    ];
 }
 
 /// The probe protocol an individual pair uses.

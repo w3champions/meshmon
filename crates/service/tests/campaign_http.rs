@@ -134,3 +134,43 @@ async fn pairs_endpoint_filters_by_state() {
         .await;
     assert_eq!(succeeded.len(), 0, "succeeded pairs = {succeeded:?}");
 }
+
+#[tokio::test]
+async fn patch_rejects_blank_title() {
+    // `create` refuses a blank title (handler check at create-time).
+    // PATCH must mirror that invariant so an existing campaign can't
+    // have its title edited to whitespace through a side door.
+    let h = common::HttpHarness::start().await;
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "http-patch-title",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-h4"],
+                "destination_ips": ["198.51.100.230"],
+            }),
+        )
+        .await;
+    let id = created["id"].as_str().expect("id is string");
+
+    // A blank title must produce 400 with `title_required`.
+    let (status, body) = h
+        .patch_raw(
+            &format!("/api/campaigns/{id}"),
+            &serde_json::json!({ "title": "   " }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body = {body}");
+    assert!(body.contains("title_required"), "body = {body}");
+
+    // A missing title (no change) still succeeds.
+    let patched: serde_json::Value = h
+        .patch_json(
+            &format!("/api/campaigns/{id}"),
+            &serde_json::json!({ "notes": "updated" }),
+        )
+        .await;
+    assert_eq!(patched["notes"], "updated");
+    assert_eq!(patched["title"], "http-patch-title", "body = {patched}");
+}

@@ -13,7 +13,7 @@
 
 use super::dispatch::{PairDispatcher, PendingPair};
 use super::events::NOTIFY_CHANNEL;
-use super::model::CampaignState;
+use super::model::{CampaignState, PairResolutionState};
 use super::repo::{self, RepoError};
 use crate::metrics;
 use crate::registry::AgentRegistry;
@@ -216,14 +216,30 @@ impl Scheduler {
     /// One-shot snapshot of campaign/pair counts + reuse ratio. Any error
     /// is swallowed with a warn — a tick that dispatched work should not
     /// fail because the aggregate query misbehaved.
+    ///
+    /// Postgres `GROUP BY state` omits zero-count rows. To prevent stale
+    /// gauge readings after a state drains empty, we iterate over the
+    /// full enum and set every label — defaulting missing ones to 0.
     async fn sample_metrics(&self) {
         match repo::metrics_snapshot(&self.pool).await {
             Ok(snap) => {
-                for (state, n) in &snap.campaigns {
-                    metrics::campaigns_total(state.as_str()).set(*n as f64);
+                for state in CampaignState::ALL {
+                    let n = snap
+                        .campaigns
+                        .iter()
+                        .find(|(s, _)| s == state)
+                        .map(|(_, n)| *n)
+                        .unwrap_or(0);
+                    metrics::campaigns_total(state.as_str()).set(n as f64);
                 }
-                for (state, n) in &snap.pairs {
-                    metrics::campaign_pairs_total(state.as_str()).set(*n as f64);
+                for state in PairResolutionState::ALL {
+                    let n = snap
+                        .pairs
+                        .iter()
+                        .find(|(s, _)| s == state)
+                        .map(|(_, n)| *n)
+                        .unwrap_or(0);
+                    metrics::campaign_pairs_total(state.as_str()).set(n as f64);
                 }
                 metrics::campaign_reuse_ratio().set(snap.reuse_ratio);
             }
@@ -319,10 +335,20 @@ impl Scheduler {
         }
 
         // Per-destination rate limit. Pairs that can't draw a token are
-        // queued for a single batched revert so a cancel/panic between
-        // the claim (already committed by `take_pending_batch`) and the
-        // revert has at most one open pair to reconcile — the
-        // `expire_stale_attempts` sweep will reclaim it regardless.
+        // queued for a single batched revert.
+        //
+        // Atomicity gap: `take_pending_batch` commits the
+        // `pending → dispatched` flip in its own transaction, so a
+        // process panic/kill between that commit and the batched revert
+        // below leaves the rate-limited subset stranded in `dispatched`.
+        // No automated sweep currently reclaims `dispatched` rows —
+        // `expire_stale_attempts` only targets `pending` rows with a
+        // high attempt_count. Recovery surfaces for a stranded row:
+        // operator `force_pair`, `apply_edit{force_measurement=true}`
+        // (provided its filter is extended to include `dispatched` —
+        // currently it is not — or a targeted re-run), or a process
+        // restart followed by adding a `dispatched`-TTL sweeper. Tick
+        // panics are logged, so the failure is observable.
         let mut allowed: Vec<PendingPair> = Vec::with_capacity(batch.len());
         let mut rate_limited: Vec<i64> = Vec::new();
         for p in batch {

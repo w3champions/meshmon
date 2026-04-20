@@ -443,6 +443,35 @@ pub async fn force_pair(
 ) -> Result<CampaignRow, RepoError> {
     let mut tx = pool.begin().await?;
 
+    // Lock the campaign row first to match the order `apply_edit` takes
+    // (measurement_campaigns then campaign_pairs). Swapping the order
+    // opens an AB-BA deadlock window: a concurrent `apply_edit` that
+    // already holds the campaign lock and is about to lock pairs would
+    // deadlock with a `force_pair` that already holds a pair and is
+    // about to lock the campaign. Postgres detects this and aborts one
+    // of the transactions, which would surface as a 500 to the
+    // operator; locking in the same order avoids the race entirely.
+    //
+    // Decide whether to stamp started_at: only when the parent campaign
+    // is NOT already Running. Finished campaigns re-enter rotation and
+    // need a fresh started_at so the scheduler picks them up; a Running
+    // campaign's rotation order is started_at-anchored (see
+    // `active_campaigns`), and force_pair must not disturb it.
+    let current: Option<CampaignState> = sqlx::query_scalar!(
+        r#"SELECT state AS "state: CampaignState"
+             FROM measurement_campaigns WHERE id = $1 FOR UPDATE"#,
+        id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.is_none() {
+        return Err(RepoError::NotFound(id));
+    }
+    let set_ts = match current {
+        Some(CampaignState::Running) => None,
+        _ => Some("started_at"),
+    };
+
     let dst_net = IpNetwork::from(destination_ip);
     let matched = sqlx::query_scalar!(
         "UPDATE campaign_pairs
@@ -465,27 +494,6 @@ pub async fn force_pair(
     if matched.is_none() {
         return Err(RepoError::NotFound(id));
     }
-
-    // Decide whether to stamp started_at: only when the parent campaign
-    // is NOT already Running. Finished campaigns re-enter rotation and
-    // need a fresh started_at so the scheduler picks them up; a Running
-    // campaign's rotation order is started_at-anchored (see
-    // `active_campaigns`), and force_pair must not disturb it.
-    //
-    // `FOR UPDATE` locks the campaign row so a concurrent writer can't
-    // flip the state between the SELECT and the gated UPDATE inside
-    // `transition_state_in_tx` — mirrors the pattern `apply_edit` uses.
-    let current: Option<CampaignState> = sqlx::query_scalar!(
-        r#"SELECT state AS "state: CampaignState"
-             FROM measurement_campaigns WHERE id = $1 FOR UPDATE"#,
-        id
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-    let set_ts = match current {
-        Some(CampaignState::Running) => None,
-        _ => Some("started_at"),
-    };
 
     let row = transition_state_in_tx(
         &mut tx,
@@ -542,11 +550,30 @@ pub async fn list_pairs(
 /// stored for the campaign — not a cross-product derived from the
 /// unique sources and destinations. Sparse pair sets (e.g. after an
 /// edit-delta removed specific pairs) preview correctly.
+///
+/// When `force_measurement` is true, reuse is disabled — mirrors the
+/// scheduler's behavior in [`crate::campaign::scheduler`] so the
+/// preview `reusable`/`fresh` split agrees with what a subsequent
+/// start/edit would actually dispatch.
 pub async fn preview_dispatch_count_for_campaign(
     pool: &PgPool,
     id: Uuid,
     protocol: ProbeProtocol,
+    force_measurement: bool,
 ) -> Result<PreviewCounts, RepoError> {
+    if force_measurement {
+        let total: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"total!\" FROM campaign_pairs WHERE campaign_id = $1",
+            id
+        )
+        .fetch_one(pool)
+        .await?;
+        return Ok(PreviewCounts {
+            total,
+            reusable: 0,
+            fresh: total,
+        });
+    }
     let row = sqlx::query!(
         r#"
         WITH pairs AS (
