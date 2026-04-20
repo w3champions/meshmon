@@ -270,7 +270,9 @@ describe("CatalogueClusterDialog", () => {
     );
     const button = screen.getByRole("button", { name: /open details for Beta/i });
     await user.click(button);
-    expect(onOpenEntry).toHaveBeenCalledWith("e2");
+    expect(onOpenEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "e2", display_name: "Beta" }),
+    );
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 

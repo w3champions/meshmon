@@ -1,4 +1,8 @@
-import { type CatalogueListQuery, useCatalogueListInfinite } from "@/api/hooks/catalogue";
+import {
+  type CatalogueEntry,
+  type CatalogueListQuery,
+  useCatalogueListInfinite,
+} from "@/api/hooks/catalogue";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -26,7 +30,13 @@ export interface CatalogueClusterDialogProps {
    * network, country, IP prefix, and name filters all flow through.
    */
   filters: CatalogueListQuery;
-  onOpenEntry(id: string): void;
+  /**
+   * Fires when the operator picks a cluster row. The full entry is
+   * passed so the parent can seed its drawer without a round-trip —
+   * cluster rows may fall outside the main table's loaded pages, so
+   * the table can't back-fill the entry object for us.
+   */
+  onOpenEntry(entry: CatalogueEntry): void;
 }
 
 /** Dialog page size — clamped by the backend to `1..=500`. */
@@ -84,7 +94,7 @@ export function CatalogueClusterDialog({
                 className="w-full cursor-pointer rounded-sm px-1 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
                 aria-label={`Open details for ${entry.display_name ?? entry.ip}`}
                 onClick={() => {
-                  onOpenEntry(entry.id);
+                  onOpenEntry(entry);
                   onOpenChange(false);
                 }}
               >

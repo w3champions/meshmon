@@ -352,6 +352,14 @@ where
 /// a serde error (→ 400). The map endpoint always scopes to a viewport,
 /// so there is no "silently drop the filter" fallback to lean on. See
 /// [`MapQuery::bbox`] for the contract.
+///
+/// Additional validation beyond parse: every component must be finite
+/// (no NaN / Infinity), latitudes in [-90, 90], longitudes in
+/// [-180, 180], and `min_lat ≤ max_lat` / `min_lon ≤ max_lon`. Absent
+/// these guards, callers panning past the antimeridian (Leaflet
+/// `worldCopyJump`) or typoing the component order silently return
+/// empty result sets because the SQL `BETWEEN` matches nothing —
+/// which looks identical to "no rows in this viewport" to operators.
 fn deserialize_bbox_required<'de, D>(de: D) -> Result<[f64; 4], D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -373,8 +381,78 @@ where
             parts.len()
         )));
     }
-    Ok([parts[0], parts[1], parts[2], parts[3]])
+    let bbox = [parts[0], parts[1], parts[2], parts[3]];
+    validate_bbox_geometry(&bbox).map_err(serde::de::Error::custom)?;
+    Ok(bbox)
 }
+
+/// Enforce bbox invariants shared by every caller that supplies a
+/// required bbox. Returns a human-readable error suitable for the
+/// serde `custom` path. Extracted so the list endpoint can reuse the
+/// same guard in a follow-up without duplicating the literals.
+fn validate_bbox_geometry(bbox: &[f64; 4]) -> Result<(), String> {
+    if !bbox.iter().all(|v| v.is_finite()) {
+        return Err("bbox components must be finite".into());
+    }
+    let [min_lat, min_lon, max_lat, max_lon] = *bbox;
+    if !(-90.0..=90.0).contains(&min_lat) || !(-90.0..=90.0).contains(&max_lat) {
+        return Err(format!(
+            "bbox latitudes must be in [-90, 90]; got min_lat={min_lat}, max_lat={max_lat}"
+        ));
+    }
+    if !(-180.0..=180.0).contains(&min_lon) || !(-180.0..=180.0).contains(&max_lon) {
+        return Err(format!(
+            "bbox longitudes must be in [-180, 180]; got min_lon={min_lon}, max_lon={max_lon}"
+        ));
+    }
+    if min_lat > max_lat {
+        return Err(format!(
+            "bbox min_lat ({min_lat}) exceeds max_lat ({max_lat})"
+        ));
+    }
+    if min_lon > max_lon {
+        return Err(format!(
+            "bbox min_lon ({min_lon}) exceeds max_lon ({max_lon})"
+        ));
+    }
+    Ok(())
+}
+
+/// Maximum zoom the map endpoint answers. Zooms above this all fall
+/// into the finest cell band, so clamping here also normalises the
+/// wire format and keeps `zoom: 255` from looking like an invariant
+/// violation when `cell_size_for_zoom` returns a sane number anyway.
+const MAP_ZOOM_MAX: u8 = 20;
+
+/// Reject zoom values above [`MAP_ZOOM_MAX`] — the finest cluster cell
+/// band already covers zoom 15+, so anything beyond 20 is either a
+/// client bug or a probe. Surfaces as 400 rather than silently mapping
+/// to the bottom band.
+fn deserialize_zoom<'de, D>(de: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let z = u8::deserialize(de)?;
+    if z > MAP_ZOOM_MAX {
+        return Err(serde::de::Error::custom(format!(
+            "zoom must be in 0..={MAP_ZOOM_MAX}; got {z}"
+        )));
+    }
+    Ok(z)
+}
+
+/// Upper bound on the number of polygons a single request may carry.
+/// Defence-in-depth: the rings feed an O(vertices × rows) point-in-
+/// polygon scan, so combining many rings with many vertices is quadratic
+/// on the happy path and linear in request size. Operators draw a
+/// handful of AOIs at a time; 16 is well above observed UX need.
+const MAX_SHAPES_PER_REQUEST: usize = 16;
+
+/// Upper bound on vertices per polygon. See `MAX_SHAPES_PER_REQUEST`
+/// for the shape-count counterpart; leaflet-geoman's draw tool caps
+/// typical hand-drawn rings far below this, so this limit only fires
+/// for programmatic callers or abuse.
+const MAX_VERTICES_PER_SHAPE: usize = 1024;
 
 /// Parse the `shapes` query parameter into `Vec<Polygon>`.
 ///
@@ -384,6 +462,16 @@ where
 /// [`serde::de::Error::custom`], matching the `asn` CSV-of-ints
 /// behaviour: once the caller supplies a structurally-typed value, a
 /// parse failure is surfaced rather than silently dropped.
+///
+/// Additional validation: rejects requests carrying more than
+/// [`MAX_SHAPES_PER_REQUEST`] polygons or any single polygon over
+/// [`MAX_VERTICES_PER_SHAPE`] vertices, and every polygon must pass
+/// [`geo::Polygon::try_from`] (≥ 3 distinct vertices). Without the
+/// try_from gate here, structurally-valid rings that can't form a
+/// polygon (e.g. three colinear points, two-point rings) used to reach
+/// the repo layer where they'd be silently dropped — producing empty
+/// result pages whose `total` (SQL count) disagreed with the returned
+/// `entries` (post-PIP filter).
 fn deserialize_shapes_json<'de, D>(de: D) -> Result<Vec<Polygon>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -393,7 +481,25 @@ where
     if s.is_empty() {
         return Ok(Vec::new());
     }
-    serde_json::from_str::<Vec<Polygon>>(&s).map_err(serde::de::Error::custom)
+    let polys: Vec<Polygon> = serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
+    if polys.len() > MAX_SHAPES_PER_REQUEST {
+        return Err(serde::de::Error::custom(format!(
+            "too many shapes: {} exceeds limit of {MAX_SHAPES_PER_REQUEST}",
+            polys.len()
+        )));
+    }
+    for (i, p) in polys.iter().enumerate() {
+        if p.0.len() > MAX_VERTICES_PER_SHAPE {
+            return Err(serde::de::Error::custom(format!(
+                "shape {i}: {} vertices exceeds limit of {MAX_VERTICES_PER_SHAPE}",
+                p.0.len()
+            )));
+        }
+        if let Err(e) = geo::Polygon::<f64>::try_from(p) {
+            return Err(serde::de::Error::custom(format!("shape {i}: {e}")));
+        }
+    }
+    Ok(polys)
 }
 
 /// Response body for `GET /api/catalogue`.
@@ -479,6 +585,9 @@ pub struct MapQuery {
     /// cluster aggregation when the filtered count crosses
     /// [`super::repo::MAP_DETAIL_THRESHOLD`]. See
     /// [`super::repo::cell_size_for_zoom`] for the mapping.
+    /// Values above 20 surface as 400 — leaflet doesn't advertise
+    /// zooms beyond that on any of our tile backends.
+    #[serde(deserialize_with = "deserialize_zoom")]
     pub zoom: u8,
 }
 
@@ -602,4 +711,133 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<T>::deserialize(de).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Focused coverage for the custom query deserializers that guard
+    //! the `shapes` wire surface and the map endpoint's `bbox` / `zoom`.
+    //! Each function carries its own adversarial inputs so a regression
+    //! in one validator can't silently leak through another. Tests use
+    //! `serde_json::from_value` because it matches the deserializers'
+    //! `Option<String>` / `String` / `u8` input shape without pulling
+    //! in an extra url-encoding dev-dep.
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Debug, Deserialize)]
+    struct ShapesEnvelope {
+        #[serde(default, deserialize_with = "deserialize_shapes_json")]
+        shapes: Vec<Polygon>,
+    }
+
+    fn parse_shapes(raw: &str) -> Result<Vec<Polygon>, String> {
+        serde_json::from_value::<ShapesEnvelope>(json!({ "shapes": raw }))
+            .map(|e| e.shapes)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn shapes_rejects_below_three_distinct_vertices() {
+        // Two-point ring. Previously silently dropped in repo::list,
+        // producing empty entries with non-zero total.
+        let err = parse_shapes("[[[0,0],[1,1]]]").unwrap_err();
+        assert!(err.contains("shape 0"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shapes_rejects_excessive_polygon_count() {
+        let one = "[[0,0],[1,0],[1,1],[0,0]]";
+        let many: Vec<&str> = std::iter::repeat_n(one, MAX_SHAPES_PER_REQUEST + 1).collect();
+        let raw = format!("[{}]", many.join(","));
+        let err = parse_shapes(&raw).unwrap_err();
+        assert!(err.contains("too many shapes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shapes_rejects_excessive_vertex_count() {
+        let mut verts = String::from("[");
+        for i in 0..(MAX_VERTICES_PER_SHAPE + 2) {
+            let x = (i as f64) * 0.001;
+            verts.push_str(&format!("[{x},0],"));
+        }
+        verts.push_str("[0,0]]");
+        let raw = format!("[{verts}]");
+        let err = parse_shapes(&raw).unwrap_err();
+        assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shapes_accepts_well_formed_polygon() {
+        let polys = parse_shapes("[[[0,0],[1,0],[1,1],[0,1],[0,0]]]").unwrap();
+        assert_eq!(polys.len(), 1);
+        assert_eq!(polys[0].0.len(), 5);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct BboxEnvelope {
+        #[serde(deserialize_with = "deserialize_bbox_required")]
+        bbox: [f64; 4],
+    }
+
+    fn parse_bbox(raw: &str) -> Result<[f64; 4], String> {
+        serde_json::from_value::<BboxEnvelope>(json!({ "bbox": raw }))
+            .map(|e| e.bbox)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn bbox_rejects_nan() {
+        let err = parse_bbox("NaN,0,10,10").unwrap_err();
+        assert!(err.contains("finite"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bbox_rejects_out_of_range_latitude() {
+        let err = parse_bbox("-100,0,100,10").unwrap_err();
+        assert!(err.contains("latitudes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bbox_rejects_out_of_range_longitude() {
+        // Mirrors what `worldCopyJump` produces when the operator pans
+        // past the antimeridian — before this guard the server silently
+        // returned an empty page, now the client gets a 400 it can
+        // clamp against.
+        let err = parse_bbox("-10,-200,10,200").unwrap_err();
+        assert!(err.contains("longitudes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bbox_rejects_inverted_axes() {
+        let err_lat = parse_bbox("30,0,10,10").unwrap_err();
+        assert!(err_lat.contains("min_lat"), "unexpected error: {err_lat}");
+        let err_lon = parse_bbox("0,30,10,10").unwrap_err();
+        assert!(err_lon.contains("min_lon"), "unexpected error: {err_lon}");
+    }
+
+    #[test]
+    fn bbox_accepts_canonical_viewport() {
+        let bbox = parse_bbox("-10,-20,10,20").unwrap();
+        assert_eq!(bbox, [-10.0, -20.0, 10.0, 20.0]);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ZoomEnvelope {
+        #[serde(deserialize_with = "deserialize_zoom")]
+        zoom: u8,
+    }
+
+    #[test]
+    fn zoom_rejects_above_max() {
+        let err = serde_json::from_value::<ZoomEnvelope>(json!({ "zoom": 21 })).unwrap_err();
+        assert!(err.to_string().contains("0..=20"));
+    }
+
+    #[test]
+    fn zoom_accepts_within_range() {
+        let z = serde_json::from_value::<ZoomEnvelope>(json!({ "zoom": 12 })).unwrap();
+        assert_eq!(z.zoom, 12);
+    }
 }

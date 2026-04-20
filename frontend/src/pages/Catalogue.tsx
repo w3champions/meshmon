@@ -200,8 +200,13 @@ export default function Catalogue() {
     [navigate, rawSearch],
   );
 
-  // Drawer state
+  // Drawer state. `drawerSeedEntry` is populated when the drawer is
+  // opened for a row that isn't in the main table's loaded pages — for
+  // example a cluster-dialog hit further down the feed. It seeds the
+  // drawer so we don't flash an empty dialog while the per-entry query
+  // catches up.
   const [drawerId, setDrawerId] = useState<string | null>(null);
+  const [drawerSeedEntry, setDrawerSeedEntry] = useState<CatalogueEntry | null>(null);
 
   // Paste panel state
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -287,21 +292,31 @@ export default function Catalogue() {
   const reenrichOneMutation = useReenrichOne();
   const reenrichManyMutation = useReenrichMany();
 
-  // The drawer needs the full entry object, not just an id. We search
-  // only the loaded pages; if the entry isn't there (e.g. operator
-  // opened the drawer from a cluster dialog hit further down the feed),
-  // `useCatalogueEntry` inside the drawer back-fills via the per-entry
-  // endpoint.
-  const drawerEntry = useMemo(() => rows.find((e) => e.id === drawerId), [rows, drawerId]);
+  // The drawer needs the full entry object, not just an id. We look it
+  // up first in the main table's loaded pages; if it isn't there — for
+  // example when the operator opened the drawer from a cluster dialog
+  // hit that falls outside the main table's filter — we fall back to
+  // `drawerSeedEntry`, which the cluster dialog handed in at open time.
+  const drawerEntry = useMemo(() => {
+    if (drawerId === null) return undefined;
+    return rows.find((e) => e.id === drawerId) ?? drawerSeedEntry ?? undefined;
+  }, [rows, drawerId, drawerSeedEntry]);
 
   // Drawer deletion guard: if the list refetches (e.g. after an SSE
-  // `deleted` event) and the open entry is gone from every loaded page,
-  // clear `drawerId` so the drawer state stays consistent.
+  // `deleted` event) and the open entry is gone from every loaded page
+  // AND we have no seed fallback, clear `drawerId` so the drawer state
+  // stays consistent. The seed check keeps cluster-dialog-opened entries
+  // alive — they're legitimately outside `rows` and must not be closed.
   useEffect(() => {
-    if (drawerId !== null && tableInfinite.data !== undefined && drawerEntry === undefined) {
+    if (
+      drawerId !== null &&
+      tableInfinite.data !== undefined &&
+      !rows.some((e) => e.id === drawerId) &&
+      drawerSeedEntry?.id !== drawerId
+    ) {
       setDrawerId(null);
     }
-  }, [drawerId, drawerEntry, tableInfinite.data]);
+  }, [drawerId, rows, tableInfinite.data, drawerSeedEntry]);
 
   const handleReenrichOne = useCallback(
     (id: string): void => {
@@ -343,13 +358,15 @@ export default function Catalogue() {
     if (!open) setClusterCell(null);
   }, []);
 
-  const handleClusterOpenEntry = useCallback((id: string): void => {
+  const handleClusterOpenEntry = useCallback((entry: CatalogueEntry): void => {
     setClusterCell(null);
-    setDrawerId(id);
+    setDrawerSeedEntry(entry);
+    setDrawerId(entry.id);
   }, []);
 
   const handleDrawerClose = useCallback((): void => {
     setDrawerId(null);
+    setDrawerSeedEntry(null);
   }, []);
 
   return (
