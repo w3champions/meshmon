@@ -6,12 +6,15 @@
 //! `crates/agent` + `crates/service/src/campaign/dispatch.rs`'s real
 //! implementation, to be shipped by T45.
 
+pub mod broker;
 pub mod dispatch;
 pub mod dto;
 pub mod events;
 pub mod handlers;
+pub mod listener;
 pub mod model;
 pub mod repo;
 pub mod rpc_dispatcher;
 pub mod scheduler;
+pub mod sse;
 pub mod writer;

@@ -1008,6 +1008,17 @@ The scheduler samples once per tick via `repo::metrics_snapshot`:
 The snapshot query uses runtime `sqlx::query_as::<_, (T, i64)>` so new
 metric aggregates do not require a `.sqlx/` regeneration.
 
+## SSE stream
+
+The service exposes `GET /api/campaigns/stream` as a Server-Sent-Events
+channel. A `PgListener` listens on Postgres NOTIFY channels
+`campaign_state_changed` and `campaign_pair_settled`, parses each
+payload as a campaign UUID, and republishes typed
+`{kind, campaign_id, state?}` events on an in-process broker. The SPA's
+`useCampaignStream` hook subscribes once per session and reconciles the
+TanStack Query cache so the list, detail, and preview views reflect
+lifecycle changes without polling.
+
 ## Campaign invariants
 
 - **State transitions go through `repo::transition_state`.** Every

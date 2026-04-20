@@ -404,6 +404,24 @@
         }
       }
     },
+    "/api/campaigns/stream": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "SSE stream of campaign lifecycle events.",
+        "description": "Requires an authenticated session (the enclosing router applies\n`login_required!`). The response never ends on its own — the server\ncloses it on shutdown or when the client disconnects.",
+        "operationId": "campaign_stream",
+        "responses": {
+          "200": {
+            "description": "SSE stream of campaign changes"
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
     "/api/campaigns/{id}": {
       "get": {
         "tags": [
@@ -2483,6 +2501,58 @@
           "evaluated",
           "stopped"
         ]
+      },
+      "CampaignStreamEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A campaign transitioned to a new lifecycle state. Emitted by the\n[`super::listener`] task after parsing a `campaign_state_changed`\nNOTIFY and resolving the current `state` column.",
+            "required": [
+              "campaign_id",
+              "state",
+              "kind"
+            ],
+            "properties": {
+              "campaign_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the campaign whose state changed."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "state_changed"
+                ]
+              },
+              "state": {
+                "$ref": "#/components/schemas/CampaignState",
+                "description": "New lifecycle state."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A pair belonging to this campaign reached a terminal resolution.\nEmitted by the [`super::listener`] task on every\n`campaign_pair_settled` NOTIFY. The payload intentionally omits\nthe pair id — subscribers re-fetch the affected pairs through\nthe existing `/api/campaigns/{id}/pairs` endpoint rather than\nattempting to reconstruct state from the SSE stream alone.",
+            "required": [
+              "campaign_id",
+              "kind"
+            ],
+            "properties": {
+              "campaign_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the campaign owning the settled pair."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pair_settled"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Campaign lifecycle event delivered to every SSE subscriber.\n\nThe `tag = \"kind\"` serde representation matches the wire shape the\nfrontend expects: one top-level `kind` discriminant plus flat\nper-variant fields. Keep variant names in `snake_case` on the wire."
       },
       "CatalogueCoordinates": {
         "type": "object",

@@ -1133,33 +1133,16 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     /// of parsed JSON payloads. Only usable from a harness created via
     /// [`Self::start_with_providers`] — the oneshot path cannot stream.
     ///
-    /// Frames are parsed from `data:` lines with `\n\n` delimiters per
-    /// the SSE spec. Keep-alive comments (`:keep-alive\n\n`) and other
-    /// non-data lines are ignored.
+    /// Delegates to [`subscribe_sse`] so the connect-and-wrap logic is
+    /// shared with other test harnesses that stand up their own axum
+    /// server (e.g. the campaigns SSE listener harness).
     pub async fn sse(&self, path: &str) -> SseStream {
         let live = self
             .live
             .as_ref()
             .expect("HttpHarness::sse requires start_with_providers — oneshot cannot stream");
-        let url = format!("http://{}{path}", live.addr);
-        let resp = live
-            .client
-            .get(&url)
-            .header(reqwest::header::COOKIE, &self.cookie)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            // Override the client-level timeout for the streaming
-            // request: SSE connections may legitimately idle for tens
-            // of seconds between events.
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("SSE connect to {url} failed: {e}"));
-        assert!(
-            resp.status().is_success(),
-            "SSE open expected 2xx, got {} at {url}",
-            resp.status()
-        );
-        SseStream::new(resp.bytes_stream())
+        let base_url = format!("http://{}", live.addr);
+        subscribe_sse(&live.client, &base_url, path, &self.cookie).await
     }
 
     /// Fire a `POST` with a JSON body and deserialize the response body
@@ -1562,6 +1545,41 @@ impl EnrichmentProvider for DeterministicCityProvider {
             .insert(Field::City, FieldValue::Text("TestCity".to_string()));
         Ok(r)
     }
+}
+
+/// Shared SSE subscribe path used by every integration harness that needs
+/// a live stream. Opens a long-lived `GET path` against `base_url` with the
+/// supplied session cookie, asserts the server answers with a 2xx, and
+/// wraps the body bytes in an [`SseStream`].
+///
+/// `base_url` is the server origin (e.g. `http://127.0.0.1:1234`) with no
+/// trailing slash; `path` is the request path (leading slash included).
+/// The per-request timeout is bumped to 60 s so legitimately idle SSE
+/// streams aren't cut short by the client-level default.
+pub async fn subscribe_sse(
+    client: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    cookie: &str,
+) -> SseStream {
+    let url = format!("{base_url}{path}");
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::COOKIE, cookie)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        // Override the client-level timeout for the streaming request:
+        // SSE connections may legitimately idle for tens of seconds
+        // between events.
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("SSE connect to {url} failed: {e}"));
+    assert!(
+        resp.status().is_success(),
+        "SSE open expected 2xx, got {} at {url}",
+        resp.status()
+    );
+    SseStream::new(resp.bytes_stream())
 }
 
 /// Byte-stream-backed Server-Sent Events parser.

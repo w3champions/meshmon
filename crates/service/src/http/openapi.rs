@@ -53,6 +53,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::campaign::dto::PairDto,
         crate::campaign::dto::PatchCampaignRequest,
         crate::campaign::dto::PreviewDispatchResponse,
+        crate::campaign::broker::CampaignStreamEvent,
         crate::campaign::model::CampaignState,
         crate::campaign::model::EvaluationMode,
         crate::campaign::model::MeasurementKind,
@@ -184,6 +185,12 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(
             crate::campaign::handlers::preview_dispatch_count
         ))
+        // SSE stream carries campaign lifecycle + pair-settle events. The
+        // static `/stream` segment is matched before any future `{id}`
+        // path param by `matchit`; registering it alongside the other
+        // campaign routes keeps the readability convention consistent
+        // with the catalogue block above.
+        .routes(utoipa_axum::routes!(crate::campaign::sse::campaign_stream))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

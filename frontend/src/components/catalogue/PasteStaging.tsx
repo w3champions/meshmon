@@ -81,6 +81,13 @@ function toMetadataWire(d: MetadataDraft): PasteMetadataBody | undefined {
 export interface PasteStagingProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Optional callback fired after a successful POST. Receives every IP
+   * the server acknowledged — both `created` (new rows) and `existing`
+   * (merged into rows that already carried the IP). Consumers like the
+   * campaign composer use it to seed a destination-selection set.
+   */
+  onPasteSuccess?: (ips: string[]) => void;
 }
 
 /** Human-readable label for a parser rejection reason. */
@@ -268,7 +275,7 @@ function SkippedSummaryNotice({ summary }: SkippedSummaryNoticeProps) {
   );
 }
 
-export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
+export function PasteStaging({ open, onOpenChange, onPasteSuccess }: PasteStagingProps) {
   const [text, setText] = useState("");
   const [stagingRows, setStagingRows] = useState<StagingRow[]>([]);
   const [hasPosted, setHasPosted] = useState(false);
@@ -351,6 +358,15 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
 
     setStagingRows(rows);
     setHasPosted(true);
+
+    if (onPasteSuccess) {
+      // Surface every IP the server acknowledged — `created` AND
+      // `existing` both carry the literal IP string — so downstream
+      // flows like the campaign composer can seed a selection set
+      // regardless of whether the row was freshly inserted.
+      const acknowledgedIps = [...result.created, ...result.existing].map((e) => e.ip);
+      onPasteSuccess(acknowledgedIps);
+    }
   };
 
   const canAdd = outcome.accepted.length > 0 && !pasteMutation.isPending;

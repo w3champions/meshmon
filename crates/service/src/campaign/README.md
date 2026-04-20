@@ -43,5 +43,48 @@ both via `PgListener::listen_all`.
 - `writer.rs` — `SettleWriter`; owns the per-result transaction and
   the writer-origin `last_error` mapping.
 - `scheduler.rs` — single-task fair-RR scheduler.
+- `broker.rs` — `CampaignBroker` + `CampaignStreamEvent`; broadcast
+  fan-out used by the SSE endpoint.
+- `listener.rs` — dedicated `PgListener` task that tails
+  `campaign_state_changed` + `campaign_pair_settled` and publishes to
+  the broker.
+- `sse.rs` — `/api/campaigns/stream` handler; subscribes to the broker
+  and serializes events as `Event::data` frames.
 - `dto.rs` — wire DTOs; `utoipa::ToSchema` on every public type.
 - `handlers.rs` — axum handlers for every campaign HTTP endpoint.
+
+## SSE event stream
+
+`GET /api/campaigns/stream` is an authenticated Server-Sent Events
+endpoint. Clients subscribe once and receive one frame per campaign
+lifecycle transition or pair settle, for every campaign in the cluster.
+
+### Event envelope
+
+Every frame is a single-line `data:` payload carrying JSON with a top-level
+`kind` discriminant:
+
+| `kind`           | Additional fields                              | Meaning                                                                          |
+|------------------|------------------------------------------------|----------------------------------------------------------------------------------|
+| `state_changed`  | `campaign_id: uuid`, `state: CampaignState`    | Campaign moved into `state` (handler call or scheduler-driven `running→completed`) |
+| `pair_settled`   | `campaign_id: uuid`                            | `SettleWriter` terminally resolved a pair belonging to `campaign_id`             |
+| `lag`            | `missed: u64`                                  | Subscriber fell behind the broker's 512-slot buffer; re-fetch to reconcile       |
+
+The `lag` frame is synthetic — emitted by the SSE handler when the
+broadcast receiver returns `Lagged(n)`. A 15 s keep-alive comment keeps
+intermediate proxies from idling the connection out.
+
+### Architecture
+
+Neither publisher lives on the HTTP request path. The scheduler flips
+`running → completed` autonomously, and the writer fires
+`campaign_pair_settled` inside the settle transaction. To fan these
+events out to SSE, [`listener.rs`](listener.rs) opens a **dedicated**
+`PgListener` (independent of the scheduler's own listener — PostgreSQL
+delivers NOTIFY payloads to every `LISTEN`ing connection), resolves
+each wake-up, and publishes onto the process-wide
+[`CampaignBroker`](broker.rs). Subscribers connect to
+`/api/campaigns/stream`; the handler in [`sse.rs`](sse.rs) forwards
+every event as an `Event::data` frame. The listener reconnects on
+failure with capped 1 s → 30 s backoff; the broker survives the
+reconnect so existing SSE clients never have to re-open their streams.

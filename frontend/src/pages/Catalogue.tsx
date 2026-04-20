@@ -448,6 +448,7 @@ export default function Catalogue() {
       <div className="flex flex-1 flex-col overflow-hidden">
         <header className="flex items-center gap-2 border-b px-4 py-3">
           <ViewToggle value={view} onChange={setView} />
+          {/* TODO(T49): add "Compose from selection" cross-link to /campaigns/new with pre-filled destinations. */}
           <div className="ml-auto flex items-center gap-2">
             <Button type="button" size="sm" onClick={() => setPasteOpen(true)}>
               Add IPs

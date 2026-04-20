@@ -13,6 +13,9 @@ import { AppShell } from "@/components/layout/AppShell";
 import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
 import Alerts from "@/pages/Alerts";
+import CampaignComposer from "@/pages/CampaignComposer";
+import CampaignDetail from "@/pages/CampaignDetail";
+import Campaigns from "@/pages/Campaigns";
 import Catalogue from "@/pages/Catalogue";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
@@ -166,6 +169,40 @@ export const catalogueRoute = createRoute({
   validateSearch: (search) => catalogueSearchSchema.parse(search),
 });
 
+export const campaignsSearchSchema = z.object({
+  q: z.string().optional(),
+  state: z.enum(["draft", "running", "completed", "evaluated", "stopped"]).optional(),
+  created_by: z.string().optional(),
+  sort: z.enum(["title", "created_at", "started_at", "state"]).optional(),
+  dir: z.enum(["asc", "desc"]).optional(),
+});
+
+export const campaignsRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/campaigns",
+  component: Campaigns,
+  validateSearch: (search) => campaignsSearchSchema.parse(search),
+});
+
+// The composer page owns all draft state in memory — the URL does not
+// persist selections, knobs, or the pending create campaign id across
+// navigation. No `validateSearch` is needed.
+export const campaignNewRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/campaigns/new",
+  component: CampaignComposer,
+});
+
+// Thin detail shell for a single campaign. The per-pair results browser
+// lands in T49; this page currently renders the metadata card, knob
+// read-out, pair-state roll-up, dispatch preview, and the state-gated
+// action bar.
+export const campaignDetailRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/campaigns/$id",
+  component: CampaignDetail,
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   authRoute.addChildren([
@@ -177,6 +214,9 @@ const routeTree = rootRoute.addChildren([
     reportRoute,
     alertsRoute,
     catalogueRoute,
+    campaignsRoute,
+    campaignNewRoute,
+    campaignDetailRoute,
   ]),
 ]);
 

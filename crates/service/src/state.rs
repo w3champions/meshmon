@@ -3,6 +3,7 @@
 //! Cheap to `Clone` — heavyweight fields are `Arc`-backed; `Instant` and
 //! `BuildInfo` are small `Copy` types (a few words each).
 
+use crate::campaign::broker::CampaignBroker;
 use crate::catalogue::events::CatalogueBroker;
 use crate::catalogue::facets::FacetsCache;
 use crate::config::Config;
@@ -85,6 +86,14 @@ pub struct AppState {
     /// — overflow surfaces to the client as a `lag` frame rather than
     /// blocking the publisher.
     pub catalogue_broker: CatalogueBroker,
+    /// In-process campaign event broker. Unlike the catalogue broker,
+    /// nothing on the request path publishes here — the dedicated
+    /// [`crate::campaign::listener`] task tails the two campaign NOTIFY
+    /// channels and fans every wake-up out to SSE subscribers via
+    /// [`crate::campaign::sse::campaign_stream`]. Capacity is fixed at
+    /// [`crate::campaign::broker::DEFAULT_CAPACITY`] — overflow surfaces
+    /// to the client as a `lag` frame rather than blocking the publisher.
+    pub campaign_broker: CampaignBroker,
     /// Producer handle for the enrichment work queue. Paste and
     /// agent-register handlers push newly-inserted ids here so the
     /// runner picks them up ahead of the periodic sweep.
@@ -161,6 +170,11 @@ impl AppState {
             // any deployment-specific knob. See
             // [`crate::catalogue::events::DEFAULT_CAPACITY`].
             catalogue_broker: CatalogueBroker::default(),
+            // Campaign broker: same fan-out shape as the catalogue broker
+            // but publishes are driven by the dedicated NOTIFY listener
+            // in [`crate::campaign::listener`] rather than by handlers.
+            // See [`crate::campaign::broker::DEFAULT_CAPACITY`].
+            campaign_broker: CampaignBroker::default(),
             enrichment_queue,
             facets_cache: Arc::new(FacetsCache::new(FacetsCache::DEFAULT_TTL)),
             // `None` by default. `main.rs` overwrites this with the real
