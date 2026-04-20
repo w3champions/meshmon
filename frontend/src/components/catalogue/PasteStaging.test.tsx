@@ -184,8 +184,57 @@ describe("PasteStaging", () => {
     // Only one row for that IP
     const ipCells = within(document.body).getAllByText("1.2.3.4");
     expect(ipCells).toHaveLength(1);
-    // Badge showing ×3
+    // Badge showing ×3 now lives inline next to the IP (count column was
+    // replaced by an editable display-name column).
     expect(within(document.body).getByText("×3")).toBeInTheDocument();
+  });
+
+  test("typing a per-IP display name sends it in per_ip_display_names on POST", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      created: [ENTRY],
+      existing: [],
+      invalid: [],
+    } satisfies CataloguePasteResponse);
+    vi.mocked(usePasteCatalogue).mockReturnValue(
+      makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
+    );
+
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
+    await user.type(textarea, "1.2.3.4\n5.6.7.8");
+
+    const nameInput = within(document.body).getByRole("textbox", {
+      name: /display name for 1\.2\.3\.4/i,
+    });
+    await user.type(nameInput, "edge-sfo-1");
+
+    await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
+
+    const body = mutateAsync.mock.calls[0][0];
+    expect(body.per_ip_display_names).toEqual({ "1.2.3.4": "edge-sfo-1" });
+    // 5.6.7.8 had a blank override input → server receives only 1.2.3.4.
+    expect(Object.keys(body.per_ip_display_names)).toHaveLength(1);
+  });
+
+  test("omits per_ip_display_names when every inline input is blank", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      created: [ENTRY],
+      existing: [],
+      invalid: [],
+    } satisfies CataloguePasteResponse);
+    vi.mocked(usePasteCatalogue).mockReturnValue(
+      makeMutation({ mutateAsync }) as unknown as ReturnType<typeof usePasteCatalogue>,
+    );
+
+    render(<PasteStaging open={true} onOpenChange={vi.fn()} />, { wrapper: wrap() });
+    const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
+    await user.type(textarea, "1.2.3.4");
+    await user.click(within(document.body).getByRole("button", { name: /^add$/i }));
+
+    const body = mutateAsync.mock.calls[0][0];
+    expect(body).not.toHaveProperty("per_ip_display_names");
   });
 
   test("typing a /24 CIDR shows the exact inline error copy on hover", async () => {
@@ -265,10 +314,12 @@ describe("PasteStaging", () => {
     const textarea = within(document.body).getByRole("textbox", { name: /paste ip/i });
     await user.type(textarea, "1.2.3.4");
 
-    // Expand panel and fill fields.
+    // Expand panel and fill fields. The panel's own Display name field
+    // shares label text with the per-row inputs now, so target it by
+    // DOM id rather than accessible name.
     await user.click(within(document.body).getByRole("button", { name: /default metadata/i }));
     await user.type(
-      within(document.body).getByRole("textbox", { name: /display name/i }),
+      document.getElementById("paste-metadata-display-name") as HTMLInputElement,
       "fastly-sfo",
     );
     await user.type(within(document.body).getByRole("textbox", { name: /^city$/i }), "SF");

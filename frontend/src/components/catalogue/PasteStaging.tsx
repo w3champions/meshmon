@@ -132,6 +132,29 @@ function StagingChip({ id }: { id: string }) {
   return <StatusChip status={status} />;
 }
 
+/**
+ * Read-only renderer for the Display name column in the post-paste
+ * staging view. Sources the name from the per-entry query cache so
+ * the value reflects whatever the paste wrote (per-IP override, panel
+ * default, or nothing) without the staging component needing to
+ * thread each value through local state. Falls back to the panel
+ * default so the operator sees the value they asked for even when the
+ * paste's merge refused the override on a locked existing row.
+ */
+function StagingDisplayName({ id, fallback }: { id: string; fallback: string }) {
+  const { data } = useQuery<CatalogueEntry>({
+    queryKey: catalogueEntryKey(id),
+    enabled: false,
+    initialData: undefined,
+  });
+  const name = data?.display_name ?? (fallback.trim() || undefined);
+  return name ? (
+    <span className="text-sm">{name}</span>
+  ) : (
+    <span className="text-xs text-muted-foreground">—</span>
+  );
+}
+
 interface MetadataPanelProps {
   value: MetadataDraft;
   onChange(next: MetadataDraft): void;
@@ -251,6 +274,12 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
   const [hasPosted, setHasPosted] = useState(false);
   const [metadata, setMetadata] = useState<MetadataDraft>(EMPTY_METADATA);
   const [metadataOpen, setMetadataOpen] = useState(false);
+  // Per-IP display-name overrides keyed by the literal IP string —
+  // same key shape the backend expects on the wire. An absent entry or
+  // a blank value falls back to `metadata.displayName`. State lives
+  // here (not per-row) so the operator can edit names before, during,
+  // or after a paste without losing input on rerenders.
+  const [perIpDisplayNames, setPerIpDisplayNames] = useState<Record<string, string>>({});
   const [skippedSummary, setSkippedSummary] = useState<
     CataloguePasteResponse["skipped_summary"] | null
   >(null);
@@ -260,11 +289,30 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
   const outcome: ParseOutcome =
     text.trim().length > 0 ? parsePasteInput(text) : { accepted: [], rejected: [] };
 
+  /**
+   * Filter the local override map down to IPs the operator actually
+   * set a non-blank name for, then trim the values so server-side
+   * whitespace-only overrides don't cause no-op locked writes.
+   */
+  const buildPerIpWire = (source: Record<string, string>): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [ip, raw] of Object.entries(source)) {
+      const trimmed = raw.trim();
+      if (trimmed) out[ip] = trimmed;
+    }
+    return out;
+  };
+
   const handleAdd = async () => {
     if (outcome.accepted.length === 0) return;
     const ips = outcome.accepted.map((a) => a.ip);
     const metadataBody = toMetadataWire(metadata);
-    const body: CataloguePasteRequest = metadataBody ? { ips, metadata: metadataBody } : { ips };
+    const perIp = buildPerIpWire(perIpDisplayNames);
+    const body: CataloguePasteRequest = {
+      ips,
+      ...(metadataBody ? { metadata: metadataBody } : {}),
+      ...(Object.keys(perIp).length > 0 ? { per_ip_display_names: perIp } : {}),
+    };
     let result: CataloguePasteResponse;
     try {
       result = await pasteMutation.mutateAsync(body);
@@ -309,15 +357,21 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[95vw] sm:max-w-xl h-[600px] flex flex-col">
-        <DialogHeader>
+      <DialogContent
+        // Wider layout makes room for the metadata panel + staging
+        // table side-by-side content; `max-h-[90vh]` caps height so
+        // the dialog fits laptop viewports; the middle region is the
+        // only scroll host so the footer stays on-screen.
+        className="w-[95vw] sm:max-w-3xl max-h-[90vh] !grid-rows-none !grid-cols-none !grid-flow-row !gap-0 flex flex-col p-0"
+      >
+        <DialogHeader className="px-6 pt-6 pb-2">
           <DialogTitle>Add IPs</DialogTitle>
           <DialogDescription>
             Paste one IP per line or comma-separated. Duplicate entries will be collapsed.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col gap-3">
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-4 flex flex-col gap-3">
           <div className="space-y-1.5">
             <Label htmlFor="paste-ip-textarea">IP addresses</Label>
             <textarea
@@ -325,7 +379,12 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
               value={text}
               onChange={(e) => {
                 setText(e.target.value);
-                // Reset staging rows when the user edits after a POST
+                // Reset staging rows when the user edits after a POST.
+                // Per-IP display names stay — matching IPs the operator
+                // pastes again (typo fix, re-add) keep the name they
+                // already typed. Stale names for IPs no longer in the
+                // list are filtered out at submit time by
+                // `buildPerIpWire`.
                 if (hasPosted) {
                   setStagingRows([]);
                   setHasPosted(false);
@@ -364,20 +423,38 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           )}
 
           {!hasPosted && outcome.accepted.length > 0 && (
-            <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
+            <div className="border rounded-md">
               <Table aria-label="Parsed IPs">
                 <TableHeader>
                   <TableRow>
                     <TableHead>IP address</TableHead>
-                    <TableHead>Count</TableHead>
+                    <TableHead>Display name</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {outcome.accepted.map((a) => (
                     <TableRow key={a.ip}>
-                      <TableCell>{a.ip}</TableCell>
-                      <TableCell>{a.dupeCount > 1 ? `×${a.dupeCount}` : null}</TableCell>
+                      <TableCell>
+                        <span>{a.ip}</span>
+                        {a.dupeCount > 1 && (
+                          <span className="ml-2 text-xs text-muted-foreground">×{a.dupeCount}</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          aria-label={`Display name for ${a.ip}`}
+                          placeholder={metadata.displayName || "Optional name"}
+                          value={perIpDisplayNames[a.ip] ?? ""}
+                          onChange={(e) =>
+                            setPerIpDisplayNames((prev) => ({
+                              ...prev,
+                              [a.ip]: e.target.value,
+                            }))
+                          }
+                          className="h-8"
+                        />
+                      </TableCell>
                       <TableCell>
                         <StatusChip status="pending" />
                       </TableCell>
@@ -389,20 +466,29 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           )}
 
           {hasPosted && stagingRows.length > 0 && (
-            <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
+            <div className="border rounded-md">
               <Table aria-label="Staged IPs">
                 <TableHeader>
                   <TableRow>
                     <TableHead>IP address</TableHead>
-                    <TableHead>Count</TableHead>
+                    <TableHead>Display name</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {stagingRows.map((row) => (
                     <TableRow key={row.ip}>
-                      <TableCell>{row.ip}</TableCell>
-                      <TableCell>{row.dupeCount > 1 ? `×${row.dupeCount}` : null}</TableCell>
+                      <TableCell>
+                        <span>{row.ip}</span>
+                        {row.dupeCount > 1 && (
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            ×{row.dupeCount}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <StagingDisplayName id={row.id} fallback={metadata.displayName} />
+                      </TableCell>
                       <TableCell>
                         <StagingChip id={row.id} />
                       </TableCell>
@@ -420,7 +506,7 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           )}
         </div>
 
-        <DialogFooter className="flex flex-row gap-2">
+        <DialogFooter className="flex flex-row gap-2 border-t bg-background px-6 py-4">
           <Button
             type="button"
             onClick={() => void handleAdd()}
