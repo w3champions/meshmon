@@ -294,6 +294,7 @@ jobs:
             exit 1
           fi
           AUTH=$(printf ":%s" "$AZDO_PAT" | base64 -w0)
+          echo "::add-mask::$AUTH"
           BODY=$(jq -n \
             --arg defId "$AZDO_RELEASE_DEFINITION_ID" \
             --arg tag "$TAG" \

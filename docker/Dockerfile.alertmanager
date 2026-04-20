@@ -13,3 +13,10 @@ FROM prom/alertmanager:${ALERTMANAGER_TAG}
 
 COPY deploy/alertmanager/alertmanager.yml /etc/alertmanager/alertmanager.yml
 COPY deploy/alertmanager/templates /etc/alertmanager/templates
+
+# Source-side READMEs do not belong in the running container.
+# The upstream image runs as non-root; temporarily switch to root to
+# strip the file, then restore the default user.
+USER root
+RUN rm -f /etc/alertmanager/templates/README.md
+USER nobody
