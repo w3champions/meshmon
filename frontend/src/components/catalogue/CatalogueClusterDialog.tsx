@@ -46,9 +46,10 @@ export function CatalogueClusterDialog({
   filters,
   onOpenEntry,
 }: CatalogueClusterDialogProps) {
-  // `bbox` is a 4-element CSV on the wire. The OpenAPI codegen surfaces
-  // it as `number[]`; serializing to CSV keeps openapi-fetch happy with
-  // the query-string shape the server expects.
+  // The generated `bbox` type is `number[]`; openapi-fetch serialises it
+  // into the 4-element comma-separated query string the server expects
+  // (`minLat,minLon,maxLat,maxLon`) via the operation's `style=form,
+  // explode=false` spec — we pass the tuple through untouched.
   const bbox = cell ?? undefined;
   const infinite = useCatalogueListInfinite(
     { ...filters, bbox },

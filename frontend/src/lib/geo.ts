@@ -132,6 +132,24 @@ export function pointInShapes(lat: number, lon: number, shapes: GeoShape[]): boo
 }
 
 /**
+ * Serialises `GeoShape[]` into the backend's `Polygon[]` wire form for
+ * the `shapes` query parameter.
+ *
+ * Rectangles expand to their four corners (closed ring), circles are
+ * polygonalised via `@turf/circle` with the same 64-step discretisation
+ * {@link pointInShapes} uses, and free-form polygons pass through with
+ * their ring closed. Every ring is emitted in GeoJSON order
+ * `[lng, lat]` to match `crates/service/src/catalogue/shapes.rs`'s
+ * `Polygon(Vec<[f64; 2]>)` wire shape.
+ */
+export function shapesToPolygons(shapes: GeoShape[]): [number, number][][] {
+  return shapes.map((shape) => {
+    const ring = shapeToPolygon(shape).geometry.coordinates[0];
+    return ring.map((position) => [position[0], position[1]] as [number, number]);
+  });
+}
+
+/**
  * Returns the GeoJSON bbox `[minLng, minLat, maxLng, maxLat]` that
  * encloses every vertex of every shape, or `null` when `shapes` is empty.
  *

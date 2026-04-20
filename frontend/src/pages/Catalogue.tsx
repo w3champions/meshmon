@@ -3,20 +3,25 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type CatalogueEntry,
   type CatalogueListQuery,
+  type CatalogueMapQuery,
+  type CatalogueSortBy,
+  type CatalogueSortDir,
   useCatalogueFacets,
-  useCatalogueList,
+  useCatalogueListInfinite,
+  useCatalogueMap,
   useReenrichMany,
   useReenrichOne,
 } from "@/api/hooks/catalogue";
 import { useCatalogueStream } from "@/api/hooks/catalogue-stream";
+import { CatalogueClusterDialog } from "@/components/catalogue/CatalogueClusterDialog";
 import { CatalogueMap } from "@/components/catalogue/CatalogueMap";
-import { CatalogueTable } from "@/components/catalogue/CatalogueTable";
+import { CatalogueTable, type CatalogueTableSort } from "@/components/catalogue/CatalogueTable";
 import { EntryDrawer } from "@/components/catalogue/EntryDrawer";
 import { PasteStaging } from "@/components/catalogue/PasteStaging";
 import { ReenrichConfirm } from "@/components/catalogue/ReenrichConfirm";
 import { FilterRail, type FilterValue } from "@/components/filter/FilterRail";
 import { Button } from "@/components/ui/button";
-import { type GeoShape, pointInShapes } from "@/lib/geo";
+import { type Bbox, type GeoShape, shapesToPolygons } from "@/lib/geo";
 import { normalizeIpPrefix } from "@/lib/ip-prefix";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +39,8 @@ interface CatalogueSearch {
   ipPrefix?: string;
   name?: string;
   view?: ViewMode;
+  sort?: CatalogueSortBy;
+  dir?: CatalogueSortDir;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,27 +73,6 @@ function filterToSearch(value: FilterValue): Partial<CatalogueSearch> {
   patch.ipPrefix = value.ipPrefix ?? undefined;
   patch.name = value.nameSearch ?? undefined;
   return patch;
-}
-
-// ---------------------------------------------------------------------------
-// Filter → backend query params
-// API only supports: country_code, asn, network, ip_prefix, name, bbox
-// city is client-side only; shapes may produce a bbox pre-filter
-// ---------------------------------------------------------------------------
-
-function buildQuery(filter: FilterValue): CatalogueListQuery {
-  const q: CatalogueListQuery = {};
-  if (filter.countryCodes.length > 0) q.country_code = filter.countryCodes;
-  if (filter.asns.length > 0) q.asn = filter.asns;
-  if (filter.networks.length > 0) q.network = filter.networks;
-  if (filter.ipPrefix) {
-    // Backend accepts only valid CIDR; expand bare dotted prefixes so natural
-    // operator input (`10.0.0.`) doesn't silently match everything.
-    const normalized = normalizeIpPrefix(filter.ipPrefix);
-    if (normalized) q.ip_prefix = normalized;
-  }
-  if (filter.nameSearch) q.name = filter.nameSearch;
-  return q;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +117,9 @@ function ViewToggle({ value, onChange }: ViewToggleProps) {
 // ---------------------------------------------------------------------------
 
 export default function Catalogue() {
-  // Mount the SSE stream once for the lifetime of this page.
+  // Mount the SSE stream once for the lifetime of this page. The stream
+  // invalidates the list, map, and facets caches on every catalogue
+  // event so server-driven queries pick up inserts/deletes/updates.
   useCatalogueStream();
 
   const rawSearch = useSearch({ strict: false }) as CatalogueSearch;
@@ -150,6 +138,17 @@ export default function Catalogue() {
 
   const view: ViewMode = rawSearch.view ?? "table";
 
+  // Sort state lives in the URL alongside the filter facets so operators
+  // can share a table view by URL. `col`/`dir` are both nullable — unset
+  // means "unsorted" and the server falls back to `created_at DESC`.
+  const sort: CatalogueTableSort = useMemo(
+    () => ({
+      col: rawSearch.sort ?? null,
+      dir: rawSearch.dir ?? null,
+    }),
+    [rawSearch.sort, rawSearch.dir],
+  );
+
   // Synchronise filter changes back to the URL (shapes excluded).
   // Stable across renders so it can be passed to memoized children
   // (FilterRail, CatalogueMap) without defeating their memoization.
@@ -159,6 +158,8 @@ export default function Catalogue() {
       const searchUpdate = {
         ...filterToSearch(next),
         view: rawSearch.view,
+        sort: rawSearch.sort,
+        dir: rawSearch.dir,
       } as CatalogueSearch;
       // Cast required: route is not yet registered in the router type tree
       // (Task 16 wires it); strict:false means the router sees `never` for search.
@@ -167,7 +168,7 @@ export default function Catalogue() {
         replace: true,
       });
     },
-    [navigate, rawSearch.view],
+    [navigate, rawSearch.view, rawSearch.sort, rawSearch.dir],
   );
 
   const setView = useCallback(
@@ -176,6 +177,21 @@ export default function Catalogue() {
         ...rawSearch,
         view: next,
       };
+      void (navigate as (opts: { search: unknown; replace: boolean }) => void)({
+        search: searchUpdate,
+        replace: true,
+      });
+    },
+    [navigate, rawSearch],
+  );
+
+  const setSort = useCallback(
+    (col: CatalogueSortBy | null, dir: CatalogueSortDir | null): void => {
+      const searchUpdate = {
+        ...rawSearch,
+        sort: col ?? undefined,
+        dir: dir ?? undefined,
+      } as CatalogueSearch;
       void (navigate as (opts: { search: unknown; replace: boolean }) => void)({
         search: searchUpdate,
         replace: true,
@@ -193,49 +209,100 @@ export default function Catalogue() {
   // Bulk re-enrich confirm state
   const [reenrichConfirmOpen, setReenrichConfirmOpen] = useState(false);
 
-  // Data hooks
-  const query = useMemo(() => buildQuery(filter), [filter]);
-  const { data: listData } = useCatalogueList(query);
+  // Cluster dialog state — holds the bbox of the clicked cluster cell
+  // or `null` while the dialog is closed. The dialog owns its own
+  // `useCatalogueListInfinite` query scoped to this bbox.
+  const [clusterCell, setClusterCell] = useState<Bbox | null>(null);
+
+  // Map viewport state — seeded on the map's first `moveend` (which
+  // `ViewportController` publishes on mount). `useCatalogueMap` stays
+  // disabled until this is set so a just-mounted map doesn't race.
+  const [mapViewport, setMapViewport] = useState<{ bbox: Bbox; zoom: number } | null>(null);
+
+  // -----------------------------------------------------------------------
+  // Server-driven table query. Runs every filter facet — including `city`
+  // (ANY semantics, backend-native) and `shapes` (serialised as a JSON
+  // array of `[lng, lat]` rings, point-in-polygon matched server-side).
+  // -----------------------------------------------------------------------
+  const tableQuery: CatalogueListQuery = useMemo(() => {
+    const q: CatalogueListQuery = {};
+    if (filter.countryCodes.length > 0) q.country_code = filter.countryCodes;
+    if (filter.asns.length > 0) q.asn = filter.asns;
+    if (filter.networks.length > 0) q.network = filter.networks;
+    if (filter.cities.length > 0) q.city = filter.cities;
+    if (filter.ipPrefix) {
+      // Backend accepts only valid CIDR; expand bare dotted prefixes so
+      // natural operator input (`10.0.0.`) doesn't silently match everything.
+      const normalized = normalizeIpPrefix(filter.ipPrefix);
+      if (normalized) q.ip_prefix = normalized;
+    }
+    if (filter.nameSearch) q.name = filter.nameSearch;
+    if (filter.shapes.length > 0) {
+      q.shapes = JSON.stringify(shapesToPolygons(filter.shapes));
+    }
+    if (sort.col) q.sort = sort.col;
+    if (sort.dir) q.sort_dir = sort.dir;
+    return q;
+  }, [filter, sort.col, sort.dir]);
+
+  const tableInfinite = useCatalogueListInfinite(tableQuery);
+  const rows: CatalogueEntry[] = useMemo(
+    () => tableInfinite.data?.pages.flatMap((p) => p.entries) ?? [],
+    [tableInfinite.data],
+  );
+  const total = tableInfinite.data?.pages[0]?.total ?? 0;
+
+  // -----------------------------------------------------------------------
+  // Server-driven map query. Intentionally drops `city`, `shapes`, and
+  // sort — the map endpoint's wire type (`MapQuery`) doesn't carry any
+  // of them. Operators draw shapes against the unfiltered fleet geography.
+  // -----------------------------------------------------------------------
+  const mapQuery: CatalogueMapQuery = useMemo(() => {
+    const q: CatalogueMapQuery = {};
+    if (filter.countryCodes.length > 0) q.country_code = filter.countryCodes;
+    if (filter.asns.length > 0) q.asn = filter.asns;
+    if (filter.networks.length > 0) q.network = filter.networks;
+    if (filter.ipPrefix) {
+      const normalized = normalizeIpPrefix(filter.ipPrefix);
+      if (normalized) q.ip_prefix = normalized;
+    }
+    if (filter.nameSearch) q.name = filter.nameSearch;
+    return q;
+  }, [filter.countryCodes, filter.asns, filter.networks, filter.ipPrefix, filter.nameSearch]);
+
+  const mapInfinite = useCatalogueMap(mapViewport?.bbox, mapViewport?.zoom ?? 2, mapQuery);
+
+  // -----------------------------------------------------------------------
+  // Cluster dialog filters: drop `shapes` so the dialog stays consistent
+  // with the map (shape-blind). Country/ASN/network/city/ip_prefix/name
+  // and sort all propagate so a pre-filtered table view still narrows
+  // cluster contents.
+  // -----------------------------------------------------------------------
+  const dialogFilters: CatalogueListQuery = useMemo(() => {
+    const { shapes: _shapes, ...rest } = tableQuery;
+    return rest;
+  }, [tableQuery]);
+
   const { data: facetsData } = useCatalogueFacets();
   const reenrichOneMutation = useReenrichOne();
   const reenrichManyMutation = useReenrichMany();
 
-  const allEntries: CatalogueEntry[] = listData?.entries ?? [];
+  // The drawer needs the full entry object, not just an id. We search
+  // only the loaded pages; if the entry isn't there (e.g. operator
+  // opened the drawer from a cluster dialog hit further down the feed),
+  // `useCatalogueEntry` inside the drawer back-fills via the per-entry
+  // endpoint.
+  const drawerEntry = useMemo(() => rows.find((e) => e.id === drawerId), [rows, drawerId]);
 
-  // Client-side city filter (not supported by the backend).
-  const afterCityFilter = useMemo(() => {
-    if (filter.cities.length === 0) return allEntries;
-    return allEntries.filter((e) => e.city != null && filter.cities.includes(e.city));
-  }, [allEntries, filter.cities]);
-
-  // Client-side shape filter layered on top of everything else.
-  const visibleEntries = useMemo(() => {
-    if (filter.shapes.length === 0) return afterCityFilter;
-    return afterCityFilter.filter((e) => {
-      if (e.latitude == null || e.longitude == null) return false;
-      return pointInShapes(e.latitude, e.longitude, filter.shapes);
-    });
-  }, [afterCityFilter, filter.shapes]);
-
-  // The drawer needs the full entry object, not just an id.
-  const drawerEntry = useMemo(
-    () => allEntries.find((e) => e.id === drawerId),
-    [allEntries, drawerId],
-  );
-
-  // Drawer deletion guard: if the list refetches (e.g. after an SSE `deleted`
-  // event) and the open entry is gone, clear `drawerId` so the drawer state
-  // stays consistent. Without this, `drawerId` lingers and re-opening the
-  // same id later would briefly flash stale behaviour.
+  // Drawer deletion guard: if the list refetches (e.g. after an SSE
+  // `deleted` event) and the open entry is gone from every loaded page,
+  // clear `drawerId` so the drawer state stays consistent.
   useEffect(() => {
-    if (drawerId !== null && listData !== undefined && drawerEntry === undefined) {
+    if (drawerId !== null && tableInfinite.data !== undefined && drawerEntry === undefined) {
       setDrawerId(null);
     }
-  }, [drawerId, drawerEntry, listData]);
+  }, [drawerId, drawerEntry, tableInfinite.data]);
 
-  // Stable across renders. `useReenrichOne` / `useReenrichMany` return
-  // reference-stable mutation objects so capturing `.mutate` directly would
-  // work, but passing the mutation object keeps the dep explicit.
   const handleReenrichOne = useCallback(
     (id: string): void => {
       reenrichOneMutation.mutate(id);
@@ -243,11 +310,18 @@ export default function Catalogue() {
     [reenrichOneMutation],
   );
 
+  // Bulk re-enrich fires against currently-loaded rows only. With
+  // server-driven paging the full filtered set may span many pages;
+  // walking it from the client just to re-enrich would add round trips
+  // without improving the operator outcome (the re-enrich runs async
+  // server-side anyway). The counter below reflects `total` so the
+  // operator sees the filter's true size; the action itself kicks off
+  // the re-enrich queue for what they have on hand.
   const handleReenrichMany = useCallback((): void => {
-    const ids = visibleEntries.map((e) => e.id);
+    const ids = rows.map((e) => e.id);
     reenrichManyMutation.mutate({ ids });
     setReenrichConfirmOpen(false);
-  }, [visibleEntries, reenrichManyMutation]);
+  }, [rows, reenrichManyMutation]);
 
   // Stable row-click & shape-change handlers for memoized heavy children.
   const handleRowClick = useCallback((id: string): void => {
@@ -260,6 +334,23 @@ export default function Catalogue() {
     },
     [filter, setFilter],
   );
+
+  const handleViewportChange = useCallback((bbox: Bbox, zoom: number): void => {
+    setMapViewport({ bbox, zoom });
+  }, []);
+
+  const handleClusterOpen = useCallback((cell: Bbox): void => {
+    setClusterCell(cell);
+  }, []);
+
+  const handleClusterDialogOpenChange = useCallback((open: boolean): void => {
+    if (!open) setClusterCell(null);
+  }, []);
+
+  const handleClusterOpenEntry = useCallback((id: string): void => {
+    setClusterCell(null);
+    setDrawerId(id);
+  }, []);
 
   const handleDrawerClose = useCallback((): void => {
     setDrawerId(null);
@@ -289,10 +380,10 @@ export default function Catalogue() {
               type="button"
               size="sm"
               variant="outline"
-              disabled={visibleEntries.length === 0}
+              disabled={rows.length === 0}
               onClick={() => setReenrichConfirmOpen(true)}
             >
-              Re-enrich all ({visibleEntries.length})
+              Re-enrich all ({total})
             </Button>
           </div>
         </header>
@@ -300,16 +391,26 @@ export default function Catalogue() {
         <main className="flex-1 overflow-auto p-4">
           {view === "table" ? (
             <CatalogueTable
-              entries={visibleEntries}
+              rows={rows}
+              total={total}
+              hasNextPage={tableInfinite.hasNextPage}
+              isFetchingNextPage={tableInfinite.isFetchingNextPage}
+              fetchNextPage={tableInfinite.fetchNextPage}
+              sort={sort}
+              onSortChange={setSort}
               onRowClick={handleRowClick}
               onReenrich={handleReenrichOne}
             />
           ) : (
             <CatalogueMap
-              entries={visibleEntries}
+              response={mapInfinite.data}
+              isLoading={mapInfinite.isLoading}
+              isError={mapInfinite.isError}
               shapes={filter.shapes}
               onShapesChange={handleShapesChange}
               onRowClick={handleRowClick}
+              onClusterOpen={handleClusterOpen}
+              onViewportChange={handleViewportChange}
               className={cn("h-full w-full")}
             />
           )}
@@ -322,9 +423,18 @@ export default function Catalogue() {
       {/* Paste panel */}
       <PasteStaging open={pasteOpen} onOpenChange={(next) => setPasteOpen(next)} />
 
+      {/* Cluster dialog — owns its own infinite query scoped to the cell */}
+      <CatalogueClusterDialog
+        open={clusterCell !== null}
+        onOpenChange={handleClusterDialogOpenChange}
+        cell={clusterCell}
+        filters={dialogFilters}
+        onOpenEntry={handleClusterOpenEntry}
+      />
+
       {/* Bulk re-enrich confirm */}
       <ReenrichConfirm
-        selectionSize={visibleEntries.length}
+        selectionSize={rows.length}
         open={reenrichConfirmOpen}
         onConfirm={handleReenrichMany}
         onCancel={() => setReenrichConfirmOpen(false)}

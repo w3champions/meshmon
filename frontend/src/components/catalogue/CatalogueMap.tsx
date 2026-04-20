@@ -71,11 +71,17 @@ function clusterRadius(count: number): number {
 function buildClusterIcon(bucket: CatalogueMapBucket): L.DivIcon {
   const r = clusterRadius(bucket.count);
   const diameter = r * 2;
+  // `role="button"` + `aria-label` expose the bubble to assistive tech —
+  // clicks fire via `DrawMapPin.onClick` which is wired directly on the
+  // marker (not on this icon HTML), so the click path stays the same
+  // while keyboard/screen-reader users get a meaningful description.
   return L.divIcon({
     className: "meshmon-cluster-bubble",
     iconSize: [diameter, diameter],
     iconAnchor: [r, r],
     html: `<div
+      role="button"
+      aria-label="Open ${bucket.count} entries in this area"
       data-testid="cluster-bubble"
       data-count="${bucket.count}"
       style="width:${diameter}px;height:${diameter}px;line-height:${diameter}px;border-radius:9999px;background:rgba(37,99,235,0.85);color:white;font-weight:600;font-size:12px;text-align:center;border:2px solid rgba(255,255,255,0.9);box-shadow:0 1px 4px rgba(0,0,0,0.2);"
