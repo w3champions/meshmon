@@ -20,9 +20,16 @@ const OPTIMIZATION_HINT = "Prioritise probes most likely to catch regressions.";
 export interface KnobPanelProps {
   value: CampaignKnobs;
   onChange(next: CampaignKnobs): void;
+  /**
+   * When true, every knob input is disabled. Set by the composer after the
+   * draft campaign has been created and is waiting on the threshold-confirm
+   * gate — further edits at that point would be discarded because the
+   * draft's values are already server-side.
+   */
+  disabled?: boolean;
 }
 
-export function KnobPanel({ value, onChange }: KnobPanelProps) {
+export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps) {
   const patch = (delta: Partial<CampaignKnobs>) => onChange({ ...value, ...delta });
 
   const handleNumber =
@@ -35,7 +42,11 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
     };
 
   return (
-    <section aria-label="Campaign knobs" className="flex flex-col gap-4">
+    <section
+      aria-label="Campaign knobs"
+      aria-disabled={disabled || undefined}
+      className="flex flex-col gap-4"
+    >
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           <Label htmlFor="campaign-title">Title</Label>
@@ -44,6 +55,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             value={value.title}
             placeholder="Campaign title"
             onChange={(e) => patch({ title: e.target.value })}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1 sm:col-span-2">
@@ -54,7 +66,8 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             placeholder="Operator notes…"
             onChange={(e) => patch({ notes: e.target.value })}
             rows={2}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            disabled={disabled}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
           />
         </div>
       </div>
@@ -73,6 +86,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
           }}
           variant="outline"
           aria-label="Probe protocol"
+          disabled={disabled}
         >
           <ToggleGroupItem value="icmp" aria-label="ICMP">
             ICMP
@@ -106,6 +120,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
           variant="outline"
           aria-label="Evaluation mode"
           aria-describedby="knob-evaluation-mode-hint"
+          disabled={disabled}
         >
           <ToggleGroupItem value="diversity" aria-label="diversity">
             Diversity
@@ -129,6 +144,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             max={KNOB_BOUNDS.probe_count.max}
             value={value.probe_count}
             onChange={handleNumber("probe_count")}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1">
@@ -140,6 +156,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             max={KNOB_BOUNDS.probe_count_detail.max}
             value={value.probe_count_detail}
             onChange={handleNumber("probe_count_detail")}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1">
@@ -151,6 +168,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             max={KNOB_BOUNDS.timeout_ms.max}
             value={value.timeout_ms}
             onChange={handleNumber("timeout_ms")}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1">
@@ -162,6 +180,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             max={KNOB_BOUNDS.probe_stagger_ms.max}
             value={value.probe_stagger_ms}
             onChange={handleNumber("probe_stagger_ms")}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1">
@@ -174,6 +193,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             max={KNOB_BOUNDS.loss_threshold_pct.max}
             value={value.loss_threshold_pct}
             onChange={handleNumber("loss_threshold_pct")}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1">
@@ -186,6 +206,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
             max={KNOB_BOUNDS.stddev_weight.max}
             value={value.stddev_weight}
             onChange={handleNumber("stddev_weight")}
+            disabled={disabled}
           />
         </div>
       </div>
@@ -197,6 +218,7 @@ export function KnobPanel({ value, onChange }: KnobPanelProps) {
           variant="outline"
           aria-label="Force measurement"
           aria-describedby="knob-force-hint"
+          disabled={disabled}
         >
           Force measurement
         </Toggle>

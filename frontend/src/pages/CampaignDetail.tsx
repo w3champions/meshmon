@@ -185,6 +185,18 @@ export default function CampaignDetail() {
           setDeleteOpen(false);
           void navigate({ to: "/campaigns" });
         },
+        onError: (err) => {
+          // Note: the backend's delete handler (`repo.rs`) is not
+          // lifecycle-gated, so we don't branch on 409 here — only the
+          // generic fallback. The DeleteCampaignDialog owns its own close
+          // path on cancel; leave `deleteOpen` alone so the operator can
+          // read the toast and retry without re-opening the dialog.
+          const { pushToast } = useToastStore.getState();
+          pushToast({
+            kind: "error",
+            message: `Delete failed: ${err.message}`,
+          });
+        },
       });
     },
     [deleteCampaign, navigate],

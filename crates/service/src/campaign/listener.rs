@@ -208,6 +208,12 @@ async fn handle_notification(
             // trigger's commit and this read is rare (the trigger fires
             // on INSERT/UPDATE, not DELETE) but not impossible — log and
             // skip rather than spam zero-row errors.
+            //
+            // TODO(follow-up): emit transition state from the NOTIFY payload
+            // instead of a re-query, so rapid draft→running→stopped sequences
+            // don't collapse into two "stopped" events. Frontend currently
+            // invalidates by id only so the race is cosmetic, but the stream
+            // contract documents per-transition semantics.
             let row = sqlx::query_scalar!(
                 r#"SELECT state AS "state: CampaignState" FROM measurement_campaigns WHERE id = $1"#,
                 campaign_id

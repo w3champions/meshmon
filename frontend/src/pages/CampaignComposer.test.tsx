@@ -35,6 +35,7 @@ vi.mock("@/api/hooks/campaigns", async () => {
     ...actual,
     useCreateCampaign: vi.fn(),
     useStartCampaign: vi.fn(),
+    useDeleteCampaign: vi.fn(),
     usePreviewDispatchCount: vi.fn(),
   };
 });
@@ -77,6 +78,7 @@ vi.mock("@/stores/toast", () => ({
 import { useAgents } from "@/api/hooks/agents";
 import {
   useCreateCampaign,
+  useDeleteCampaign,
   usePreviewDispatchCount,
   useStartCampaign,
 } from "@/api/hooks/campaigns";
@@ -238,6 +240,7 @@ function renderComposer(initialPath = "/campaigns/new") {
 
 const createStub = createMutationStub();
 const startStub = createMutationStub();
+const deleteStub = createMutationStub();
 
 interface SetupOptions {
   agents?: AgentSummary[];
@@ -286,6 +289,9 @@ function setupHooks(opts: SetupOptions = {}) {
   vi.mocked(useStartCampaign).mockReturnValue(
     startStub as unknown as ReturnType<typeof useStartCampaign>,
   );
+  vi.mocked(useDeleteCampaign).mockReturnValue(
+    deleteStub as unknown as ReturnType<typeof useDeleteCampaign>,
+  );
 
   // Default `create.mutate` success path: invoke `onSuccess` with a fresh
   // draft campaign so the composer advances to phase 2 automatically.
@@ -306,6 +312,12 @@ beforeEach(() => {
   pushToast.mockReset();
   createStub.mutate.mockReset();
   startStub.mutate.mockReset();
+  deleteStub.mutate.mockReset();
+  // Default `delete.mutate` — invoke `onSettled` so Back-after-create
+  // proceeds through to navigation in tests.
+  deleteStub.mutate.mockImplementation((_id: string, handlers?: { onSettled?: () => void }) => {
+    handlers?.onSettled?.();
+  });
   setupHooks();
 });
 
@@ -645,5 +657,148 @@ describe("CampaignComposer — client-side validation gate", () => {
       expect.objectContaining({ kind: "error", message: expect.stringMatching(/destination/i) }),
     );
     expect(createStub.mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("CampaignComposer — draft lock after create", () => {
+  test("draft-created banner renders and Back deletes the draft before navigating", async () => {
+    // Large fresh count so the create resolves into the confirm dialog
+    // (draftCampaignId set, start not yet fired) — this is the one
+    // window in which Back-with-delete must fire.
+    setupHooks({
+      preview: { fresh: 1500, reusable: 0, total: 1500 } as PreviewDispatchResponse,
+      createResponse: makeCampaign("draft-xyz"),
+    });
+
+    const user = userEvent.setup();
+    renderComposer();
+
+    await fillTitle(user, "Soon-to-be-abandoned");
+    await selectAllSources(user);
+    await clickAddAllDestinationsAllPages(user);
+
+    const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
+    await user.click(startButton);
+
+    // Confirm dialog opens because fresh > threshold, keeping the draft
+    // in the limbo state the fix guards against.
+    await screen.findByRole("dialog", { name: /confirm large dispatch/i });
+    expect(await screen.findByText(/draft created — further edits/i)).toBeInTheDocument();
+
+    // The user cancels out of the confirm dialog so we're sitting on the
+    // composer with `draftCampaignId` set — the exact state Back must
+    // clean up.
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+
+    // Now click Back. It must delete the draft before navigating.
+    const backButton = screen.getByRole("button", { name: /^back$/i });
+    await user.click(backButton);
+
+    await waitFor(() =>
+      expect(deleteStub.mutate).toHaveBeenCalledWith("draft-xyz", expect.any(Object)),
+    );
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ to: "/campaigns" })),
+    );
+  });
+
+  test("Back before create fires navigation without touching delete", async () => {
+    setupHooks();
+    const user = userEvent.setup();
+    renderComposer();
+
+    await screen.findByLabelText(/^title$/i);
+    const backButton = screen.getByRole("button", { name: /^back$/i });
+    await user.click(backButton);
+
+    expect(deleteStub.mutate).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ to: "/campaigns" })),
+    );
+  });
+
+  test("knob inputs are disabled once the draft exists", async () => {
+    // Force the draft into limbo (confirm dialog open, not yet started).
+    setupHooks({
+      preview: { fresh: 1500, reusable: 0, total: 1500 } as PreviewDispatchResponse,
+      createResponse: makeCampaign("locked-id"),
+    });
+
+    const user = userEvent.setup();
+    renderComposer();
+
+    await fillTitle(user, "Locked");
+    await selectAllSources(user);
+    await clickAddAllDestinationsAllPages(user);
+
+    await user.click(screen.getByRole("button", { name: /^start(ing…)?$/i }));
+    await screen.findByRole("dialog", { name: /confirm large dispatch/i });
+    // Close the dialog so the disabled-state is visible without the
+    // portal overlay blocking pointer events.
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+
+    // Title input is disabled — attempting to type must be a no-op.
+    const titleInput = screen.getByLabelText(/^title$/i) as HTMLInputElement;
+    expect(titleInput).toBeDisabled();
+  });
+});
+
+describe("CampaignComposer — exhaustive walk guards", () => {
+  test("button is disabled while the catalogue is still loading", async () => {
+    // `useCatalogueListInfinite` mocked to a pre-first-page state: no
+    // pages, `isLoading=true`. The exhaustive-walk button must be
+    // disabled so the empty-snapshot race can't fire.
+    vi.mocked(useCatalogueListInfinite).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+      isFetching: true,
+      hasNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as unknown as ReturnType<typeof useCatalogueListInfinite>);
+
+    const user = userEvent.setup();
+    renderComposer();
+
+    const btn = await screen.findByRole("button", {
+      name: /add all destinations \(all pages\)/i,
+    });
+    expect(btn).toBeDisabled();
+    await user.click(btn);
+
+    // Nothing happens — destSet untouched, no toast, no fetchNextPage call.
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  test("empty-catalogue snapshot guard toasts and leaves destSet untouched", async () => {
+    // This path is reached if the click somehow lands with an empty
+    // `pages` array even though the button is enabled — e.g. a filter
+    // change flips `isFetching` false between render and click. The
+    // guard is defence-in-depth beyond the button-disabled gate.
+    const fetchNextPage = vi.fn();
+    vi.mocked(useCatalogueListInfinite).mockReturnValue({
+      data: { pages: [], pageParams: [] },
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      hasNextPage: false,
+      fetchNextPage,
+    } as unknown as ReturnType<typeof useCatalogueListInfinite>);
+
+    const user = userEvent.setup();
+    renderComposer();
+
+    const btn = await screen.findByRole("button", {
+      name: /add all destinations \(all pages\)/i,
+    });
+    await user.click(btn);
+
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "error",
+        message: expect.stringMatching(/catalogue still loading/i),
+      }),
+    );
+    expect(fetchNextPage).not.toHaveBeenCalled();
   });
 });

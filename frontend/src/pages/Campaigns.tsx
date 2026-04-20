@@ -291,6 +291,18 @@ export default function Campaigns() {
     (id: string): void => {
       deleteCampaign(id, {
         onSuccess: () => setDeleteTarget(null),
+        onError: (err) => {
+          // Note: the backend's delete handler (`repo.rs`) is not
+          // lifecycle-gated, so we don't branch on 409 here — only the
+          // generic fallback. Close the dialog either way so the operator
+          // isn't left with a stuck-open confirm while the toast fires.
+          setDeleteTarget(null);
+          const { pushToast } = useToastStore.getState();
+          pushToast({
+            kind: "error",
+            message: `Delete failed: ${err.message}`,
+          });
+        },
       });
     },
     [deleteCampaign],

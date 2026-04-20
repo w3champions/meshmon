@@ -45,8 +45,14 @@ All keys are defined in `frontend/src/api/hooks/campaigns.ts`.
 |---|---|---|
 | `CAMPAIGNS_LIST_KEY` (`["campaigns","list"]`) | `/campaigns` list page | create, patch, start, stop, edit, delete, `stream:state_changed`, `stream:lag` |
 | `campaignKey(id)` (`["campaigns","entry",id]`) | `/campaigns/$id` detail page | patch, start, stop, edit, force-pair, `stream:state_changed`, `stream:pair_settled` |
-| `campaignPairsKey(id)` (`["campaigns","pairs",id]`) | Detail pairs list | edit, force-pair, `stream:pair_settled` |
+| `campaignPairsKey(id)` (`["campaigns","entry",id,"pairs"]`) | Detail pairs list | edit, force-pair, `stream:pair_settled` |
 | `campaignPreviewKey(id)` (`["campaigns","preview",id]`) | `SizePreview` phase 2 (post-submit exact count) | start, stop, edit, force-pair, `stream:state_changed`, `stream:pair_settled` |
+
+`campaignPairsKey` is nested under `campaignKey` (both share the
+`["campaigns","entry",id,...]` prefix). TanStack Query matches by
+prefix, so invalidating `campaignKey(id)` on `state_changed` also
+sweeps the pairs cache — that's intentional: pairs depend on the
+entry and any state transition can reshape them.
 
 `useCampaignStream` subscribes once per session. `lag` frames (emitted
 when the subscriber falls behind the broker's 512-slot buffer) trigger

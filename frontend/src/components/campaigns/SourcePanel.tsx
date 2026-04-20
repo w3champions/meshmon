@@ -47,6 +47,14 @@ export interface SourcePanelProps {
   onFilterChange(next: FilterValue): void;
   facets: FacetsResponse | undefined;
   onOpenMap(): void;
+  /**
+   * When true, every mutation button (Add all / Add matching / Remove all /
+   * Map view) is disabled and row-click no-ops. The filter rail stays live
+   * so the operator can still inspect matches, but selection is frozen —
+   * composer sets this after a draft campaign has been created so further
+   * source edits don't silently diverge from the persisted draft.
+   */
+  disabled?: boolean;
 }
 
 export function isAgentOffline(agent: AgentSummary, now: number = Date.now()): boolean {
@@ -110,6 +118,7 @@ export function SourcePanel({
   onFilterChange,
   facets,
   onOpenMap,
+  disabled = false,
 }: SourcePanelProps) {
   const { data: agents } = useAgents();
 
@@ -141,17 +150,20 @@ export function SourcePanel({
   });
 
   const handleAddVisible = () => {
+    if (disabled) return;
     const next = new Set(selected);
     for (const row of filteredRows) next.add(row.agent.id);
     onSelectedChange(next);
   };
 
   const handleRemoveAll = () => {
+    if (disabled) return;
     if (selected.size === 0) return;
     onSelectedChange(new Set());
   };
 
   const handleToggleRow = (id: string) => {
+    if (disabled) return;
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
     else next.add(id);
@@ -183,7 +195,7 @@ export function SourcePanel({
               size="sm"
               variant="outline"
               onClick={handleAddVisible}
-              disabled={filteredRows.length === 0}
+              disabled={disabled || filteredRows.length === 0}
             >
               Add all
             </Button>
@@ -192,7 +204,7 @@ export function SourcePanel({
               size="sm"
               variant="outline"
               onClick={handleAddVisible}
-              disabled={filteredRows.length === 0}
+              disabled={disabled || filteredRows.length === 0}
             >
               Add matching
             </Button>
@@ -201,11 +213,17 @@ export function SourcePanel({
               size="sm"
               variant="ghost"
               onClick={handleRemoveAll}
-              disabled={selected.size === 0}
+              disabled={disabled || selected.size === 0}
             >
               Remove all
             </Button>
-            <Button type="button" size="sm" variant="outline" onClick={onOpenMap}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onOpenMap}
+              disabled={disabled}
+            >
               Map view
             </Button>
           </div>

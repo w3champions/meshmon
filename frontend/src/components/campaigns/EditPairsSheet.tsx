@@ -10,6 +10,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { isIllegalStateTransition } from "@/lib/campaign";
+import { useToastStore } from "@/stores/toast";
 
 interface EditPairsSheetProps {
   campaign: Campaign | null;
@@ -111,6 +113,20 @@ export function EditPairsSheet({ campaign, open, onOpenChange }: EditPairsSheetP
       { id: campaign.id, body },
       {
         onSuccess: () => onOpenChange(false),
+        onError: (err) => {
+          const { pushToast } = useToastStore.getState();
+          if (isIllegalStateTransition(err)) {
+            pushToast({
+              kind: "error",
+              message: "This campaign advanced before your edit landed.",
+            });
+            return;
+          }
+          pushToast({
+            kind: "error",
+            message: `Save failed: ${err.message}`,
+          });
+        },
       },
     );
   };

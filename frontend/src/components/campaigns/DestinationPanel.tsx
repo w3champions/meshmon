@@ -32,6 +32,14 @@ export interface DestinationPanelProps {
   onFilterChange(next: FilterValue): void;
   facets: FacetsResponse | undefined;
   onOpenMap(): void;
+  /**
+   * When true, every mutation button (Add all / Add matching / Remove all /
+   * Add IPs / Map view) is disabled and row-click no-ops. Filter rail stays
+   * live so the operator can still inspect matches. Composer sets this
+   * after a draft campaign has been created so further destination edits
+   * don't silently diverge from the persisted draft.
+   */
+  disabled?: boolean;
 }
 
 export function DestinationPanel({
@@ -41,6 +49,7 @@ export function DestinationPanel({
   onFilterChange,
   facets,
   onOpenMap,
+  disabled = false,
 }: DestinationPanelProps) {
   const query = useMemo(() => destinationFilterToQuery(filter), [filter]);
   const listQuery = useCatalogueListInfinite(query, { pageSize: PAGE_SIZE });
@@ -64,12 +73,14 @@ export function DestinationPanel({
   });
 
   const addIps = (ips: Iterable<string>) => {
+    if (disabled) return;
     const next = new Set(selected);
     for (const ip of ips) next.add(ip);
     onSelectedChange(next);
   };
 
   const handleAddVisible = () => {
+    if (disabled) return;
     // F1 scope: snapshot IPs from already-loaded pages only.
     // The catalogue-walk fallback that covers the "total > loaded rows" case
     // lives in F2's CampaignComposer page (plan T47 F.7 §608).
@@ -77,11 +88,13 @@ export function DestinationPanel({
   };
 
   const handleRemoveAll = () => {
+    if (disabled) return;
     if (selected.size === 0) return;
     onSelectedChange(new Set());
   };
 
   const handleToggleRow = (ip: string) => {
+    if (disabled) return;
     const next = new Set(selected);
     if (next.has(ip)) next.delete(ip);
     else next.add(ip);
@@ -127,7 +140,7 @@ export function DestinationPanel({
               size="sm"
               variant="outline"
               onClick={handleAddVisible}
-              disabled={rows.length === 0}
+              disabled={disabled || rows.length === 0}
             >
               Add all
             </Button>
@@ -136,7 +149,7 @@ export function DestinationPanel({
               size="sm"
               variant="outline"
               onClick={handleAddVisible}
-              disabled={rows.length === 0}
+              disabled={disabled || rows.length === 0}
             >
               Add matching
             </Button>
@@ -145,14 +158,20 @@ export function DestinationPanel({
               size="sm"
               variant="ghost"
               onClick={handleRemoveAll}
-              disabled={selected.size === 0}
+              disabled={disabled || selected.size === 0}
             >
               Remove all
             </Button>
-            <Button type="button" size="sm" onClick={() => setPasteOpen(true)}>
+            <Button type="button" size="sm" onClick={() => setPasteOpen(true)} disabled={disabled}>
               Add IPs
             </Button>
-            <Button type="button" size="sm" variant="outline" onClick={onOpenMap}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onOpenMap}
+              disabled={disabled}
+            >
               Map view
             </Button>
           </div>

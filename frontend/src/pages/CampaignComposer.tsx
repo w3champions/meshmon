@@ -6,6 +6,7 @@ import {
   type CreateCampaignBody,
   type ProbeProtocol,
   useCreateCampaign,
+  useDeleteCampaign,
   usePreviewDispatchCount,
   useStartCampaign,
 } from "@/api/hooks/campaigns";
@@ -92,7 +93,14 @@ export default function CampaignComposer() {
   // --- Hooks --------------------------------------------------------------
   const createMutation = useCreateCampaign();
   const startMutation = useStartCampaign();
+  const deleteMutation = useDeleteCampaign();
   const previewQuery = usePreviewDispatchCount(draftCampaignId ?? undefined);
+
+  // Once a draft is created, inputs lock: the create payload has already
+  // been persisted server-side, so further edits would be silently dropped
+  // at Start time. The operator must Back out (which deletes the draft)
+  // and start a new composer if they need to change anything.
+  const draftLocked = draftCampaignId !== null;
 
   // Pre-submit approximate destination total: uses the first page's `total`
   // exactly like `DestinationPanel` so the SizePreview stays consistent
@@ -171,22 +179,37 @@ export default function CampaignComposer() {
   // referential stability doesn't matter here.
   const handleAddAllDestinationsExhaustive = async () => {
     if (walkRunningRef.current) return;
+
+    // Guard against an empty catalogue snapshot. If the hook hasn't
+    // returned even the first page yet (clicked before initial load, or
+    // during a refetch), seeding `latestPages=[]` and passing an empty
+    // Set into `setDestSet` would silently wipe the operator's existing
+    // destination selection. Leave `destSet` untouched and nudge the
+    // operator to retry once the catalogue lands.
+    const initialPages = walkInfinite.data?.pages ?? [];
+    if (initialPages.length === 0) {
+      useToastStore.getState().pushToast({
+        kind: "error",
+        message: "Catalogue still loading — try again in a moment.",
+      });
+      return;
+    }
+
     walkRunningRef.current = true;
     // Clear any prior failure so a retry starts from a clean slate.
     setWalkError(null);
 
     try {
       // Seed progress from whatever's already loaded by the hook.
-      const seedPages = walkInfinite.data?.pages ?? [];
-      const seedTotal = seedPages[0]?.total ?? 0;
-      let collectedCount = seedPages.reduce((n, p) => n + p.entries.length, 0);
+      const seedTotal = initialPages[0]?.total ?? 0;
+      let collectedCount = initialPages.reduce((n, p) => n + p.entries.length, 0);
       setWalkProgress({ collected: collectedCount, total: seedTotal });
 
       // Drain remaining pages via `fetchNextPage`. Each call returns the
       // updated InfiniteData snapshot, so we read the cumulative page
       // list off the result rather than racing the hook's state.
       let hasNext = walkInfinite.hasNextPage;
-      let latestPages = seedPages;
+      let latestPages = initialPages;
       while (hasNext) {
         const result = await walkInfinite.fetchNextPage();
         latestPages = result.data?.pages ?? latestPages;
@@ -199,6 +222,16 @@ export default function CampaignComposer() {
       const collectedIps = new Set<string>();
       for (const page of latestPages) {
         for (const entry of page.entries) collectedIps.add(entry.ip);
+      }
+      // Defence-in-depth: if the walk aggregated zero IPs (pages arrived
+      // but carried no entries), don't nuke the operator's current set.
+      if (collectedIps.size === 0) {
+        useToastStore.getState().pushToast({
+          kind: "error",
+          message: "Catalogue returned no matching rows — selection left unchanged.",
+        });
+        setWalkProgress(null);
+        return;
       }
       setDestSet(collectedIps);
       setWalkProgress(null);
@@ -392,6 +425,38 @@ export default function CampaignComposer() {
     runStart(draftCampaignId);
   }, [draftCampaignId, runStart]);
 
+  // Back discards the draft. When a `draftCampaignId` exists the create
+  // already hit the server — navigate-away-without-delete would leave an
+  // orphan draft row that the operator can't see from this screen. Fire
+  // the delete mutation on the way out; navigation waits for the delete
+  // to settle so a fast-click-retry doesn't race the still-present draft.
+  const { mutate: deleteCampaignMutate } = deleteMutation;
+  const handleBack = useCallback(() => {
+    if (draftCampaignId === null) {
+      void navigate({ to: "/campaigns" });
+      return;
+    }
+    deleteCampaignMutate(draftCampaignId, {
+      onError: (err) => {
+        // Surface a toast so the operator sees that the draft may still
+        // exist — the mutation's error state is lost the moment we
+        // navigate away, and silently abandoning a failed delete risks an
+        // orphan draft the operator never learns about.
+        useToastStore.getState().pushToast({
+          kind: "error",
+          message: `Draft may still exist — check the list. ${err.message}`,
+        });
+      },
+      onSettled: () => {
+        // Regardless of outcome — a 404 means the draft's already gone,
+        // other errors surface via the toast above but shouldn't trap the
+        // operator on this page (they explicitly asked to go back).
+        setDraftCampaignId(null);
+        void navigate({ to: "/campaigns" });
+      },
+    });
+  }, [draftCampaignId, deleteCampaignMutate, navigate]);
+
   // Note: SizePreview's `onThresholdExceeded` would also fire when fresh
   // crosses the threshold, but we intentionally do not wire it here — the
   // `autoStartAfterCreate` effect above owns the one-shot "open the
@@ -423,6 +488,15 @@ export default function CampaignComposer() {
   const approxDestTotal =
     destSet.size > 0 ? destSet.size : (walkInfinite.data?.pages[0]?.total ?? 0);
 
+  // The exhaustive-walk action is disabled while the catalogue hook is
+  // mid-initial-fetch (clicking before the first page lands would race the
+  // empty-snapshot guard inside `handleAddAllDestinationsExhaustive`) and
+  // during subsequent background refetches that haven't produced a page
+  // yet. `isLoading` covers the first load; `isFetching` covers manual
+  // refetches and filter-triggered reloads.
+  const walkButtonDisabled =
+    walkProgress !== null || draftLocked || walkInfinite.isLoading || walkInfinite.isFetching;
+
   return (
     <form onSubmit={handleStart} aria-label="Create campaign" className="flex flex-col gap-4">
       <header className="flex flex-wrap items-baseline justify-between gap-3">
@@ -431,11 +505,22 @@ export default function CampaignComposer() {
           type="button"
           variant="outline"
           onClick={handleAddAllDestinationsExhaustive}
-          disabled={walkProgress !== null}
+          disabled={walkButtonDisabled}
         >
           Add all destinations (all pages)
         </Button>
       </header>
+
+      {draftLocked ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm"
+        >
+          Draft created — further edits require starting a new campaign. Use Back to discard this
+          draft and restart.
+        </div>
+      ) : null}
 
       {walkProgress !== null ? (
         <p
@@ -468,6 +553,7 @@ export default function CampaignComposer() {
               onFilterChange={setSourceFilter}
               facets={facetsQuery.data}
               onOpenMap={openSourceMap}
+              disabled={draftLocked}
             />
           </Card>
           <Card className="flex flex-col gap-3 p-4">
@@ -478,6 +564,7 @@ export default function CampaignComposer() {
               onFilterChange={setDestFilter}
               facets={facetsQuery.data}
               onOpenMap={openDestMap}
+              disabled={draftLocked}
             />
           </Card>
         </div>
@@ -485,7 +572,7 @@ export default function CampaignComposer() {
         {/* Right column — knobs, preview, action bar */}
         <div className="flex flex-col gap-4">
           <Card className="p-4">
-            <KnobPanel value={knobs} onChange={setKnobs} />
+            <KnobPanel value={knobs} onChange={setKnobs} disabled={draftLocked} />
           </Card>
           <Card className="p-4">
             {/* onThresholdExceeded intentionally unset — composer owns threshold
@@ -504,9 +591,8 @@ export default function CampaignComposer() {
             <Button
               type="button"
               variant="outline"
-              onClick={() => {
-                void navigate({ to: "/campaigns" });
-              }}
+              onClick={handleBack}
+              disabled={deleteMutation.isPending}
             >
               Back
             </Button>
