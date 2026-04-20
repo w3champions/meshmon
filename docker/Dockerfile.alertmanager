@@ -1,0 +1,15 @@
+# docker/Dockerfile.alertmanager
+#
+# Bakes meshmon's default Alertmanager config + templates into the image.
+# Downstream deployments override discord webhook URLs by either:
+#   (a) building a thin overlay image that replaces /etc/alertmanager/
+#       alertmanager.yml, or
+#   (b) remounting the file at runtime.
+# OSS users keep the default (webhook URLs injected via docker-compose's
+# `secrets:` stanza — see deploy/docker-compose.yml).
+
+ARG ALERTMANAGER_TAG=v0.32.0
+FROM prom/alertmanager:${ALERTMANAGER_TAG}
+
+COPY deploy/alertmanager/alertmanager.yml /etc/alertmanager/alertmanager.yml
+COPY deploy/alertmanager/templates /etc/alertmanager/templates
