@@ -126,11 +126,22 @@ Key patterns:
   exponential backoff + ±25% jitter on termination.
 - `AgentCommandService` (`command/`) hosts the tonic server exposed
   over the tunnel. The measurement prober plugs in via the
-  `CampaignProber` trait at service-construction time; the default
-  `StubProber` covers transport-level tests. `MESHMON_CAMPAIGN_MAX_CONCURRENCY`
-  sizes the service-wide semaphore and is advertised to the service
-  via `RegisterRequest.campaign_max_concurrency` so both sides
-  enforce the same cap.
+  `CampaignProber` trait at service-construction time; production
+  wires `probing::oneshot::OneshotProber` (a trippy-backed prober that
+  serves ICMP / TCP / UDP / MTR through one builder matrix), while
+  `command::StubProber` stays in the crate for transport-level tests.
+  `MESHMON_CAMPAIGN_MAX_CONCURRENCY` sizes the service-wide semaphore
+  and is advertised to the service via
+  `RegisterRequest.campaign_max_concurrency` so both sides enforce the
+  same cap.
+- `OneshotProber` owns a `tokio::sync::Semaphore` sized from the same
+  `campaign_max_concurrency` cap, independent of the continuous
+  prober's `MESHMON_ICMP_TARGET_CONCURRENCY` pool. Both prober
+  classes call the shared `probing::next_trace_id()` allocator
+  (process-wide monotonic non-zero `AtomicU16`), so continuous MTR and
+  campaign tracers share one trace-id space by construction. See
+  `crates/agent/src/probing/oneshot.md` for the builder matrix,
+  per-protocol loss predicates, and the full shared-resource audit.
 
 ## Service
 

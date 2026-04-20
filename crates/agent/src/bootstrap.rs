@@ -560,6 +560,7 @@ impl<A: ServiceApi> AgentRuntime<A> {
     pub async fn shutdown(self) {
         tracing::info!(
             contamination_total = crate::probing::trippy::cross_contamination_total(),
+            oneshot_collisions_total = crate::probing::oneshot::oneshot_probe_collisions_total(),
             "agent shutting down",
         );
         self.cancel.cancel();

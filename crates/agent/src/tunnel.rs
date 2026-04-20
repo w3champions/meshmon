@@ -19,7 +19,8 @@ use tonic::transport::Server;
 use tracing::{debug, warn};
 
 use crate::api::GrpcServiceApi;
-use crate::command::{AgentCommandService, StubProber};
+use crate::command::AgentCommandService;
+use crate::probing::oneshot::OneshotProber;
 
 const BASE_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
@@ -127,10 +128,10 @@ async fn run_one_session(
     max_concurrency: usize,
     cancel: CancellationToken,
 ) -> Result<(), meshmon_revtunnel::TunnelError> {
-    // `StubProber` is the default; it's the T45 transport-test seam and
-    // will be swapped for a real trippy-backed prober at this same call
-    // site in T46 without changing any other wiring.
-    let prober = Arc::new(StubProber);
+    // `OneshotProber` is the production campaign prober. `StubProber`
+    // stays compiled into the crate so transport-level integration
+    // tests can construct a deterministic prober without raw sockets.
+    let prober = Arc::new(OneshotProber::new(max_concurrency));
     let router_factory = move || {
         Server::builder().add_service(AgentCommandServer::new(AgentCommandService::new(
             refresh_trigger.clone(),
