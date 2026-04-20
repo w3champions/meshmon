@@ -34,6 +34,34 @@ pub(crate) fn parse_xff_client_ip(header: &str) -> Option<std::net::IpAddr> {
         .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
 }
 
+/// Parse an IP value that may be optionally bracketed (IPv6) and/or
+/// carry a trailing `:port`, stripping quotes.
+///
+/// Covers the shapes both RFC 7239 `Forwarded` (`for=<value>`) and
+/// `X-Real-IP` carry in the wild: `1.2.3.4`, `"1.2.3.4"`,
+/// `1.2.3.4:5678`, `[::1]:4711`, `[2001:db8::1]`, bare
+/// `2001:db8::1`.
+fn parse_ip_with_optional_port(value: &str) -> Option<std::net::IpAddr> {
+    let value = value.trim().trim_matches('"');
+    // Bracketed IPv6: [addr] or [addr]:port.
+    let stripped = if let Some(rest) = value.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if let Some((host, maybe_port)) = value.rsplit_once(':') {
+        // `host:port` split. Bare IPv6 contains colons and would split
+        // incorrectly (`2001:db8::1` → `("2001:db8:", "1")`), so require
+        // the right side to be a numeric port AND the left side to
+        // contain no colons — otherwise fall through to raw parse.
+        if maybe_port.chars().all(|c| c.is_ascii_digit()) && !host.contains(':') {
+            host
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+    stripped.parse::<std::net::IpAddr>().ok()
+}
+
 /// Extract the leftmost `for=<ip>` from an RFC 7239 `Forwarded` value.
 ///
 /// Handles the common real-world shapes: `for=1.2.3.4`,
@@ -52,27 +80,21 @@ pub(crate) fn parse_forwarded_client_ip(header: &str) -> Option<std::net::IpAddr
         if !key.trim().eq_ignore_ascii_case("for") {
             continue;
         }
-        let value = value.trim().trim_matches('"');
-        // Bracketed IPv6: [addr] or [addr]:port.
-        let stripped = if let Some(rest) = value.strip_prefix('[') {
-            rest.split(']').next().unwrap_or(rest)
-        } else if let Some((host, maybe_port)) = value.rsplit_once(':') {
-            // IPv4 with port (`host:port`) — IPv6 is only valid with
-            // brackets per RFC 7239 §6. `maybe_port` must parse as u16
-            // to distinguish `host:port` from bare `::1`.
-            if maybe_port.chars().all(|c| c.is_ascii_digit()) {
-                host
-            } else {
-                value
-            }
-        } else {
-            value
-        };
-        if let Ok(ip) = stripped.parse::<std::net::IpAddr>() {
+        if let Some(ip) = parse_ip_with_optional_port(value) {
             return Some(ip);
         }
     }
     None
+}
+
+/// Parse a single client IP from an `X-Real-IP` header value.
+///
+/// `X-Real-IP` is non-standard but widely emitted by nginx-style
+/// proxies — it always carries exactly one IP (the outermost client
+/// as understood by the proxy), unlike the chain semantics of
+/// `X-Forwarded-For`.
+pub(crate) fn parse_real_ip_client(header: &str) -> Option<std::net::IpAddr> {
+    parse_ip_with_optional_port(header)
 }
 
 /// Client-IP extraction shared between the login rate limit, the agent
@@ -80,8 +102,10 @@ pub(crate) fn parse_forwarded_client_ip(header: &str) -> Option<std::net::IpAddr
 ///
 /// When `trust_forwarded = true`, try the leftmost entry of
 /// `X-Forwarded-For` first; if missing or malformed, try RFC 7239
-/// `Forwarded: for=...`. On any fallback, use the `ConnectInfo` peer.
-/// When `trust_forwarded = false`, only `ConnectInfo` is read.
+/// `Forwarded: for=...`; finally try `X-Real-IP` (the header
+/// nginx-style proxies emit for gRPC locations by default). On any
+/// fallback, use the `ConnectInfo` peer. When `trust_forwarded = false`,
+/// only `ConnectInfo` is read.
 #[allow(dead_code)]
 pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net::IpAddr> {
     if trust_forwarded {
@@ -98,6 +122,14 @@ pub(crate) fn client_ip(parts: &Parts, trust_forwarded: bool) -> Option<std::net
             .get("forwarded")
             .and_then(|v| v.to_str().ok())
             .and_then(parse_forwarded_client_ip)
+        {
+            return Some(ip);
+        }
+        if let Some(ip) = parts
+            .headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_real_ip_client)
         {
             return Some(ip);
         }
@@ -1013,6 +1045,43 @@ udp_probe_secret = "hex:6d73686d6e2d7631"
             parse_forwarded_client_ip("stray;for=192.0.2.60"),
             Some("192.0.2.60".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn parse_real_ip_handles_common_shapes() {
+        // Bare IPv4.
+        assert_eq!(
+            parse_real_ip_client("1.2.3.4"),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        // IPv4 with surrounding whitespace.
+        assert_eq!(
+            parse_real_ip_client("  1.2.3.4\t"),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        // IPv4 with :port.
+        assert_eq!(
+            parse_real_ip_client("1.2.3.4:4711"),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        // Bare IPv6 (nginx X-Real-IP shape without brackets).
+        assert_eq!(
+            parse_real_ip_client("2001:db8::1"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        // Bracketed IPv6.
+        assert_eq!(
+            parse_real_ip_client("[2001:db8::1]"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        // Bracketed IPv6 with port.
+        assert_eq!(
+            parse_real_ip_client("[2001:db8::1]:4711"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        // Garbage → None.
+        assert_eq!(parse_real_ip_client("not-an-ip"), None);
+        assert_eq!(parse_real_ip_client(""), None);
     }
 
     #[test]

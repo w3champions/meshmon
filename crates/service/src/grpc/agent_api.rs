@@ -22,12 +22,16 @@ use tonic::{Request, Response, Status};
 /// the `Connected` impl on `StreamWithPeer`), and production inserts
 /// `axum::extract::ConnectInfo<SocketAddr>`. We try all three.
 ///
-/// When `trust_forwarded` is `true`, an `X-Forwarded-For` or RFC 7239
-/// `Forwarded` metadata header takes precedence over the raw peer
-/// address — mirroring the behaviour of REST routes so that operators
-/// who terminate TLS at a trusted proxy see a consistent client IP
-/// across gRPC and HTTP. The caller is responsible for only enabling
-/// the flag when the proxy is actually trusted.
+/// When `trust_forwarded` is `true`, an `X-Forwarded-For`, RFC 7239
+/// `Forwarded`, or `X-Real-IP` metadata header takes precedence over
+/// the raw peer address — mirroring the behaviour of REST routes so
+/// that operators who terminate TLS at a trusted proxy see a
+/// consistent client IP across gRPC and HTTP. `X-Real-IP` is the
+/// fallback because nginx-style proxies set it by default for gRPC
+/// locations (where `X-Forwarded-For` is not emitted by default).
+/// The caller is responsible for only enabling the flag when the
+/// proxy is actually trusted — an untrusted client can otherwise
+/// spoof any of these headers.
 fn resolve_peer_ip<T>(request: &Request<T>, trust_forwarded: bool) -> Option<IpAddr> {
     let from_transport = || -> Option<IpAddr> {
         // 1. tonic native (TcpConnectInfo — real TcpListener)
@@ -46,10 +50,10 @@ fn resolve_peer_ip<T>(request: &Request<T>, trust_forwarded: bool) -> Option<IpA
     };
 
     if trust_forwarded {
-        // Check metadata first (proxies inject XFF or RFC 7239
-        // `Forwarded`); fall back to the raw peer addr from the
-        // transport. Shared helpers keep gRPC and REST in sync on
-        // which header shapes they honor.
+        // Check metadata first (proxies inject XFF, RFC 7239
+        // `Forwarded`, or `X-Real-IP`); fall back to the raw peer
+        // addr from the transport. Shared helpers keep gRPC and REST
+        // in sync on which header shapes they honor.
         request
             .metadata()
             .get("x-forwarded-for")
@@ -61,6 +65,13 @@ fn resolve_peer_ip<T>(request: &Request<T>, trust_forwarded: bool) -> Option<IpA
                     .get("forwarded")
                     .and_then(|v| v.to_str().ok())
                     .and_then(crate::http::auth::parse_forwarded_client_ip)
+            })
+            .or_else(|| {
+                request
+                    .metadata()
+                    .get("x-real-ip")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(crate::http::auth::parse_real_ip_client)
             })
             .or_else(from_transport)
     } else {
