@@ -286,6 +286,22 @@ async fn run() -> anyhow::Result<()> {
         enrichment_queue,
     );
 
+    // Campaign SSE listener: runs regardless of `[campaigns] enabled`.
+    // The feature flag gates the scheduler/dispatcher (so a cluster can
+    // suppress dispatch) but the event stream is read-only fan-out from
+    // the same NOTIFY channels the scheduler writes to — subscribing
+    // even when dispatch is off lets operators observe lifecycle edits
+    // and pair settles from other processes. Owns its own cancel token
+    // so the main shutdown drain can await it separately from the
+    // scheduler.
+    let campaign_sse_cancel = CancellationToken::new();
+    let campaign_sse_handle = meshmon_service::campaign::listener::spawn_campaign_listener(
+        pool.clone(),
+        state.campaign_broker.clone(),
+        campaign_sse_cancel.clone(),
+    );
+    info!("campaign SSE listener spawned");
+
     // Campaign scheduler: single tokio task, driven by a dedicated cancel
     // token so it can be shut down AFTER the HTTP drain completes (in-flight
     // handlers may still publish NOTIFY wake-ups until they finish). Gated
@@ -527,6 +543,21 @@ async fn run() -> anyhow::Result<()> {
         }
         info!("campaign scheduler drained");
     }
+
+    // Campaign SSE listener: same post-HTTP-drain ordering as the
+    // scheduler. In-flight handlers may still emit NOTIFY wake-ups
+    // (e.g. a lifecycle transition from a final `/start` call) that
+    // this listener should surface to subscribers before it exits.
+    campaign_sse_cancel.cancel();
+    match tokio::time::timeout(deadline, campaign_sse_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "campaign SSE listener task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "campaign SSE listener did not drain within shutdown_deadline; aborting",
+        ),
+    }
+    info!("campaign SSE listener drained");
 
     // Registry refresh loop: cancelled by `shutdown_token`. The loop checks
     // the token after each `refresh_once` completes, so an in-flight refresh
