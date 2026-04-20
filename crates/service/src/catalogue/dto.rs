@@ -164,10 +164,66 @@ impl From<CatalogueEntry> for CatalogueEntryDto {
 /// CIDRs (`/32` for v4, `/128` for v6). Wider CIDRs and unparseable
 /// tokens fall into [`PasteResponse::invalid`] instead of aborting the
 /// whole request.
+///
+/// An optional [`PasteMetadata`] applies the same operator-set fields
+/// to every accepted IP. Newly-created rows always receive the values
+/// and have the corresponding field names appended to
+/// `operator_edited_fields`. Existing rows receive a field only if it
+/// is not already locked; paired fields (`Latitude`+`Longitude` and
+/// `CountryCode`+`CountryName`) apply atomically — if either half of
+/// a pair is locked, neither half is written. Requests without
+/// `metadata` preserve the pre-T52 behaviour exactly (no writes to
+/// `existing` rows, no `skipped_summary` on the response).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PasteRequest {
     /// Raw tokens to parse and (when valid) insert into the catalogue.
     pub ips: Vec<String>,
+    /// Optional default metadata applied to every accepted IP. See the
+    /// struct-level docs for the merge semantics.
+    #[serde(default)]
+    pub metadata: Option<PasteMetadata>,
+}
+
+/// Operator-set default metadata applied to every accepted IP in a
+/// paste.
+///
+/// Each field is independently optional — absent means "don't touch
+/// this column". Two pairings are **atomic**: `latitude`+`longitude`
+/// must be supplied together (or both omitted), and
+/// `country_code`+`country_name` must be supplied together. The
+/// paste handler rejects half-supplied pairs with 400
+/// `paired_metadata_half_missing`.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct PasteMetadata {
+    /// Operator-facing display label.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// City name.
+    #[serde(default)]
+    pub city: Option<String>,
+    /// ISO 3166-1 alpha-2 country code. Must be paired with
+    /// [`PasteMetadata::country_name`]. Validated as a 2-character
+    /// ASCII-alphabetic string by the handler.
+    #[serde(default)]
+    pub country_code: Option<String>,
+    /// Country human-readable name. Must be paired with
+    /// [`PasteMetadata::country_code`].
+    #[serde(default)]
+    pub country_name: Option<String>,
+    /// Decimal latitude in [-90, 90]. Must be paired with
+    /// [`PasteMetadata::longitude`].
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// Decimal longitude in [-180, 180]. Must be paired with
+    /// [`PasteMetadata::latitude`].
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// Operator-supplied external link.
+    #[serde(default)]
+    pub website: Option<String>,
+    /// Free-form operator notes.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 /// Per-token rejection surfaced by [`PasteResponse::invalid`].
@@ -180,16 +236,45 @@ pub struct PasteInvalid {
 }
 
 /// Response body for `POST /api/catalogue` — a three-way split of the
-/// paste outcome.
+/// paste outcome plus an optional aggregate describing metadata
+/// writes that were skipped against existing rows.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PasteResponse {
     /// Rows newly inserted by this call.
     pub created: Vec<CatalogueEntryDto>,
-    /// Rows already present in the catalogue. Surfaces the existing
-    /// enrichment state without a follow-up fetch.
+    /// Rows already present in the catalogue. When the request
+    /// carried a [`PasteMetadata`], each entry here reflects the
+    /// post-merge row state — so the UI does not need a follow-up
+    /// fetch to observe writes that survived the lock check.
     pub existing: Vec<CatalogueEntryDto>,
     /// Tokens rejected during parse.
     pub invalid: Vec<PasteInvalid>,
+    /// Aggregate summary of metadata writes that were refused because
+    /// the target field was already operator-locked. Absent when the
+    /// request did not carry `metadata`; present (and possibly
+    /// all-zero) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_summary: Option<PasteSkippedSummary>,
+}
+
+/// Aggregate describing metadata writes the server refused to apply
+/// because the target row already carried operator locks on the
+/// affected fields.
+///
+/// Keys in [`PasteSkippedSummary::skipped_field_counts`] are canonical
+/// [`super::model::Field::as_str`] names, plus two composite labels
+/// for paired fields:
+/// - `"Location"` — either half of `Latitude`/`Longitude` was locked.
+/// - `"Country"`  — either half of `CountryCode`/`CountryName` was
+///   locked.
+/// The composite names let the UI narrate skips without reconstructing
+/// the pairing client-side.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct PasteSkippedSummary {
+    /// Count of rows that kept at least one operator-locked field.
+    pub rows_with_skips: u32,
+    /// Per-field skip counts; zero-count keys are omitted.
+    pub skipped_field_counts: std::collections::BTreeMap<String, u32>,
 }
 
 /// Query-string filter set accepted by `GET /api/catalogue`.

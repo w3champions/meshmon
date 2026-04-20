@@ -181,6 +181,7 @@ pub async fn paste(
             .map(CatalogueEntryDto::from)
             .collect(),
         invalid,
+        skipped_summary: None,
     };
     (StatusCode::OK, Json(response)).into_response()
 }
