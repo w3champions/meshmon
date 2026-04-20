@@ -433,7 +433,16 @@ async fn dispatch_rate_limit_rejects_every_pair_when_rps_is_zero() {
     let pair_id = pending[0].pair_id;
     let outcome = dispatcher.dispatch(agent_id, pending).await;
     assert_eq!(outcome.dispatched, 0);
-    assert_eq!(outcome.rejected_ids, vec![pair_id]);
+    assert!(
+        outcome.rejected_ids.is_empty(),
+        "bucket-rejected pairs must not flow through rejected_ids: {:?}",
+        outcome.rejected_ids,
+    );
+    assert_eq!(
+        outcome.rate_limited_ids,
+        vec![pair_id],
+        "bucket rejection must land in rate_limited_ids so the scheduler preserves attempt budget",
+    );
     assert_eq!(outcome.skipped_reason.as_deref(), Some("rate_limited"));
     repo::delete(&pool, campaign_id).await.expect("cleanup");
 }

@@ -321,6 +321,7 @@ impl PairDispatcher for RpcDispatcher {
             return DispatchOutcome {
                 dispatched: 0,
                 rejected_ids: batch.iter().map(|p| p.pair_id).collect(),
+                rate_limited_ids: Vec::new(),
                 skipped_reason: Some("agent_unreachable".into()),
             };
         };
@@ -334,17 +335,22 @@ impl PairDispatcher for RpcDispatcher {
                 return DispatchOutcome {
                     dispatched: 0,
                     rejected_ids: batch.iter().map(|p| p.pair_id).collect(),
+                    rate_limited_ids: Vec::new(),
                     skipped_reason: Some("semaphore_closed".into()),
                 };
             }
         };
 
-        // 3. Per-destination rate limit.
+        // 3. Per-destination rate limit. Bucket-rejected pairs go into
+        // `rate_limited_ids` (not `rejected_ids`) so the scheduler
+        // reverts them WITH `attempt_count--` — a throttling decision
+        // before the RPC should not consume retry budget.
         let (allowed, rate_limited) = self.reserve_tokens(batch).await;
         if allowed.is_empty() {
             return DispatchOutcome {
                 dispatched: 0,
-                rejected_ids: rate_limited,
+                rejected_ids: Vec::new(),
+                rate_limited_ids: rate_limited,
                 skipped_reason: Some("rate_limited".into()),
             };
         }
@@ -370,14 +376,14 @@ impl PairDispatcher for RpcDispatcher {
                     error = %status,
                     "run_measurement_batch RPC failed"
                 );
-                let mut rejected: Vec<i64> = allowed.iter().map(|p| p.pair_id).collect();
-                rejected.extend(rate_limited);
+                let rejected: Vec<i64> = allowed.iter().map(|p| p.pair_id).collect();
                 metrics::campaign_batches_total(agent_id, kind, "rpc_error").increment(1);
                 metrics::campaign_batch_duration_seconds(agent_id, kind)
                     .record(start.elapsed().as_secs_f64());
                 return DispatchOutcome {
                     dispatched: 0,
                     rejected_ids: rejected,
+                    rate_limited_ids: rate_limited,
                     skipped_reason: Some(format!("rpc_error:{}", status.code())),
                 };
             }
@@ -386,7 +392,7 @@ impl PairDispatcher for RpcDispatcher {
         // 6. Drain stream into writer.
         let mut expected: HashMap<i64, PendingPair> =
             allowed.into_iter().map(|p| (p.pair_id, p)).collect();
-        let mut rejected = rate_limited;
+        let mut rejected: Vec<i64> = Vec::new();
         let mut dispatched_ok = 0usize;
 
         while let Some(item) = stream.next().await {
@@ -446,7 +452,8 @@ impl PairDispatcher for RpcDispatcher {
         // on the stream (even if the writer rolled it back) — the batch
         // reached the agent and the scheduler should revert only the
         // rejected subset, not the whole thing.
-        let outcome_label = if rejected.is_empty() { "ok" } else { "partial" };
+        let has_revert = !rejected.is_empty() || !rate_limited.is_empty();
+        let outcome_label = if has_revert { "partial" } else { "ok" };
         metrics::campaign_batches_total(agent_id, kind, outcome_label).increment(1);
         metrics::campaign_batch_duration_seconds(agent_id, kind)
             .record(start.elapsed().as_secs_f64());
@@ -454,6 +461,7 @@ impl PairDispatcher for RpcDispatcher {
         DispatchOutcome {
             dispatched: dispatched_ok,
             rejected_ids: rejected,
+            rate_limited_ids: rate_limited,
             skipped_reason: None,
         }
     }

@@ -144,7 +144,6 @@ async fn scheduler_dispatches_five_batches_end_to_end() {
         dispatcher,
         100,
         10,
-        1_000,
         3,
         Duration::from_secs(300),
     );

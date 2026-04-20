@@ -316,8 +316,7 @@ async fn run() -> anyhow::Result<()> {
             // reverts them as `rejected_ids` even though no transient
             // fault occurred. Keep chunk = max_batch so every claimed
             // pair makes it into at least one RPC request.
-            initial_config.campaigns.max_batch_size as usize,
-            initial_config.campaigns.per_destination_rps,
+            initial_config.campaigns.max_batch_size as i64,
             // `max_pair_attempts` is `u16` in config but `i16` at the DB edge;
             // both map onto the same non-negative range in practice. Clamp
             // explicitly so a misconfigured `65535` can't wrap to a negative

@@ -17,10 +17,8 @@ use super::model::{CampaignState, PairResolutionState};
 use super::repo::{self, RepoError};
 use crate::metrics;
 use crate::registry::AgentRegistry;
-use moka::future::Cache;
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
@@ -28,50 +26,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Per-destination token bucket configuration. Simple leaky-bucket of
-/// capacity `per_destination_rps`; refills once per second.
-#[derive(Debug, Clone)]
-struct Bucket {
-    /// Tokens remaining in the current second.
-    remaining: u32,
-    /// When the bucket last refilled.
-    refilled_at: Instant,
-    /// Capacity (tokens per second).
-    capacity: u32,
-}
-
-impl Bucket {
-    fn new(capacity: u32) -> Self {
-        Self {
-            remaining: capacity,
-            refilled_at: Instant::now(),
-            capacity,
-        }
-    }
-
-    /// Try to draw `n` tokens. Returns the number actually drawn (0..=n).
-    /// Refills to full on every clock second.
-    fn try_take(&mut self, n: u32) -> u32 {
-        let now = Instant::now();
-        if now.duration_since(self.refilled_at) >= Duration::from_secs(1) {
-            self.remaining = self.capacity;
-            self.refilled_at = now;
-        }
-        let drawn = n.min(self.remaining);
-        self.remaining -= drawn;
-        drawn
-    }
-}
-
 /// Single-instance campaign scheduler. Instantiate with [`Scheduler::new`]
 /// and drive with [`Scheduler::run`] inside a `tokio::spawn`.
+///
+/// The per-destination token bucket lives on the dispatcher (see
+/// [`super::rpc_dispatcher::RpcDispatcher`]); the scheduler only drives
+/// claim → dispatch → revert and never second-guesses the dispatcher's
+/// throttling decisions.
 pub struct Scheduler {
     pool: PgPool,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<dyn PairDispatcher>,
     tick: Duration,
     chunk_size: i64,
-    per_destination_rps: u32,
     max_pair_attempts: i16,
     target_active_window: Duration,
 }
@@ -83,7 +50,6 @@ impl Scheduler {
     ///   when the DB trigger fires.
     /// - `chunk_size` — maximum pairs claimed per `(agent, campaign)` per
     ///   tick (see `repo::take_pending_batch`).
-    /// - `per_destination_rps` — per-destination-IP token bucket cap.
     /// - `max_pair_attempts` — sweep threshold for `pending` pairs the
     ///   scheduler gives up on (see `repo::expire_stale_attempts`).
     /// - `target_active_window` — agents with `last_seen_at` newer than
@@ -95,7 +61,6 @@ impl Scheduler {
         dispatcher: Arc<dyn PairDispatcher>,
         tick_ms: u32,
         chunk_size: i64,
-        per_destination_rps: u32,
         max_pair_attempts: i16,
         target_active_window: Duration,
     ) -> Self {
@@ -105,7 +70,6 @@ impl Scheduler {
             dispatcher,
             tick: Duration::from_millis(tick_ms as u64),
             chunk_size,
-            per_destination_rps,
             max_pair_attempts,
             target_active_window,
         }
@@ -125,7 +89,6 @@ impl Scheduler {
         info!(
             tick_ms = self.tick.as_millis() as u64,
             chunk_size = self.chunk_size,
-            rps = self.per_destination_rps,
             "campaign scheduler starting"
         );
 
@@ -151,10 +114,6 @@ impl Scheduler {
             self.tick_only_loop(cancel).await;
             return;
         }
-
-        let buckets: Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>> = Cache::builder()
-            .time_to_idle(Duration::from_secs(60))
-            .build();
 
         // Round-robin cursor; preserved across ticks so successive ticks
         // interleave batches between active campaigns.
@@ -184,38 +143,31 @@ impl Scheduler {
                 _ = sleep(self.tick) => {}
             }
 
-            if let Err(e) = self.tick_once(&buckets, &mut cursor).await {
+            if let Err(e) = self.tick_once(&mut cursor).await {
                 warn!(error = %e, "scheduler: tick failed");
             }
         }
     }
 
     async fn tick_only_loop(&self, cancel: CancellationToken) {
-        let buckets: Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>> = Cache::builder()
-            .time_to_idle(Duration::from_secs(60))
-            .build();
         let mut cursor: usize = 0;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = sleep(self.tick) => {}
             }
-            if let Err(e) = self.tick_once(&buckets, &mut cursor).await {
+            if let Err(e) = self.tick_once(&mut cursor).await {
                 warn!(error = %e, "scheduler (tick-only): tick failed");
             }
         }
     }
 
-    async fn tick_once(
-        &self,
-        buckets: &Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>>,
-        cursor: &mut usize,
-    ) -> Result<(), RepoError> {
+    async fn tick_once(&self, cursor: &mut usize) -> Result<(), RepoError> {
         // Stopwatch around the dispatch body. We record the histogram
         // whether the inner loop returns Ok or Err so failed ticks still
         // show up in SLOs; then sample the gauges once per tick.
         let started = Instant::now();
-        let result = self.tick_once_inner(buckets, cursor).await;
+        let result = self.tick_once_inner(cursor).await;
         metrics::scheduler_tick_seconds().record(started.elapsed().as_secs_f64());
         self.sample_metrics().await;
         result
@@ -259,7 +211,6 @@ impl Scheduler {
 
     async fn tick_once_inner(
         &self,
-        buckets: &Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>>,
         cursor: &mut usize,
     ) -> Result<(), RepoError> {
         // Reload active campaigns (started_at ASC for stable rotation).
@@ -287,7 +238,7 @@ impl Scheduler {
             for step in 1..=len {
                 let c_idx = (*cursor + step) % len;
                 let c_id = active_campaigns[c_idx];
-                let dispatched = self.dispatch_for_campaign(c_id, &agent.id, buckets).await?;
+                let dispatched = self.dispatch_for_campaign(c_id, &agent.id).await?;
                 if dispatched {
                     *cursor = c_idx;
                     break;
@@ -333,7 +284,6 @@ impl Scheduler {
         &self,
         campaign_id: Uuid,
         agent_id: &str,
-        buckets: &Cache<IpAddr, Arc<tokio::sync::Mutex<Bucket>>>,
     ) -> Result<bool, RepoError> {
         // Read campaign row for the knobs (probe_count etc.) without pair join.
         let camp = match repo::get_raw_for_scheduler(&self.pool, campaign_id).await? {
@@ -363,79 +313,62 @@ impl Scheduler {
             }
         }
 
-        // Per-destination rate limit. Pairs that can't draw a token are
-        // queued for a single batched revert.
+        // Per-destination rate limiting is the dispatcher's responsibility
+        // (see `rpc_dispatcher.rs`); the scheduler only claims pairs and
+        // reverts what the dispatcher refuses.
         //
         // Atomicity gap: `take_pending_batch` commits the
         // `pending → dispatched` flip in its own transaction, so a
-        // process panic/kill between that commit and the batched revert
-        // below leaves the rate-limited subset stranded in `dispatched`.
-        // No automated sweep currently reclaims `dispatched` rows —
-        // `expire_stale_attempts` only targets `pending` rows with a
-        // high attempt_count. Recovery surfaces for a stranded row:
-        // operator `force_pair`, `apply_edit{force_measurement=true}`
-        // (which resets every non-pending pair including `dispatched`),
-        // or a process restart followed by adding a `dispatched`-TTL
-        // sweeper. Tick panics are logged, so the failure is observable.
-        let mut allowed: Vec<PendingPair> = Vec::with_capacity(batch.len());
-        let mut rate_limited: Vec<i64> = Vec::new();
-        for p in batch {
-            let dest: IpAddr = match p.destination_ip {
-                sqlx::types::ipnetwork::IpNetwork::V4(n) => IpAddr::V4(n.ip()),
-                sqlx::types::ipnetwork::IpNetwork::V6(n) => IpAddr::V6(n.ip()),
-            };
-            let bucket = buckets
-                .get_with(dest, async {
-                    Arc::new(tokio::sync::Mutex::new(Bucket::new(
-                        self.per_destination_rps,
-                    )))
-                })
-                .await;
-            let drawn = {
-                let mut guard = bucket.lock().await;
-                guard.try_take(1)
-            };
-            if drawn == 1 {
-                allowed.push(PendingPair {
+        // process panic/kill between that commit and the revert below
+        // leaves the refused subset stranded in `dispatched`.
+        // `expire_stale_attempts` only targets `pending` rows, so
+        // recovery surfaces are: operator `force_pair`,
+        // `apply_edit{force_measurement=true}` (which resets every
+        // non-pending pair including `dispatched`), or a process
+        // restart followed by adding a `dispatched`-TTL sweeper. Tick
+        // panics are logged, so the failure is observable.
+        let allowed: Vec<PendingPair> = batch
+            .into_iter()
+            .map(|p| {
+                let dest = match p.destination_ip {
+                    sqlx::types::ipnetwork::IpNetwork::V4(n) => std::net::IpAddr::V4(n.ip()),
+                    sqlx::types::ipnetwork::IpNetwork::V6(n) => std::net::IpAddr::V6(n.ip()),
+                };
+                PendingPair {
                     pair_id: p.id,
                     campaign_id,
-                    source_agent_id: p.source_agent_id.clone(),
+                    source_agent_id: p.source_agent_id,
                     destination_ip: dest,
                     probe_count: camp.probe_count,
                     timeout_ms: camp.timeout_ms,
                     probe_stagger_ms: camp.probe_stagger_ms,
                     force_measurement: camp.force_measurement,
                     protocol: camp.protocol,
-                });
-            } else {
-                rate_limited.push(p.id);
-            }
-        }
-        if !rate_limited.is_empty() {
-            // `take_pending_batch` flipped these to dispatched and bumped
-            // attempt_count; revert both in a single statement.
+                }
+            })
+            .collect();
+
+        let outcome = self.dispatcher.dispatch(agent_id, allowed).await;
+
+        // Rate-limited pairs: revert AND decrement attempt_count so a
+        // throttling decision made before the RPC does not burn retry
+        // budget. Without this, a high-traffic destination would exhaust
+        // its per-pair attempt budget after `max_pair_attempts`
+        // consecutive rate-limited ticks and get expired.
+        if !outcome.rate_limited_ids.is_empty() {
             sqlx::query!(
                 "UPDATE campaign_pairs
                     SET resolution_state = 'pending',
                         dispatched_at    = NULL,
                         attempt_count    = GREATEST(0, attempt_count - 1)
                   WHERE id = ANY($1::bigint[])",
-                &rate_limited as &[i64],
+                &outcome.rate_limited_ids as &[i64],
             )
             .execute(&self.pool)
             .await
             .map_err(RepoError::from)?;
         }
 
-        if allowed.is_empty() {
-            // We did useful work (reuse settlements or rate-limit backoff).
-            // Report `true` so the caller anchors the cursor on this
-            // campaign — subsequent agents in this tick (and the next
-            // tick) rotate past it via `(cursor + step) % len`.
-            return Ok(true);
-        }
-
-        let outcome = self.dispatcher.dispatch(agent_id, allowed).await;
         if !outcome.rejected_ids.is_empty() {
             // Dispatcher refused these — revert to `pending` so a
             // subsequent tick can retry. `take_pending_batch` already

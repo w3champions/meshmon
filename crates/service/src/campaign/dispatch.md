@@ -24,9 +24,12 @@ clone (interior state is `Arc`-owned) and holds references to:
 3. **Reserve per-destination tokens.** A process-wide
    `moka::future::Cache<IpAddr, Arc<Mutex<Bucket>>>` holds a leaky
    bucket per destination. `reserve_tokens` draws one token per pair;
-   pairs that lose the draw are added to `rate_limited` and surface
-   as `rejected_ids`. If every pair is rate-limited the batch returns
-   early with `skipped_reason = Some("rate_limited")`.
+   pairs that lose the draw land in `DispatchOutcome::rate_limited_ids`
+   (not `rejected_ids`) so the scheduler reverts them to `pending` AND
+   decrements `attempt_count` — a throttling decision made before the
+   RPC opens should not burn retry budget. If every pair is
+   rate-limited the batch returns early with
+   `skipped_reason = Some("rate_limited")`.
 4. **Build `RunMeasurementBatchRequest`.** Every pair in a batch
    shares the same campaign (scheduler invariant:
    `take_pending_batch` is per-`(campaign, agent)`), so per-campaign
@@ -57,7 +60,8 @@ clone (interior state is `Arc`-owned) and holds references to:
 | Field | Population |
 |---|---|
 | `dispatched` | Count of pairs whose results streamed back AND whose writer settle returned `Settled`. |
-| `rejected_ids` | Pairs blocked by the per-destination bucket, pairs whose response never arrived, pairs whose stream errored mid-flight, pairs whose writer call returned `MalformedNoOutcome`, pairs whose writer call returned `Err`. |
+| `rejected_ids` | Pairs whose response never arrived, pairs whose stream errored mid-flight, pairs whose writer call returned `MalformedNoOutcome`, pairs whose writer call returned `Err`. Scheduler reverts these to `pending` **without** decrementing `attempt_count`. |
+| `rate_limited_ids` | Pairs that lost the per-destination bucket draw. Scheduler reverts to `pending` AND decrements `attempt_count`. |
 | `skipped_reason` | Set only when the batch failed before any pair streamed: `"agent_unreachable"`, `"rpc_error:<code>"`, `"rate_limited"` (bucket consumed every pair), `"semaphore_closed"`. |
 
 Agent-reported failures (`MeasurementFailure` — `NO_ROUTE`, `TIMEOUT`,
