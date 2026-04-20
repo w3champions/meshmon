@@ -287,13 +287,34 @@ impl Scheduler {
             }
         }
 
-        // After a batch settles, complete any campaigns whose pairs are
-        // all terminal.
+        // Skip pairs for source agents that are not currently active.
+        // Without this sweep, a campaign targeting an offline agent
+        // would stay in `running` forever because `maybe_complete` only
+        // fires when every pair is terminal. The registry's activity
+        // window is on the order of minutes, so by the time an agent
+        // is missing from `active_agents` it has been silent long
+        // enough to declare its pairs stuck.
+        let active_agent_ids: Vec<String> = active_agents.iter().map(|a| a.id.clone()).collect();
+        let skipped_offline = repo::skip_pending_for_inactive_sources(
+            &self.pool,
+            &active_agent_ids,
+            &active_campaigns,
+        )
+        .await?;
+        if skipped_offline > 0 {
+            debug!(
+                skipped = skipped_offline,
+                "scheduler: skipped pairs for offline source agents"
+            );
+        }
+
+        // After a batch settles (or agent-offline sweep skips), complete
+        // any campaigns whose pairs are all terminal.
         for c_id in active_campaigns {
             let _ = repo::maybe_complete(&self.pool, c_id).await?;
         }
 
-        // Safety-net sweep.
+        // Safety-net sweep for max-attempts-exceeded pairs.
         let _ = repo::expire_stale_attempts(&self.pool, self.max_pair_attempts).await?;
 
         Ok(())

@@ -880,6 +880,46 @@ pub async fn expire_stale_attempts(pool: &PgPool, max_attempts: i16) -> Result<u
     Ok(affected)
 }
 
+/// Skip `pending` pairs whose `source_agent_id` is not in the given
+/// active-agent set, scoped to the supplied campaigns. Without this
+/// sweep, a campaign targeting an offline agent would keep those
+/// pairs in `pending` forever — the scheduler only iterates active
+/// agents, and `expire_stale_attempts` only bumps pairs that actually
+/// get claimed for dispatch.
+///
+/// The agent-activity window (see `CampaignsSection` /
+/// `registry_active_window`) is already on the order of minutes, so
+/// any agent handed to this sweep has already been silent long enough
+/// to be considered truly offline; the sweep is not aggressive
+/// relative to that window.
+///
+/// `last_error` is set to `agent_offline` so operator tooling can
+/// distinguish this case from `max_attempts_exceeded`.
+pub async fn skip_pending_for_inactive_sources(
+    pool: &PgPool,
+    active_agent_ids: &[String],
+    campaign_ids: &[Uuid],
+) -> Result<u64, RepoError> {
+    if campaign_ids.is_empty() {
+        return Ok(0);
+    }
+    let affected = sqlx::query!(
+        "UPDATE campaign_pairs
+            SET resolution_state = 'skipped',
+                last_error       = 'agent_offline',
+                settled_at       = now()
+          WHERE resolution_state = 'pending'
+            AND campaign_id = ANY($1::uuid[])
+            AND source_agent_id <> ALL($2::text[])",
+        campaign_ids,
+        active_agent_ids as &[String],
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected)
+}
+
 /// Summary statistics for scheduler self-metrics.
 ///
 /// Returns counts per campaign state, counts per pair resolution state,

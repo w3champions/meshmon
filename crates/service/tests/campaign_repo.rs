@@ -696,6 +696,56 @@ async fn force_pair_preserves_started_at_on_running_campaign() {
 }
 
 #[tokio::test]
+async fn skip_pending_for_inactive_sources_targets_offline_agents_only() {
+    // A campaign targeting (agent-a, agent-b). Feed the sweep only
+    // agent-a as active — agent-b's pairs must flip to skipped with
+    // `last_error='agent_offline'`, agent-a's must stay pending.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-offline-sweep"))
+        .await
+        .unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+
+    let affected =
+        repo::skip_pending_for_inactive_sources(&pool, &["agent-a".to_string()], &[row.id])
+            .await
+            .unwrap();
+    assert!(affected >= 1, "at least one agent-b pair skipped");
+
+    let a_pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = 'agent-a' AND resolution_state = 'pending'",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(a_pending >= 1, "agent-a pairs stay pending");
+
+    let b_skipped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = 'agent-b' \
+           AND resolution_state = 'skipped' AND last_error = 'agent_offline'",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        b_skipped >= 1,
+        "agent-b pairs flip to skipped/agent_offline"
+    );
+
+    // Empty campaign_ids is a no-op.
+    let none = repo::skip_pending_for_inactive_sources(&pool, &["agent-a".into()], &[])
+        .await
+        .unwrap();
+    assert_eq!(none, 0);
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn apply_edit_force_measurement_resets_dispatched_pairs() {
     // `stop()` preserves `dispatched` pairs — they may still settle
     // from an in-flight agent call. When a stopped campaign is edited
