@@ -163,19 +163,22 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
             />
           </div>
 
-          {outcome.rejected.length > 0 && (
-            <ul aria-label="Invalid tokens" className="flex flex-wrap gap-1.5 list-none p-0">
-              {outcome.rejected.map((r) => (
-                <li key={`${r.token}::${r.reason}`}>
-                  <RejectedChip token={r.token} reason={r.reason} />
-                </li>
-              ))}
-            </ul>
-          )}
+          {/* Fixed-height slot for rejected tokens — reserved even when empty so the
+              table below doesn't jump as the user types. */}
+          <div className="min-h-8">
+            {outcome.rejected.length > 0 && (
+              <ul aria-label="Invalid tokens" className="flex flex-wrap gap-1.5 list-none p-0">
+                {outcome.rejected.map((r) => (
+                  <li key={`${r.token}::${r.reason}`}>
+                    <RejectedChip token={r.token} reason={r.reason} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
           {!hasPosted && outcome.accepted.length > 0 && (
             <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
-              <p className="px-3 pt-2 pb-1 text-sm font-medium text-muted-foreground">Parsed IPs</p>
               <Table aria-label="Parsed IPs">
                 <TableHeader>
                   <TableRow>
@@ -201,7 +204,6 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
 
           {hasPosted && stagingRows.length > 0 && (
             <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
-              <p className="px-3 pt-2 pb-1 text-sm font-medium text-muted-foreground">Staged IPs</p>
               <Table aria-label="Staged IPs">
                 <TableHeader>
                   <TableRow>
