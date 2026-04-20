@@ -17,6 +17,7 @@ import { ReenrichConfirm } from "@/components/catalogue/ReenrichConfirm";
 import { FilterRail, type FilterValue } from "@/components/filter/FilterRail";
 import { Button } from "@/components/ui/button";
 import { type GeoShape, pointInShapes } from "@/lib/geo";
+import { normalizeIpPrefix } from "@/lib/ip-prefix";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,12 @@ function buildQuery(filter: FilterValue): CatalogueListQuery {
   if (filter.countryCodes.length > 0) q.country_code = filter.countryCodes;
   if (filter.asns.length > 0) q.asn = filter.asns;
   if (filter.networks.length > 0) q.network = filter.networks;
-  if (filter.ipPrefix) q.ip_prefix = filter.ipPrefix;
+  if (filter.ipPrefix) {
+    // Backend accepts only valid CIDR; expand bare dotted prefixes so natural
+    // operator input (`10.0.0.`) doesn't silently match everything.
+    const normalized = normalizeIpPrefix(filter.ipPrefix);
+    if (normalized) q.ip_prefix = normalized;
+  }
   if (filter.nameSearch) q.name = filter.nameSearch;
   return q;
 }
