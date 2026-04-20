@@ -327,20 +327,30 @@ describe("Catalogue page — row click opens drawer", () => {
   });
 });
 
-describe("Catalogue page — Re-enrich all button", () => {
-  test("Re-enrich all button is disabled when no rows are loaded", async () => {
+describe("Catalogue page — Re-enrich button", () => {
+  test("Re-enrich button is disabled when no rows are loaded", async () => {
     renderCatalogue();
     await screen.findByRole("complementary", { name: /catalogue filters/i });
 
-    const btn = screen.getByRole("button", { name: /re-enrich all/i });
+    const btn = screen.getByRole("button", { name: /re-enrich/i });
     expect(btn).toBeDisabled();
   });
 
-  test("Re-enrich all button reflects the server total (not the loaded subset)", async () => {
+  test("label reads 'Re-enrich loaded (N of M)' when pagination isn't exhausted", async () => {
+    // Loaded subset = 1, server total = 327 — the button promises the
+    // honest action: fire against the loaded rows only.
     setupHookMocks({ infinite: { entries: [ENTRY_A], total: 327 } });
     renderCatalogue();
 
-    const btn = await screen.findByRole("button", { name: /re-enrich all \(327\)/i });
+    const btn = await screen.findByRole("button", { name: /re-enrich loaded \(1 of 327\)/i });
+    expect(btn).toBeEnabled();
+  });
+
+  test("label reads 'Re-enrich all (M)' when every row is loaded", async () => {
+    setupHookMocks({ infinite: { entries: [ENTRY_A], total: 1 } });
+    renderCatalogue();
+
+    const btn = await screen.findByRole("button", { name: /re-enrich all \(1\)/i });
     expect(btn).toBeEnabled();
   });
 });

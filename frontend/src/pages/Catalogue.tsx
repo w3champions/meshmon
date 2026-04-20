@@ -310,13 +310,9 @@ export default function Catalogue() {
     [reenrichOneMutation],
   );
 
-  // Bulk re-enrich fires against currently-loaded rows only. With
-  // server-driven paging the full filtered set may span many pages;
-  // walking it from the client just to re-enrich would add round trips
-  // without improving the operator outcome (the re-enrich runs async
-  // server-side anyway). The counter below reflects `total` so the
-  // operator sees the filter's true size; the action itself kicks off
-  // the re-enrich queue for what they have on hand.
+  // Bulk re-enrich fires against currently-loaded rows only; the button
+  // label below reflects the loaded subset whenever pagination isn't
+  // exhausted so the action matches what the operator sees.
   const handleReenrichMany = useCallback((): void => {
     const ids = rows.map((e) => e.id);
     reenrichManyMutation.mutate({ ids });
@@ -383,7 +379,9 @@ export default function Catalogue() {
               disabled={rows.length === 0}
               onClick={() => setReenrichConfirmOpen(true)}
             >
-              Re-enrich all ({total})
+              {rows.length < total
+                ? `Re-enrich loaded (${rows.length} of ${total})`
+                : `Re-enrich all (${total})`}
             </Button>
           </div>
         </header>
