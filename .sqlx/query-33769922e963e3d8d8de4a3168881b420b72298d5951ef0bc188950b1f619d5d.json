@@ -1,0 +1,196 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_pct, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 2.0::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_pct, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "notes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "state: CampaignState",
+        "type_info": {
+          "Custom": {
+            "name": "campaign_state",
+            "kind": {
+              "Enum": [
+                "draft",
+                "running",
+                "completed",
+                "evaluated",
+                "stopped"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "protocol: ProbeProtocol",
+        "type_info": {
+          "Custom": {
+            "name": "probe_protocol",
+            "kind": {
+              "Enum": [
+                "icmp",
+                "tcp",
+                "udp"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "probe_count",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 6,
+        "name": "probe_count_detail",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 7,
+        "name": "timeout_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "probe_stagger_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "force_measurement",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "loss_threshold_pct",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 11,
+        "name": "stddev_weight",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 12,
+        "name": "evaluation_mode: EvaluationMode",
+        "type_info": {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "stopped_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "evaluated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "probe_protocol",
+            "kind": {
+              "Enum": [
+                "icmp",
+                "tcp",
+                "udp"
+              ]
+            }
+          }
+        },
+        "Int2",
+        "Int2",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Float4",
+        "Float4",
+        {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
+            }
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "33769922e963e3d8d8de4a3168881b420b72298d5951ef0bc188950b1f619d5d"
+}

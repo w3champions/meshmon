@@ -274,6 +274,725 @@
         }
       }
     },
+    "/api/campaigns": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns` — filtered list of campaigns.",
+        "description": "`limit` is clamped server-side to 500 rows; list responses do not\npopulate `pair_counts` (see [`get_one`] for the per-state counts).",
+        "operationId": "campaigns_list",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional substring match on `title` / `notes`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Optional state filter.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CampaignState"
+            }
+          },
+          {
+            "name": "created_by",
+            "in": "query",
+            "description": "Optional exact-match filter on `created_by`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size. Clamped to `1..=500` internally; default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campaign list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CampaignDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns` — create a new campaign in `draft`.",
+        "description": "Rejects blank titles and malformed destination IP strings up front\nso a client mistake surfaces as 400 rather than leaking a Postgres\ntype error as 500. The `created_by` field is filled from the active\nsession principal; anonymous callers get 401.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCampaignRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created campaign",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns/{id}` — single-row fetch + pair-state counts.",
+        "description": "Runs two queries (campaign fetch + `COUNT(*) GROUP BY\nresolution_state`) and joins the results handler-side. A failure\non the counts query degrades gracefully: the campaign body is\nstill returned with an empty `pair_counts` list and the error is\nlogged — the campaign shell is more valuable to the UI than a 500.",
+        "operationId": "campaigns_get_one",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campaign + pair counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`DELETE /api/campaigns/{id}` — idempotent removal.",
+        "description": "Returns 204 whether or not the row existed (the underlying\n`DELETE ... WHERE id = $1` is a no-op on an absent id).",
+        "operationId": "campaigns_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`PATCH /api/campaigns/{id}` — partial update.",
+        "description": "Absent fields leave the underlying column untouched; explicit\n`null` values are currently treated as \"no change\" (see\n[`PatchCampaignRequest`]). Campaign lifecycle state is not\neditable through this surface — use `/start` / `/stop` / `/edit`.",
+        "operationId": "campaigns_patch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchCampaignRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated campaign",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/edit": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns/{id}/edit` — apply an edit delta.",
+        "description": "Adds/removes pairs on a finished campaign (`completed`, `stopped`,\nor `evaluated`) and transitions it back to `running`. When\n`force_measurement` is `Some(true)`, the sticky flag is flipped and\nevery non-delta pair is reset so the whole campaign re-runs.",
+        "operationId": "edit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditCampaignRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated campaign",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Illegal state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/force_pair": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns/{id}/force_pair` — reset a single pair and\nre-enter `running`.",
+        "description": "404 when the `(source_agent_id, destination_ip)` pair is unknown for\nthe campaign; 400 if the destination IP fails to parse.",
+        "operationId": "force_pair",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForcePairRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Pair reset + campaign running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Pair not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/pairs": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns/{id}/pairs` — paginated pair list.",
+        "description": "Empty `state` filter expands to all six pair-resolution states.\n`limit` is clamped to 5 000 rows handler-side; the repo clamps\nfurther to its own upper bound.",
+        "operationId": "pairs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Comma-separated list of pair resolution states.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/PairResolutionState"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size. Clamped to `1..=500` internally; default 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pair list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PairDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/preview-dispatch-count": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns/{id}/preview-dispatch-count` — dispatch estimate.",
+        "description": "Counts the campaign's actual `campaign_pairs` rows, splitting them\nbetween ones resolvable from the 24 h reuse window and ones the\nscheduler would dispatch fresh. Never writes.",
+        "operationId": "preview_dispatch_count",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dispatch preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewDispatchResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/start": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns/{id}/start` — transition `draft` → `running`.",
+        "description": "Returns 409 (`illegal_state_transition`) if the campaign is not in\n`draft`. The scheduler picks up the newly-running campaign via its\n`LISTEN` loop.",
+        "operationId": "start",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Illegal state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/stop": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns/{id}/stop` — transition `running` → `stopped`.",
+        "description": "Pending pairs are flipped to `skipped` in the same transaction;\nin-flight `dispatched` pairs settle as-is via the campaign result\nwriter.",
+        "operationId": "stop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Illegal state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalogue": {
       "get": {
         "tags": [
@@ -1429,6 +2148,168 @@
           }
         }
       },
+      "CampaignDto": {
+        "type": "object",
+        "description": "Wire shape for a single campaign.\n\n`pair_counts` is populated only by the single-row GET endpoint; list\nresponses leave it empty to avoid an N+1 COUNT fan-out.",
+        "required": [
+          "id",
+          "title",
+          "notes",
+          "state",
+          "protocol",
+          "probe_count",
+          "probe_count_detail",
+          "timeout_ms",
+          "probe_stagger_ms",
+          "force_measurement",
+          "loss_threshold_pct",
+          "stddev_weight",
+          "evaluation_mode",
+          "created_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When all pairs reached a terminal state, if ever."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Row creation timestamp."
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Session principal that created the row; audit-only."
+          },
+          "evaluated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the evaluation pass last produced results, if ever."
+          },
+          "evaluation_mode": {
+            "$ref": "#/components/schemas/EvaluationMode",
+            "description": "Evaluation strategy."
+          },
+          "force_measurement": {
+            "type": "boolean",
+            "description": "When `true`, the scheduler forces a fresh measurement instead of\nreusing a matching row from the 24 h window."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Primary key."
+          },
+          "loss_threshold_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Loss-rate threshold (percent) used by the evaluator."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Free-form operator notes."
+          },
+          "pair_counts": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": false,
+              "prefixItems": [
+                {
+                  "type": "string",
+                  "description": "Terminal or in-progress state of a single `(source_agent_id,\ndestination_ip)` pair within a campaign.",
+                  "enum": [
+                    "pending",
+                    "dispatched",
+                    "reused",
+                    "succeeded",
+                    "unreachable",
+                    "skipped"
+                  ]
+                },
+                {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              ]
+            },
+            "description": "Per-state pair counts. Empty on list responses; populated on single-row GET."
+          },
+          "probe_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Probes per dispatched measurement (campaign rounds)."
+          },
+          "probe_count_detail": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Probes per detail measurement (UI re-runs)."
+          },
+          "probe_stagger_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Inter-probe stagger in milliseconds."
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/ProbeProtocol",
+            "description": "Probe protocol shared by every pair."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the campaign most recently transitioned to `running`."
+          },
+          "state": {
+            "$ref": "#/components/schemas/CampaignState",
+            "description": "Lifecycle state."
+          },
+          "stddev_weight": {
+            "type": "number",
+            "format": "float",
+            "description": "Weight applied to RTT stddev by the evaluator."
+          },
+          "stopped_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the operator last stopped the campaign, if ever."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Per-probe timeout in milliseconds."
+          },
+          "title": {
+            "type": "string",
+            "description": "Operator-facing title."
+          }
+        }
+      },
+      "CampaignState": {
+        "type": "string",
+        "description": "Lifecycle state of a measurement campaign. Mirrors the\n`campaign_state` Postgres enum.",
+        "enum": [
+          "draft",
+          "running",
+          "completed",
+          "evaluated",
+          "stopped"
+        ]
+      },
       "CatalogueCoordinates": {
         "type": "object",
         "description": "Latitude / longitude pair sourced from the IP catalogue join.\n\nPresent only when both coordinates are known; otherwise the parent\n`AgentSummary.catalogue_coordinates` is `None`.",
@@ -1732,6 +2613,153 @@
           }
         }
       },
+      "CreateCampaignRequest": {
+        "type": "object",
+        "description": "POST body for `/api/campaigns`.",
+        "required": [
+          "title",
+          "protocol"
+        ],
+        "properties": {
+          "destination_ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destination IPs as strings (e.g. `\"10.0.0.1\"`, `\"2001:db8::1\"`)."
+          },
+          "evaluation_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EvaluationMode",
+                "description": "Optional evaluation strategy."
+              }
+            ]
+          },
+          "force_measurement": {
+            "type": "boolean",
+            "description": "When `true`, the scheduler ignores the 24 h reuse cache."
+          },
+          "loss_threshold_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Optional loss-rate threshold for the evaluator."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional free-form notes."
+          },
+          "probe_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional probe-count override (campaign rounds)."
+          },
+          "probe_count_detail": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional detail-probe count override (UI re-runs)."
+          },
+          "probe_stagger_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional inter-probe stagger (ms)."
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/ProbeProtocol",
+            "description": "Probe protocol shared by every pair."
+          },
+          "source_agent_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source agent ids that will probe."
+          },
+          "stddev_weight": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Optional RTT-stddev weight for the evaluator."
+          },
+          "timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional per-probe timeout (ms)."
+          },
+          "title": {
+            "type": "string",
+            "description": "Operator-facing title. Rejected when blank."
+          }
+        }
+      },
+      "EditCampaignRequest": {
+        "type": "object",
+        "description": "Body for `POST /api/campaigns/{id}/edit`.",
+        "properties": {
+          "add_pairs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EditPairDto"
+            },
+            "description": "Pairs to add (or reset to `pending` if they already exist)."
+          },
+          "force_measurement": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "When `Some(true)`, flips the sticky `force_measurement` flag and\nresets every non-delta pair so the whole campaign re-runs."
+          },
+          "remove_pairs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EditPairDto"
+            },
+            "description": "Pairs to remove entirely."
+          }
+        }
+      },
+      "EditPairDto": {
+        "type": "object",
+        "description": "A single `(source_agent, destination_ip)` pair identifier used by\nthe edit and force endpoints. `destination_ip` is a bare IP string.",
+        "required": [
+          "source_agent_id",
+          "destination_ip"
+        ],
+        "properties": {
+          "destination_ip": {
+            "type": "string",
+            "description": "Destination IP as a bare host string."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent id."
+          }
+        }
+      },
       "EnrichmentStatus": {
         "type": "string",
         "description": "Current status of the enrichment pipeline for a row.",
@@ -1743,16 +2771,24 @@
       },
       "ErrorEnvelope": {
         "type": "object",
-        "description": "Error envelope used by every non-2xx catalogue response.\n\nThe single `error` field carries a stable, machine-parseable\nsnake_case code (e.g. `not_found`, `database_error`). Matches the\ngateway-level JSON 404 emitted by `crate::http::backend_path_404`\nso clients can use one shape for every `/api` error.",
+        "description": "JSON error body returned by every non-2xx `/api/campaigns/*` response.",
         "required": [
           "error"
         ],
         "properties": {
           "error": {
             "type": "string",
-            "description": "Stable error code. Clients should match on this string, not on\nthe HTTP status alone."
+            "description": "Snake-case error code; stable across versions."
           }
         }
+      },
+      "EvaluationMode": {
+        "type": "string",
+        "description": "Evaluation strategy for the campaign's result-aggregation pass\n(spec 04). Storage here; consumed by T48.",
+        "enum": [
+          "diversity",
+          "optimization"
+        ]
       },
       "FacetsResponse": {
         "type": "object",
@@ -1791,6 +2827,24 @@
               "$ref": "#/components/schemas/NetworkFacet"
             },
             "description": "Top 250 operator buckets, descending by count."
+          }
+        }
+      },
+      "ForcePairRequest": {
+        "type": "object",
+        "description": "Body for `POST /api/campaigns/{id}/force_pair`.",
+        "required": [
+          "source_agent_id",
+          "destination_ip"
+        ],
+        "properties": {
+          "destination_ip": {
+            "type": "string",
+            "description": "Destination IP of the pair to force."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent id of the pair to force."
           }
         }
       },
@@ -1968,6 +3022,15 @@
           }
         }
       },
+      "MeasurementKind": {
+        "type": "string",
+        "description": "Kind of measurement row stored in `measurements`. `campaign` is the\ndefault; T44 never writes anything else (T45/T48 do).",
+        "enum": [
+          "campaign",
+          "detail_ping",
+          "detail_mtr"
+        ]
+      },
       "NetworkFacet": {
         "type": "object",
         "description": "Per-network-operator occurrence count.",
@@ -1986,6 +3049,90 @@
             "description": "Network operator / ISP name."
           }
         }
+      },
+      "PairDto": {
+        "type": "object",
+        "description": "Wire shape for a single pair in `GET /api/campaigns/{id}/pairs`.",
+        "required": [
+          "id",
+          "campaign_id",
+          "source_agent_id",
+          "destination_ip",
+          "resolution_state",
+          "attempt_count"
+        ],
+        "properties": {
+          "attempt_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of dispatch attempts to date."
+          },
+          "campaign_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Owning campaign."
+          },
+          "destination_ip": {
+            "type": "string",
+            "description": "Destination IP as a bare host string."
+          },
+          "dispatched_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the scheduler dispatched the pair to an agent."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Primary key."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last error observed on this pair, if any."
+          },
+          "measurement_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "FK to the `measurements` row once dispatched or reused."
+          },
+          "resolution_state": {
+            "$ref": "#/components/schemas/PairResolutionState",
+            "description": "Current resolution state."
+          },
+          "settled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the pair reached a terminal state."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent (the prober)."
+          }
+        }
+      },
+      "PairResolutionState": {
+        "type": "string",
+        "description": "Terminal or in-progress state of a single `(source_agent_id,\ndestination_ip)` pair within a campaign.",
+        "enum": [
+          "pending",
+          "dispatched",
+          "reused",
+          "succeeded",
+          "unreachable",
+          "skipped"
+        ]
       },
       "PasteInvalid": {
         "type": "object",
@@ -2050,6 +3197,53 @@
               "$ref": "#/components/schemas/PasteInvalid"
             },
             "description": "Tokens rejected during parse."
+          }
+        }
+      },
+      "PatchCampaignRequest": {
+        "type": "object",
+        "description": "PATCH body for `/api/campaigns/{id}`.\n\nAbsent fields leave the existing column untouched. There is no\nrevert-to-auto surface here because campaigns only persist\noperator-authored data.",
+        "properties": {
+          "evaluation_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EvaluationMode",
+                "description": "Replacement evaluation strategy."
+              }
+            ]
+          },
+          "loss_threshold_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Replacement loss-rate threshold."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Replacement notes (when present)."
+          },
+          "stddev_weight": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Replacement RTT-stddev weight."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Replacement title (when present)."
           }
         }
       },
@@ -2278,6 +3472,41 @@
             "description": "Overall path loss fraction."
           }
         }
+      },
+      "PreviewDispatchResponse": {
+        "type": "object",
+        "description": "Response body for `POST /api/campaigns/preview`.",
+        "required": [
+          "total",
+          "reusable",
+          "fresh"
+        ],
+        "properties": {
+          "fresh": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Pairs the scheduler would dispatch fresh."
+          },
+          "reusable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Pairs resolvable from the 24 h reuse window."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total number of `(source, destination)` pairs that would be created."
+          }
+        }
+      },
+      "ProbeProtocol": {
+        "type": "string",
+        "description": "The probe protocol an individual pair uses.",
+        "enum": [
+          "icmp",
+          "tcp",
+          "udp"
+        ]
       },
       "RangeQuery": {
         "type": "object",

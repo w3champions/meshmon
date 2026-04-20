@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE measurement_campaigns\n            SET state = 'completed', completed_at = now()\n          WHERE id = $1\n            AND state = 'running'\n            AND NOT EXISTS (\n                SELECT 1 FROM campaign_pairs\n                 WHERE campaign_id = $1\n                   AND resolution_state IN ('pending','dispatched')\n            )\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c4830b46ce55d04bac337829f56d3c2c727c06001d3e1bbb933ed5dfd79fabbc"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM campaign_pairs\n              WHERE campaign_id = $1\n                AND source_agent_id = $2\n                AND destination_ip = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Inet"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d223698a99ba95efee8ca9f1476f4454d3eb5e636ee7f9a3ea5dfb7f526e13bc"
+}
