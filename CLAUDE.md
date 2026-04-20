@@ -115,6 +115,12 @@ Key patterns:
 - Boot-time constraint: `[enrichment.ipgeolocation] enabled = true`
   requires `acknowledged_tos = true`. The config loader aborts
   startup otherwise.
+- Campaign scheduler is a single tokio task. It subscribes to the
+  `campaign_state_changed` Postgres NOTIFY channel (see
+  `measurement_campaigns_notify` trigger) plus a periodic tick
+  (default 500 ms) and issues fair-RR batches across active campaigns
+  to a pluggable `PairDispatcher`. The NOTIFY channel name is a load-
+  bearing contract — keep trigger + listener in lockstep on rename.
 
 ## Alerting
 
