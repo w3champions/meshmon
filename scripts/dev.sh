@@ -97,17 +97,20 @@ grafana_url = "http://127.0.0.1:3000/grafana"
 
 [probing]
 udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
+EOF
 
-# Opt-in: enable ipgeolocation.io enrichment when the API key is exported in
-# the calling shell. If the env var is unset the section stays commented so
-# startup doesn't abort on the "enabled without api_key" guard. RDAP is
-# already on by default via the chain builder.
-${MESHMON_IPGEO_API_KEY:+[enrichment.ipgeolocation]
+# Opt-in: append the ipgeolocation.io block when the API key is exported in
+# the calling shell. Keeping it out of the main heredoc avoids parameter
+# expansion stripping the inner quotes on `api_key_env = "..."`.
+if [[ -n "${MESHMON_IPGEO_API_KEY:-}" ]]; then
+    cat >> "$DEPLOY_DIR/meshmon.toml" <<'EOF'
+
+[enrichment.ipgeolocation]
 enabled = true
 acknowledged_tos = true
 api_key_env = "MESHMON_IPGEO_API_KEY"
-}
 EOF
+fi
 
 echo "[dev.sh] starting infra via docker compose dev overlay"
 (cd "$DEPLOY_DIR" && docker compose \
