@@ -198,23 +198,79 @@ Components read per-entry data directly from the cache
 (`useQuery({ queryKey: ['catalogue','entry',id], enabled: false })`);
 they never open a second SSE connection.
 
-## Frontend — map-polygon filter
+## Catalogue list — keyset paging, sort, server-side filters
 
-Map-polygon filtering is a two-stage process:
+`GET /api/catalogue` is the list surface for the catalogue page and
+every downstream consumer (campaign composer, history picker).
 
-1. **Server pre-filter (bounding box).** When shapes are drawn, the
-   frontend computes the convex bounding box of all shapes and passes it
-   to `GET /api/catalogue` as `bbox=[minLat,minLon,maxLat,maxLon]`.
-   The server returns all rows whose coordinates fall inside the box.
+- **Keyset pagination.** Each response carries `entries`, `total`, and
+  `next_cursor`. `next_cursor` is an opaque base64-encoded JSON object
+  `{s, d, v, i}` (sort column, direction, last sort-value, last id) and
+  is `null` on the last page. Page size defaults to 100 and is
+  hard-clamped to 500. A malformed or type-mismatched cursor is
+  silently dropped and the request restarts from the first page — the
+  cursor is advisory, not authoritative.
+- **Single-column sort.** `sort` picks the column (`ip`, `display_name`,
+  `city`, `country_code`, `asn`, `network_operator`, `enrichment_status`,
+  `website`, `location` for the derived `has_coords` boolean, or
+  `created_at`); `sort_dir` is `asc` or `desc`. Default is
+  `created_at DESC`. Two invariants hold for every sort:
+  - `NULLS LAST` in both directions (nullable columns keep nulls after
+    every populated row regardless of direction).
+  - `id DESC` is always the cursor tiebreaker, so pages don't repeat or
+    skip rows when the sort column has duplicate values.
+- **All filters run server-side.** `country_code[]`, `asn[]`,
+  `network[]`, `city` (CSV), `ip_prefix`, `name`, and `shapes` (JSON
+  array of `Polygon` rings in `[lng, lat]` order) compose with AND; ASN
+  and country multi-selects compose with OR within the field. The
+  backend runs a SQL bbox pre-filter from the union of the shape rings
+  and a Rust `geo`-crate point-in-polygon pass on the returned page. No
+  filter is client-side any more, so `total` always reflects the true
+  filter size the operator sees.
+- **`total` is approximate under shape filters.** The count query
+  pre-filters by the shape union's bounding box but cannot subtract the
+  polygon miss without materialising the whole filtered set; rows that
+  land inside the bbox but outside every polygon are counted in
+  `total` while the page walk excludes them from `entries`. Clients
+  that need the exact shape-filtered count sum `entries.length` across
+  every page. `total` is exact for every shape-free filter
+  combination.
+- **Shape wire shape.** Clients serialise circles, rectangles, and
+  freeform polygons to the same `Polygon[]` wire type via
+  `shapesToPolygons(shapes)` in `frontend/src/lib/geo.ts` (circles
+  discretise to a 64-step polygon; rectangles convert to 4-vertex
+  polygons). Polygon rings are `[lng, lat]` pairs — GeoJSON
+  convention.
 
-2. **Client containment test.** The returned rows are filtered again
-   client-side using `pointInShapes` from `lib/geo.ts` (backed by
-   `@turf/boolean-point-in-polygon`). A row passes when its pin falls
-   inside *any* drawn shape (OR semantics). Rows without coordinates
-   are excluded from the map view but not from the table.
+## Catalogue map endpoint
 
-This two-stage approach keeps server load bounded (bounding-box index
-query) while keeping containment exact for non-rectangular shapes.
+`GET /api/catalogue/map` powers the map tab. The endpoint is
+viewport-scoped and shape-blind by design: operators need to draw
+polygons against the unfiltered fleet geography, and likewise the city
+filter narrows the table without distorting the map.
+
+- **Required params.** `bbox` is an array `[minLat, minLng, maxLat, maxLng]`; `zoom` is an integer. Missing or malformed values produce a 400.
+- **Text filters flow through.** `country_code[]`, `asn[]`, `network[]`,
+  `ip_prefix`, and `name` are honoured exactly as on the list endpoint.
+- **Shape-blind and city-blind.** `shapes` and `city` are not accepted
+  on the wire. The backend DTO omits them and the frontend does not
+  send them. Operators narrow the *table* with shapes and cities; the
+  *map* stays showing the catalogue's real geographic coverage.
+- **Adaptive response.** The response is a discriminated union keyed
+  on `kind`:
+  - `{ "kind": "detail", "rows": [...], "total": N }` when the
+    filtered viewport row count is at or below
+    `MAP_DETAIL_THRESHOLD` (2000). The client renders one pin per row.
+  - `{ "kind": "clusters", "buckets": [...], "total": N, "cell_size": D }`
+    otherwise. Each bucket carries a sample catalogue id, a `lat` /
+    `lng` centroid, a `count`, and its own `bbox` — the frontend
+    passes that bbox straight into a scoped
+    `useCatalogueListInfinite` when the operator opens the cluster
+    dialog.
+- **Cell size.** `cell_size_for_zoom(zoom)` bands zoom levels into six
+  steps: `0-2 → 10°`, `3-5 → 5°`, `6-8 → 1°`, `9-11 → 0.25°`,
+  `12-14 → 0.05°`, `15+ → 0.01°`. Zooms beyond 20 fall back to the
+  finest band.
 
 ## Agent Register hook
 
@@ -242,8 +298,18 @@ All under `/api/catalogue`, all session-authenticated.
 
 - `POST /api/catalogue` — operator paste; parses tokens, bulk-inserts
   accepted IPs, enqueues each new id for enrichment.
-- `GET /api/catalogue` — filtered list (country, ASN, network, name,
-  IP prefix, bounding box). Capped at 500 rows.
+- `GET /api/catalogue` — keyset-paginated filtered list. Query params:
+  `limit` (default 100, max 500), `after` (opaque cursor), `sort`,
+  `sort_dir`, `country_code[]`, `asn[]`, `network[]`, `city` (CSV),
+  `ip_prefix`, `name`, `shapes`. Response carries `entries`, `total`,
+  `next_cursor`. See the "Catalogue list" section above for the full
+  contract.
+- `GET /api/catalogue/map` — viewport-scoped adaptive response.
+  Required `bbox` + `zoom`; accepts the list endpoint's text filters
+  but not `shapes` or `city`. Returns either
+  `{kind: "detail", rows, total}` below the 2000-row viewport
+  threshold or `{kind: "clusters", buckets, total, cell_size}` above
+  it.
 - `GET /api/catalogue/{id}` — single row.
 - `PATCH /api/catalogue/{id}` — partial update with `revert_to_auto`
   support.

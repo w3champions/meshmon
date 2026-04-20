@@ -39,31 +39,67 @@ SSE events to flip the status badge without a refresh.
 
 ## Filtering
 
-The filter rail runs across the top of the catalogue view. Active
-filters compose with AND — a row must satisfy every set filter to
-appear. Within multi-select filters (Country, ASN) each selection is
-OR-combined.
+The filter rail runs across the top of the catalogue view. Every
+filter runs server-side, so the row counter always reflects the true
+filter size — including every row the current page hasn't loaded yet.
+Active filters compose with AND; multi-select values within a single
+filter compose with OR.
 
 | Filter | Behaviour |
 |---|---|
 | **Country** | Exact ISO country-code match; multi-select. |
 | **ASN** | Exact match; multi-select. |
 | **Network** | Substring match against the network-operator field. |
-| **City** | Substring match against the city field. |
+| **City** | Substring match against the city field; multi-select. |
 | **Name** | Full-text search over display name, city, country name, and network operator. |
 | **IP prefix** | Accepts any Postgres-parseable CIDR or bare IP. |
-| **Map polygon** | Client-side containment check: a row matches when its geo-pin falls inside any of the drawn shapes (OR across shapes). |
+| **Map polygon** | A row matches when its geo-pin falls inside any drawn shape (OR across shapes). The server pre-filters by the shapes' union bounding box, then runs an exact point-in-polygon pass per returned row. |
 
 Switching to **Map view** reveals the draw toolbar (rectangle, circle,
-freehand polygon). Each shape drawn adds to the active filter; the
-filter clears when you remove all shapes or click **Clear** in the
-filter rail. Shapes compose with OR — a pin only needs to be inside
-one shape to pass.
+freehand polygon). Each shape you draw narrows the *table* view; the
+filter clears when you remove every shape or click **Clear** in the
+filter rail.
 
-The server-side query uses the convex bounding box of all drawn shapes
-as a pre-filter; the exact per-shape containment test runs on the
-client against the returned rows. Entries with no coordinates are
-excluded from the map view but still appear in the table.
+The map view itself stays shape-blind and city-blind on purpose: the
+point of drawing shapes is to select *against* the catalogue's
+existing geography, which is hard to do if the map is already
+narrowed. Every other filter in the rail (country, ASN, network, IP
+prefix, name) flows through to the map query so pins and clusters
+reflect those choices.
+
+Entries with no coordinates never appear on the map — their rows
+still show up in the table.
+
+### Paging and sort
+
+The table uses keyset pagination. Each page holds up to 100 rows; the
+**Load more** control walks the server-provided cursor until the full
+result set has been fetched. Re-applying a filter or changing the
+sort resets the cursor chain and the table rewinds to the first page.
+
+Click any column header to sort by that column. Header clicks cycle
+**off → ascending → descending → off**; only one column can drive the
+sort at a time. Nullable columns place nulls last in both directions,
+so rows with populated values always sort together ahead of the
+`—` placeholders. The sort picks round-trip through the URL
+(`?sort=<col>&dir=<asc|desc>`), so refreshing or sharing the URL
+preserves the view.
+
+When a shape filter is active, the row-count badge renders with a
+"~" prefix: the server counts rows inside the shapes' bounding box,
+then excludes point-in-polygon misses per page. Without shape
+filters the count is exact.
+
+### Map clustering
+
+The map response adapts to the current viewport. Below 2000 rows the
+server returns individual pins; above it, pre-aggregated cluster
+bubbles sized by count. Clicking a cluster bubble opens a dialog
+listing every catalogue entry inside that cell — the dialog uses its
+own Load-more button to walk pages of 50 through the cursor chain.
+Zooming in tightens the cluster cell size automatically (1° at mid
+zoom, 0.05° once you're in on a city, 0.01° at street level), so
+clusters peel into pins as the viewport narrows.
 
 Filter facets (top countries, top ASNs, top cities, top networks) are
 served from a cached snapshot with a 30-second TTL. Immediately after
