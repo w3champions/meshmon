@@ -385,3 +385,92 @@ async fn stop_prevents_further_dispatch() {
     handle.await.unwrap();
     db.close().await;
 }
+
+#[tokio::test]
+async fn scheduler_reverts_rejected_pairs_to_pending() {
+    // A dispatcher that rejects every pair it receives. The scheduler
+    // must flip those pairs from `dispatched` back to `pending` so
+    // `expire_stale_attempts` can eventually skip them via
+    // `max_pair_attempts`. Without the revert, the campaign stays in
+    // `running` forever (codex iter-6 finding).
+    let db = common::own_container().await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+    seed_agents(&db.pool, &["agent-reject"]).await;
+
+    let row = repo::create(
+        &db.pool,
+        create_input(
+            "sched-reject",
+            "agent-reject",
+            vec![IpAddr::from_str("198.51.100.60").unwrap()],
+        ),
+    )
+    .await
+    .unwrap();
+    repo::start(&db.pool, row.id).await.unwrap();
+
+    struct RejectAll;
+    #[async_trait::async_trait]
+    impl PairDispatcher for RejectAll {
+        async fn dispatch(
+            &self,
+            _agent: &str,
+            batch: Vec<meshmon_service::campaign::dispatch::PendingPair>,
+        ) -> DispatchOutcome {
+            DispatchOutcome {
+                dispatched: 0,
+                rejected_ids: batch.iter().map(|p| p.pair_id).collect(),
+                skipped_reason: Some("test-rejects-all".into()),
+            }
+        }
+    }
+
+    let registry = Arc::new(AgentRegistry::new(
+        db.pool.clone(),
+        Duration::from_secs(60),
+        Duration::from_secs(300),
+    ));
+    registry.initial_load().await.unwrap();
+
+    let scheduler = Scheduler::new(
+        db.pool.clone(),
+        registry,
+        Arc::new(RejectAll),
+        /*tick_ms=*/ 80,
+        /*chunk_size=*/ 32,
+        /*per_destination_rps=*/ 10,
+        /*max_pair_attempts=*/ 3,
+        /*target_active_window=*/ Duration::from_secs(300),
+    );
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(scheduler.run(cancel.clone()));
+
+    // Poll up to 6 s. With 3 attempt budget and 80 ms tick, the pair
+    // gets claimed → rejected → pending three times, then skipped.
+    let mut final_state = None;
+    for _ in 0..120 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let row: (PairResolutionState, i16) = sqlx::query_as(
+            "SELECT resolution_state, attempt_count FROM campaign_pairs \
+              WHERE campaign_id = $1 LIMIT 1",
+        )
+        .bind(row.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if row.0 == PairResolutionState::Skipped {
+            final_state = Some(row);
+            break;
+        }
+    }
+    let (state, attempts) = final_state.expect("pair did not reach skipped within 6 s");
+    assert_eq!(state, PairResolutionState::Skipped);
+    assert!(
+        attempts >= 3,
+        "attempt_count must reach the max threshold; got {attempts}"
+    );
+
+    cancel.cancel();
+    handle.await.unwrap();
+    db.close().await;
+}

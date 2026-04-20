@@ -427,7 +427,30 @@ impl Scheduler {
             return Ok(true);
         }
 
-        let _ = self.dispatcher.dispatch(agent_id, allowed).await;
+        let outcome = self.dispatcher.dispatch(agent_id, allowed).await;
+        if !outcome.rejected_ids.is_empty() {
+            // Dispatcher refused these — revert to `pending` so a
+            // subsequent tick can retry. `take_pending_batch` already
+            // bumped `attempt_count`, so the retry budget counts down
+            // naturally; `expire_stale_attempts` eventually skips any
+            // pair the dispatcher keeps rejecting.
+            sqlx::query!(
+                "UPDATE campaign_pairs
+                    SET resolution_state = 'pending',
+                        dispatched_at    = NULL
+                  WHERE id = ANY($1::bigint[])",
+                &outcome.rejected_ids as &[i64],
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(RepoError::from)?;
+            debug!(
+                agent_id,
+                rejected = outcome.rejected_ids.len(),
+                reason = outcome.skipped_reason.as_deref().unwrap_or(""),
+                "scheduler: dispatcher rejected pairs"
+            );
+        }
         Ok(true)
     }
 }

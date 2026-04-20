@@ -40,8 +40,12 @@ pub struct PendingPair {
 pub struct DispatchOutcome {
     /// Number of pairs successfully dispatched.
     pub dispatched: usize,
-    /// Number of pairs rejected by the dispatcher or the agent.
-    pub rejected: usize,
+    /// IDs of pairs the dispatcher (or agent) refused. The scheduler
+    /// reverts these from `dispatched` back to `pending` so they get
+    /// another shot on a subsequent tick (up to `max_pair_attempts`).
+    /// Without this, a rejected pair is stranded in `dispatched` —
+    /// `expire_stale_attempts` only sweeps `pending` rows.
+    pub rejected_ids: Vec<i64>,
     /// When the whole batch was skipped, the reason tag.
     pub skipped_reason: Option<String>,
 }
