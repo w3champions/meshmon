@@ -367,9 +367,10 @@ impl Scheduler {
         }
 
         if allowed.is_empty() {
-            // We did useful work (reuse settlements or rate-limit backoff);
-            // keep the cursor on this campaign so other agents this tick
-            // still advance past it.
+            // We did useful work (reuse settlements or rate-limit backoff).
+            // Report `true` so the caller anchors the cursor on this
+            // campaign — subsequent agents in this tick (and the next
+            // tick) rotate past it via `(cursor + step) % len`.
             return Ok(true);
         }
 

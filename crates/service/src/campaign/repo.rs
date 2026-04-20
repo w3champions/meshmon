@@ -9,8 +9,6 @@
 use super::model::{
     CampaignRow, CampaignState, EvaluationMode, PairResolutionState, PairRow, ProbeProtocol,
 };
-#[allow(unused_imports)]
-use crate::campaign::events::NOTIFY_CHANNEL;
 use chrono::{DateTime, Utc};
 use sqlx::{types::ipnetwork::IpNetwork, PgPool, Postgres, Transaction};
 use std::net::IpAddr;
@@ -410,7 +408,7 @@ pub async fn apply_edit(
                     attempt_count    = 0,
                     last_error       = NULL
               WHERE campaign_id = $1
-                AND resolution_state IN ('reused','succeeded','unreachable')",
+                AND resolution_state IN ('reused','succeeded','unreachable','skipped')",
             id
         )
         .execute(&mut *tx)
@@ -468,9 +466,22 @@ pub async fn force_pair(
         return Err(RepoError::NotFound(id));
     }
 
-    // Running → Running is a valid no-op; finished campaigns re-enter
-    // rotation. transition_state_in_tx is inclusive of Running so the
-    // caller can force a pair without first checking the parent state.
+    // Decide whether to stamp started_at: only when the parent campaign
+    // is NOT already Running. Finished campaigns re-enter rotation and
+    // need a fresh started_at so the scheduler picks them up; a Running
+    // campaign's rotation order is started_at-anchored (see
+    // `active_campaigns`), and force_pair must not disturb it.
+    let current: Option<CampaignState> = sqlx::query_scalar!(
+        r#"SELECT state AS "state: CampaignState" FROM measurement_campaigns WHERE id = $1"#,
+        id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let set_ts = match current {
+        Some(CampaignState::Running) => None,
+        _ => Some("started_at"),
+    };
+
     let row = transition_state_in_tx(
         &mut tx,
         id,
@@ -481,7 +492,7 @@ pub async fn force_pair(
             CampaignState::Evaluated,
         ],
         CampaignState::Running,
-        Some("started_at"),
+        set_ts,
     )
     .await?;
     tx.commit().await?;
@@ -489,14 +500,14 @@ pub async fn force_pair(
 }
 
 /// List pairs for a campaign, optionally filtered to a specific set of
-/// resolution states. Results ordered by id, capped at `min(limit, 500)`.
+/// resolution states. Results ordered by id, capped at `min(limit, 5000)`.
 pub async fn list_pairs(
     pool: &PgPool,
     id: Uuid,
     states: &[PairResolutionState],
     limit: i64,
 ) -> Result<Vec<PairRow>, RepoError> {
-    let bounded = limit.clamp(1, 500);
+    let bounded = limit.clamp(1, 5000);
     let raws = sqlx::query_as!(
         PairRowRaw,
         r#"
@@ -519,9 +530,63 @@ pub async fn list_pairs(
     Ok(raws.into_iter().map(Into::into).collect())
 }
 
+/// Count the total, reusable, and fresh dispatches for a campaign's
+/// current `campaign_pairs` row set, using the 24 h reuse window.
+///
+/// Operates on the actual `(source_agent_id, destination_ip)` pairs
+/// stored for the campaign — not a cross-product derived from the
+/// unique sources and destinations. Sparse pair sets (e.g. after an
+/// edit-delta removed specific pairs) preview correctly.
+pub async fn preview_dispatch_count_for_campaign(
+    pool: &PgPool,
+    id: Uuid,
+    protocol: ProbeProtocol,
+) -> Result<PreviewCounts, RepoError> {
+    let row = sqlx::query!(
+        r#"
+        WITH pairs AS (
+            SELECT source_agent_id, destination_ip
+              FROM campaign_pairs
+             WHERE campaign_id = $1
+        ),
+        reusable AS (
+            SELECT DISTINCT ON (p.source_agent_id, p.destination_ip)
+                   p.source_agent_id, p.destination_ip
+              FROM pairs p
+              JOIN measurements m
+                ON m.source_agent_id = p.source_agent_id
+               AND m.destination_ip  = p.destination_ip
+               AND m.protocol        = $2::probe_protocol
+               AND m.measured_at     > now() - interval '24 hours'
+             ORDER BY p.source_agent_id, p.destination_ip,
+                      m.probe_count DESC, m.measured_at DESC
+        )
+        SELECT
+            (SELECT COUNT(*) FROM pairs)    AS "total!",
+            (SELECT COUNT(*) FROM reusable) AS "reusable!"
+        "#,
+        id,
+        protocol as ProbeProtocol,
+    )
+    .fetch_one(pool)
+    .await?;
+    let total = row.total;
+    let reusable = row.reusable;
+    Ok(PreviewCounts {
+        total,
+        reusable,
+        fresh: total - reusable,
+    })
+}
+
 /// Count the total pairs the given sources × destinations would produce,
 /// split between ones resolvable from the 24 h reuse window and ones
 /// the scheduler would dispatch fresh. Never writes.
+///
+/// Used by pre-save preview paths where no `campaign_pairs` rows exist
+/// yet. For an existing campaign, use
+/// [`preview_dispatch_count_for_campaign`] instead — it operates on the
+/// actual pair set and avoids the Cartesian explosion.
 pub async fn preview_dispatch_count(
     pool: &PgPool,
     protocol: ProbeProtocol,
@@ -1040,7 +1105,6 @@ async fn insert_pairs_in_tx(
 }
 
 /// sqlx-derived raw row. [`CampaignRow`] is the domain-layer clone.
-#[allow(dead_code)]
 struct CampaignRowRaw {
     id: Uuid,
     title: String,
@@ -1090,7 +1154,6 @@ impl From<CampaignRowRaw> for CampaignRow {
 }
 
 /// sqlx-derived raw row for [`PairRow`].
-#[allow(dead_code)]
 struct PairRowRaw {
     id: i64,
     campaign_id: Uuid,

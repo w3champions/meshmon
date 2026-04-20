@@ -635,3 +635,153 @@ async fn force_pair_resets_pair_and_transitions_to_running() {
 
     repo::delete(&pool, row.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn force_pair_preserves_started_at_on_running_campaign() {
+    // force_pair on a Running campaign must NOT bump started_at — the
+    // scheduler's fair-RR rotation orders active campaigns by started_at,
+    // so a stamp reset would shove the campaign to the back of the queue.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-force-running"))
+        .await
+        .unwrap();
+    let started = repo::start(&pool, row.id).await.unwrap();
+    let original_started_at = started.started_at.expect("started_at stamped by start()");
+
+    // Ensure enough wall-clock drift that `now()` differs from
+    // original_started_at at microsecond resolution.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let forced = repo::force_pair(
+        &pool,
+        row.id,
+        "agent-a",
+        IpAddr::from_str("198.51.100.1").unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(forced.state, CampaignState::Running);
+    assert_eq!(
+        forced.started_at,
+        Some(original_started_at),
+        "started_at preserved for Running campaign"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_edit_force_measurement_resets_skipped_pairs() {
+    // Stop converts pending pairs to `skipped`. A subsequent
+    // force_measurement edit must reset them along with the terminal
+    // `reused/succeeded/unreachable` triad — otherwise a re-run leaves
+    // previously-skipped pairs permanently un-dispatched.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-edit-skipped"))
+        .await
+        .unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+    repo::stop(&pool, row.id).await.unwrap();
+
+    let skipped_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+         WHERE campaign_id = $1 AND resolution_state = 'skipped'",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(skipped_before > 0, "stop() should produce skipped pairs");
+
+    repo::apply_edit(
+        &pool,
+        row.id,
+        EditInput {
+            force_measurement: Some(true),
+            ..EditInput::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let skipped_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+         WHERE campaign_id = $1 AND resolution_state = 'skipped'",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(skipped_after, 0, "force_measurement resets skipped pairs");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_dispatch_count_for_campaign_uses_actual_pair_set() {
+    // Sparse campaign: pairs (A,1) and (B,2) — NOT the full cross
+    // product (A,2) / (B,1). The Cartesian-projection path would
+    // compute total=4; the correct answer is total=2.
+    let pool = common::shared_migrated_pool().await;
+    let agent_a = format!("prev-a-{}", uuid::Uuid::new_v4().simple());
+    let agent_b = format!("prev-b-{}", uuid::Uuid::new_v4().simple());
+    let ip1 = IpAddr::from_str("198.51.100.10").unwrap();
+    let ip2 = IpAddr::from_str("198.51.100.11").unwrap();
+
+    // Build a campaign with the full cross product first.
+    let mut input = make_input("t-preview-sparse");
+    input.source_agent_ids = vec![agent_a.clone(), agent_b.clone()];
+    input.destination_ips = vec![ip1, ip2];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Remove the off-diagonal pairs to leave only (A,1) and (B,2).
+    let ip2_net = sqlx::types::ipnetwork::IpNetwork::from(ip2);
+    let ip1_net = sqlx::types::ipnetwork::IpNetwork::from(ip1);
+    sqlx::query(
+        "DELETE FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = $2 AND destination_ip = $3",
+    )
+    .bind(row.id)
+    .bind(&agent_a)
+    .bind(ip2_net)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = $2 AND destination_ip = $3",
+    )
+    .bind(row.id)
+    .bind(&agent_b)
+    .bind(ip1_net)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Seed a reusable measurement for (agent_a, ip1) so reusable=1.
+    sqlx::query(
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 0.0)",
+    )
+    .bind(&agent_a)
+    .bind(ip1_net)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let counts =
+        repo::preview_dispatch_count_for_campaign(&pool, row.id, ProbeProtocol::Icmp)
+            .await
+            .unwrap();
+    assert_eq!(counts.total, 2, "total reflects actual pair set, not AxB");
+    assert_eq!(counts.reusable, 1, "one reusable measurement");
+    assert_eq!(counts.fresh, 1, "total - reusable");
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE source_agent_id IN ($1, $2)")
+        .bind(&agent_a)
+        .bind(&agent_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

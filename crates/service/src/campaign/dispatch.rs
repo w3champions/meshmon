@@ -1,6 +1,6 @@
 //! Dispatcher trait + test stubs. Production RPC dispatch is T45.
 
-use super::model::{PairResolutionState, PairRow};
+use super::model::PairResolutionState;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -107,12 +107,6 @@ impl PairDispatcher for DirectSettleDispatcher {
             dispatched: size,
             ..Default::default()
         }
-    }
-}
-
-impl From<PairRow> for PendingPair {
-    fn from(_: PairRow) -> Self {
-        panic!("convert PairRow -> PendingPair via Scheduler::pair_to_pending (needs campaign context)");
     }
 }
 

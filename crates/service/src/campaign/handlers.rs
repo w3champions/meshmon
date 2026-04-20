@@ -1,8 +1,7 @@
 //! HTTP handlers for `/api/campaigns/*`.
 //!
-//! Covers the full CRUD + lifecycle + edit-delta + pair surface. Handlers
-//! are not yet registered on the axum router — wiring lives in the
-//! router-setup task.
+//! Covers the full CRUD + lifecycle + edit-delta + pair surface. Routes
+//! are registered in `crates/service/src/http/openapi.rs`.
 //!
 //! Every handler mirrors the catalogue surface's error envelope
 //! (snake_case `error` key) so the SPA's shared error-handling layer
@@ -22,7 +21,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
 use uuid::Uuid;
@@ -482,9 +480,9 @@ pub async fn pairs(
 
 /// `GET /api/campaigns/{id}/preview-dispatch-count` — dispatch estimate.
 ///
-/// Computes `total`, `reusable`, and `fresh` counts against the
-/// campaign's current pair set (sources × destinations, deduped) using
-/// the 24 h reuse window. Never writes.
+/// Counts the campaign's actual `campaign_pairs` rows, splitting them
+/// between ones resolvable from the 24 h reuse window and ones the
+/// scheduler would dispatch fresh. Never writes.
 #[utoipa::path(
     get,
     path = "/api/campaigns/{id}/preview-dispatch-count",
@@ -501,7 +499,6 @@ pub async fn preview_dispatch_count(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Response {
-    // Preview uses the campaign's current pair set.
     let Some(camp) = (match repo::get(&state.pool, id).await {
         Ok(v) => v,
         Err(e) => return repo_error("campaign::preview", e),
@@ -509,41 +506,7 @@ pub async fn preview_dispatch_count(
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
     };
 
-    let pairs = match repo::list_pairs(
-        &state.pool,
-        id,
-        &[
-            PairResolutionState::Pending,
-            PairResolutionState::Dispatched,
-            PairResolutionState::Reused,
-            PairResolutionState::Succeeded,
-            PairResolutionState::Unreachable,
-            PairResolutionState::Skipped,
-        ],
-        10_000,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => return repo_error("campaign::preview::pairs", e),
-    };
-    let sources: Vec<String> = pairs
-        .iter()
-        .map(|p| p.source_agent_id.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let destinations: Vec<IpAddr> = pairs
-        .iter()
-        .map(|p| match p.destination_ip {
-            sqlx::types::ipnetwork::IpNetwork::V4(n) => IpAddr::V4(n.ip()),
-            sqlx::types::ipnetwork::IpNetwork::V6(n) => IpAddr::V6(n.ip()),
-        })
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    match repo::preview_dispatch_count(&state.pool, camp.protocol, &sources, &destinations).await {
+    match repo::preview_dispatch_count_for_campaign(&state.pool, id, camp.protocol).await {
         Ok(counts) => (
             StatusCode::OK,
             Json(PreviewDispatchResponse {
