@@ -394,5 +394,27 @@ describe("CatalogueTable", () => {
       expect(Array.isArray(parsed)).toBe(false);
       expect(parsed).toEqual(expect.any(Object));
     });
+
+    test("Actions column is always the rightmost header with all optional columns enabled", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(
+        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
+      );
+
+      // Enable all optional columns via the chooser
+      const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+      await user.click(chooserBtn);
+      for (const label of ["Latitude", "Longitude", "Website", "Notes"]) {
+        const checkbox = screen.getByRole("checkbox", { name: new RegExp(label, "i") });
+        if (!checkbox.hasAttribute("checked") && !(checkbox as HTMLInputElement).checked) {
+          await user.click(checkbox);
+        }
+      }
+
+      // Read all visible column headers in DOM order
+      const headers = screen.getAllByRole("columnheader");
+      const headerNames = headers.map((h) => h.textContent?.trim());
+      expect(headerNames.at(-1)).toBe("Actions");
+    });
   });
 });

@@ -108,7 +108,11 @@ function getInitialVisibility(): VisibilityState {
 // Column definitions
 // ---------------------------------------------------------------------------
 
-function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntry>[] {
+/**
+ * All columns except Actions. Actions is kept separate so it can always be
+ * appended last — even when optional columns are toggled on.
+ */
+function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
   return [
     {
       id: "ip",
@@ -159,27 +163,6 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
         return <StatusChip status={row.original.enrichment_status} />;
       },
     },
-    {
-      id: "actions",
-      header: "Actions",
-      cell: ({ row }) => {
-        const { id, ip } = row.original;
-        return (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={`Re-enrich ${ip}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onReenrich(id);
-            }}
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-          </Button>
-        );
-      },
-    },
     // Optional columns — off by default
     {
       id: "latitude",
@@ -210,6 +193,39 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
       ),
     },
   ];
+}
+
+/** The Actions column — always rendered last regardless of optional column state. */
+function buildActionsColumn(onReenrich: (id: string) => void): ColumnDef<CatalogueEntry> {
+  return {
+    id: "actions",
+    header: "Actions",
+    cell: ({ row }) => {
+      const { id, ip } = row.original;
+      return (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={`Re-enrich ${ip}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onReenrich(id);
+          }}
+        >
+          <RefreshCw className="h-4 w-4" aria-hidden="true" />
+        </Button>
+      );
+    },
+  };
+}
+
+/**
+ * Assembles the full column list with Actions pinned to the rightmost position,
+ * regardless of which optional columns are visible.
+ */
+function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntry>[] {
+  return [...buildNonActionColumns(), buildActionsColumn(onReenrich)];
 }
 
 // ---------------------------------------------------------------------------
