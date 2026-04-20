@@ -6,6 +6,7 @@ import {
   type CatalogueMapQuery,
   type CatalogueSortBy,
   type CatalogueSortDir,
+  useCatalogueEntry,
   useCatalogueFacets,
   useCatalogueListInfinite,
   useCatalogueMap,
@@ -320,7 +321,7 @@ export default function Catalogue() {
   // AND the seed doesn't cover it (same id gate as `drawerEntry`),
   // clear `drawerId` so the drawer state stays consistent. Cluster-
   // dialog-opened entries stay alive via the seed — they're
-  // legitimately outside `rows` and must not be closed.
+  // legitimately outside `rows` and must not be closed by THIS guard.
   useEffect(() => {
     if (
       drawerId !== null &&
@@ -331,6 +332,23 @@ export default function Catalogue() {
       setDrawerId(null);
     }
   }, [drawerId, rows, tableInfinite.data, drawerSeedEntry]);
+
+  // Server-side deletion guard: subscribes to the per-entry endpoint
+  // while the drawer is open. The SSE `deleted` handler invokes
+  // `removeQueries` on this key, which triggers a refetch → 404 →
+  // `data === null`. That's the authoritative "row is gone
+  // server-side" signal and closes the drawer regardless of how it
+  // was opened (rows-path OR seed-path). Without this, a cluster-
+  // dialog-opened entry that another operator deletes would stay in
+  // the drawer indefinitely because the rows-based guard above is
+  // deliberately shielded by the seed.
+  const drawerEntryQuery = useCatalogueEntry(drawerId ?? undefined);
+  useEffect(() => {
+    if (drawerId !== null && drawerEntryQuery.data === null) {
+      setDrawerId(null);
+      setDrawerSeedEntry(null);
+    }
+  }, [drawerId, drawerEntryQuery.data]);
 
   const handleReenrichOne = useCallback(
     (id: string): void => {
