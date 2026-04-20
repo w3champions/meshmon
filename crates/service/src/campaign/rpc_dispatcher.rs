@@ -192,11 +192,18 @@ impl RpcDispatcher {
     /// Returns `(allowed, rate_limited_pair_ids)`. Rate-limited pairs
     /// are reverted to `pending` by the scheduler via the normal
     /// `rejected_ids` path.
+    ///
+    /// Records [`metrics::campaign_dest_bucket_wait_seconds`] with the
+    /// wall time each pair spent acquiring (or failing to acquire) a
+    /// token — granular enough to expose bucket contention without
+    /// flooding the exporter, since each histogram observation covers
+    /// one pair rather than a whole batch.
     async fn reserve_tokens(&self, batch: Vec<PendingPair>) -> (Vec<PendingPair>, Vec<i64>) {
         let mut allowed = Vec::with_capacity(batch.len());
         let mut rate_limited = Vec::new();
         for p in batch {
             let dest = p.destination_ip;
+            let wait_start = Instant::now();
             let bucket = self
                 .buckets
                 .get_with(dest, async {
@@ -207,6 +214,7 @@ impl RpcDispatcher {
                 let mut guard = bucket.lock().await;
                 guard.try_take(1)
             };
+            metrics::campaign_dest_bucket_wait_seconds().record(wait_start.elapsed().as_secs_f64());
             if drawn == 1 {
                 allowed.push(p);
             } else {
@@ -274,6 +282,33 @@ fn kind_label(req: &RunMeasurementBatchRequest) -> &'static str {
     }
 }
 
+/// RAII guard that bumps `meshmon_campaign_pairs_inflight` on
+/// construction and decrements on drop. Every early-return path out of
+/// [`RpcDispatcher::dispatch`] therefore restores the gauge without any
+/// explicit bookkeeping — the gauge naturally returns to zero once
+/// every live batch for an agent has completed.
+struct InflightGuard {
+    agent_id: String,
+    count: u32,
+}
+
+impl InflightGuard {
+    fn new(agent_id: &str, count: usize) -> Self {
+        let count = count.min(u32::MAX as usize) as u32;
+        metrics::campaign_pairs_inflight(agent_id).increment(count as f64);
+        Self {
+            agent_id: agent_id.to_string(),
+            count,
+        }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        metrics::campaign_pairs_inflight(&self.agent_id).decrement(self.count as f64);
+    }
+}
+
 #[async_trait]
 impl PairDispatcher for RpcDispatcher {
     async fn dispatch(&self, agent_id: &str, batch: Vec<PendingPair>) -> DispatchOutcome {
@@ -313,6 +348,12 @@ impl PairDispatcher for RpcDispatcher {
                 skipped_reason: Some("rate_limited".into()),
             };
         }
+
+        // Track the allowed subset as in-flight until the dispatch
+        // function returns; `_inflight` is dropped on every exit path
+        // (success, rpc error, mid-stream drop) so the gauge returns to
+        // zero naturally.
+        let _inflight = InflightGuard::new(agent_id, allowed.len());
 
         // 4. Build request.
         let req = self.build_request(&allowed);

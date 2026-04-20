@@ -82,6 +82,11 @@ async fn run() -> anyhow::Result<()> {
     let prom = meshmon_service::metrics::install_recorder();
     meshmon_service::metrics::describe_service_metrics();
     meshmon_service::metrics::emit_build_info(meshmon_service::state::BuildInfo::compile_time());
+    // Seed the probe-collision counter at zero so scrapers see the
+    // series from boot even before the agent's real prober lands in
+    // T46. `absolute(0)` is a no-op on the counter's value but
+    // registers the zero-labeled series with the exporter.
+    meshmon_service::metrics::campaign_probe_collisions_total().absolute(0);
 
     // --- Step 3: Postgres + migrations ---
     let pool = db::connect(initial_config.database.url())

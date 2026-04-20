@@ -66,10 +66,16 @@ pub const CAMPAIGN_REUSE_RATIO: &str = "meshmon_campaign_reuse_ratio";
 /// Histogram: wall time of one scheduler tick (`Scheduler::tick_once`).
 pub const SCHEDULER_TICK_SECONDS: &str = "meshmon_scheduler_tick_seconds";
 
-// --- Campaign dispatch self-metrics (T45-08). ------------------------------
-// Populated by the RPC-backed `PairDispatcher`. Task 12 extends the set
-// with in-flight gauges and bucket-wait histograms; the two below are
-// what `RpcDispatcher::dispatch` emits directly.
+// --- Campaign dispatch self-metrics (T45-08, T45-12). ----------------------
+// Populated by the RPC-backed `PairDispatcher`.
+//   - `*_batches_total` / `*_batch_duration_seconds` are emitted from
+//     `RpcDispatcher::dispatch` once per RPC.
+//   - `*_pairs_inflight` is a per-agent gauge maintained via inc-on-entry /
+//     dec-on-exit in the dispatch path so it naturally returns to zero.
+//   - `*_dest_bucket_wait_seconds` is a histogram recorded around the
+//     per-destination leaky-bucket reservation.
+//   - `*_probe_collisions_total` is seeded at 0 on boot; real bumps land
+//     in T46 when the real prober can detect unexpected ICMP identifiers.
 
 /// Counter: `RunMeasurementBatch` RPCs by outcome.
 /// Labels: `agent`, `kind` (`latency`|`mtr`), `outcome` (`ok`|`partial`|`rpc_error`).
@@ -77,6 +83,14 @@ pub const CAMPAIGN_BATCHES_TOTAL: &str = "meshmon_campaign_batches_total";
 /// Histogram: `RunMeasurementBatch` RPC latency in seconds.
 /// Labels: `agent`, `kind`.
 pub const CAMPAIGN_BATCH_DURATION_SECONDS: &str = "meshmon_campaign_batch_duration_seconds";
+/// Gauge: in-flight campaign pairs per agent (post-semaphore, pre-RPC-complete).
+/// Label: `agent`.
+pub const CAMPAIGN_PAIRS_INFLIGHT: &str = "meshmon_campaign_pairs_inflight";
+/// Histogram: seconds a pair spent waiting for a destination-bucket token.
+pub const CAMPAIGN_DEST_BUCKET_WAIT_SECONDS: &str = "meshmon_campaign_dest_bucket_wait_seconds";
+/// Counter: partitioning violations observed by the agent-side prober.
+/// Seeded at 0 in T45; real bumps land with the T46 prober.
+pub const CAMPAIGN_PROBE_COLLISIONS_TOTAL: &str = "meshmon_campaign_probe_collisions_total";
 
 // HTTP request counter names (`meshmon_service_http_requests_total`,
 // `..._duration_seconds`, `..._pending`) are not declared here — they
@@ -114,6 +128,9 @@ const ALL_METRIC_NAMES: &[&str] = &[
     SCHEDULER_TICK_SECONDS,
     CAMPAIGN_BATCHES_TOTAL,
     CAMPAIGN_BATCH_DURATION_SECONDS,
+    CAMPAIGN_PAIRS_INFLIGHT,
+    CAMPAIGN_DEST_BUCKET_WAIT_SECONDS,
+    CAMPAIGN_PROBE_COLLISIONS_TOTAL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -312,6 +329,30 @@ pub fn campaign_batch_duration_seconds(agent: &str, kind: &'static str) -> Histo
     )
 }
 
+/// Gauge handle for [`CAMPAIGN_PAIRS_INFLIGHT`].
+///
+/// Incremented when a dispatch enters the agent-semaphore critical
+/// section (i.e. a batch has cleared the per-agent concurrency gate and
+/// the RPC is live) and decremented when the dispatcher returns. The
+/// gauge therefore returns to zero naturally once every batch for an
+/// agent has settled; no drain-to-zero sweep is required.
+pub fn campaign_pairs_inflight(agent: &str) -> Gauge {
+    gauge!(CAMPAIGN_PAIRS_INFLIGHT, "agent" => agent.to_string())
+}
+
+/// Histogram handle for [`CAMPAIGN_DEST_BUCKET_WAIT_SECONDS`].
+pub fn campaign_dest_bucket_wait_seconds() -> Histogram {
+    histogram!(CAMPAIGN_DEST_BUCKET_WAIT_SECONDS)
+}
+
+/// Counter handle for [`CAMPAIGN_PROBE_COLLISIONS_TOTAL`].
+///
+/// Seeded at 0 in `main.rs` so scrapers see the series from boot. Real
+/// bumps land in T46 when the real prober detects unexpected identifiers.
+pub fn campaign_probe_collisions_total() -> Counter {
+    counter!(CAMPAIGN_PROBE_COLLISIONS_TOTAL)
+}
+
 // ---------------------------------------------------------------------------
 // One-shot: emit build_info with its two static labels.
 // ---------------------------------------------------------------------------
@@ -432,6 +473,21 @@ pub fn describe_campaign_metrics() {
         CAMPAIGN_BATCH_DURATION_SECONDS,
         Unit::Seconds,
         "RunMeasurementBatch RPC latency in seconds. Labels: agent, kind"
+    );
+    describe_gauge!(
+        CAMPAIGN_PAIRS_INFLIGHT,
+        Unit::Count,
+        "In-flight campaign pairs per agent (post-semaphore, pre-settle). Label: agent"
+    );
+    describe_histogram!(
+        CAMPAIGN_DEST_BUCKET_WAIT_SECONDS,
+        Unit::Seconds,
+        "Seconds pairs spent waiting for a destination-bucket token"
+    );
+    describe_counter!(
+        CAMPAIGN_PROBE_COLLISIONS_TOTAL,
+        Unit::Count,
+        "Agent-observed probe-identifier collisions. Stays at 0; non-zero indicates a partitioning bug. Seeded at 0 in T45; real bumps land with the T46 prober."
     );
 }
 
@@ -573,6 +629,11 @@ mod tests {
         campaign_pairs_total("pending").set(0.0);
         campaign_reuse_ratio().set(0.0);
         scheduler_tick_seconds().record(0.0);
+        campaign_batches_total("metrics-test-agent", "latency", "ok").increment(0);
+        campaign_batch_duration_seconds("metrics-test-agent", "latency").record(0.0);
+        campaign_pairs_inflight("metrics-test-agent").set(0.0);
+        campaign_dest_bucket_wait_seconds().record(0.0);
+        campaign_probe_collisions_total().increment(0);
         // BUILD_INFO is intentionally not in ALL_METRIC_NAMES (it's a
         // one-shot with non-enumerable labels). Exercise it separately so
         // this test's name ("every metric") doesn't lie.
