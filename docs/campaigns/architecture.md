@@ -743,14 +743,17 @@ UPDATE is the silent-drop path — the writer returns `Ok(false)` and
 
 ### `DispatchOutcome`
 
-The scheduler reverts `rejected_ids` to `pending` on the next tick
-and decrements `attempt_count`; `skipped_reason` is set only when the
-whole batch failed before any pair streamed:
+The scheduler reverts both revert fields to `pending` on the next
+tick. `rate_limited_ids` additionally decrements `attempt_count` so a
+pre-RPC throttling decision does not burn retry budget.
+`skipped_reason` is set only when the whole batch failed before any
+pair streamed:
 
 | Field | Population |
 |---|---|
-| `dispatched` | Count of pairs whose result streamed back and whose writer settle returned `Ok(true)`. |
-| `rejected_ids` | Pairs rate-limited, pairs whose result never arrived, pairs that hit a mid-stream RPC error, pairs whose writer settle errored. |
+| `dispatched` | Count of pairs whose result streamed back and whose writer settle returned `SettleOutcome::Settled`. |
+| `rejected_ids` | Pairs whose result never arrived, pairs that hit a mid-stream RPC error, pairs whose writer settle returned `MalformedNoOutcome`, pairs whose writer settle errored. Scheduler reverts to `pending` **without** `attempt_count--`. |
+| `rate_limited_ids` | Pairs that lost the dispatcher's per-destination bucket draw. Scheduler reverts to `pending` AND decrements `attempt_count`. |
 | `skipped_reason` | `"agent_unreachable"`, `"rpc_error:<code>"`, `"rate_limited"` (bucket consumed every pair), `"semaphore_closed"`. |
 
 Agent-reported failures (`NO_ROUTE`, `TIMEOUT`, etc.) are **settled**
