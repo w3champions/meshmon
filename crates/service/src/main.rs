@@ -272,17 +272,39 @@ async fn run() -> anyhow::Result<()> {
     let (enrichment_queue_raw, enrichment_rx) = EnrichmentQueue::new(ENRICHMENT_QUEUE_CAPACITY);
     let enrichment_queue = Arc::new(enrichment_queue_raw);
 
+    // Build AppState before the scheduler so the dispatcher can borrow
+    // the tunnel manager from it. `AppState::new` is pure construction
+    // — no tasks are spawned — so the scheduler still comes up after
+    // the state is fully assembled below.
+    let state = AppState::new(
+        config_handle,
+        config_rx,
+        pool.clone(),
+        ingestion.clone(),
+        registry.clone(),
+        prom.clone(),
+        enrichment_queue,
+    );
+
     // Campaign scheduler: single tokio task, driven by a dedicated cancel
     // token so it can be shut down AFTER the HTTP drain completes (in-flight
     // handlers may still publish NOTIFY wake-ups until they finish). Gated
-    // on `[campaigns] enabled` — default is off until T45 wires a real
-    // dispatcher, because the T44 `NoopDispatcher` would flip pairs
-    // `pending → dispatched` and never settle them. HTTP CRUD + preview
-    // still function without the scheduler.
+    // on `[campaigns] enabled` — operators flip this off in TOML to
+    // suppress dispatch. The `RpcDispatcher` routes batches over the
+    // per-agent yamux tunnels owned by `state.tunnel_manager`.
     let (campaign_cancel, campaign_scheduler_handle) = if initial_config.campaigns.enabled {
         let cancel = CancellationToken::new();
-        let dispatcher: Arc<dyn meshmon_service::campaign::dispatch::PairDispatcher> =
-            Arc::new(meshmon_service::campaign::dispatch::NoopDispatcher::default());
+        let writer = meshmon_service::campaign::writer::SettleWriter::new(pool.clone());
+        let dispatcher: Arc<dyn meshmon_service::campaign::dispatch::PairDispatcher> = Arc::new(
+            meshmon_service::campaign::rpc_dispatcher::RpcDispatcher::new(
+                state.tunnel_manager.clone(),
+                registry.clone(),
+                writer,
+                initial_config.campaigns.default_agent_concurrency,
+                initial_config.campaigns.per_destination_rps,
+                initial_config.campaigns.max_batch_size,
+            ),
+        );
         let scheduler = meshmon_service::campaign::scheduler::Scheduler::new(
             pool.clone(),
             registry.clone(),
@@ -298,7 +320,7 @@ async fn run() -> anyhow::Result<()> {
             registry_active_window,
         );
         let handle = tokio::spawn(scheduler.run(cancel.clone()));
-        info!("campaign scheduler spawned");
+        info!("campaign scheduler spawned (RpcDispatcher)");
         (Some(cancel), Some(handle))
     } else {
         info!("campaign scheduler disabled (set [campaigns] enabled = true to start)");
@@ -306,15 +328,7 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let state = {
-        let mut s = AppState::new(
-            config_handle,
-            config_rx,
-            pool.clone(),
-            ingestion.clone(),
-            registry.clone(),
-            prom.clone(),
-            enrichment_queue,
-        );
+        let mut s = state;
         s.campaign_cancel = campaign_cancel.clone();
         s
     };
