@@ -362,7 +362,13 @@ export default function Catalogue() {
     if (!open) setClusterCell(null);
   }, []);
 
-  const handleClusterOpenEntry = useCallback((entry: CatalogueEntry): void => {
+  // Opens the drawer with a full entry seed. Used by both the cluster
+  // dialog (rows scoped by cell bbox, not in the main table's pages)
+  // and the map detail popup (map omits `city`/`shapes` filters, so a
+  // visible pin may represent a row the table didn't load). Seeding
+  // lets `drawerEntry` fall back gracefully when `rows.find(...)`
+  // misses, and also suppresses the deletion-guard early-close.
+  const handleOpenEntryWithSeed = useCallback((entry: CatalogueEntry): void => {
     setClusterCell(null);
     setDrawerSeedEntry(entry);
     setDrawerId(entry.id);
@@ -427,7 +433,7 @@ export default function Catalogue() {
               isError={mapInfinite.isError}
               shapes={filter.shapes}
               onShapesChange={handleShapesChange}
-              onRowClick={handleRowClick}
+              onOpenEntry={handleOpenEntryWithSeed}
               onClusterOpen={handleClusterOpen}
               onViewportChange={handleViewportChange}
               className={cn("h-full w-full")}
@@ -448,7 +454,7 @@ export default function Catalogue() {
         onOpenChange={handleClusterDialogOpenChange}
         cell={clusterCell}
         filters={dialogFilters}
-        onOpenEntry={handleClusterOpenEntry}
+        onOpenEntry={handleOpenEntryWithSeed}
       />
 
       {/* Bulk re-enrich confirm */}

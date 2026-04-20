@@ -63,7 +63,7 @@ function clustersResponse(buckets: CatalogueMapBucket[]): CatalogueMapResponse {
 
 const noopHandlers = {
   onShapesChange: () => {},
-  onRowClick: () => {},
+  onOpenEntry: () => {},
   onClusterOpen: () => {},
   onViewportChange: () => {},
 };
@@ -149,7 +149,7 @@ describe("CatalogueMap", () => {
         isError={false}
         shapes={[]}
         onShapesChange={() => {}}
-        onRowClick={() => {}}
+        onOpenEntry={() => {}}
         onClusterOpen={onClusterOpen}
         onViewportChange={() => {}}
       />,
@@ -205,7 +205,7 @@ describe("CatalogueMap", () => {
         isError={false}
         shapes={[]}
         onShapesChange={() => {}}
-        onRowClick={() => {}}
+        onOpenEntry={() => {}}
         onClusterOpen={onClusterOpen}
         onViewportChange={() => {}}
       />,
@@ -272,7 +272,7 @@ describe("CatalogueMap", () => {
         isError={false}
         shapes={[]}
         onShapesChange={() => {}}
-        onRowClick={() => {}}
+        onOpenEntry={() => {}}
         onClusterOpen={() => {}}
         onViewportChange={onViewportChange}
       />,
@@ -301,8 +301,8 @@ describe("CatalogueMap", () => {
     expect(onRowClick).toHaveBeenCalledTimes(1);
   });
 
-  test("integration: detail popup button fires onRowClick with the entry id", async () => {
-    const onRowClick = vi.fn();
+  test("integration: detail popup button fires onOpenEntry with the full entry", async () => {
+    const onOpenEntry = vi.fn();
     const entries = [makeEntry({ id: "entry-42", ip: "1.2.3.4", latitude: 10, longitude: 20 })];
     const user = userEvent.setup();
     renderWithProviders(
@@ -312,7 +312,7 @@ describe("CatalogueMap", () => {
         isError={false}
         shapes={[]}
         onShapesChange={vi.fn()}
-        onRowClick={onRowClick}
+        onOpenEntry={onOpenEntry}
         onClusterOpen={() => {}}
         onViewportChange={() => {}}
       />,
@@ -321,7 +321,11 @@ describe("CatalogueMap", () => {
       name: /open details for 1\.2\.3\.4/i,
     });
     await user.click(button);
-    expect(onRowClick).toHaveBeenCalledWith("entry-42");
+    // Full entry must be passed so the parent can seed the drawer when
+    // `rows.find(id)` would miss (map omits `city`/`shapes` filters).
+    expect(onOpenEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "entry-42", ip: "1.2.3.4" }),
+    );
   });
 
   test("EntryPopup shows IP as header when display_name absent and hides optional rows", () => {

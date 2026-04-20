@@ -16,8 +16,15 @@ export interface CatalogueMapProps {
   isError: boolean;
   shapes: GeoShape[];
   onShapesChange(next: GeoShape[]): void;
-  /** Operator clicked a detail pin's popup "Open details" button. */
-  onRowClick(id: string): void;
+  /**
+   * Fires when the operator clicks a detail pin's popup "Open details"
+   * button. The full entry is passed (not just the id) so the parent
+   * can seed the drawer — `mapQuery` drops `city` and `shapes`, so a
+   * visible map pin may represent a row the main table hasn't loaded.
+   * Without the seed, `rows.find(id)` misses and the drawer silently
+   * fails to open.
+   */
+  onOpenEntry(entry: CatalogueEntry): void;
   /** Operator clicked a server-side cluster bubble — parent opens dialog. */
   onClusterOpen(cell: Bbox): void;
   /** Parent reads this to drive `useCatalogueMap(bbox, zoom, filters)`. */
@@ -99,7 +106,7 @@ export function CatalogueMap({
   isError,
   shapes,
   onShapesChange,
-  onRowClick,
+  onOpenEntry,
   onClusterOpen,
   onViewportChange,
   className,
@@ -118,9 +125,9 @@ export function CatalogueMap({
         id: e.id,
         lat: e.latitude as number,
         lon: e.longitude as number,
-        popup: <EntryPopup entry={e} onOpen={() => onRowClick(e.id)} />,
+        popup: <EntryPopup entry={e} onOpen={() => onOpenEntry(e)} />,
       }));
-  }, [detailRows, onRowClick]);
+  }, [detailRows, onOpenEntry]);
 
   // Cluster pins — one per server-aggregated cell. Clicks fire
   // `onClusterOpen(cell)` which the parent threads into the dialog.
