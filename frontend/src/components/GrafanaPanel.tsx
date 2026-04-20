@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef } from "react";
 import { buildGrafanaSoloUrl } from "@/lib/grafana-panels";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui";
 
 interface GrafanaPanelProps {
   /** Dashboard UID — matches the Grafana dashboard's `uid` (e.g., `"meshmon-path"`).
@@ -41,9 +42,21 @@ function GrafanaPanelImpl({
   to,
   title,
   className,
-  theme = "light",
+  theme: themeProp,
 }: GrafanaPanelProps) {
-  const src = buildGrafanaSoloUrl({ uid: dashboard, panelId, vars, from, to, theme });
+  // Fall back to the app theme when the caller doesn't pin one (e.g. the
+  // interactive path view). Print surfaces pass `theme="light"` explicitly
+  // so they stay readable on paper regardless of the app theme.
+  const appTheme = useUiStore((s) => s.theme);
+  const resolvedTheme = themeProp ?? appTheme;
+  const src = buildGrafanaSoloUrl({
+    uid: dashboard,
+    panelId,
+    vars,
+    from,
+    to,
+    theme: resolvedTheme,
+  });
   const ref = useRef<HTMLIFrameElement | null>(null);
 
   // Update the iframe's `src` imperatively instead of letting React replace
@@ -90,7 +103,11 @@ export const GrafanaPanel = memo(GrafanaPanelImpl, (prev, next) => {
   // that actually affects the rendered iframe changes. `vars` is a nested
   // `Record<string, string>` — compare its entries, not its identity, so a
   // fresh object literal from the parent doesn't force an unnecessary
-  // render.
+  // render. The `theme` prop compare still works when the caller omits it
+  // (both sides `undefined`); app-theme changes reach the component via
+  // the Zustand subscription inside `GrafanaPanelImpl`, which bypasses
+  // memo — so callers that don't pin `theme` still re-render when the
+  // store flips.
   return (
     prev.dashboard === next.dashboard &&
     prev.panelId === next.panelId &&
