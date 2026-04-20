@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
+import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import {
@@ -23,6 +23,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { COUNTRIES } from "@/lib/countries";
 
 export interface EntryDrawerProps {
   /** Undefined closes the dialog. A defined entry opens it and seeds the form. */
@@ -39,7 +47,6 @@ type EditableField =
   | "display_name"
   | "asn"
   | "country_code"
-  | "country_name"
   | "city"
   | "latitude"
   | "longitude"
@@ -56,7 +63,6 @@ const FIELD_PASCAL_MAP: Record<EditableField, string> = {
   display_name: "DisplayName",
   asn: "Asn",
   country_code: "CountryCode",
-  country_name: "CountryName",
   city: "City",
   latitude: "Latitude",
   longitude: "Longitude",
@@ -72,6 +78,8 @@ interface EditableFieldConfig {
   colSpan?: boolean;
   /** When true, renders a resizable textarea instead of a single-line input. */
   multiline?: boolean;
+  /** When true, renders a country Select picker instead of an Input. */
+  countrySelect?: boolean;
   extraProps?: Omit<React.ComponentProps<typeof Input>, "name" | "ref">;
 }
 
@@ -87,8 +95,7 @@ const EDITABLE_FIELD_CONFIGS: readonly EditableFieldConfig[] = [
     label: "ASN",
     extraProps: { type: "number", inputMode: "numeric" },
   },
-  { field: "country_code", label: "Country code", extraProps: { maxLength: 2 } },
-  { field: "country_name", label: "Country name" },
+  { field: "country_code", label: "Country", countrySelect: true },
   { field: "city", label: "City" },
   {
     field: "latitude",
@@ -121,7 +128,6 @@ const schema = z.object({
     { message: "ASN must be a non-negative 32-bit integer" },
   ),
   country_code: z.string(),
-  country_name: z.string(),
   city: z.string(),
   latitude: numberFromInput.refine((v) => v === "" || (v >= -90 && v <= 90), {
     message: "Latitude must be between -90 and 90",
@@ -147,7 +153,6 @@ function toFormValues(entry: CatalogueEntry): FormValues {
     display_name: entry.display_name ?? "",
     asn: entry.asn ?? "",
     country_code: entry.country_code ?? "",
-    country_name: entry.country_name ?? "",
     city: entry.city ?? "",
     latitude: entry.latitude ?? "",
     longitude: entry.longitude ?? "",
@@ -241,10 +246,15 @@ interface EditableFieldRowProps {
   label: string;
   colSpan?: boolean;
   multiline?: boolean;
+  countrySelect?: boolean;
   locked: boolean;
   isPending: boolean;
   errorMessage?: string;
   inputProps: React.ComponentProps<typeof Input>;
+  /** Value for the country select (only used when countrySelect=true). */
+  countryValue?: string;
+  /** onChange handler for the country select. */
+  onCountryChange?: (value: string) => void;
   onRevert: (field: EditableField) => void;
 }
 
@@ -253,10 +263,13 @@ function EditableFieldRow({
   label,
   colSpan,
   multiline,
+  countrySelect,
   locked,
   isPending,
   errorMessage,
   inputProps,
+  countryValue,
+  onCountryChange,
   onRevert,
 }: EditableFieldRowProps) {
   const id = `entry-drawer-${field}`;
@@ -282,7 +295,28 @@ function EditableFieldRow({
           </button>
         )}
       </div>
-      {multiline ? (
+      {countrySelect ? (
+        <Select
+          // Radix Select forbids empty string values on SelectItem, so we use a
+          // sentinel "__none__" for the "clear" option and translate on the boundary.
+          value={countryValue === "" || countryValue == null ? "__none__" : countryValue}
+          onValueChange={(val) => onCountryChange?.(val === "__none__" ? "" : val)}
+          disabled={isPending}
+        >
+          <SelectTrigger id={id} className={locked ? "ring-1 ring-primary/30" : undefined}>
+            <SelectValue placeholder="Select a country…" />
+          </SelectTrigger>
+          <SelectContent className="max-h-72">
+            {/* Clear option — sentinel value because Radix forbids empty strings */}
+            <SelectItem value="__none__">— (none)</SelectItem>
+            {COUNTRIES.map((c) => (
+              <SelectItem key={c.code} value={c.code}>
+                {c.name} ({c.code})
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : multiline ? (
         <textarea
           id={id}
           rows={4}
@@ -360,6 +394,7 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
 
   const {
     register,
+    control,
     handleSubmit,
     reset,
     getValues,
@@ -479,20 +514,46 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
           )}
 
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {EDITABLE_FIELD_CONFIGS.map(({ field, label, colSpan, multiline, extraProps }) => (
-              <EditableFieldRow
-                key={field}
-                field={field}
-                label={label}
-                colSpan={colSpan}
-                multiline={multiline}
-                locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
-                isPending={patchMutation.isPending}
-                errorMessage={errors[field]?.message}
-                inputProps={{ ...(extraProps ?? {}), ...register(field) }}
-                onRevert={handleRevert}
-              />
-            ))}
+            {EDITABLE_FIELD_CONFIGS.map(
+              ({ field, label, colSpan, multiline, countrySelect, extraProps }) =>
+                countrySelect ? (
+                  <Controller
+                    key={field}
+                    name={field as "country_code"}
+                    control={control}
+                    render={({ field: controllerField }) => (
+                      <EditableFieldRow
+                        field={field}
+                        label={label}
+                        colSpan={colSpan}
+                        countrySelect
+                        locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
+                        isPending={patchMutation.isPending}
+                        errorMessage={errors[field]?.message}
+                        inputProps={{}}
+                        countryValue={
+                          typeof controllerField.value === "string" ? controllerField.value : ""
+                        }
+                        onCountryChange={controllerField.onChange}
+                        onRevert={handleRevert}
+                      />
+                    )}
+                  />
+                ) : (
+                  <EditableFieldRow
+                    key={field}
+                    field={field}
+                    label={label}
+                    colSpan={colSpan}
+                    multiline={multiline}
+                    locked={lockedFields.has(FIELD_PASCAL_MAP[field])}
+                    isPending={patchMutation.isPending}
+                    errorMessage={errors[field]?.message}
+                    inputProps={{ ...(extraProps ?? {}), ...register(field) }}
+                    onRevert={handleRevert}
+                  />
+                ),
+            )}
           </section>
 
           <DialogFooter className="flex flex-col gap-2 sm:flex-row sm:justify-between">

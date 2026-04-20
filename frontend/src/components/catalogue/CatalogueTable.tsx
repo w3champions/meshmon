@@ -18,8 +18,27 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 import { StatusChip } from "./StatusChip";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the hostname from a raw website string entered by the operator.
+ * Prepends `https://` when no scheme is present so `URL()` can parse it.
+ * Falls back to returning the raw value unchanged on parse failure.
+ */
+export function formatWebsiteHost(raw: string): string {
+  try {
+    const normalized = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return new URL(normalized).hostname;
+  } catch {
+    return raw;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -134,11 +153,12 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
     },
     {
       id: "country",
+      accessorKey: "country_code",
       header: "Country",
       cell: ({ row }) => {
-        const { country_code, country_name } = row.original;
-        if (!country_code) return "—";
-        return <span title={country_name ?? undefined}>{country_code}</span>;
+        const code = row.original.country_code;
+        const name = lookupCountryName(code);
+        return <span title={code ?? undefined}>{name ?? code ?? "—"}</span>;
       },
     },
     {
@@ -186,16 +206,17 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
         // Operators may save "example.com" as well as a full URL; normalise
         // so the href is always absolute. Assume https when no scheme is set.
         const href = /^https?:\/\//i.test(website) ? website : `https://${website}`;
+        const displayHost = formatWebsiteHost(website);
         return (
           <a
             href={href}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="block max-w-[16rem] truncate text-primary underline-offset-2 hover:underline"
+            className="block max-w-[12rem] truncate text-primary underline-offset-2 hover:underline"
             title={website}
           >
-            {website}
+            {displayHost}
           </a>
         );
       },

@@ -48,8 +48,8 @@ const ENTRY: CatalogueEntry = {
   operator_edited_fields: ["DisplayName"],
   display_name: "Alpha",
   asn: 64500,
-  country_code: "US",
-  country_name: "United States",
+  country_code: "DE",
+  country_name: "Germany",
   city: "San Francisco",
   latitude: 37.77,
   longitude: -122.42,
@@ -81,8 +81,11 @@ describe("EntryDrawer", () => {
     render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
     expect(screen.getByLabelText("Display name")).toHaveValue("Alpha");
     expect(screen.getByLabelText("ASN")).toHaveValue(64500);
-    expect(screen.getByLabelText("Country code")).toHaveValue("US");
-    expect(screen.getByLabelText("Country name")).toHaveValue("United States");
+    // Country is now a Radix Select (combobox role), not a free-text input.
+    // The trigger should display the selected country name + code.
+    const countryTrigger = screen.getByRole("combobox", { name: /country/i });
+    expect(countryTrigger).toBeInTheDocument();
+    expect(countryTrigger).toHaveTextContent("Germany (DE)");
     expect(screen.getByLabelText("City")).toHaveValue("San Francisco");
     expect(screen.getByLabelText("Latitude")).toHaveValue(37.77);
     expect(screen.getByLabelText("Longitude")).toHaveValue(-122.42);
@@ -110,6 +113,27 @@ describe("EntryDrawer", () => {
     const [variables] = patchMutation.mutate.mock.calls[0];
     expect(variables.id).toBe(ENTRY.id);
     expect(variables.patch).toEqual({ city: "Berlin" });
+  });
+
+  test("selecting a country PATCHes only country_code (no country_name)", async () => {
+    const user = userEvent.setup();
+    render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+
+    // Open the country Select (Radix uses a button with role=combobox).
+    const countryTrigger = screen.getByRole("combobox", { name: /country/i });
+    await user.click(countryTrigger);
+
+    // The portal renders options into document.body.
+    const frOption = within(document.body).getByRole("option", { name: /France/ });
+    await user.click(frOption);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(patchMutation.mutate).toHaveBeenCalledTimes(1);
+    const [variables] = patchMutation.mutate.mock.calls[0];
+    expect(variables.id).toBe(ENTRY.id);
+    // Only country_code — no country_name
+    expect(variables.patch).toEqual({ country_code: "FR" });
   });
 
   test("Revert to auto sends PascalCase field name + nulled column", async () => {
