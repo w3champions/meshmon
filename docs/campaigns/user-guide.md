@@ -37,6 +37,37 @@ id is enqueued for the background enrichment pipeline. Fields fill in
 live as providers respond; the page reacts to `enrichment_progress`
 SSE events to flip the status badge without a refresh.
 
+### Default metadata
+
+The **Add IPs** dialog includes an optional **Default metadata**
+panel. Expand it to set display name, city, country, location,
+website, and notes once for every IP in the paste. Blank fields are
+ignored. Country (code + name) and Location (latitude + longitude)
+travel as atomic pairs — the server rejects a half-supplied pair, so
+the panel's country and location pickers always emit both halves
+together.
+
+Merge rules match the rest of the catalogue's lock model:
+
+- New rows receive every supplied field, and each supplied field is
+  added to `operator_edited_fields` so later enrichment runs skip it.
+- Existing rows receive a field only if it is not already in
+  `operator_edited_fields`. Paired fields are atomic: if either half
+  of Location or Country is already locked, neither half is written.
+
+The response's `skipped_summary` surfaces the aggregate — when
+existing rows kept locked values, an inline notice inside the dialog
+names the skipped fields so the operator sees what survived.
+
+### Pick coordinates on a map
+
+Latitude and longitude (both in the Default metadata panel and the
+entry drawer's edit form) are set by clicking on a Leaflet map.
+Click drops a marker, drag moves it, and the Clear button nulls it
+back to the empty state. The selected coordinates show below the map
+for verification, and the component respects the system's
+reduced-motion preference.
+
 ## Filtering
 
 The filter rail runs across the top of the catalogue view. Every
