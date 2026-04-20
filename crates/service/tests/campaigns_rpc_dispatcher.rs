@@ -515,6 +515,112 @@ async fn dispatch_malformed_outcome_rejects_pair_and_leaves_state_dispatched() {
 }
 
 #[tokio::test]
+async fn dispatch_returns_agent_busy_when_semaphore_saturated() {
+    // With `default_agent_concurrency = 1`, a first in-flight dispatch
+    // consumes the only permit. A second, concurrent dispatch must
+    // return `skipped_reason = "agent_busy"` immediately — it must NOT
+    // block on the semaphore, otherwise one saturated agent would
+    // stall every other agent's dispatch in the scheduler tick.
+    let pool = common::shared_migrated_pool().await;
+    let agent_id = "agent-rpc-busy";
+    seed_agent_row(&pool, agent_id, "203.0.113.16").await;
+    let registry = make_registry(&pool).await;
+
+    // Agent holds the response channel open until the test releases
+    // it, keeping the first dispatch's semaphore permit acquired over
+    // the whole blocked window. `_tx` leaks deliberately so the
+    // scheduler's stream read parks waiting on the next item.
+    struct BlockingAgent {
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[tonic::async_trait]
+    impl AgentCommand for BlockingAgent {
+        async fn refresh_config(
+            &self,
+            _: Request<RefreshConfigRequest>,
+        ) -> Result<Response<RefreshConfigResponse>, Status> {
+            Ok(Response::new(RefreshConfigResponse {}))
+        }
+        type RunMeasurementBatchStream = ResultStream;
+        async fn run_measurement_batch(
+            &self,
+            _: Request<RunMeasurementBatchRequest>,
+        ) -> Result<Response<Self::RunMeasurementBatchStream>, Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<MeasurementResult, Status>>(1);
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                release.notified().await;
+                drop(tx); // close the stream after release fires
+            });
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            Ok(Response::new(Box::pin(stream)))
+        }
+    }
+
+    let release = Arc::new(tokio::sync::Notify::new());
+    let channel = spawn_agent_server(BlockingAgent {
+        release: release.clone(),
+    })
+    .await;
+    let tunnels = Arc::new(TunnelManager::new_for_test(vec![(
+        agent_id.to_string(),
+        channel,
+    )]));
+    let writer = SettleWriter::new(pool.clone());
+    // default_agent_concurrency = 1 — second dispatch must be refused.
+    let dispatcher = Arc::new(RpcDispatcher::new(tunnels, registry, writer, 1, 100, 50));
+
+    let (campaign_id_a, pending_a) =
+        seed_dispatched_batch(&pool, agent_id, vec![unique_dest()]).await;
+    let (campaign_id_b, pending_b) =
+        seed_dispatched_batch(&pool, agent_id, vec![unique_dest()]).await;
+    let pair_id_b = pending_b[0].pair_id;
+
+    // Kick off the first dispatch in the background — it blocks in the
+    // fake agent, holding the semaphore permit.
+    let dispatcher_a = dispatcher.clone();
+    let agent_label = agent_id.to_string();
+    let first = tokio::spawn(async move { dispatcher_a.dispatch(&agent_label, pending_a).await });
+
+    // Spin until the first dispatch has actually opened the RPC and
+    // taken the permit. Polling the bucket is overkill; a short sleep
+    // is sufficient because the fake agent awaits `release` immediately.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Second dispatch must NOT block. It lands in `rate_limited_ids`
+    // so the scheduler reverts to `pending` AND decrements
+    // `attempt_count` — a saturated per-agent cap is a pre-RPC
+    // throttling decision, same category as the per-destination
+    // bucket. Burning retry budget here would expire the pair after
+    // a few consecutive ticks of legitimate backpressure.
+    let start = std::time::Instant::now();
+    let outcome = dispatcher.dispatch(agent_id, pending_b).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "saturated semaphore must not block the scheduler: took {elapsed:?}",
+    );
+    assert_eq!(outcome.dispatched, 0);
+    assert!(
+        outcome.rejected_ids.is_empty(),
+        "saturated agent must not flow through rejected_ids: {:?}",
+        outcome.rejected_ids,
+    );
+    assert_eq!(
+        outcome.rate_limited_ids,
+        vec![pair_id_b],
+        "agent_busy must preserve attempt budget by landing in rate_limited_ids",
+    );
+    assert_eq!(outcome.skipped_reason.as_deref(), Some("agent_busy"));
+
+    // Release the first dispatch so the test doesn't leak its task.
+    release.notify_one();
+    let _ = first.await;
+    repo::delete(&pool, campaign_id_a).await.expect("cleanup");
+    repo::delete(&pool, campaign_id_b).await.expect("cleanup");
+}
+
+#[tokio::test]
 async fn dispatch_empty_batch_returns_default_outcome() {
     let pool = common::shared_migrated_pool().await;
     let registry = make_registry(&pool).await;

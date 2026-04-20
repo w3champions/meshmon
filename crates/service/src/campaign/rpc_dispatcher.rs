@@ -351,12 +351,28 @@ impl PairDispatcher for RpcDispatcher {
             };
         };
 
-        // 2. Per-agent semaphore (rebuild on concurrency change).
+        // 2. Per-agent semaphore. Use `try_acquire_owned`, not the
+        // awaiting variant: the scheduler dispatches agents serially
+        // per tick, so blocking here on a saturated agent would stall
+        // every other agent's dispatch behind it. Saturation lands
+        // in `rate_limited_ids` (same "pre-RPC throttling" category
+        // as the per-destination bucket) so the scheduler reverts to
+        // `pending` AND decrements `attempt_count` — declining to
+        // dispatch because the cap is saturated must not burn retry
+        // budget.
         let effective = self.effective_concurrency(agent_id);
         let semaphore = self.semaphore_for(agent_id, effective);
-        let _permit = match semaphore.acquire_owned().await {
+        let _permit = match semaphore.try_acquire_owned() {
             Ok(p) => p,
-            Err(_) => {
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                return DispatchOutcome {
+                    dispatched: 0,
+                    rejected_ids: Vec::new(),
+                    rate_limited_ids: batch.iter().map(|p| p.pair_id).collect(),
+                    skipped_reason: Some("agent_busy".into()),
+                };
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => {
                 return DispatchOutcome {
                     dispatched: 0,
                     rejected_ids: batch.iter().map(|p| p.pair_id).collect(),

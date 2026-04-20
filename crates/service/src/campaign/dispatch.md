@@ -15,12 +15,23 @@ clone (interior state is `Arc`-owned) and holds references to:
    returns the tonic channel for the agent's tunnel. Missing tunnel
    means every pair joins `DispatchOutcome::rejected_ids` with
    `skipped_reason = Some("agent_unreachable")`.
-2. **Acquire a per-agent semaphore permit.** Effective concurrency is
-   `registry.snapshot().get(agent).campaign_max_concurrency
-     .unwrap_or(default_agent_concurrency).max(1)`. The semaphore is
-   cached in a `DashMap<agent_id, AgentSemaphore>`. When the effective
-   cap widens at runtime the cached entry is grown via
-   `Semaphore::add_permits`; widening takes effect on the next
+2. **Acquire a per-agent semaphore permit (non-blocking).** Effective
+   concurrency is `registry.snapshot().get(agent).campaign_max_concurrency
+     .unwrap_or(default_agent_concurrency).max(1)`. Uses
+   `try_acquire_owned` so a saturated agent never stalls the scheduler
+   loop: scheduler dispatches agents serially per tick, so awaiting
+   the permit here would queue every other agent behind the
+   bottlenecked one. On saturation the batch returns with
+   `skipped_reason = "agent_busy"` and all pairs in `rate_limited_ids`
+   (not `rejected_ids`) — saturating the cap is the same "pre-RPC
+   throttling" category as losing the per-destination bucket, so the
+   scheduler reverts WITH `attempt_count--` to avoid burning retry
+   budget on legitimate backpressure. The next tick retries once the
+   agent frees a permit.
+
+   The semaphore is cached in a `DashMap<agent_id, AgentSemaphore>`.
+   When the effective cap widens at runtime the cached entry is grown
+   via `Semaphore::add_permits`; widening takes effect on the next
    dispatch. A cap shrink at runtime is *ignored* — replacing the
    semaphore would leak accounting for permits held by in-flight
    batches and let total concurrency briefly exceed the new cap.
@@ -66,7 +77,7 @@ clone (interior state is `Arc`-owned) and holds references to:
 | `dispatched` | Count of pairs whose results streamed back AND whose writer settle returned `Settled`. |
 | `rejected_ids` | Pairs whose response never arrived, pairs whose stream errored mid-flight, pairs whose writer call returned `MalformedNoOutcome`, pairs whose writer call returned `Err`. Scheduler reverts these to `pending` **without** decrementing `attempt_count`. |
 | `rate_limited_ids` | Pairs that lost the per-destination bucket draw. Scheduler reverts to `pending` AND decrements `attempt_count`. |
-| `skipped_reason` | Set only when the batch failed before any pair streamed: `"agent_unreachable"`, `"rpc_error:<code>"`, `"rate_limited"` (bucket consumed every pair), `"semaphore_closed"`. |
+| `skipped_reason` | Set only when the batch failed before any pair streamed: `"agent_unreachable"`, `"agent_busy"` (per-agent semaphore saturated), `"rpc_error:<code>"`, `"rate_limited"` (bucket consumed every pair), `"semaphore_closed"`. |
 
 Agent-reported failures (`MeasurementFailure` — `NO_ROUTE`, `TIMEOUT`,
 etc.) are **settled** by the writer, not rejected. The writer maps
