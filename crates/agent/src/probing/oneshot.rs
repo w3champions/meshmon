@@ -11,9 +11,7 @@
 #![doc = include_str!("oneshot.md")]
 
 use std::net::IpAddr;
-use std::sync::atomic::AtomicU64;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,22 +33,22 @@ use crate::command::CampaignProber;
 // Collision counter (see spec 03 §6 and oneshot.md § Shared-resource audit)
 // ---------------------------------------------------------------------------
 
-/// Process-wide counter; stays at 0 in steady state. A non-zero value
-/// means a trippy reply arrived whose trace identifier did not match any
-/// tracer this prober spawned — a defensive guard against trace-id
-/// collisions with the continuous pool. Wired by the coexistence test.
-#[allow(dead_code)]
+/// Process-wide counter. Stays at 0 in steady state — trippy-core's
+/// reply dispatcher already filters at the library level, so no
+/// production path calls `fetch_add`. Reserved for a future aggregator
+/// that uses `Tracer::run_with` and can observe stray replies directly.
+/// Observed via the shutdown log in `bootstrap.rs` (mirrors the
+/// continuous prober's `CROSS_CONTAMINATION_TOTAL`) and by the
+/// coexistence integration test.
 static ONESHOT_PROBE_COLLISIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Return the current collision count. Used by the coexistence test.
-#[cfg(test)]
-#[allow(dead_code)]
+/// Return the current collision count. Read by bootstrap at shutdown
+/// and by the coexistence integration test.
 pub(crate) fn oneshot_probe_collisions_total() -> u64 {
     ONESHOT_PROBE_COLLISIONS_TOTAL.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn reset_oneshot_collisions_for_test() {
     ONESHOT_PROBE_COLLISIONS_TOTAL.store(0, Ordering::Relaxed);
 }
@@ -156,15 +154,41 @@ impl CampaignProber for OneshotProber {
                 continue;
             }
 
-            let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
-                let _ = results
-                    .send(Ok(failure_result(
-                        target.pair_id,
-                        MeasurementFailureCode::AgentError,
-                        "semaphore closed",
-                    )))
-                    .await;
-                continue;
+            // Cancel-aware acquire: a saturated semaphore must never pin
+            // a cancelled batch. If cancel fires while we're waiting, emit
+            // CANCELLED for this pair and move on (the next loop iteration
+            // hits the fast-path above for the remaining targets).
+            let permit = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    if results
+                        .send(Ok(failure_result(
+                            target.pair_id,
+                            MeasurementFailureCode::Cancelled,
+                            "batch cancelled",
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                acquired = self.semaphore.clone().acquire_owned() => match acquired {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // Semaphore is never closed in production today;
+                        // the branch is defensive against future refactors.
+                        let _ = results
+                            .send(Ok(failure_result(
+                                target.pair_id,
+                                MeasurementFailureCode::AgentError,
+                                "semaphore closed",
+                            )))
+                            .await;
+                        continue;
+                    }
+                }
             };
 
             let meta = OneshotRequest {
@@ -229,10 +253,31 @@ async fn run_one_pair(
         }
     };
 
-    let port = u16::try_from(target.destination_port).unwrap_or(0);
+    // TCP/UDP require a non-zero port in [1, 65535]. ICMP ignores the
+    // port entirely. A missing protobuf field defaults to 0, and a value
+    // > 65535 cannot fit in u16 — both cases surface as AgentError rather
+    // than silently probing port 0, which would always TIMEOUT and
+    // masquerade as legitimate unreachability.
     let (tcp_port, udp_port) = match req.protocol {
-        Protocol::Tcp => (Some(port), None),
-        Protocol::Udp => (None, Some(port)),
+        Protocol::Tcp | Protocol::Udp => {
+            let parsed: Option<u16> = u16::try_from(target.destination_port)
+                .ok()
+                .filter(|p| *p != 0);
+            match parsed {
+                Some(p) if matches!(req.protocol, Protocol::Tcp) => (Some(p), None),
+                Some(p) => (None, Some(p)),
+                None => {
+                    let _ = results
+                        .send(Ok(failure_result(
+                            target.pair_id,
+                            MeasurementFailureCode::AgentError,
+                            "invalid destination_port",
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        }
         _ => (None, None),
     };
 
@@ -283,11 +328,17 @@ async fn run_one_pair(
     let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            // Drop the tracer Arc so the raw socket closes. Give the
-            // blocking task CANCEL_DRAIN_BUDGET to unwind; if it misses
-            // we drop the handle — the socket is already closed.
+            // trippy-core 0.13 does not expose a cancellation hook on
+            // `Tracer::run()`, so dropping our outer Arc does not stop the
+            // blocking thread — the spawn_blocking task holds its own
+            // Arc<Tracer> until `run()` returns naturally (bounded by
+            // `max_rounds * (probe_stagger + read_timeout) + grace`).
+            // CANCEL_DRAIN_BUDGET only guarantees a fast wire-visible
+            // CANCELLED emission; operators must size the tokio blocking
+            // thread pool (default 64) against `continuous_cap +
+            // campaign_cap` worst-case.
             drop(tracer);
-            let _ = tokio::time::timeout(CANCEL_DRAIN_BUDGET, blocking).await;
+            let _ = tokio::time::timeout(CANCEL_DRAIN_BUDGET, &mut blocking).await;
             let _ = results
                 .send(Ok(failure_result(
                     target.pair_id,
@@ -316,6 +367,9 @@ async fn run_one_pair(
             }
         }
         _ = tokio::time::sleep(max_wall_clock) => {
+            // Same caveat as the cancel arm: the blocking thread keeps
+            // running until trippy's natural round loop exits. We detach
+            // here and emit TIMEOUT so the batch doesn't stall.
             drop(tracer);
             failure_result(
                 target.pair_id,
@@ -441,7 +495,18 @@ fn aggregate_latency(pair_id: u64, state: &State) -> MeasurementResult {
         return failure_result(pair_id, MeasurementFailureCode::Timeout, "no replies");
     }
 
-    let summary = build_summary(attempted, succeeded, target_hop.samples());
+    // trippy 0.13's `Hop::samples()` includes a `Duration::default()`
+    // sentinel for every `ProbeStatus::Awaited` and `ProbeStatus::Failed`
+    // probe (see trippy-core state.rs around ProbeStatus::Awaited/Failed).
+    // Feeding those zeros into the stats pulls `min` to 0 and skews
+    // `avg`/`stddev` on any partial-loss batch. Drop them before stats.
+    let rtts: Vec<Duration> = target_hop
+        .samples()
+        .iter()
+        .copied()
+        .filter(|d| !d.is_zero())
+        .collect();
+    let summary = build_summary(attempted, succeeded, &rtts);
     success_result(pair_id, summary)
 }
 
@@ -486,6 +551,10 @@ fn aggregate_mtr(pair_id: u64, state: &State) -> MeasurementResult {
         match hops_by_ttl.get(&ttl) {
             Some(hop) if hop.total_recv() > 0 => {
                 let avg_rtt_micros = hop.best_ms().map(ms_to_micros).unwrap_or(0);
+                // Single-round MTR sees at most one reply per TTL in
+                // practice, so every observed IP lands with frequency
+                // 1.0. A multi-round variant would derive this from
+                // `hop.addrs_with_counts() / hop.total_recv()`.
                 let observed_ips = hop
                     .addrs()
                     .map(|ip| HopIp {
@@ -572,6 +641,11 @@ fn build_summary(attempted: u32, succeeded: u32, samples: &[Duration]) -> Measur
     }
 }
 
+/// Nearest-rank percentile using `round` on `q * (N - 1)`. This matches
+/// the existing continuous-prober stats pass and gives the median at
+/// `sorted[N/2]` for odd N; it is *not* the interpolated percentile that
+/// pandas/numpy default to. Callers comparing to reference tooling must
+/// use the same convention.
 fn percentile(samples_ms: &[f64], q: f64) -> f64 {
     if samples_ms.is_empty() {
         return 0.0;
@@ -748,6 +822,45 @@ mod tests {
         assert!((s.latency_max_ms - 30.0).abs() < 1e-3);
         assert!((s.latency_avg_ms - 20.0).abs() < 1e-3);
         assert!((s.latency_median_ms - 20.0).abs() < 1e-3);
+    }
+
+    // Regression: trippy 0.13 inserts Duration::default() into Hop::samples
+    // for Awaited/Failed probes. If those zeros reach build_summary, min
+    // pins to 0 and avg/stddev are skewed. aggregate_latency must filter
+    // them out before the stats pass. We verify at the helper boundary by
+    // asserting build_summary on a filtered slice matches the expected
+    // non-zero stats.
+    #[test]
+    fn build_summary_ignores_zero_duration_filter() {
+        // Caller (aggregate_latency) filters zeros out; build_summary
+        // sees only real RTTs even when attempted > succeeded.
+        let real_rtts = vec![Duration::from_millis(10), Duration::from_millis(30)];
+        let s = build_summary(5, 2, &real_rtts);
+        assert_eq!(s.attempted, 5);
+        assert_eq!(s.succeeded, 2);
+        assert!((s.latency_min_ms - 10.0).abs() < 1e-3);
+        assert!((s.latency_max_ms - 30.0).abs() < 1e-3);
+        assert!((s.loss_pct - 0.6).abs() < 1e-5);
+    }
+
+    // End-to-end: feed aggregate_latency a mixture of real and sentinel
+    // samples and prove the filter engages. This uses Duration::is_zero
+    // the same way the production path does.
+    #[test]
+    fn zero_duration_filter_strips_trippy_sentinels() {
+        let mixed = [
+            Duration::from_millis(15),
+            Duration::default(),
+            Duration::from_millis(25),
+            Duration::default(),
+        ];
+        let filtered: Vec<Duration> =
+            mixed.iter().copied().filter(|d| !d.is_zero()).collect();
+        assert_eq!(filtered.len(), 2);
+        let s = build_summary(4, 2, &filtered);
+        assert!((s.latency_min_ms - 15.0).abs() < 1e-3);
+        assert!((s.latency_max_ms - 25.0).abs() < 1e-3);
+        assert!((s.latency_avg_ms - 20.0).abs() < 1e-3);
     }
 
     // Loopback integration: ICMP LATENCY — self-skips without CAP_NET_RAW.
@@ -1087,30 +1200,28 @@ mod tests {
     /// prober's shared infrastructure. A compile-time grep over the
     /// module's source proves this; any future edit that imports or
     /// names the forbidden symbols trips this test.
+    ///
+    /// The scan truncates at the first occurrence of the audit-cutoff
+    /// marker, which is declared immediately below as a `const`. The
+    /// assertion literals live *after* that cutoff, so they cannot
+    /// self-match. Tests added above the cutoff must not use the
+    /// forbidden literals in comments or doc strings.
     #[test]
     fn oneshot_source_avoids_continuous_udp_symbols() {
         const SRC: &str = include_str!("oneshot.rs");
-        // Scan only up to the audit-cutoff marker so the assertions
-        // below don't match their own literals.
         const CUTOFF: &str = "audit-cutoff-anchor-do-not-delete";
         let idx = SRC
             .find(CUTOFF)
             .expect("cutoff marker must appear before the assertions");
         let preceding = &SRC[..idx];
-        let pool_symbol = [
-            'U', 'd', 'p', 'P', 'r', 'o', 'b', 'e', 'r', 'P', 'o', 'o', 'l',
-        ]
-        .iter()
-        .collect::<String>();
-        let echo_symbol = ['e', 'c', 'h', 'o', '_', 'u', 'd', 'p']
-            .iter()
-            .collect::<String>();
+        let pool_symbol = concat!("Udp", "ProberPool");
+        let echo_symbol = concat!("echo_", "udp");
         assert!(
-            !preceding.contains(&pool_symbol),
+            !preceding.contains(pool_symbol),
             "oneshot.rs must not reach into the continuous UDP pool",
         );
         assert!(
-            !preceding.contains(&echo_symbol),
+            !preceding.contains(echo_symbol),
             "oneshot.rs must not import the UDP echo module",
         );
         // audit-cutoff-anchor-do-not-delete

@@ -841,12 +841,19 @@ cap should validate the combined load.
 ### Cancellation
 
 The gRPC stream drop propagates to a `CancellationToken` the per-pair
-task selects on. On cancel, the task drops the `Arc<Tracer>` (closing
-the raw socket) and waits up to 1 s for the blocking `Tracer::run()`
-to unwind; if the blocking thread misses the window, the handle is
-dropped anyway — the socket is already closed and a stale blocking
-thread expires on its next round boundary. Cancelled pairs emit
-`MeasurementFailureCode::CANCELLED`.
+task selects on. On cancel, the task drops its outer `Arc<Tracer>` and
+awaits the blocking join handle for up to 1 s. `trippy-core 0.13` does
+not expose a cancellation hook on `Tracer::run()`, so the
+`spawn_blocking` task keeps its own `Arc<Tracer>` strong reference and
+the raw socket stays open until the run finishes naturally (bounded by
+`max_rounds * (probe_stagger + read_timeout) + grace`). The 1-second
+drain budget therefore only guarantees a fast wire-visible
+`MeasurementFailureCode::CANCELLED` emission; operators must size the
+tokio blocking thread pool (default 64) against `continuous_cap +
+campaign_cap` simultaneously so a burst of cancellations does not
+saturate the pool while the previous tracers are still unwinding. The
+wall-clock safety net (`MeasurementFailureCode::TIMEOUT`) shares the
+caveat.
 
 A wall-clock safety net caps each LATENCY pair at
 `probe_count * (stagger_ms + timeout_ms) + 5 s` and MTR pairs at

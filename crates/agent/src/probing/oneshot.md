@@ -72,20 +72,41 @@ Single-round MTR. `aggregate_mtr` walks `[1..=target_reached_ttl]`:
 
 `run_one_pair` selects on three branches, biased toward cancel:
 
-1. `cancel.cancelled()` — drops the `Arc<Tracer>` (closing the raw
-   socket) and waits up to 1 s for the blocking thread to unwind, then
-   emits `MeasurementFailureCode::CANCELLED` regardless of whether the
-   thread returned in time.
+1. `cancel.cancelled()` — drops the outer `Arc<Tracer>` and awaits the
+   blocking join handle for up to 1 s, then emits
+   `MeasurementFailureCode::CANCELLED`.
 2. `&mut blocking` — the `spawn_blocking` join handle resolves when
    `Tracer::run()` finishes all rounds.
 3. `tokio::time::sleep(max_wall_clock)` — a safety net sized from
    `probe_count * (stagger + timeout) + 5 s` for LATENCY or `35 s` for
-   MTR; tripping the net surfaces as `MeasurementFailureCode::TIMEOUT`.
+   MTR; tripping the net emits `MeasurementFailureCode::TIMEOUT`.
 
-The 1-second drain budget is tighter than the continuous prober's 15 s
-because one-shot tracers run at most `probe_count` rounds (≤ 20 in
-typical campaigns) rather than the continuous prober's bounded-3600
-round loop.
+### Cancellation caveat (trippy-core 0.13)
+
+`Tracer::run()` does not expose a cancellation hook, so dropping the
+outer `Arc<Tracer>` does **not** stop the blocking thread — the
+`spawn_blocking` task holds its own `Arc` and keeps the raw socket
+open until `run()` returns naturally. The 1-second drain budget only
+guarantees a fast wire-visible `CANCELLED` emission; the underlying
+blocking thread can continue running for up to
+`max_rounds * (probe_stagger + read_timeout) + grace` after cancel
+(≈ 20 s worst case with a 20-probe campaign at `stagger = 50 ms`,
+`timeout = 950 ms`).
+
+This has two operational consequences:
+
+- Operators must size the tokio blocking pool (default 64 threads) to
+  absorb `continuous_cap + campaign_cap` simultaneously in the worst
+  case, otherwise a burst of cancellations can saturate the pool before
+  the previous tracers finish unwinding.
+- `meshmon_campaign_probe_collisions_total` on the agent side is the
+  canary for trace-id contention while leaked tracers are still
+  running; a future trippy-core patch that adds a cancellation hook
+  would retire this caveat.
+
+The wall-clock arm (branch 3) shares the caveat — we detach and emit
+`TIMEOUT` on the wire, but the blocking thread follows the same
+bounded-natural-exit path.
 
 ## Shared-resource audit
 
@@ -98,12 +119,19 @@ round loop.
 | Tokio blocking thread pool  | default 64 threads (set in `agent::main`)                       | `continuous_cap + campaign_cap` budgets the pool. Operators raising either cap should leave headroom for both classes.                                                                               |
 
 `ONESHOT_PROBE_COLLISIONS_TOTAL` (`AtomicU64` at module scope) mirrors
-the continuous `CROSS_CONTAMINATION_TOTAL`. A coexistence integration
-test runs two concurrent oneshot batches against the same destination
-and asserts both counters stay at 0; a future aggregator that uses
-`Tracer::run_with` can bump `ONESHOT_PROBE_COLLISIONS_TOTAL` directly if
-it observes a reply that does not belong to any tracer this module
-spawned.
+the continuous `CROSS_CONTAMINATION_TOTAL` exactly: an in-process
+counter with no Prometheus registration — the agent has no `/metrics`
+scrape endpoint. The total is logged at shutdown alongside
+`contamination_total` via `bootstrap.rs::shutdown` (`tracing::info!`),
+and the coexistence integration test asserts both counters stay at 0.
+No production path bumps the counter today because trippy-core's reply
+dispatcher already filters mismatched replies at the library level; a
+future aggregator that uses `Tracer::run_with` could `fetch_add` it
+directly when it observes an unowned reply. The service-side
+Prometheus counter `meshmon_campaign_probe_collisions_total` stays
+seeded at 0 as a placeholder for a future cross-agent aggregation
+path — T46 does not plumb per-agent collision counts through the
+ingestion pipeline.
 
 ## Code anchors
 
