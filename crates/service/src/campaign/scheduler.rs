@@ -12,7 +12,7 @@
 //! plugs in the real RPC dispatcher.
 
 use super::dispatch::{PairDispatcher, PendingPair};
-use super::events::NOTIFY_CHANNEL;
+use super::events::{NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL};
 use super::model::{CampaignState, PairResolutionState};
 use super::repo::{self, RepoError};
 use crate::metrics;
@@ -113,9 +113,14 @@ impl Scheduler {
 
     /// Main loop. Runs until `cancel` fires.
     ///
-    /// Opens a dedicated [`PgListener`] on `NOTIFY_CHANNEL`. On listener
-    /// failure falls back to a tick-only loop so a transient listener
-    /// outage never grounds dispatch permanently.
+    /// Opens a dedicated [`PgListener`] subscribed to both
+    /// [`NOTIFY_CHANNEL`] (lifecycle transitions) and
+    /// [`PAIR_SETTLED_CHANNEL`] (dispatch-writer settlements). Either
+    /// channel wakes the loop sooner than the periodic tick; the `recv`
+    /// arm does not distinguish channels since any wake triggers a
+    /// single `tick_once`. On listener failure, falls back to a
+    /// tick-only loop so a transient listener outage never grounds
+    /// dispatch permanently.
     pub async fn run(self, cancel: CancellationToken) {
         info!(
             tick_ms = self.tick.as_millis() as u64,
@@ -135,10 +140,13 @@ impl Scheduler {
                 return;
             }
         };
-        if let Err(e) = listener.listen(NOTIFY_CHANNEL).await {
+        if let Err(e) = listener
+            .listen_all([NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL])
+            .await
+        {
             warn!(
                 error = %e,
-                "scheduler: failed to subscribe to NOTIFY; falling back to periodic tick only"
+                "scheduler: failed to subscribe to NOTIFY channels; falling back to periodic tick only"
             );
             self.tick_only_loop(cancel).await;
             return;

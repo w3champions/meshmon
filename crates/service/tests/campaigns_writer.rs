@@ -22,12 +22,25 @@ use meshmon_service::campaign::repo::{self, CreateInput};
 use meshmon_service::campaign::writer::SettleWriter;
 use sqlx::PgPool;
 use std::net::IpAddr;
-use std::str::FromStr;
 
-/// Build a fresh campaign with one pair, then flip the pair to
-/// `dispatched` via `take_pending_batch` so the writer's
-/// `resolution_state='dispatched'` gate will match.
-async fn seed_dispatched_pair(pool: &PgPool) -> (uuid::Uuid, i64) {
+/// Allocate a test-unique destination IP so concurrent tests against
+/// the shared pool cannot cross-pollute `measurements` rows or the
+/// `campaign_pairs` UNIQUE constraint on (campaign, source, dest).
+/// The prefix 203.0.113.0/24 is TEST-NET-3 per RFC 5737.
+fn unique_dest() -> IpAddr {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Keep within the /24 — 254 distinct values are plenty for one
+    // test binary, and staying inside TEST-NET-3 makes the intent clear.
+    IpAddr::from([203, 0, 113, (n % 254 + 1) as u8])
+}
+
+/// Build a fresh campaign with one pair using a unique destination IP,
+/// then flip the pair to `dispatched` via `take_pending_batch` so the
+/// writer's `resolution_state='dispatched'` gate will match.
+async fn seed_dispatched_pair(pool: &PgPool) -> (uuid::Uuid, i64, IpAddr) {
+    let dest = unique_dest();
     let campaign = repo::create(
         pool,
         CreateInput {
@@ -35,7 +48,7 @@ async fn seed_dispatched_pair(pool: &PgPool) -> (uuid::Uuid, i64) {
             notes: "".into(),
             protocol: ProbeProtocol::Icmp,
             source_agent_ids: vec!["agent-a".into()],
-            destination_ips: vec![IpAddr::from_str("203.0.113.5").unwrap()],
+            destination_ips: vec![dest],
             force_measurement: false,
             probe_count: None,
             probe_count_detail: None,
@@ -54,15 +67,15 @@ async fn seed_dispatched_pair(pool: &PgPool) -> (uuid::Uuid, i64) {
         .await
         .expect("take batch");
     assert_eq!(batch.len(), 1, "expected exactly one seeded pair");
-    (campaign.id, batch[0].id)
+    (campaign.id, batch[0].id, dest)
 }
 
-fn mk_pair(campaign_id: uuid::Uuid, pair_id: i64) -> PendingPair {
+fn mk_pair(campaign_id: uuid::Uuid, pair_id: i64, dest: IpAddr) -> PendingPair {
     PendingPair {
         pair_id,
         campaign_id,
         source_agent_id: "agent-a".into(),
-        destination_ip: IpAddr::from_str("203.0.113.5").unwrap(),
+        destination_ip: dest,
         probe_count: 10,
         timeout_ms: 2_000,
         probe_stagger_ms: 100,
@@ -101,11 +114,11 @@ fn failure_result(pair_id: i64, code: MeasurementFailureCode) -> MeasurementResu
 #[tokio::test]
 async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     let settled = writer
-        .settle(&mk_pair(campaign_id, pair_id), &ok_result(pair_id))
+        .settle(&mk_pair(campaign_id, pair_id, dest), &ok_result(pair_id))
         .await
         .expect("settle");
     assert!(settled);
@@ -143,12 +156,12 @@ async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
 #[tokio::test]
 async fn settle_failure_timeout_writes_skipped_with_timeout_tag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     let settled = writer
         .settle(
-            &mk_pair(campaign_id, pair_id),
+            &mk_pair(campaign_id, pair_id, dest),
             &failure_result(pair_id, MeasurementFailureCode::Timeout),
         )
         .await
@@ -175,12 +188,12 @@ async fn settle_failure_timeout_writes_skipped_with_timeout_tag() {
 #[tokio::test]
 async fn settle_no_route_maps_to_unreachable_state() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     writer
         .settle(
-            &mk_pair(campaign_id, pair_id),
+            &mk_pair(campaign_id, pair_id, dest),
             &failure_result(pair_id, MeasurementFailureCode::NoRoute),
         )
         .await
@@ -202,12 +215,12 @@ async fn settle_no_route_maps_to_unreachable_state() {
 #[tokio::test]
 async fn settle_refused_maps_to_skipped_with_refused_tag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     writer
         .settle(
-            &mk_pair(campaign_id, pair_id),
+            &mk_pair(campaign_id, pair_id, dest),
             &failure_result(pair_id, MeasurementFailureCode::Refused),
         )
         .await
@@ -229,12 +242,12 @@ async fn settle_refused_maps_to_skipped_with_refused_tag() {
 #[tokio::test]
 async fn settle_cancelled_maps_to_skipped_with_cancelled_tag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     writer
         .settle(
-            &mk_pair(campaign_id, pair_id),
+            &mk_pair(campaign_id, pair_id, dest),
             &failure_result(pair_id, MeasurementFailureCode::Cancelled),
         )
         .await
@@ -256,12 +269,12 @@ async fn settle_cancelled_maps_to_skipped_with_cancelled_tag() {
 #[tokio::test]
 async fn settle_agent_error_maps_to_skipped_with_agent_rejected_tag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     writer
         .settle(
-            &mk_pair(campaign_id, pair_id),
+            &mk_pair(campaign_id, pair_id, dest),
             &failure_result(pair_id, MeasurementFailureCode::AgentError),
         )
         .await
@@ -283,12 +296,12 @@ async fn settle_agent_error_maps_to_skipped_with_agent_rejected_tag() {
 #[tokio::test]
 async fn settle_unspecified_maps_to_skipped_with_agent_rejected_tag() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     writer
         .settle(
-            &mk_pair(campaign_id, pair_id),
+            &mk_pair(campaign_id, pair_id, dest),
             &failure_result(pair_id, MeasurementFailureCode::Unspecified),
         )
         .await
@@ -310,7 +323,7 @@ async fn settle_unspecified_maps_to_skipped_with_agent_rejected_tag() {
 #[tokio::test]
 async fn settle_mtr_writes_trace_and_links_measurement() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     let result = MeasurementResult {
@@ -330,7 +343,7 @@ async fn settle_mtr_writes_trace_and_links_measurement() {
     };
 
     writer
-        .settle(&mk_pair(campaign_id, pair_id), &result)
+        .settle(&mk_pair(campaign_id, pair_id, dest), &result)
         .await
         .expect("settle");
 
@@ -371,7 +384,7 @@ async fn settle_mtr_writes_trace_and_links_measurement() {
 #[tokio::test]
 async fn settle_returns_false_when_pair_was_reset_between_claim_and_settle() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     // Simulate a concurrent operator reset: flip the pair back to
@@ -388,7 +401,7 @@ async fn settle_returns_false_when_pair_was_reset_between_claim_and_settle() {
     .unwrap();
 
     let settled = writer
-        .settle(&mk_pair(campaign_id, pair_id), &ok_result(pair_id))
+        .settle(&mk_pair(campaign_id, pair_id, dest), &ok_result(pair_id))
         .await
         .expect("settle");
     assert!(!settled, "late settle against reset pair must be a no-op");
@@ -403,11 +416,14 @@ async fn settle_returns_false_when_pair_was_reset_between_claim_and_settle() {
 
     // And because the whole tx rolled back, no measurement row was
     // inserted either — otherwise the agent's work would leak into
-    // `measurements` without an attributing pair.
+    // `measurements` without an attributing pair. Scope the lookup by
+    // destination so parallel tests against the shared pool do not
+    // cross-pollute the assertion.
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM measurements WHERE source_agent_id = $1 AND destination_ip = '203.0.113.5'::inet",
+        "SELECT COUNT(*)::bigint FROM measurements WHERE source_agent_id = $1 AND destination_ip = $2",
     )
     .bind("agent-a")
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dest))
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -417,9 +433,53 @@ async fn settle_returns_false_when_pair_was_reset_between_claim_and_settle() {
 }
 
 #[tokio::test]
+async fn settle_emits_campaign_pair_settled_notify() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
+    let writer = SettleWriter::new(pool.clone());
+
+    // Subscribe *before* firing the settle so the NOTIFY cannot be
+    // missed by a race between listener setup and tx commit.
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .expect("connect listener");
+    listener
+        .listen("campaign_pair_settled")
+        .await
+        .expect("listen");
+
+    let pair = mk_pair(campaign_id, pair_id, dest);
+    let result = ok_result(pair_id);
+
+    let writer_task = tokio::spawn(async move { writer.settle(&pair, &result).await });
+
+    // Drain notifications until we find ours — the shared test pool
+    // may interleave other writers' notifications on the same channel,
+    // so matching purely on the next recv is racy. A 2 s bound keeps
+    // the assertion strict enough that a broken NOTIFY still fails
+    // quickly.
+    let expected = campaign_id.to_string();
+    let found = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let notify = listener.recv().await.expect("PgListener recv");
+            assert_eq!(notify.channel(), "campaign_pair_settled");
+            if notify.payload() == expected {
+                break;
+            }
+        }
+    })
+    .await;
+    found.expect("NOTIFY arrived in time");
+
+    writer_task.await.unwrap().unwrap();
+
+    repo::delete(&pool, campaign_id).await.unwrap();
+}
+
+#[tokio::test]
 async fn settle_empty_outcome_is_a_rollback() {
     let pool = common::shared_migrated_pool().await.clone();
-    let (campaign_id, pair_id) = seed_dispatched_pair(&pool).await;
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
 
     let result = MeasurementResult {
@@ -427,7 +487,7 @@ async fn settle_empty_outcome_is_a_rollback() {
         outcome: None,
     };
     let settled = writer
-        .settle(&mk_pair(campaign_id, pair_id), &result)
+        .settle(&mk_pair(campaign_id, pair_id, dest), &result)
         .await
         .expect("settle");
     assert!(!settled);
