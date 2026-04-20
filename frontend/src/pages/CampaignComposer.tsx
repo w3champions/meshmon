@@ -24,6 +24,7 @@ import { DrawMap, type DrawMapPin } from "@/components/map/DrawMap";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { extractCampaignErrorCode } from "@/lib/campaign";
 import { type CampaignKnobs, DEFAULT_KNOBS, SIZE_WARNING_THRESHOLD } from "@/lib/campaign-config";
 import { destinationFilterToQuery } from "@/lib/catalogue-query";
 import type { Bbox } from "@/lib/geo";
@@ -45,20 +46,6 @@ const EMPTY_FILTER: FilterValue = {
 };
 
 type MapTarget = "source" | "dest" | null;
-
-// ---------------------------------------------------------------------------
-// Narrow the mutation cause the way Campaigns.tsx does. The backend replies
-// with `{ error: "<code>" }`; we surface the code so we can branch without
-// parsing the human-readable message.
-// ---------------------------------------------------------------------------
-
-function extractErrorCode(err: unknown): string | null {
-  if (!(err instanceof Error)) return null;
-  const cause: unknown = err.cause;
-  if (cause === null || typeof cause !== "object") return null;
-  const code = (cause as { error?: unknown }).error;
-  return typeof code === "string" ? code : null;
-}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -260,23 +247,13 @@ export default function CampaignComposer() {
     (campaignId: string): void => {
       startMutation.mutate(campaignId, {
         onSuccess: () => {
-          // `/campaigns/$id` lands in Phase G; the typed `navigate()`
-          // rejects the path until then. Cast through `unknown` so the
-          // composer flow is wired now and lights up automatically when
-          // the detail route registers.
-          // TODO(Phase G): remove this cast once /campaigns/$id route is registered.
-          void (
-            navigate as unknown as (opts: {
-              to: string;
-              params: Record<string, string>;
-            }) => Promise<void> | void
-          )({
+          void navigate({
             to: "/campaigns/$id",
             params: { id: campaignId },
           });
         },
         onError: (err) => {
-          const code = extractErrorCode(err);
+          const code = extractCampaignErrorCode(err);
           const { pushToast } = useToastStore.getState();
           if (code === "illegal_state_transition") {
             pushToast({
@@ -359,7 +336,7 @@ export default function CampaignComposer() {
         },
         onError: (err) => {
           setAutoStartAfterCreate(false);
-          const code = extractErrorCode(err);
+          const code = extractCampaignErrorCode(err);
           if (code === "title_required") {
             pushToast({ kind: "error", message: "Title is required." });
             focusTitle();

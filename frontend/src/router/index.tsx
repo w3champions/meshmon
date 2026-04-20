@@ -14,6 +14,7 @@ import AgentDetail from "@/pages/AgentDetail";
 import AgentsList from "@/pages/AgentsList";
 import Alerts from "@/pages/Alerts";
 import CampaignComposer from "@/pages/CampaignComposer";
+import CampaignDetail from "@/pages/CampaignDetail";
 import Campaigns from "@/pages/Campaigns";
 import Catalogue from "@/pages/Catalogue";
 import Login from "@/pages/Login";
@@ -192,6 +193,16 @@ export const campaignNewRoute = createRoute({
   component: CampaignComposer,
 });
 
+// Thin detail shell for a single campaign. The per-pair results browser
+// lands in T49; this page currently renders the metadata card, knob
+// read-out, pair-state roll-up, dispatch preview, and the state-gated
+// action bar.
+export const campaignDetailRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/campaigns/$id",
+  component: CampaignDetail,
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   authRoute.addChildren([
@@ -205,6 +216,7 @@ const routeTree = rootRoute.addChildren([
     catalogueRoute,
     campaignsRoute,
     campaignNewRoute,
+    campaignDetailRoute,
   ]),
 ]);
 

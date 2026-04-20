@@ -36,6 +36,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { isIllegalStateTransition, stateBadgeVariant } from "@/lib/campaign";
 import { useToastStore } from "@/stores/toast";
 
 // ---------------------------------------------------------------------------
@@ -89,45 +90,6 @@ function sortByColumn(rows: Campaign[], col: SortColumn, dir: SortDir): Campaign
     return dir === "asc" ? result : -result;
   });
   return copy;
-}
-
-// ---------------------------------------------------------------------------
-// Error introspection. The campaign mutation hooks throw
-// `new Error("failed to …", { cause: <openapi-fetch response body> })` and the
-// server emits `{error: "illegal_state_transition"}` on 409 (stale Start/Stop
-// click). Drill into `cause` defensively — other shapes fall through to the
-// generic copy.
-// ---------------------------------------------------------------------------
-
-function isIllegalStateTransition(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const cause: unknown = err.cause;
-  if (cause === null || typeof cause !== "object") return false;
-  const code = (cause as { error?: unknown }).error;
-  return code === "illegal_state_transition";
-}
-
-// ---------------------------------------------------------------------------
-// State badge variant mapping. The shipped `Badge` component only exposes
-// `default | secondary | destructive | outline`, so terminal states all share
-// `secondary` and `outline` rather than inventing new variants.
-// ---------------------------------------------------------------------------
-
-function stateBadgeVariant(
-  state: CampaignState,
-): "default" | "secondary" | "destructive" | "outline" {
-  switch (state) {
-    case "draft":
-      return "outline";
-    case "running":
-      return "default";
-    case "completed":
-      return "secondary";
-    case "evaluated":
-      return "secondary";
-    case "stopped":
-      return "destructive";
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,9 +222,15 @@ export default function Campaigns() {
   // Action handlers
   // -------------------------------------------------------------------------
 
-  const startMutation = useStartCampaign();
-  const stopMutation = useStopCampaign();
+  // TanStack Query v5 returns a new result object every render, so listing
+  // the whole mutation in a `useCallback` dep array defeats memoization.
+  // Destructure `.mutate` — it's a stable reference per mutation. The
+  // delete path also reads `isPending` to disable the dialog's confirm
+  // button, so we keep the full result object for that site.
+  const { mutate: startCampaign } = useStartCampaign();
+  const { mutate: stopCampaign } = useStopCampaign();
   const deleteMutation = useDeleteCampaign();
+  const { mutate: deleteCampaign } = deleteMutation;
 
   const [editMetadataTarget, setEditMetadataTarget] = useState<Campaign | null>(null);
   const [editPairsTarget, setEditPairsTarget] = useState<Campaign | null>(null);
@@ -270,7 +238,7 @@ export default function Campaigns() {
 
   const handleStart = useCallback(
     (id: string): void => {
-      startMutation.mutate(id, {
+      startCampaign(id, {
         onError: (err) => {
           const { pushToast } = useToastStore.getState();
           if (isIllegalStateTransition(err)) {
@@ -287,11 +255,11 @@ export default function Campaigns() {
         },
       });
     },
-    [startMutation],
+    [startCampaign],
   );
   const handleStop = useCallback(
     (id: string): void => {
-      stopMutation.mutate(id, {
+      stopCampaign(id, {
         onError: (err) => {
           const { pushToast } = useToastStore.getState();
           if (isIllegalStateTransition(err)) {
@@ -308,7 +276,7 @@ export default function Campaigns() {
         },
       });
     },
-    [stopMutation],
+    [stopCampaign],
   );
   const handleEditMetadata = useCallback((campaign: Campaign): void => {
     setEditMetadataTarget(campaign);
@@ -321,11 +289,11 @@ export default function Campaigns() {
   }, []);
   const handleConfirmDelete = useCallback(
     (id: string): void => {
-      deleteMutation.mutate(id, {
+      deleteCampaign(id, {
         onSuccess: () => setDeleteTarget(null),
       });
     },
-    [deleteMutation],
+    [deleteCampaign],
   );
 
   // -------------------------------------------------------------------------
@@ -478,8 +446,15 @@ export default function Campaigns() {
           <TableBody>
             {rows.map((campaign) => (
               <TableRow key={campaign.id} data-testid={`campaign-row-${campaign.id}`}>
-                {/* TODO(Phase G): wire up the detail route via <Link to="/campaigns/$id">. */}
-                <TableCell className="font-medium">{campaign.title}</TableCell>
+                <TableCell className="font-medium">
+                  <Link
+                    to="/campaigns/$id"
+                    params={{ id: campaign.id }}
+                    className="hover:underline"
+                  >
+                    {campaign.title}
+                  </Link>
+                </TableCell>
                 <TableCell>
                   <Badge variant={stateBadgeVariant(campaign.state)}>{campaign.state}</Badge>
                 </TableCell>
