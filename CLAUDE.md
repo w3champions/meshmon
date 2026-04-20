@@ -156,13 +156,12 @@ Key patterns:
 
 ## Alerting
 
-Alert rules and Alertmanager config live under `deploy/`:
+Alert rules and Alertmanager config ship **inside meshmon-owned
+container images** so deployments don't mount yaml at runtime.
 
-- `deploy/alerts/rules.yaml` — VMAlert rules evaluated against
-  VictoriaMetrics. Rule groups map to stable `category` labels
-  consumed by the frontend alerts filter.
-- `deploy/alertmanager/alertmanager.yml` — default routing with
-  per-severity Discord receivers and an unreachable→loss inhibit rule.
+- `deploy/alerts/rules.yaml` → baked into `ghcr.io/w3champions/meshmon-vmalert`
+- `deploy/alertmanager/alertmanager.yml` + `alertmanager/templates/` →
+  baked into `ghcr.io/w3champions/meshmon-alertmanager`
 - Discord webhook URLs are injected at container start via
   docker-compose's `secrets:` stanza with `environment:` source; see
   `deploy/docker-compose.yml`. Nothing touches the host filesystem.
@@ -175,7 +174,8 @@ cargo test -p meshmon-service --test alerts_validation        # integration (req
 cargo e2e                                                     # optional: end-to-end delivery smoke
 ```
 
-See `deploy/alerts/README.md` for the label contract and editing workflow.
+See `deploy/alerts/README.md` and `deploy/alertmanager/README.md` for
+the label contract and override workflow.
 
 ## Dashboards
 

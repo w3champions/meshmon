@@ -1,0 +1,11 @@
+# docker/Dockerfile.vmalert
+#
+# Bakes meshmon's VMAlert rule set into the image so downstream
+# deployments don't need to mount `deploy/alerts/rules.yaml` at runtime.
+# Operators override the rules by building their own image on top of
+# this one, not by remounting.
+
+ARG VMALERT_TAG=v1.140.0
+FROM victoriametrics/vmalert:${VMALERT_TAG}
+
+COPY deploy/alerts/rules.yaml /etc/vmalert/rules/rules.yaml

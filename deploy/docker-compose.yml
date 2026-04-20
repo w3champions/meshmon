@@ -80,7 +80,14 @@ services:
     networks: [meshmon-internal]
 
   meshmon-vmalert:
-    image: victoriametrics/vmalert:v1.140.0
+    image: ghcr.io/w3champions/meshmon-vmalert:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vmalert
+      args:
+        VMALERT_TAG: "v1.140.0"
+      cache_from:
+        - type=registry,ref=ghcr.io/w3champions/meshmon-vmalert:buildcache-linux-amd64
     container_name: meshmon-vmalert
     restart: unless-stopped
     depends_on: [meshmon-vm, meshmon-alertmanager]
@@ -89,12 +96,17 @@ services:
       - "-datasource.url=http://meshmon-vm:8428"
       - "-notifier.url=http://meshmon-alertmanager:9093/alertmanager"
       - "-evaluationInterval=30s"
-    volumes:
-      - ./alerts/rules.yaml:/etc/vmalert/rules/rules.yaml:ro
     networks: [meshmon-internal]
 
   meshmon-alertmanager:
-    image: prom/alertmanager:v0.32.0
+    image: ghcr.io/w3champions/meshmon-alertmanager:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.alertmanager
+      args:
+        ALERTMANAGER_TAG: "v0.32.0"
+      cache_from:
+        - type=registry,ref=ghcr.io/w3champions/meshmon-alertmanager:buildcache-linux-amd64
     container_name: meshmon-alertmanager
     restart: unless-stopped
     command:
@@ -103,8 +115,6 @@ services:
       - "--web.external-url=${MESHMON_PUBLIC_URL:-http://localhost:8080}/alertmanager"
       - "--storage.path=/alertmanager"
     volumes:
-      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      - ./alertmanager/templates:/etc/alertmanager/templates:ro
       - meshmon-am-data:/alertmanager
     secrets:
       - source: discord_webhook

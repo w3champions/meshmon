@@ -5,9 +5,14 @@ frontend/dist/
 .github/
 docs/
 deploy/
-# Bundled Grafana image assets (docker/Dockerfile.grafana) need these
-# re-included despite the blanket deploy/ exclusion above.
+# Baked-image assets need these re-included despite the blanket deploy/
+# exclusion above:
+#   - docker/Dockerfile.grafana      → deploy/grafana/
+#   - docker/Dockerfile.vmalert      → deploy/alerts/
+#   - docker/Dockerfile.alertmanager → deploy/alertmanager/
 !deploy/grafana/
+!deploy/alerts/
+!deploy/alertmanager/
 *.md
 !README.md
 .DS_Store

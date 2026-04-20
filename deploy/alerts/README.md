@@ -6,6 +6,16 @@ unittest`.
 
 ---
 
+## Shipping
+
+The rule file is baked into the `ghcr.io/w3champions/meshmon-vmalert`
+image at `/etc/vmalert/rules/rules.yaml`. The OSS and overlay compose
+files both reference the image directly; there is no runtime volume
+mount. Downstream deployments override by building a thin image on
+top of `meshmon-vmalert`, not by mounting a different file.
+
+---
+
 ## Directory layout
 
 ```
