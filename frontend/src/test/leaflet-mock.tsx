@@ -40,7 +40,18 @@ type EventHandler = (...args: unknown[]) => void;
  */
 export interface MockLeafletMap {
   fitBounds: () => void;
-  setView: () => void;
+  /**
+   * `setView` accepts the real Leaflet shape (`[lat, lng]` + optional
+   * zoom) so assertions can inspect `__setViewCalls` and verify the
+   * viewport followed a controlled value change.
+   */
+  setView: (center: [number, number], zoom?: number) => void;
+  /**
+   * Ordered log of every `setView` call since `resetLeafletMock()` —
+   * used by `LocationPicker` tests to assert the viewport recenters
+   * when the controlled `value` prop changes.
+   */
+  __setViewCalls: Array<{ center: [number, number]; zoom?: number }>;
   on: (event: string, handler: EventHandler) => void;
   off: (event: string, handler: EventHandler) => void;
   removeLayer: (layer: L.Layer) => void;
@@ -84,9 +95,14 @@ function createMockMap(): MockLeafletMap {
   // the emitted viewport for assertions on `onViewportChange`.
   let bounds: [number, number, number, number] = [-60, -180, 70, 180];
 
+  const setViewCalls: Array<{ center: [number, number]; zoom?: number }> = [];
+
   const map: MockLeafletMap = {
     fitBounds: () => {},
-    setView: () => {},
+    setView: (center, zoom) => {
+      setViewCalls.push({ center, zoom });
+    },
+    __setViewCalls: setViewCalls,
     on: (event, handler) => {
       let set = handlers.get(event);
       if (!set) {

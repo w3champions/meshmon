@@ -1,8 +1,8 @@
 import "./leaflet-setup";
 
 import type { LeafletMouseEvent } from "leaflet";
-import { useEffect, useState } from "react";
-import { MapContainer, Marker, TileLayer, useMapEvents } from "react-leaflet";
+import { useEffect, useRef, useState } from "react";
+import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
@@ -76,6 +76,44 @@ function ClickToPlace({ onPick }: { onPick(next: LocationPickerValue): void }) {
   return null;
 }
 
+/**
+ * Keep the Leaflet viewport tracking controlled `value` updates.
+ *
+ * `react-leaflet`'s `MapContainer` reads `center`/`zoom` only on initial
+ * mount; subsequent prop changes never reach the underlying `L.Map`. When
+ * a parent updates `value` — e.g. the drawer navigates between entries
+ * with different coordinates, or an external "revert to auto" nulls a
+ * previous selection — the marker moves but the viewport would stay on
+ * the old area, hiding the selected point off-screen. This helper bridges
+ * the gap by calling `setView` whenever `value` changes, and returning
+ * to the world-overview default when `value` clears.
+ *
+ * User-driven pans and zooms survive untouched: the effect only fires
+ * when the controlled `value` prop itself changes, not on map
+ * interaction. Dragging the marker does loop through `onChange` and
+ * therefore re-centres — intentional, since a fresh pick is exactly
+ * when the operator expects the map to follow.
+ */
+function RecenterOnValueChange({ value }: { value: LocationPickerValue | null }) {
+  const map = useMap();
+  // Snapshot the value we last re-centred on so marker-drag round-trips
+  // (which update `value` by sub-pixel amounts) don't fight the operator
+  // mid-gesture. Compare by stringified coords — cheap and precise enough
+  // for 1e-7° granularity.
+  const last = useRef<string | null>(null);
+  useEffect(() => {
+    const key = value ? `${value.latitude},${value.longitude}` : null;
+    if (last.current === key) return;
+    last.current = key;
+    if (value) {
+      map.setView([value.latitude, value.longitude], 6);
+    } else {
+      map.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+    }
+  }, [map, value]);
+  return null;
+}
+
 export function LocationPicker({
   value,
   onChange,
@@ -130,6 +168,7 @@ export function LocationPicker({
             subdomains={TILE_SUBDOMAINS}
           />
           <ClickToPlace onPick={onChange} />
+          <RecenterOnValueChange value={value} />
           {value ? (
             <Marker
               position={[value.latitude, value.longitude]}

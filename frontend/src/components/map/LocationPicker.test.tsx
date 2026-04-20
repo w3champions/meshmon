@@ -8,7 +8,12 @@ vi.mock("react-leaflet", async () => {
 });
 
 import { LocationPicker } from "@/components/map/LocationPicker";
-import { fireMapClick, fireMarkerDragEnd, resetLeafletMock } from "@/test/leaflet-mock";
+import {
+  fireMapClick,
+  fireMarkerDragEnd,
+  getLeafletMock,
+  resetLeafletMock,
+} from "@/test/leaflet-mock";
 import { renderWithProviders } from "@/test/query-wrapper";
 
 describe("LocationPicker", () => {
@@ -85,5 +90,39 @@ describe("LocationPicker", () => {
     if (clear) {
       expect(clear).toBeDisabled();
     }
+  });
+
+  test("recenters the viewport when the controlled value changes", async () => {
+    // `MapContainer` reads `center` / `zoom` only on initial mount, so
+    // without `RecenterOnValueChange` a parent swapping `value` (e.g.
+    // navigating between catalogue entries) would leave the marker
+    // off-screen. Assert that the helper fires `map.setView(...)` for
+    // every controlled transition: null → point, point → other point,
+    // point → null.
+    const { rerender } = renderWithProviders(<LocationPicker value={null} onChange={() => {}} />);
+    await screen.findByTestId("map-container");
+    const map = getLeafletMock();
+
+    // First render with `value=null` still records a setView call
+    // because the helper's effect always runs on mount.
+    const initialCalls = map.__setViewCalls.length;
+
+    rerender(
+      <LocationPicker value={{ latitude: 37.77, longitude: -122.42 }} onChange={() => {}} />,
+    );
+    const afterFirstPoint = map.__setViewCalls.at(-1);
+    expect(afterFirstPoint?.center).toEqual([37.77, -122.42]);
+
+    rerender(<LocationPicker value={{ latitude: 48.14, longitude: 11.58 }} onChange={() => {}} />);
+    const afterSecondPoint = map.__setViewCalls.at(-1);
+    expect(afterSecondPoint?.center).toEqual([48.14, 11.58]);
+
+    rerender(<LocationPicker value={null} onChange={() => {}} />);
+    // Clearing the value must recentre to the world overview.
+    const afterClear = map.__setViewCalls.at(-1);
+    expect(afterClear?.center[0]).toBe(20);
+    expect(afterClear?.center[1]).toBe(0);
+
+    expect(map.__setViewCalls.length).toBeGreaterThan(initialCalls);
   });
 });
