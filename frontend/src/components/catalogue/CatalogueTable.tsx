@@ -6,7 +6,7 @@ import {
   type VisibilityState,
 } from "@tanstack/react-table";
 import { RefreshCw, Settings2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -25,7 +25,7 @@ import { StatusChip } from "./StatusChip";
 // Constants
 // ---------------------------------------------------------------------------
 
-const LS_KEY = "catalogue.table.visibleColumns";
+export const LS_KEY = "catalogue.table.visibleColumns";
 
 /** Columns that are visible by default. */
 const DEFAULT_VISIBLE: string[] = [
@@ -78,16 +78,13 @@ function saveVisibility(state: VisibilityState): void {
 
 function getInitialVisibility(): VisibilityState {
   const stored = loadVisibleIds();
-  const allColumns = [...DEFAULT_VISIBLE, ...OPTIONAL_COLUMNS];
   const result: VisibilityState = {};
 
-  if (stored) {
-    for (const col of allColumns) {
-      result[col] = stored.includes(col);
-    }
-  } else {
-    for (const col of DEFAULT_VISIBLE) result[col] = true;
-    for (const col of OPTIONAL_COLUMNS) result[col] = false;
+  for (const col of DEFAULT_VISIBLE) {
+    result[col] = stored ? stored.includes(col) : true;
+  }
+  for (const col of OPTIONAL_COLUMNS) {
+    result[col] = stored ? stored.includes(col) : false;
   }
 
   return result;
@@ -220,7 +217,7 @@ export function CatalogueTable({
     saveVisibility(columnVisibility);
   }, [columnVisibility]);
 
-  const columns = buildColumns(onReenrich);
+  const columns = useMemo(() => buildColumns(onReenrich), [onReenrich]);
 
   const table = useReactTable({
     data: entries,

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { renderWithProviders } from "@/test/query-wrapper";
-import { CatalogueTable } from "./CatalogueTable";
+import { CatalogueTable, LS_KEY } from "./CatalogueTable";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -46,12 +46,6 @@ const ENTRY_B: CatalogueEntry = {
 };
 
 const ENTRIES = [ENTRY_A, ENTRY_B];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const LS_KEY = "catalogue.table.visibleColumns";
 
 // ---------------------------------------------------------------------------
 // Setup / teardown
@@ -321,6 +315,24 @@ describe("CatalogueTable", () => {
 
       // Now Latitude header should be visible
       expect(screen.getByRole("columnheader", { name: "Latitude" })).toBeInTheDocument();
+    });
+
+    test("first-time users (no stored preferences) see compile-time default columns", async () => {
+      // No localStorage entry → getInitialVisibility seeds from DEFAULT_VISIBLE /
+      // OPTIONAL_COLUMNS. This covers the "new install" case and also guards
+      // against the hydration regression where a user who never interacted with
+      // the chooser would lose access to newly added default-visible columns.
+      expect(localStorage.getItem(LS_KEY)).toBeNull();
+
+      renderWithProviders(
+        <CatalogueTable entries={ENTRIES} onRowClick={vi.fn()} onReenrich={vi.fn()} />,
+      );
+
+      await screen.findByRole("columnheader", { name: "IP" });
+      // Every compile-time default-visible column should be present.
+      expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Network" })).toBeInTheDocument();
     });
   });
 });
