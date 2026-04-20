@@ -1383,6 +1383,346 @@ pub async fn facets(pool: &PgPool) -> Result<FacetsResponse, sqlx::Error> {
     })
 }
 
+// --- Map ------------------------------------------------------------------
+
+/// Threshold separating the detail vs cluster response for
+/// [`map_detail_or_clusters`]: at or below this row count we return raw
+/// rows; above it we aggregate into grid buckets.
+pub const MAP_DETAIL_THRESHOLD: i64 = 2000;
+
+/// Grid cell size in degrees for [`map_detail_or_clusters`] cluster
+/// aggregation, keyed by zoom level.
+///
+/// The band layout trades map-level visual density for cell count:
+/// low-zoom views aggregate aggressively (whole continents into a few
+/// cells), high-zoom views use sub-degree cells so markers don't
+/// over-merge. Zooms beyond 20 fall back to the finest band.
+pub fn cell_size_for_zoom(zoom: u8) -> f64 {
+    match zoom {
+        0..=2 => 10.0,
+        3..=5 => 5.0,
+        6..=8 => 1.0,
+        9..=11 => 0.25,
+        12..=14 => 0.05,
+        _ => 0.01,
+    }
+}
+
+/// Filter set accepted by [`map_detail_or_clusters`].
+///
+/// Mirrors [`ListFilter`] minus `sort`/`sort_dir`/`after`/`shapes`/`city`
+/// and with a **required** [`bbox`](MapFilter::bbox). Shapes are omitted
+/// by design — operators draw shapes against the unfiltered geography
+/// of the fleet — and paging is N/A on a map view. The separate type
+/// encodes those semantics at the API surface.
+#[derive(Debug)]
+pub struct MapFilter {
+    /// Exact country-code match, ANY semantics across the vector.
+    pub country_code: Vec<String>,
+    /// Exact ASN match, ANY semantics across the vector.
+    pub asn: Vec<i32>,
+    /// Case-insensitive ILIKE match on `network_operator`, ANY across
+    /// the vector. Substrings must be wrapped in `%…%` by the caller.
+    pub network: Vec<String>,
+    /// CIDR / single-IP containment (`ip <<= $prefix`). Unparseable
+    /// values are ignored (no filter applied).
+    pub ip_prefix: Option<String>,
+    /// Case-insensitive ILIKE match on `display_name`. Wildcards are
+    /// the caller's responsibility.
+    pub name: Option<String>,
+    /// Viewport `[minLat, minLon, maxLat, maxLon]`. Always applied.
+    pub bbox: [f64; 4],
+}
+
+/// Adaptive map view result: raw rows below the threshold, grid-
+/// aggregated clusters above it. The zoom input to
+/// [`map_detail_or_clusters`] maps to a fixed cell size via
+/// [`cell_size_for_zoom`].
+pub enum MapResult {
+    /// Raw rows — the filtered viewport count is at or below
+    /// [`MAP_DETAIL_THRESHOLD`].
+    Detail {
+        /// Rows ordered by `(created_at DESC, id DESC)`.
+        rows: Vec<CatalogueEntry>,
+        /// Count of rows matching the filter in the viewport.
+        total: i64,
+    },
+    /// Grid-aggregated buckets — the filtered viewport count exceeds
+    /// [`MAP_DETAIL_THRESHOLD`].
+    Clusters {
+        /// One bucket per occupied grid cell.
+        buckets: Vec<super::dto::MapBucket>,
+        /// Count of rows matching the filter in the viewport (sum of
+        /// bucket counts — `total == buckets.iter().map(|b| b.count).sum()`).
+        total: i64,
+        /// Cell size in degrees used for aggregation.
+        cell_size: f64,
+    },
+}
+
+/// Adaptive-response map query: return raw rows when the filtered
+/// viewport count is small enough to render directly; otherwise,
+/// grid-aggregate the matches into cell-centered buckets.
+///
+/// The detail/cluster split is driven by [`MAP_DETAIL_THRESHOLD`]; the
+/// grid cell size is picked from [`cell_size_for_zoom`]. All three
+/// underlying SQL queries share the same filter WHERE so the view
+/// stays internally consistent across the threshold boundary (a row
+/// present in the count is present in the detail result or aggregated
+/// into a cluster bucket).
+pub async fn map_detail_or_clusters(
+    pool: &PgPool,
+    filter: MapFilter,
+    zoom: u8,
+) -> Result<MapResult, sqlx::Error> {
+    let total = count_in_bbox(pool, &filter).await?;
+    if total <= MAP_DETAIL_THRESHOLD {
+        let rows = list_detail_in_bbox(pool, &filter, MAP_DETAIL_THRESHOLD).await?;
+        Ok(MapResult::Detail { rows, total })
+    } else {
+        let cell = cell_size_for_zoom(zoom);
+        let buckets = aggregate_clusters(pool, &filter, cell).await?;
+        Ok(MapResult::Clusters {
+            buckets,
+            total,
+            cell_size: cell,
+        })
+    }
+}
+
+/// Count of rows matching the map filter inside the viewport.
+///
+/// KEEP IN SYNC with [`list_detail_in_bbox`] and [`aggregate_clusters`]:
+/// all three share the same filter WHERE so the adaptive map view
+/// stays internally consistent — a row counted here must be present in
+/// the corresponding detail result or contribute to a cluster bucket.
+///
+/// The explicit `latitude IS NOT NULL AND longitude IS NOT NULL` gate
+/// is redundant with the bbox BETWEEN (NULL values fail any comparison)
+/// but we keep it for the `idx_ip_catalogue_latlon` index hint — the
+/// planner picks the partial `(latitude, longitude)` index when it sees
+/// the NOT NULL predicate explicitly.
+async fn count_in_bbox(pool: &PgPool, filter: &MapFilter) -> Result<i64, sqlx::Error> {
+    let country_code: &[String] = &filter.country_code;
+    let asn: &[i32] = &filter.asn;
+    let network: &[String] = &filter.network;
+    let ip_prefix: Option<IpNetwork> = filter
+        .ip_prefix
+        .as_deref()
+        .and_then(|s| s.parse::<IpNetwork>().ok());
+    let [min_lat, min_lon, max_lat, max_lon] = filter.bbox;
+
+    let total = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) AS "total!"
+        FROM ip_catalogue c
+        WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))
+          AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))
+          AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))
+          AND ($4::INET IS NULL OR c.ip <<= $4::INET)
+          AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)
+          AND c.latitude  IS NOT NULL
+          AND c.longitude IS NOT NULL
+          AND c.latitude  BETWEEN $6::DOUBLE PRECISION AND $8::DOUBLE PRECISION
+          AND c.longitude BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+        "#,
+        country_code as &[String],
+        asn as &[i32],
+        network as &[String],
+        ip_prefix as Option<IpNetwork>,
+        filter.name.as_deref(),
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(total)
+}
+
+/// Return up to `limit` rows matching the filter inside the viewport,
+/// ordered `(created_at DESC, id DESC)` for determinism.
+///
+/// Called only when [`count_in_bbox`] returned at most
+/// [`MAP_DETAIL_THRESHOLD`], so in practice `limit == MAP_DETAIL_THRESHOLD`
+/// — the explicit `LIMIT` acts as a belt-and-braces cap should the
+/// caller ever invoke this directly.
+///
+/// KEEP IN SYNC with [`count_in_bbox`] and [`aggregate_clusters`].
+async fn list_detail_in_bbox(
+    pool: &PgPool,
+    filter: &MapFilter,
+    limit: i64,
+) -> Result<Vec<CatalogueEntry>, sqlx::Error> {
+    let country_code: &[String] = &filter.country_code;
+    let asn: &[i32] = &filter.asn;
+    let network: &[String] = &filter.network;
+    let ip_prefix: Option<IpNetwork> = filter
+        .ip_prefix
+        .as_deref()
+        .and_then(|s| s.parse::<IpNetwork>().ok());
+    let [min_lat, min_lon, max_lat, max_lon] = filter.bbox;
+
+    let rows = sqlx::query_as!(
+        CatalogueEntryRow,
+        r#"
+        SELECT
+            c.id,
+            c.ip AS "ip: IpNetwork",
+            c.display_name,
+            c.city,
+            c.country_code,
+            c.country_name,
+            c.latitude,
+            c.longitude,
+            c.asn,
+            c.network_operator,
+            c.website,
+            c.notes,
+            c.enrichment_status AS "enrichment_status: EnrichmentStatus",
+            c.enriched_at,
+            c.operator_edited_fields,
+            c.source AS "source: CatalogueSource",
+            c.created_at,
+            c.created_by
+        FROM ip_catalogue c
+        WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))
+          AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))
+          AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))
+          AND ($4::INET IS NULL OR c.ip <<= $4::INET)
+          AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)
+          AND c.latitude  IS NOT NULL
+          AND c.longitude IS NOT NULL
+          AND c.latitude  BETWEEN $6::DOUBLE PRECISION AND $8::DOUBLE PRECISION
+          AND c.longitude BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+        ORDER BY c.created_at DESC, c.id DESC
+        LIMIT $10
+        "#,
+        country_code as &[String],
+        asn as &[i32],
+        network as &[String],
+        ip_prefix as Option<IpNetwork>,
+        filter.name.as_deref(),
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// Aggregate matching rows into `cell_size`-degree grid cells.
+///
+/// Each bucket carries the cell's center coordinates, the row count,
+/// a deterministic sample id (`(ARRAY_AGG(id ORDER BY id))[1]`) for
+/// client-side drill-down, and the cell's bounding box as
+/// `[min_lat, min_lng, max_lat, max_lng]`.
+///
+/// KEEP IN SYNC with [`count_in_bbox`] and [`list_detail_in_bbox`].
+async fn aggregate_clusters(
+    pool: &PgPool,
+    filter: &MapFilter,
+    cell_size: f64,
+) -> Result<Vec<super::dto::MapBucket>, sqlx::Error> {
+    let country_code: &[String] = &filter.country_code;
+    let asn: &[i32] = &filter.asn;
+    let network: &[String] = &filter.network;
+    let ip_prefix: Option<IpNetwork> = filter
+        .ip_prefix
+        .as_deref()
+        .and_then(|s| s.parse::<IpNetwork>().ok());
+    let [min_lat, min_lon, max_lat, max_lon] = filter.bbox;
+
+    // Bucket center = `FLOOR(x / cell) * cell + cell/2`. Grouping by
+    // the center naturally snaps rows into the same cell. `lat_min` /
+    // `lng_min` are recomputed via `MIN(FLOOR(…) * cell)` over the
+    // group so the bucket's bbox is exact even if Postgres rounds the
+    // center expression differently per row (it shouldn't — `FLOOR`
+    // over deterministic inputs is deterministic — but the extra
+    // `MIN(…)` is free under the same GROUP BY).
+    struct BucketRow {
+        lat_center: Option<f64>,
+        lng_center: Option<f64>,
+        lat_min: Option<f64>,
+        lng_min: Option<f64>,
+        count: i64,
+        sample_id: Option<Uuid>,
+    }
+    let rows = sqlx::query_as!(
+        BucketRow,
+        r#"
+        SELECT
+            FLOOR(c.latitude  / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION
+                + $10::DOUBLE PRECISION / 2.0
+                AS "lat_center: f64",
+            FLOOR(c.longitude / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION
+                + $10::DOUBLE PRECISION / 2.0
+                AS "lng_center: f64",
+            MIN(FLOOR(c.latitude  / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION)
+                AS "lat_min: f64",
+            MIN(FLOOR(c.longitude / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION)
+                AS "lng_min: f64",
+            COUNT(*)::BIGINT                         AS "count!: i64",
+            (ARRAY_AGG(c.id ORDER BY c.id))[1]       AS "sample_id: Uuid"
+        FROM ip_catalogue c
+        WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))
+          AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))
+          AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))
+          AND ($4::INET IS NULL OR c.ip <<= $4::INET)
+          AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)
+          AND c.latitude  IS NOT NULL
+          AND c.longitude IS NOT NULL
+          AND c.latitude  BETWEEN $6::DOUBLE PRECISION AND $8::DOUBLE PRECISION
+          AND c.longitude BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION
+        GROUP BY
+            FLOOR(c.latitude  / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION
+                + $10::DOUBLE PRECISION / 2.0,
+            FLOOR(c.longitude / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION
+                + $10::DOUBLE PRECISION / 2.0
+        "#,
+        country_code as &[String],
+        asn as &[i32],
+        network as &[String],
+        ip_prefix as Option<IpNetwork>,
+        filter.name.as_deref(),
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+        cell_size,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let buckets = rows
+        .into_iter()
+        .filter_map(|r| {
+            // Every row here has non-null lat/lng — the filter ensures
+            // that — so each aggregation column is `Some` too. We unwrap
+            // defensively via `filter_map` so a wayward NULL doesn't
+            // panic; sqlx reports the columns as nullable because they
+            // sit under aggregate/expression wrappers.
+            let lat = r.lat_center?;
+            let lng = r.lng_center?;
+            let lat_min = r.lat_min?;
+            let lng_min = r.lng_min?;
+            let sample_id = r.sample_id?;
+            Some(super::dto::MapBucket {
+                lat,
+                lng,
+                count: r.count,
+                sample_id,
+                bbox: [lat_min, lng_min, lat_min + cell_size, lng_min + cell_size],
+            })
+        })
+        .collect();
+    Ok(buckets)
+}
+
 // --- Row mirror ------------------------------------------------------------
 
 /// Flat sqlx row mirror of [`CatalogueEntry`]. Exists because sqlx's macro

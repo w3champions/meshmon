@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            FLOOR(c.latitude  / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION\n                + $10::DOUBLE PRECISION / 2.0\n                AS \"lat_center: f64\",\n            FLOOR(c.longitude / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION\n                + $10::DOUBLE PRECISION / 2.0\n                AS \"lng_center: f64\",\n            MIN(FLOOR(c.latitude  / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION)\n                AS \"lat_min: f64\",\n            MIN(FLOOR(c.longitude / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION)\n                AS \"lng_min: f64\",\n            COUNT(*)::BIGINT                         AS \"count!: i64\",\n            (ARRAY_AGG(c.id ORDER BY c.id))[1]       AS \"sample_id: Uuid\"\n        FROM ip_catalogue c\n        WHERE ($1::TEXT[] = '{}' OR c.country_code = ANY($1::TEXT[]))\n          AND ($2::INT[]  = '{}' OR c.asn          = ANY($2::INT[]))\n          AND ($3::TEXT[] = '{}' OR c.network_operator ILIKE ANY($3::TEXT[]))\n          AND ($4::INET IS NULL OR c.ip <<= $4::INET)\n          AND ($5::TEXT IS NULL OR c.display_name ILIKE $5::TEXT)\n          AND c.latitude  IS NOT NULL\n          AND c.longitude IS NOT NULL\n          AND c.latitude  BETWEEN $6::DOUBLE PRECISION AND $8::DOUBLE PRECISION\n          AND c.longitude BETWEEN $7::DOUBLE PRECISION AND $9::DOUBLE PRECISION\n        GROUP BY\n            FLOOR(c.latitude  / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION\n                + $10::DOUBLE PRECISION / 2.0,\n            FLOOR(c.longitude / $10::DOUBLE PRECISION) * $10::DOUBLE PRECISION\n                + $10::DOUBLE PRECISION / 2.0\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "lat_center: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "lng_center: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "lat_min: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "lng_min: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "sample_id: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int4Array",
+        "TextArray",
+        "Inet",
+        "Text",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f6d709491c44b4674ab622e67cddcbfe0b3c1bac6dadfd0fdb4aefaf82fec9a6"
+}

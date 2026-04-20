@@ -30,8 +30,8 @@
 //! OpenAPI registration consolidate in T16.
 
 use super::dto::{
-    BulkReenrichRequest, CatalogueEntryDto, ErrorEnvelope, ListQuery, ListResponse, PasteInvalid,
-    PasteRequest, PasteResponse, PatchRequest,
+    BulkReenrichRequest, CatalogueEntryDto, ErrorEnvelope, ListQuery, ListResponse, MapQuery,
+    MapResponse, PasteInvalid, PasteRequest, PasteResponse, PatchRequest,
 };
 use super::events::CatalogueEvent;
 use super::model::{CatalogueSource, Field};
@@ -60,6 +60,24 @@ fn db_error(context: &'static str, err: sqlx::Error) -> Response {
         Json(json!({ "error": "database_error" })),
     )
         .into_response()
+}
+
+/// Convert a user-facing `name` substring into an ILIKE pattern.
+///
+/// The repo binds the returned string verbatim into `display_name ILIKE
+/// $N`, so callers send the literal substring they want to find
+/// (e.g. `?name=Fastly`) and this wrapper adds the `%…%` for them.
+/// Whitespace-only inputs collapse to `None` so the "no filter" posture
+/// is uniform across list-like endpoints.
+///
+/// ILIKE treats `%` / `_` as wildcards and user-supplied characters
+/// pass through unescaped — matches other catalogue search surfaces
+/// (e.g. `agents.name`).
+fn trim_to_ilike(name: Option<String>) -> Option<String> {
+    name.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{s}%"))
 }
 
 /// Turn a parse [`ParseReason`] into a short operator-friendly string.
@@ -195,18 +213,10 @@ pub async fn paste(
 )]
 pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
     // The `name` query param is a user-facing substring filter. The repo
-    // binds it verbatim into `display_name ILIKE $5`, so wrap the value
-    // here so callers can pass `?name=Fastly` and match rows whose
-    // `display_name` *contains* "Fastly" rather than having to send
-    // the raw `%Fastly%` themselves. ILIKE treats `%` / `_` as wildcards
-    // and the user-supplied characters pass through unescaped — that
-    // matches other catalogue search surfaces (e.g. `agents.name`).
-    let name_filter = q
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("%{s}%"));
+    // binds it verbatim into `display_name ILIKE $5`, so `trim_to_ilike`
+    // wraps the value with `%…%` here so callers can pass `?name=Fastly`
+    // directly. See that helper for the whitespace + wildcard contract.
+    let name_filter = trim_to_ilike(q.name);
 
     // Decode the opaque cursor. Decode failures (malformed base64 or
     // JSON) silently degrade to "no cursor" — the repo then serves the
@@ -585,6 +595,64 @@ pub async fn reenrich_many(
     // matched row — invalidate once after the full write completes.
     state.facets_cache.invalidate().await;
     StatusCode::ACCEPTED.into_response()
+}
+
+/// `GET /api/catalogue/map` — adaptive map view.
+///
+/// Returns raw rows when the filtered viewport count is at or below
+/// [`repo::MAP_DETAIL_THRESHOLD`]; otherwise returns grid-aggregated
+/// cluster buckets sized by [`repo::cell_size_for_zoom`]. The wire body
+/// carries a `kind` discriminator so the client can branch on a single
+/// field.
+///
+/// Differences from [`list`]:
+/// - `bbox` is required — missing/malformed is a 400 via
+///   [`super::dto::MapQuery::bbox`]'s strict deserializer.
+/// - `shapes`/`sort`/`sort_dir`/`after`/`city` are intentionally not
+///   part of the filter surface — see [`super::dto::MapQuery`].
+#[utoipa::path(
+    get,
+    path = "/api/catalogue/map",
+    tag = "catalogue",
+    params(MapQuery),
+    responses(
+        (status = 200, description = "Catalogue map view", body = MapResponse),
+        (status = 400, description = "Missing/malformed bbox or zoom", body = ErrorEnvelope),
+        (status = 401, description = "No active session"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn map(State(state): State<AppState>, Query(q): Query<MapQuery>) -> Response {
+    let filter = repo::MapFilter {
+        country_code: q.country_code,
+        asn: q.asn,
+        network: q.network,
+        ip_prefix: q.ip_prefix,
+        name: trim_to_ilike(q.name),
+        bbox: q.bbox,
+    };
+    match repo::map_detail_or_clusters(&state.pool, filter, q.zoom).await {
+        Ok(repo::MapResult::Detail { rows, total }) => {
+            let body = MapResponse::Detail {
+                rows: rows.into_iter().map(CatalogueEntryDto::from).collect(),
+                total,
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Ok(repo::MapResult::Clusters {
+            buckets,
+            total,
+            cell_size,
+        }) => {
+            let body = MapResponse::Clusters {
+                buckets,
+                total,
+                cell_size,
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => db_error("catalogue map: repo call failed", e),
+    }
 }
 
 /// `GET /api/catalogue/facets` — cached aggregate facets for the

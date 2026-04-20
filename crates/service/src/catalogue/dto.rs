@@ -346,6 +346,36 @@ where
     Ok(Some([parts[0], parts[1], parts[2], parts[3]]))
 }
 
+/// Parse `minLat,minLon,maxLat,maxLon` into `[f64; 4]` — **required**.
+///
+/// Unlike [`deserialize_bbox`], a missing or malformed bbox surfaces as
+/// a serde error (→ 400). The map endpoint always scopes to a viewport,
+/// so there is no "silently drop the filter" fallback to lean on. See
+/// [`MapQuery::bbox`] for the contract.
+fn deserialize_bbox_required<'de, D>(de: D) -> Result<[f64; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    if raw.is_empty() {
+        return Err(serde::de::Error::custom("bbox is required"));
+    }
+    let parts: Result<Vec<f64>, _> = raw
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<f64>)
+        .collect();
+    let parts =
+        parts.map_err(|e| serde::de::Error::custom(format!("invalid bbox component: {e}")))?;
+    if parts.len() != 4 {
+        return Err(serde::de::Error::custom(format!(
+            "bbox must have exactly 4 components, got {}",
+            parts.len()
+        )));
+    }
+    Ok([parts[0], parts[1], parts[2], parts[3]])
+}
+
 /// Parse the `shapes` query parameter into `Vec<Polygon>`.
 ///
 /// Accepts either an inline JSON array (`?shapes=[[[lng,lat],…]]`) or
@@ -402,6 +432,104 @@ pub struct ErrorEnvelope {
     /// Stable error code. Clients should match on this string, not on
     /// the HTTP status alone.
     pub error: String,
+}
+
+/// Filters for `GET /api/catalogue/map`.
+///
+/// Same filter set as [`ListQuery`] **minus** `sort` / `sort_dir` /
+/// `after` / `shapes` / `city` — the map view is intentionally shape-
+/// blind (operators still want to draw shapes against the unfiltered
+/// geography of the fleet) and is not paginated. `bbox` is **required**
+/// here — the map endpoint always scopes to a viewport. `zoom` drives
+/// the grid cell size when the server falls back to cluster aggregation
+/// (see [`MapResponse`]).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct MapQuery {
+    /// Zero-or-more ISO 3166-1 alpha-2 codes. ANY semantics. CSV form
+    /// (`?country_code=US,DE`) — see [`ListQuery::country_code`] for the
+    /// rationale; repeat-key form is not accepted.
+    #[serde(default, deserialize_with = "deserialize_csv_string")]
+    #[param(style = Form, explode = false)]
+    pub country_code: Vec<String>,
+    /// Zero-or-more ASN numbers. ANY semantics. CSV form.
+    #[serde(default, deserialize_with = "deserialize_csv_i32")]
+    #[param(style = Form, explode = false)]
+    pub asn: Vec<i32>,
+    /// Zero-or-more `network_operator` ILIKE patterns. ANY semantics.
+    /// CSV form.
+    #[serde(default, deserialize_with = "deserialize_csv_string")]
+    #[param(style = Form, explode = false)]
+    pub network: Vec<String>,
+    /// Optional IP prefix (CIDR or bare IP). Filters `c.ip <<= $prefix`;
+    /// unparseable values are silently dropped (mirrors [`ListQuery`]).
+    #[serde(default)]
+    pub ip_prefix: Option<String>,
+    /// Optional `display_name` substring. Same `%…%` wrap happens in
+    /// the handler before it hits the repo.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Viewport bounds — `minLat,minLon,maxLat,maxLon`. **Required.**
+    /// A malformed or missing value surfaces as a 400 via serde, unlike
+    /// [`ListQuery::bbox`] which permissively drops the filter.
+    #[serde(deserialize_with = "deserialize_bbox_required")]
+    #[param(style = Form, explode = false)]
+    pub bbox: [f64; 4],
+    /// Zoom level (0..=20). Controls the grid cell size for
+    /// cluster aggregation when the filtered count crosses
+    /// [`super::repo::MAP_DETAIL_THRESHOLD`]. See
+    /// [`super::repo::cell_size_for_zoom`] for the mapping.
+    pub zoom: u8,
+}
+
+/// Adaptive response for `GET /api/catalogue/map`.
+///
+/// - `detail` — raw rows — when the filtered count in the request bbox
+///   is at or below [`super::repo::MAP_DETAIL_THRESHOLD`].
+/// - `clusters` — grid-aggregated buckets — when above the threshold.
+///
+/// The wire form carries a `kind` discriminator (`"detail"` /
+/// `"clusters"`) so clients can branch without inspecting the variant's
+/// fields. See [`super::repo::map_detail_or_clusters`] for the
+/// server-side selection logic.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MapResponse {
+    /// Raw rows — returned when the filtered count stays at or below
+    /// the detail threshold.
+    Detail {
+        /// Matching rows, ordered by `(created_at DESC, id DESC)`.
+        rows: Vec<CatalogueEntryDto>,
+        /// Count of all rows matching the filter within the viewport.
+        total: i64,
+    },
+    /// Grid-aggregated buckets — returned when the filtered count
+    /// exceeds the detail threshold.
+    Clusters {
+        /// One bucket per occupied grid cell.
+        buckets: Vec<MapBucket>,
+        /// Total row count in the viewport before aggregation.
+        total: i64,
+        /// Grid cell size in degrees; matches
+        /// [`super::repo::cell_size_for_zoom`] for the request's `zoom`.
+        cell_size: f64,
+    },
+}
+
+/// One grid-aggregated cluster cell surfaced by [`MapResponse::Clusters`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MapBucket {
+    /// Cell center latitude.
+    pub lat: f64,
+    /// Cell center longitude.
+    pub lng: f64,
+    /// Rows inside the cell.
+    pub count: i64,
+    /// A deterministically-chosen row id from inside the cell — useful
+    /// for client-side drill-down without re-querying the whole cell.
+    pub sample_id: Uuid,
+    /// Cell bounding box as `[min_lat, min_lng, max_lat, max_lng]`.
+    pub bbox: [f64; 4],
 }
 
 /// PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12
