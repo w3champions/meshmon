@@ -134,7 +134,7 @@ export function FilterRail({ value, onChange, facets, onOpenMap }: FilterRailPro
       />
 
       <FreeTextGroup
-        title="IP prefix"
+        title="IP Filter"
         placeholder="e.g. 10.0.0."
         hint="Prefix or CIDR (10.0.0.0/24)"
         value={value.ipPrefix ?? ""}

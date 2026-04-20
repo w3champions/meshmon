@@ -63,7 +63,7 @@ describe("FilterRail", () => {
     expect(findSummary(/Network/)).toBeInTheDocument();
     expect(findSummary(/City/)).toBeInTheDocument();
     expect(findSummary(/Name/)).toBeInTheDocument();
-    expect(findSummary(/IP prefix/)).toBeInTheDocument();
+    expect(findSummary(/IP Filter/)).toBeInTheDocument();
     expect(findSummary(/Map shapes/)).toBeInTheDocument();
   });
 
