@@ -11,10 +11,12 @@ import shadowUrl from "leaflet/dist/images/marker-shadow.png";
 // Leaflet ships its default marker icon via CSS + `require('./images/*')`
 // relative paths that resolve at bundle time with Webpack but not with
 // Vite's ESM loader. The stock `L.Icon.Default` therefore renders a broken
-// image. Re-bind the three asset URLs through Vite's static-asset pipeline
-// so markers render correctly.
+// image. Delete the prototype `_getIconUrl` override (which otherwise wins
+// over the merged options and computes a relative `images/…` path) and
+// re-bind the three asset URLs through Vite's static-asset pipeline.
+delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
 L.Icon.Default.mergeOptions({
-  iconRetinaUrl,
   iconUrl,
+  iconRetinaUrl,
   shadowUrl,
 });
