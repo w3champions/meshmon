@@ -406,7 +406,8 @@ pub struct EvaluationCandidateDto {
     /// Average improvement (ms) across considered pairs; negative means faster.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_improvement_ms: Option<f32>,
-    /// Average observed loss (percent) on the direct leg during scoring.
+    /// Average compound loss (percent) across transit triples that
+    /// cleared the loss gate during scoring.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_loss_pct: Option<f32>,
     /// Composite score; lower is better.
