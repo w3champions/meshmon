@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+// Re-exported so callers keep importing `dto::Polygon` while the wire
+// type's home module is `shapes` (which owns both the struct and the
+// conversion into `geo::Polygon`).
+pub use super::shapes::Polygon;
+
 /// Sort columns accepted by `GET /api/catalogue`.
 ///
 /// The list handler always appends `id DESC` as the tiebreaker so the
@@ -67,18 +72,6 @@ pub enum SortDir {
     #[default]
     Desc,
 }
-
-/// GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.
-///
-/// The ring is implicitly closed — the server appends the closing
-/// vertex if absent. A minimum of three distinct points is required;
-/// the wire-type conversion in [`super::shapes`] (added in Task 2)
-/// rejects shorter rings.
-///
-/// The `[lng, lat]` order matches GeoJSON and `@turf/helpers`, so the
-/// frontend can feed Turf outputs straight through without reordering.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct Polygon(pub Vec<[f64; 2]>);
 
 /// Operator-facing view of a single catalogue row.
 ///

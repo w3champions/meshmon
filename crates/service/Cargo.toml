@@ -34,6 +34,11 @@ prometheus-reqwest-remote-write = { workspace = true }
 snap = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+# `geo` is used purely for polygon containment (catalogue shape filter).
+# Default features pull in `earcut`/`spade` triangulation which has
+# build issues on our toolchain and isn't needed for `Contains` — keep
+# the dependency lean via `default-features = false`.
+geo = { version = "0.33", default-features = false }
 governor = { workspace = true }
 hyper = { workspace = true }
 icann-rdap-client = { workspace = true }
