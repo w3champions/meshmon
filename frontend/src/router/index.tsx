@@ -159,10 +159,6 @@ export const catalogueSearchSchema = z.object({
   view: z.enum(["table", "map"]).default("table"),
 });
 
-// TODO(Task 16): add catalogueRoute to authRoute.addChildren([...]).
-// Until wired, /catalogue is not navigable through the router tree and does
-// NOT go through the auth-guard beforeLoad — the route is defined here only
-// so it can be imported by tests and by Task 16's nav wiring.
 export const catalogueRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/catalogue",
@@ -180,6 +176,7 @@ const routeTree = rootRoute.addChildren([
     routeCompareRoute,
     reportRoute,
     alertsRoute,
+    catalogueRoute,
   ]),
 ]);
 
