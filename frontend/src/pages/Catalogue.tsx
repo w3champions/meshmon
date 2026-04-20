@@ -277,7 +277,16 @@ export default function Catalogue() {
     return q;
   }, [filter.countryCodes, filter.asns, filter.networks, filter.ipPrefix, filter.nameSearch]);
 
-  const mapInfinite = useCatalogueMap(mapViewport?.bbox, mapViewport?.zoom ?? 2, mapQuery);
+  // Only fire the map query while the map view is actually visible.
+  // Without this gate, SSE invalidations keep triggering hidden
+  // `/api/catalogue/map` refetches after the operator switches to
+  // the table — extra backend load the user can't see.
+  const mapInfinite = useCatalogueMap(
+    mapViewport?.bbox,
+    mapViewport?.zoom ?? 2,
+    mapQuery,
+    { enabled: view === "map" },
+  );
 
   // -----------------------------------------------------------------------
   // Cluster dialog filters: must match the map endpoint's filter set

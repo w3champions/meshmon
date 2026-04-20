@@ -115,9 +115,13 @@ export function useCatalogueListInfinite(
  * Fetch the adaptive map response for a given viewport.
  *
  * Disabled while `bbox` is absent so a just-mounted map doesn't emit a bad
- * `bbox=` query (the backend treats missing/malformed `bbox` as a 400).
- * Once `bbox` is defined, the query refires whenever the viewport, zoom, or
- * any filter changes — query-key equality handles it automatically.
+ * `bbox=` query (the backend treats missing/malformed `bbox` as a 400). Also
+ * disabled explicitly via `options.enabled` — callers must gate the query on
+ * the map view being visible, otherwise SSE invalidations will keep firing
+ * hidden `/api/catalogue/map` refetches after the operator switches to the
+ * table view. Once both gates are satisfied the query refires whenever the
+ * viewport, zoom, or any filter changes — query-key equality handles it
+ * automatically.
  *
  * The backend picks detail-vs-cluster internally; consumers branch on
  * `data.kind` which narrows the union to the right shape.
@@ -126,10 +130,12 @@ export function useCatalogueMap(
   bbox: readonly [number, number, number, number] | undefined,
   zoom: number,
   filters: CatalogueMapQuery = {},
+  options: { enabled?: boolean } = {},
 ): UseQueryResult<CatalogueMapResponse, Error> {
+  const { enabled = true } = options;
   return useQuery({
     queryKey: [...CATALOGUE_MAP_KEY, bbox, zoom, filters],
-    enabled: bbox !== undefined,
+    enabled: enabled && bbox !== undefined,
     queryFn: async (): Promise<CatalogueMapResponse> => {
       // queryFn only runs when enabled → bbox is defined.
       const bboxValue = bbox as readonly [number, number, number, number];
