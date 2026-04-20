@@ -856,10 +856,12 @@ catalogue surface. `RepoError::NotFound` → 404 `not_found`,
 
 ```toml
 [campaigns]
-# Spawn the background scheduler. Default: true. Set to false to
-# suppress dispatch without disabling HTTP CRUD or preview — useful
-# when staging a new target set on a running deployment.
-enabled = true
+# Spawn the background scheduler. Default: false until a real prober
+# ships — the agent's current `StubProber` would persist synthetic
+# measurements against real campaigns otherwise. Once the real prober
+# lands, flip this to `true`. HTTP CRUD and preview remain online
+# regardless of this flag.
+enabled = false
 # Composer confirm-dialog threshold on expected dispatch count.
 # Advisory only — no hard cap.
 size_warning_threshold = 1000
