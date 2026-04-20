@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator\n             FROM ip_catalogue c\n            WHERE c.ip IN (\n                SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1\n            )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "country_code",
+        "type_info": "Bpchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "asn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "network_operator",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "7621cda4ef02a2dcc4ce6e7cbe6c875f887c4b5345474b4f160482d9ef64360c"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)\n             SELECT $1, src, dst\n               FROM UNNEST($2::text[], $3::inet[]) AS p(src, dst)\n             ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) DO UPDATE\n                SET resolution_state = 'pending',\n                    settled_at       = NULL,\n                    dispatched_at    = NULL,\n                    attempt_count    = 0,\n                    last_error       = NULL,\n                    measurement_id   = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "InetArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8cf6d20c0caefeda9a88c9d80e189bbfd2be986fa6334eec7dd1d1bd37aea78b"
+}

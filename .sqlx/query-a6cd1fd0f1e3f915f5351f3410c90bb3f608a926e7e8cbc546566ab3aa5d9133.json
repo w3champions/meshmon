@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.source_agent_id,\n                  m.destination_ip,\n                  m.latency_avg_ms,\n                  m.latency_stddev_ms,\n                  m.loss_pct,\n                  m.mtr_id\n             FROM measurements m\n             JOIN campaign_pairs cp ON cp.measurement_id = m.id\n            WHERE cp.campaign_id = $1\n              AND cp.kind = 'campaign'\n              AND m.kind IN ('campaign', 'detail_ping')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_agent_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 2,
+        "name": "latency_avg_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 3,
+        "name": "latency_stddev_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 4,
+        "name": "loss_pct",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 5,
+        "name": "mtr_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "a6cd1fd0f1e3f915f5351f3410c90bb3f608a926e7e8cbc546566ab3aa5d9133"
+}

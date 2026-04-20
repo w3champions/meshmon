@@ -385,7 +385,7 @@ pub async fn apply_edit(
             "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)
              SELECT $1, src, dst
                FROM UNNEST($2::text[], $3::inet[]) AS p(src, dst)
-             ON CONFLICT (campaign_id, source_agent_id, destination_ip) DO UPDATE
+             ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) DO UPDATE
                 SET resolution_state = 'pending',
                     settled_at       = NULL,
                     dispatched_at    = NULL,
@@ -808,7 +808,7 @@ pub async fn resolve_reuse(
     let rows = sqlx::query!(
         r#"
         WITH requested AS (
-            SELECT r.pair_id, r.source_agent_id, r.destination_ip_str, cp.kind
+            SELECT r.pair_id, r.source_agent_id, r.destination_ip_str
               FROM UNNEST($1::bigint[], $2::text[], $3::text[])
                      AS r(pair_id, source_agent_id, destination_ip_str)
               JOIN campaign_pairs cp ON cp.id = r.pair_id
@@ -1192,7 +1192,7 @@ async fn insert_pairs_in_tx(
         "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)
          SELECT $1, src, dst
            FROM UNNEST($2::text[], $3::inet[]) AS p(src, dst)
-         ON CONFLICT (campaign_id, source_agent_id, destination_ip) DO NOTHING",
+         ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) DO NOTHING",
         campaign_id,
         &expanded_sources as &[&str],
         &expanded_dests as &[IpNetwork],
@@ -1280,4 +1280,308 @@ impl From<PairRowRaw> for PairRow {
             last_error: r.last_error,
         }
     }
+}
+
+// ----- Evaluation persistence (T48) -------------------------------------
+
+use crate::campaign::eval::{
+    AgentRow as EvalAgentRow, AttributedMeasurement, CatalogueLookup, EvaluationInputs,
+    EvaluationOutputs,
+};
+use std::collections::HashMap;
+
+/// Builds the pure-function evaluator's inputs from DB state.
+///
+/// - Reads only `campaign_pairs.kind='campaign'` rows — detail rows
+///   never feed the baseline/candidate matrix.
+/// - Joins `measurements` via `campaign_pairs.measurement_id`.
+/// - Pulls agents + enrichment from `agents_with_catalogue` +
+///   `ip_catalogue` in one pass so the evaluator stays pure.
+pub async fn measurements_for_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<EvaluationInputs, RepoError> {
+    let campaign = sqlx::query!(
+        r#"SELECT loss_threshold_pct, stddev_weight,
+                  evaluation_mode AS "evaluation_mode: EvaluationMode"
+             FROM measurement_campaigns WHERE id = $1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    .ok_or(RepoError::NotFound(campaign_id))?;
+
+    let rows = sqlx::query!(
+        r#"SELECT m.source_agent_id,
+                  m.destination_ip,
+                  m.latency_avg_ms,
+                  m.latency_stddev_ms,
+                  m.loss_pct,
+                  m.mtr_id
+             FROM measurements m
+             JOIN campaign_pairs cp ON cp.measurement_id = m.id
+            WHERE cp.campaign_id = $1
+              AND cp.kind = 'campaign'
+              AND m.kind IN ('campaign', 'detail_ping')"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let measurements: Vec<AttributedMeasurement> = rows
+        .into_iter()
+        .map(|r| AttributedMeasurement {
+            source_agent_id: r.source_agent_id,
+            destination_ip: inet_to_ip(r.destination_ip),
+            latency_avg_ms: r.latency_avg_ms,
+            latency_stddev_ms: r.latency_stddev_ms,
+            loss_pct: r.loss_pct,
+            mtr_measurement_id: r.mtr_id,
+        })
+        .collect();
+
+    let agent_rows = sqlx::query!(
+        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+             FROM agents_with_catalogue
+            WHERE ip IN (
+                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )
+               OR agent_id IN (
+                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let agents: Vec<EvalAgentRow> = agent_rows
+        .into_iter()
+        .map(|r| EvalAgentRow {
+            agent_id: r.agent_id,
+            ip: inet_to_ip(r.ip),
+        })
+        .collect();
+
+    let enr_rows = sqlx::query!(
+        r#"SELECT c.ip,
+                  c.display_name,
+                  c.city,
+                  c.country_code,
+                  c.asn,
+                  c.network_operator
+             FROM ip_catalogue c
+            WHERE c.ip IN (
+                SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let enrichment: HashMap<IpAddr, CatalogueLookup> = enr_rows
+        .into_iter()
+        .map(|r| {
+            (
+                inet_to_ip(r.ip),
+                CatalogueLookup {
+                    display_name: r.display_name,
+                    city: r.city,
+                    country_code: r.country_code,
+                    asn: r.asn.map(|v| v as i64),
+                    network_operator: r.network_operator,
+                },
+            )
+        })
+        .collect();
+
+    Ok(EvaluationInputs {
+        measurements,
+        agents,
+        enrichment,
+        loss_threshold_pct: campaign.loss_threshold_pct,
+        stddev_weight: campaign.stddev_weight,
+        mode: campaign.evaluation_mode,
+    })
+}
+
+fn inet_to_ip(v: IpNetwork) -> IpAddr {
+    match v {
+        IpNetwork::V4(x) => x.ip().into(),
+        IpNetwork::V6(x) => x.ip().into(),
+    }
+}
+
+/// Persisted evaluation artefact, one row per campaign.
+#[derive(Debug, Clone)]
+pub struct EvaluationRow {
+    /// Primary key of the evaluation row.
+    pub id: Uuid,
+    /// Owning campaign.
+    pub campaign_id: Uuid,
+    /// Wall-clock stamp from the most recent UPSERT.
+    pub evaluated_at: DateTime<Utc>,
+    /// Loss threshold (percent) used during scoring.
+    pub loss_threshold_pct: f32,
+    /// RTT-stddev weight used during scoring.
+    pub stddev_weight: f32,
+    /// Evaluator strategy that produced this row.
+    pub evaluation_mode: EvaluationMode,
+    /// Baseline pair count from the evaluator pass.
+    pub baseline_pair_count: i32,
+    /// Total candidate transit destinations scored.
+    pub candidates_total: i32,
+    /// Candidates with at least one qualifying baseline pair.
+    pub candidates_good: i32,
+    /// Mean improvement (ms) across qualifying pair details; `None` when nothing qualified.
+    pub avg_improvement_ms: Option<f32>,
+    /// Serialised `EvaluationResultsDto` (persisted verbatim).
+    pub results: serde_json::Value,
+}
+
+/// UPSERT the evaluator's output into `campaign_evaluations` and return
+/// the freshly persisted row. Uniqueness is on `campaign_id`, so a
+/// second call for the same campaign replaces the previous result and
+/// restamps `evaluated_at`.
+pub async fn write_evaluation(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    outputs: &EvaluationOutputs,
+    loss_threshold_pct: f32,
+    stddev_weight: f32,
+    mode: EvaluationMode,
+) -> Result<EvaluationRow, RepoError> {
+    let results_json = serde_json::to_value(&outputs.results)
+        .expect("EvaluationResultsDto is owned by this service and always serialises");
+    let row = sqlx::query!(
+        r#"INSERT INTO campaign_evaluations
+              (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,
+               baseline_pair_count, candidates_total, candidates_good,
+               avg_improvement_ms, results, evaluated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+           ON CONFLICT (campaign_id) DO UPDATE SET
+               loss_threshold_pct   = EXCLUDED.loss_threshold_pct,
+               stddev_weight        = EXCLUDED.stddev_weight,
+               evaluation_mode      = EXCLUDED.evaluation_mode,
+               baseline_pair_count  = EXCLUDED.baseline_pair_count,
+               candidates_total     = EXCLUDED.candidates_total,
+               candidates_good      = EXCLUDED.candidates_good,
+               avg_improvement_ms   = EXCLUDED.avg_improvement_ms,
+               results              = EXCLUDED.results,
+               evaluated_at         = now()
+           RETURNING id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
+                     evaluation_mode AS "evaluation_mode: EvaluationMode",
+                     baseline_pair_count, candidates_total, candidates_good,
+                     avg_improvement_ms, results"#,
+        campaign_id,
+        loss_threshold_pct,
+        stddev_weight,
+        mode as EvaluationMode,
+        outputs.baseline_pair_count,
+        outputs.candidates_total,
+        outputs.candidates_good,
+        outputs.avg_improvement_ms,
+        results_json,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(EvaluationRow {
+        id: row.id,
+        campaign_id: row.campaign_id,
+        evaluated_at: row.evaluated_at,
+        loss_threshold_pct: row.loss_threshold_pct,
+        stddev_weight: row.stddev_weight,
+        evaluation_mode: row.evaluation_mode,
+        baseline_pair_count: row.baseline_pair_count,
+        candidates_total: row.candidates_total,
+        candidates_good: row.candidates_good,
+        avg_improvement_ms: row.avg_improvement_ms,
+        results: row.results,
+    })
+}
+
+/// Read the persisted evaluation row for a campaign. `Ok(None)` when
+/// the campaign has never been evaluated.
+pub async fn read_evaluation(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Option<EvaluationRow>, RepoError> {
+    let row = sqlx::query!(
+        r#"SELECT id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
+                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                  baseline_pair_count, candidates_total, candidates_good,
+                  avg_improvement_ms, results
+             FROM campaign_evaluations WHERE campaign_id = $1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| EvaluationRow {
+        id: r.id,
+        campaign_id: r.campaign_id,
+        evaluated_at: r.evaluated_at,
+        loss_threshold_pct: r.loss_threshold_pct,
+        stddev_weight: r.stddev_weight,
+        evaluation_mode: r.evaluation_mode,
+        baseline_pair_count: r.baseline_pair_count,
+        candidates_total: r.candidates_total,
+        candidates_good: r.candidates_good,
+        avg_improvement_ms: r.avg_improvement_ms,
+        results: r.results,
+    }))
+}
+
+/// Inserts detail-pair rows for the `POST /detail` handler and flips
+/// the campaign state back to `running` + clears completion/evaluation
+/// timestamps. Returns the number of rows **actually inserted** (not
+/// the requested count) — duplicates skip silently via `ON CONFLICT
+/// DO NOTHING`.
+///
+/// Each requested `(source, destination)` tuple produces TWO rows:
+/// one `kind='detail_ping'`, one `kind='detail_mtr'`. Dispatch (T45)
+/// will treat each as a separate measurement; the `resolve_reuse`
+/// filter (T1) structurally skips them regardless of the campaign's
+/// `force_measurement` flag. The widened 4-column UNIQUE constraint
+/// (`campaign_id, source_agent_id, destination_ip, kind`) makes each
+/// kind a distinct row under conflict resolution.
+pub async fn insert_detail_pairs(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    pairs: &[(String, IpAddr)],
+) -> Result<i32, RepoError> {
+    let mut tx = pool.begin().await?;
+    let mut inserted = 0i32;
+    for (source_agent_id, destination_ip) in pairs {
+        for kind in ["detail_ping", "detail_mtr"] {
+            let result = sqlx::query(
+                r#"INSERT INTO campaign_pairs
+                      (campaign_id, source_agent_id, destination_ip,
+                       resolution_state, kind)
+                   VALUES ($1, $2, $3, 'pending', $4::measurement_kind)
+                   ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind)
+                     DO NOTHING"#,
+            )
+            .bind(campaign_id)
+            .bind(source_agent_id)
+            .bind(IpNetwork::from(*destination_ip))
+            .bind(kind)
+            .execute(&mut *tx)
+            .await?;
+            inserted += result.rows_affected() as i32;
+        }
+    }
+
+    sqlx::query(
+        r#"UPDATE measurement_campaigns
+              SET state = 'running',
+                  completed_at = NULL,
+                  evaluated_at = NULL
+            WHERE id = $1 AND state IN ('completed', 'evaluated')"#,
+    )
+    .bind(campaign_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(inserted)
 }

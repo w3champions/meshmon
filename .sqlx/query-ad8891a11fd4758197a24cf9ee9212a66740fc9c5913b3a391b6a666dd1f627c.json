@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT loss_threshold_pct, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\"\n             FROM measurement_campaigns WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "loss_threshold_pct",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 1,
+        "name": "stddev_weight",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 2,
+        "name": "evaluation_mode: EvaluationMode",
+        "type_info": {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ad8891a11fd4758197a24cf9ee9212a66740fc9c5913b3a391b6a666dd1f627c"
+}
