@@ -181,12 +181,16 @@ async fn per_destination_rps_caps_cross_agent_traffic() {
     // `rate_limited_ids`. If the buckets were per-agent, both would
     // succeed and `combined_dispatched == 2` would break the test.
     assert_eq!(
-        combined_dispatched, 1,
+        combined_dispatched,
+        1,
         "expected exactly 1 pair through the shared bucket, got {combined_dispatched} \
          (dispatched: x={}, y={}; rate_limited: x={:?}, y={:?}; rejected: x={:?}, y={:?})",
-        out_x.dispatched, out_y.dispatched,
-        out_x.rate_limited_ids, out_y.rate_limited_ids,
-        out_x.rejected_ids, out_y.rejected_ids,
+        out_x.dispatched,
+        out_y.dispatched,
+        out_x.rate_limited_ids,
+        out_y.rate_limited_ids,
+        out_x.rejected_ids,
+        out_y.rejected_ids,
     );
     assert_eq!(
         combined_rate_limited, 1,

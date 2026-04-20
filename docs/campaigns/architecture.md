@@ -738,8 +738,12 @@ The state predicate is load-bearing. A concurrent operator action
 (`apply_edit{force_measurement=true}`, `force_pair`) can flip a
 `dispatched` row back to `pending` between claim and settle; without
 the gate, a late-arriving result would clobber the reset. The 0-row
-UPDATE is the silent-drop path — the writer returns `Ok(false)` and
-`RpcDispatcher` treats it as neither dispatched nor rejected.
+UPDATE is the silent-drop path — the writer returns
+`SettleOutcome::RaceLost` and `RpcDispatcher` treats it as neither
+dispatched nor rejected. A separate `SettleOutcome::MalformedNoOutcome`
+covers the "agent sent a result with no `outcome` field" protocol
+violation, which the dispatcher reverts via `rejected_ids` so the pair
+does not strand in `dispatched`.
 
 ### `DispatchOutcome`
 

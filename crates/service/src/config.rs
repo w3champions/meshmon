@@ -54,9 +54,12 @@ pub struct Config {
 /// Campaigns scheduler, size-guard, and per-destination-rate-limit settings.
 #[derive(Debug, Clone)]
 pub struct CampaignsSection {
-    /// Enable the background scheduler. T45 flips to `true` now that the
-    /// RpcDispatcher replaces the T44 `NoopDispatcher`. Ops that want
-    /// the scheduler off must set `[campaigns] enabled = false`.
+    /// Enable the background scheduler. Defaults to `false` until a
+    /// real prober ships: T45 wires the transport but agents still use
+    /// `StubProber` (the real trippy-backed prober lands in T46).
+    /// Flipping this on before T46 would persist synthetic measurements
+    /// against real campaigns. Operators who need the scheduler off
+    /// even after T46 can keep this `false` in their config.
     pub enabled: bool,
     /// Soft warning threshold on the composer's expected-dispatch count.
     /// Above this the frontend shows a confirm dialog. No hard cap.
@@ -85,7 +88,7 @@ pub struct CampaignsSection {
 impl Default for CampaignsSection {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             size_warning_threshold: 1000,
             scheduler_tick_ms: 500,
             max_pair_attempts: 3,
@@ -1771,13 +1774,13 @@ per_destination_rps = 4
         assert_eq!(cfg.campaigns.max_pair_attempts, 5);
         assert_eq!(cfg.campaigns.per_destination_rps, 4);
 
-        // Defaults apply when the section is omitted. T45 flips
-        // `enabled` to `true` because the RpcDispatcher replaces the
-        // T44 NoopDispatcher.
+        // Defaults apply when the section is omitted. Scheduler ships
+        // disabled by default — a real prober lands in T46; until then
+        // the agent's `StubProber` would persist synthetic measurements.
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
         assert!(
-            cfg.campaigns.enabled,
-            "T45 enables the scheduler by default"
+            !cfg.campaigns.enabled,
+            "scheduler must default to disabled until T46 ships a real prober",
         );
         assert_eq!(cfg.campaigns.size_warning_threshold, 1000);
         assert_eq!(cfg.campaigns.scheduler_tick_ms, 500);
@@ -1798,12 +1801,17 @@ scheduler_tick_ms = 0
     }
 
     #[test]
-    fn campaigns_defaults_flip_to_enabled_with_dispatch_knobs() {
-        // T45 ships the real RpcDispatcher and flips the safety-gate default
-        // so cargo-built binaries run the scheduler by default. Ops that
-        // want the scheduler off must set `[campaigns] enabled = false`.
+    fn campaigns_defaults_disabled_with_dispatch_knobs_seeded() {
+        // Scheduler stays off by default so the agent's `StubProber`
+        // does not persist synthetic campaign measurements. Dispatch
+        // knobs (`default_agent_concurrency`, `max_batch_size`) still
+        // seed with production values so T46 only has to flip
+        // `enabled = true` — no other config surgery required.
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
-        assert!(cfg.campaigns.enabled, "T45 ships enabled=true by default");
+        assert!(
+            !cfg.campaigns.enabled,
+            "scheduler must default off until a real prober ships",
+        );
         assert_eq!(cfg.campaigns.default_agent_concurrency, 16);
         assert_eq!(cfg.campaigns.max_batch_size, 50);
     }

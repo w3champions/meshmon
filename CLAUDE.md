@@ -154,7 +154,9 @@ Key patterns:
   requires `acknowledged_tos = true`. The config loader aborts
   startup otherwise.
 - Campaign scheduler is a single tokio task, gated on `[campaigns]
-  enabled` (default `true`). It subscribes to two Postgres NOTIFY
+  enabled` (default `false` until a real prober ships; the agent's
+  current `StubProber` would persist synthetic measurements otherwise).
+  It subscribes to two Postgres NOTIFY
   channels — `campaign_state_changed` (lifecycle changes from the
   `measurement_campaigns_notify` trigger) and `campaign_pair_settled`
   (writer-side fan-out) — plus a periodic tick (default 500 ms), and

@@ -14,9 +14,10 @@ Measurement-campaign subsystem.
   `SettleWriter` (terminal settle from agent-reported results, gated
   on `resolution_state='dispatched'`). Integration tests that
   simulate settlements use `DirectSettleDispatcher`.
-- Per-destination rate limit lives on both the scheduler and
-  `RpcDispatcher` as `moka::future::Cache<IpAddr, Bucket>`; cache TTL
-  is 60 s idle on each side.
+- Per-destination rate limit lives on `RpcDispatcher` as a
+  `moka::future::Cache<IpAddr, Bucket>` (60 s idle TTL). Bucket-rejected
+  pairs flow back to the scheduler via `DispatchOutcome::rate_limited_ids`
+  so the scheduler reverts them with `attempt_count--`.
 - Fair round-robin cursor is preserved across ticks and only advances
   when a batch actually dispatches (empty passes leave it where it was).
 

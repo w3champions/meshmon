@@ -209,10 +209,7 @@ impl Scheduler {
         }
     }
 
-    async fn tick_once_inner(
-        &self,
-        cursor: &mut usize,
-    ) -> Result<(), RepoError> {
+    async fn tick_once_inner(&self, cursor: &mut usize) -> Result<(), RepoError> {
         // Reload active campaigns (started_at ASC for stable rotation).
         let active_campaigns = repo::active_campaigns(&self.pool).await?;
         if active_campaigns.is_empty() {
