@@ -11,6 +11,7 @@ import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import MarkerClusterGroup from "react-leaflet-cluster";
 import type { GeoShape } from "@/lib/geo";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui";
 
 export interface DrawMapPin {
   id: string;
@@ -49,8 +50,14 @@ const GEOMAN_CONTROL_OPTIONS = {
   removalMode: true,
 };
 
-const OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-const OSM_ATTRIBUTION = "© OpenStreetMap contributors";
+// CARTO's Voyager (light) and Dark Matter (dark) basemaps share the a/b/c/d
+// subdomain pool and a shared attribution line. Swapping between them tracks
+// the app theme and keeps the pin/cluster palette readable on both.
+const TILE_URL_LIGHT = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
+const TILE_URL_DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+const TILE_ATTRIBUTION =
+  '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>';
+const TILE_SUBDOMAINS = "abcd";
 
 // World-overview default view. Latitude 20 biases slightly north of the
 // equator so Europe/North America aren't clipped at typical aspect ratios,
@@ -328,6 +335,9 @@ export function DrawMap({ shapes, onShapesChange, pins, onClusterClick, classNam
 
   const clusteringEnabled = !!onClusterClick;
 
+  const theme = useUiStore((s) => s.theme);
+  const tileUrl = theme === "dark" ? TILE_URL_DARK : TILE_URL_LIGHT;
+
   return (
     <div
       className={cn(
@@ -344,7 +354,13 @@ export function DrawMap({ shapes, onShapesChange, pins, onClusterClick, classNam
         scrollWheelZoom={false}
         className="h-full w-full"
       >
-        <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
+        {/* TileLayer key remounts on theme change because Leaflet does not swap url reactively */}
+        <TileLayer
+          key={theme}
+          url={tileUrl}
+          attribution={TILE_ATTRIBUTION}
+          subdomains={TILE_SUBDOMAINS}
+        />
         <GeomanController shapes={shapes} onShapesChange={onShapesChange} />
         <ModifierZoomController onHintNeeded={flashHint} />
         {pins && pins.length > 0 ? (
