@@ -123,6 +123,30 @@ async fn register_claimed_ip_mismatches_connection_returns_permission_denied() {
 }
 
 #[tokio::test]
+async fn register_honors_x_real_ip_when_trust_forwarded_enabled() {
+    // Proxy deployments: the TCP peer is the proxy's own IP, but the
+    // real client IP arrives via `X-Real-IP` (the header nginx-style
+    // proxies emit by default for gRPC locations). `state_with_agent_token`
+    // builds a config with `trust_forwarded_headers = true`, so the
+    // register handler must honor the metadata over the transport.
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    // Connection IP is the "proxy" 172.18.0.10; claimed IP is the real
+    // client 10.0.0.7; X-Real-IP advertises the same real client.
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([172, 18, 0, 10])).await;
+
+    let mut req = tonic::Request::new(sample("agent-reg-xrealip", [10, 0, 0, 7]));
+    req.metadata_mut()
+        .insert("x-real-ip", "10.0.0.7".parse().unwrap());
+
+    let _ = client
+        .register(req)
+        .await
+        .expect("x-real-ip metadata should override transport peer");
+}
+
+#[tokio::test]
 async fn register_allows_loopback_connection_with_any_claimed_ip() {
     let pool = common::shared_migrated_pool().await.clone();
     let state = common::state_with_agent_token(pool).await;
