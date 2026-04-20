@@ -73,7 +73,17 @@ export function PasteStaging({ onClose }: PasteStagingProps) {
   const handleAdd = async () => {
     if (outcome.accepted.length === 0) return;
     const ips = outcome.accepted.map((a) => a.ip);
-    const result: CataloguePasteResponse = await pasteMutation.mutateAsync({ ips });
+    let result: CataloguePasteResponse;
+    try {
+      result = await pasteMutation.mutateAsync({ ips });
+    } catch {
+      // `pasteMutation.isError` drives the error banner. Clear stale rows from
+      // a previous successful paste so the UI doesn't show a half-populated
+      // staging table alongside the error.
+      setStagingRows([]);
+      setHasPosted(false);
+      return;
+    }
 
     // Build a map from ip → id from the response
     const ipToId = new Map<string, string>();

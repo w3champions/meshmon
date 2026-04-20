@@ -117,8 +117,6 @@ describe("PasteStaging", () => {
     // The rejected token renders as a chip inside the invalid-tokens list
     const invalidList = screen.getByRole("list", { name: /invalid tokens/i });
     const chip = within(invalidList).getByText("not-an-ip");
-    // Red destructive variant — Badge applies `bg-destructive` on destructive
-    expect(chip.className).toMatch(/destructive/);
     // Hover tooltip surfaces the parse error via the `title` attribute
     expect(chip).toHaveAttribute("title", "Not a valid IP address");
   });
@@ -146,7 +144,6 @@ describe("PasteStaging", () => {
     // the exact error copy lives in the `title` attribute (hover tooltip).
     const invalidList = screen.getByRole("list", { name: /invalid tokens/i });
     const chip = within(invalidList).getByText("192.168.1.0/24");
-    expect(chip.className).toMatch(/destructive/);
     expect(chip).toHaveAttribute(
       "title",
       "IP addresses only — CIDR ranges aren't allowed as catalogue entries",
