@@ -177,9 +177,7 @@ fn config_response_roundtrip() {
         }),
         diff_detection: Some(DiffDetection {
             new_ip_min_freq: 0.2,
-            missing_ip_max_freq: 0.05,
             hop_count_change: 1,
-            rtt_shift_frac: 0.5,
         }),
         path_health_thresholds: Some(PathHealthThresholds {
             degraded_trigger_pct: 0.02,

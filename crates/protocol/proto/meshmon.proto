@@ -280,17 +280,20 @@ message Windows {
   reserved 15 to 31;
 }
 
-// Route-change diff detection thresholds (spec 02 "Diff detection").
+// Route-change diff detection thresholds. Only structural changes fire
+// a diff: a new IP appearing at a position, or the hop count changing.
+// Per-hop packet loss and per-hop RTT are measurement signals and live
+// in the rolling stats / alerting pipeline, not in route snapshots.
 message DiffDetection {
   // New IP must appear at ≥ this fraction of observations to count.
   double new_ip_min_freq = 1;
-  // Previously-present IP must drop below this fraction to count as gone.
-  double missing_ip_max_freq = 2;
   // Absolute number of positions added/removed to trigger.
   uint32 hop_count_change = 3;
-  // Relative change in average hop RTT to trigger (e.g. 0.5 = 50% shift).
-  double rtt_shift_frac = 4;
 
+  // 2 (missing_ip_max_freq) and 4 (rtt_shift_frac) were removed — they
+  // fired on pure packet-loss / jitter and produced constant false-positive
+  // "route changed" events.
+  reserved 2, 4;
   reserved 15 to 31;
 }
 

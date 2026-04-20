@@ -380,9 +380,7 @@ fn default_path_thresholds() -> PathHealthThresholds {
 fn default_diff_detection() -> DiffDetection {
     DiffDetection {
         new_ip_min_freq: 0.20,
-        missing_ip_max_freq: 0.05,
         hop_count_change: 1,
-        rtt_shift_frac: 0.50,
     }
 }
 
@@ -835,18 +833,14 @@ mod tests {
             udp_probe_secret: vec![0u8; 8].into(),
             diff_detection: Some(DiffDetection {
                 new_ip_min_freq: 0.30,
-                missing_ip_max_freq: 0.10,
                 hop_count_change: 2,
-                rtt_shift_frac: 0.75,
             }),
             ..Default::default()
         };
         let cfg = ProbeConfig::from_proto(resp).expect("valid");
         let d = cfg.diff_detection();
         assert!((d.new_ip_min_freq - 0.30).abs() < 1e-9);
-        assert!((d.missing_ip_max_freq - 0.10).abs() < 1e-9);
         assert_eq!(d.hop_count_change, 2);
-        assert!((d.rtt_shift_frac - 0.75).abs() < 1e-9);
     }
 
     #[test]
@@ -858,8 +852,6 @@ mod tests {
         let cfg = ProbeConfig::from_proto(resp).expect("valid");
         let d = cfg.diff_detection();
         assert!((d.new_ip_min_freq - 0.20).abs() < 1e-9);
-        assert!((d.missing_ip_max_freq - 0.05).abs() < 1e-9);
         assert_eq!(d.hop_count_change, 1);
-        assert!((d.rtt_shift_frac - 0.50).abs() < 1e-9);
     }
 }

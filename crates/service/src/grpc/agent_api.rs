@@ -546,9 +546,7 @@ fn probing_to_config_response(p: &crate::probing::ProbingSection) -> ConfigRespo
         }),
         diff_detection: Some(PbDiffDetection {
             new_ip_min_freq: p.diff_detection.new_ip_min_freq,
-            missing_ip_max_freq: p.diff_detection.missing_ip_max_freq,
             hop_count_change: p.diff_detection.hop_count_change,
-            rtt_shift_frac: p.diff_detection.rtt_shift_frac,
         }),
         path_health_thresholds: Some(PbPathHealthThresholds {
             degraded_trigger_pct: p.path_health_thresholds.degraded_trigger_pct,
