@@ -1,4 +1,5 @@
 import {
+  type Column,
   type ColumnDef,
   flexRender,
   getCoreRowModel,
@@ -12,14 +13,7 @@ import type { CatalogueEntry, CatalogueSortBy, CatalogueSortDir } from "@/api/ho
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Table, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 import { StatusChip } from "./StatusChip";
@@ -108,13 +102,15 @@ export const ROW_HEIGHT_ESTIMATE = 44;
 const SCROLL_MAX_HEIGHT = "70vh";
 
 /**
- * Explicit per-column widths (pixels). Pinning width at both the header
- * and body tables — paired with `table-layout: fixed` — lets header
- * columns and virtualized body columns align vertically and keeps cell
- * content from expanding its row beyond {@link ROW_HEIGHT_ESTIMATE}
- * (which the virtualizer assumes is constant). Every cell renderer
- * clips overflow via `truncate`, so widths narrower than the raw
- * content are safe.
+ * Explicit per-column widths (pixels). The header is a real `<table>`
+ * with `table-layout: fixed` + `<colgroup>` so column titles align and
+ * screen readers still read column headers. The virtualized body is a
+ * flat stack of `role="row"` / `role="cell"` divs laid out with CSS
+ * grid using these same widths — grid tracks behave predictably with
+ * `minWidth: 0` for in-track truncation, whereas `<tr>`-as-flex with
+ * `<td>` children yields undefined table layout across browsers.
+ * Every cell renderer clips overflow via `truncate`, so widths
+ * narrower than the raw content are safe.
  */
 const COLUMN_WIDTHS: Record<string, number> = {
   ip: 140,
@@ -135,6 +131,15 @@ const DEFAULT_COLUMN_WIDTH = 140;
 
 function columnWidth(columnId: string): number {
   return COLUMN_WIDTHS[columnId] ?? DEFAULT_COLUMN_WIDTH;
+}
+
+/**
+ * CSS grid-template-columns value for the virtualized body grid.
+ * Emits one fixed-px track per visible column in the configured order
+ * so row cells line up with the header `<colgroup>` column widths.
+ */
+function buildGridTemplate(columns: ReadonlyArray<Column<CatalogueEntry, unknown>>): string {
+  return columns.map((col) => `${columnWidth(col.id)}px`).join(" ");
 }
 
 /**
@@ -571,12 +576,15 @@ export function CatalogueTable({
         </Popover>
       </div>
 
-      {/* Table — header lives outside the scrollable body so the column
-          titles stay pinned and don't virtualize. A shared <colgroup>
-          plus `table-layout: fixed` on both the header and body tables
-          keeps column widths locked so header/body line up vertically
-          and cell content cannot push the absolutely-positioned row
-          past its virtualizer-assumed height. */}
+      {/* Table — the header stays a real `<table>` so screen readers
+          announce column headers and aria-sort. The virtualized body
+          below is intentionally NOT a `<table>`: rendering `<tr
+          style="display: flex">` with `<td>` children inside a
+          `table-layout: fixed` `<table>` yields undefined layout
+          across browsers (Chrome clips all but the first cell). We
+          render rows as div-based CSS-grid tracks that use the same
+          per-column widths as the header `<colgroup>`, so the two
+          still line up visually. */}
       <div className="overflow-hidden rounded-md border">
         <Table style={{ tableLayout: "fixed" }}>
           <colgroup>
@@ -617,64 +625,48 @@ export function CatalogueTable({
           className="relative overflow-auto"
           style={{ maxHeight: SCROLL_MAX_HEIGHT }}
         >
-          <Table style={{ tableLayout: "fixed" }}>
-            <colgroup>
-              {visibleColumns.map((col) => (
-                <col key={col.id} style={{ width: `${columnWidth(col.id)}px` }} />
-              ))}
-            </colgroup>
-            <TableBody
-              style={{
-                display: "block",
-                position: "relative",
-                height: `${totalSize}px`,
-              }}
-            >
-              {virtualItems.map((virtualItem) => {
-                const row = tableRows[virtualItem.index];
-                if (!row) return null;
-                const handleClick = () => onRowClick(row.original.id);
-                return (
-                  <TableRow
-                    key={row.original.id}
-                    data-index={virtualItem.index}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open entry ${row.original.ip}`}
-                    onClick={handleClick}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        handleClick();
-                      }
-                    }}
-                    className="absolute top-0 left-0 flex w-full cursor-pointer items-center overflow-hidden hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
-                    style={{
-                      transform: `translateY(${virtualItem.start}px)`,
-                      height: `${virtualItem.size}px`,
-                    }}
-                  >
-                    {row.getVisibleCells().map((cell) => {
-                      const width = columnWidth(cell.column.id);
-                      return (
-                        <TableCell
-                          key={cell.id}
-                          className="overflow-hidden"
-                          style={{
-                            width: `${width}px`,
-                            minWidth: `${width}px`,
-                            maxWidth: `${width}px`,
-                          }}
-                        >
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </TableCell>
-                      );
-                    })}
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+          <div style={{ position: "relative", height: `${totalSize}px` }}>
+            {virtualItems.map((virtualItem) => {
+              const row = tableRows[virtualItem.index];
+              if (!row) return null;
+              const handleClick = () => onRowClick(row.original.id);
+              return (
+                /* biome-ignore lint/a11y/useSemanticElements: virtualized row is a CSS-grid parent for cell tracks (see block comment above); a <button> would not accept grid children semantically and nesting the grid inside a <button> would break the ARIA row/cell structure. role="button" keeps keyboard+click affordance. */
+                <div
+                  key={row.original.id}
+                  data-index={virtualItem.index}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Open entry ${row.original.ip}`}
+                  onClick={handleClick}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      handleClick();
+                    }
+                  }}
+                  className="absolute top-0 left-0 grid w-full cursor-pointer items-center overflow-hidden border-b text-sm hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
+                  style={{
+                    transform: `translateY(${virtualItem.start}px)`,
+                    height: `${virtualItem.size}px`,
+                    gridTemplateColumns: buildGridTemplate(visibleColumns),
+                  }}
+                >
+                  {row.getVisibleCells().map((cell) => (
+                    /* biome-ignore lint/a11y/useSemanticElements: virtualized body is pure-div CSS grid (see block comment above); a <td> here would require a <tr>/<table> ancestor and reintroduce the Chrome flex-tr layout bug. role="cell" keeps ARIA table semantics for screen readers. */
+                    <div
+                      key={cell.id}
+                      role="cell"
+                      className="overflow-hidden px-4"
+                      style={{ minWidth: 0 }}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
         </div>
         {/* Load-more + total counter */}
         <div className="flex items-center justify-between border-t bg-muted/20 px-4 py-3 text-sm">

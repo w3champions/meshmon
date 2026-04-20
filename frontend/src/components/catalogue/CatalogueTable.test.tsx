@@ -522,7 +522,9 @@ describe("CatalogueTable", () => {
       // jsdom doesn't compute layout, so the virtualizer may render a
       // conservative default window. We assert the weaker invariant: the
       // table mounts, the header renders, and the DOM row count stays
-      // finite (data-index rows are << rows.length).
+      // finite (data-index rows are << rows.length). Body rows are
+      // div-based (role="button") rather than <tr> so we query by the
+      // data-index attribute the virtualizer stamps onto every row.
       const rows: CatalogueEntry[] = Array.from({ length: 2000 }, (_, i) => ({
         ...ENTRY_A,
         id: `bulk-${i}`,
@@ -533,9 +535,10 @@ describe("CatalogueTable", () => {
 
       await screen.findByRole("columnheader", { name: /IP/ });
 
-      const rendered = document.querySelectorAll("tr[data-index]");
+      const rendered = document.querySelectorAll("[data-index]");
       // With a 2000-row dataset, the virtualizer should never commit all
       // of them at once regardless of layout measurements.
+      expect(rendered.length).toBeGreaterThan(0);
       expect(rendered.length).toBeLessThan(2000);
     });
 
@@ -544,8 +547,8 @@ describe("CatalogueTable", () => {
       // massively-long notes string would grow past the 44px the
       // virtualizer pinned in its translateY math, causing neighbouring
       // rows to overlap visually. The fix truncates every cell to a
-      // single line, so the inline style on the `<tr>` must always
-      // report exactly `ROW_HEIGHT_ESTIMATE`.
+      // single line, so the inline style on the virtualized row div
+      // must always report exactly `ROW_HEIGHT_ESTIMATE`.
       const longNotes = "qwdqwo;as ".repeat(50);
       const longCity = "A really very absurdly long city name ".repeat(10);
       const rows: CatalogueEntry[] = [
@@ -570,26 +573,31 @@ describe("CatalogueTable", () => {
     });
 
     test("rendered column widths match the declared explicit widths", async () => {
-      // Fixed table layout + shared colgroup is how header and body
-      // stay aligned. Verify both tables carry the same <col>
-      // width for each visible column id.
+      // The header is a real <table> with <colgroup>; the body is a
+      // pure-div CSS grid. Both must encode the same per-column widths
+      // for the columns to line up visually.
       const { container } = renderWithProviders(<CatalogueTable {...buildProps()} />);
       await screen.findByRole("columnheader", { name: /IP/ });
 
       const tables = container.querySelectorAll("table");
-      // Two tables: header + virtualized body.
-      expect(tables.length).toBe(2);
+      // One table: the header. The body no longer uses table markup.
+      expect(tables.length).toBe(1);
 
-      const widthsPerTable = Array.from(tables).map((t) =>
-        Array.from(t.querySelectorAll("colgroup > col")).map((c) => (c as HTMLElement).style.width),
+      const headerWidths = Array.from(tables[0].querySelectorAll("colgroup > col")).map(
+        (c) => (c as HTMLElement).style.width,
       );
-
-      // Header/body colgroups must match column-for-column.
-      expect(widthsPerTable[0]).toEqual(widthsPerTable[1]);
       // Every column must have an explicit px width (no auto-sizing).
-      for (const width of widthsPerTable[0]) {
+      for (const width of headerWidths) {
         expect(width).toMatch(/^\d+px$/);
       }
+
+      // Body rows carry the same widths as a grid-template-columns
+      // string. The first committed row is the source of truth.
+      const firstRow = document.querySelector("[data-index]") as HTMLElement | null;
+      expect(firstRow).not.toBeNull();
+      // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+      const gridTemplate = firstRow!.style.gridTemplateColumns;
+      expect(gridTemplate).toBe(headerWidths.join(" "));
     });
   });
 });
