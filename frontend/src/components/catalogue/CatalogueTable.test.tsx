@@ -224,14 +224,15 @@ describe("CatalogueTable", () => {
       expect(onRowClick).not.toHaveBeenCalled();
     });
 
-    test("ENTRY_B with operator_edited_fields shows operator-locked chip and Actions re-enrich", async () => {
+    test("ENTRY_B with operator_edited_fields shows failed status chip and Actions re-enrich", async () => {
       const onReenrich = vi.fn();
       renderWithProviders(
         <CatalogueTable entries={[ENTRY_B]} onRowClick={vi.fn()} onReenrich={onReenrich} />,
       );
 
-      // operator-locked badge rendered by StatusChip (display-only in the table)
-      expect(await screen.findByLabelText("Operator-edited")).toBeInTheDocument();
+      // Status column shows the enrichment status only — no operator-locked badge
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Operator-edited")).not.toBeInTheDocument();
 
       // Actions column carries the re-enrich button
       const reenrichBtn = screen.getByRole("button", { name: "Re-enrich 5.6.7.8" });

@@ -448,10 +448,7 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
               <ReadonlyRow label="IP">{entry.ip}</ReadonlyRow>
               <ReadonlyRow label="Created">{formatTimestamp(entry.created_at)}</ReadonlyRow>
               <ReadonlyRow label="Status">
-                <StatusChip
-                  status={entry.enrichment_status}
-                  operatorLocked={entry.operator_edited_fields.length > 0}
-                />
+                <StatusChip status={entry.enrichment_status} />
               </ReadonlyRow>
               <ReadonlyRow label="Created by">{entry.created_by ?? "—"}</ReadonlyRow>
               <ReadonlyRow label="Source">{entry.source}</ReadonlyRow>

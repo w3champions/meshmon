@@ -153,16 +153,10 @@ function buildColumns(onReenrich: (id: string) => void): ColumnDef<CatalogueEntr
       id: "status",
       header: "Status",
       cell: ({ row }) => {
-        const { enrichment_status, operator_edited_fields } = row.original;
         // Display-only in the table: the Actions column owns the re-enrich button.
         // StatusChip.onReenrich is still used in EntryDrawer where the chip is
         // the only re-enrich surface.
-        return (
-          <StatusChip
-            status={enrichment_status}
-            operatorLocked={operator_edited_fields.length > 0}
-          />
-        );
+        return <StatusChip status={row.original.enrichment_status} />;
       },
     },
     {

@@ -37,14 +37,8 @@ describe("StatusChip", () => {
     expect(onReenrich).toHaveBeenCalledTimes(1);
   });
 
-  test("operatorLocked toggles the lock badge", () => {
-    const { rerender } = render(<StatusChip status="enriched" operatorLocked={true} />);
-    expect(screen.getByLabelText("Operator-edited")).toBeInTheDocument();
-
-    rerender(<StatusChip status="enriched" operatorLocked={false} />);
-    expect(screen.queryByLabelText("Operator-edited")).not.toBeInTheDocument();
-
-    rerender(<StatusChip status="enriched" />);
+  test("does not render an operator-locked badge — status only", () => {
+    render(<StatusChip status="enriched" />);
     expect(screen.queryByLabelText("Operator-edited")).not.toBeInTheDocument();
   });
 });
