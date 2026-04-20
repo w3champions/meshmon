@@ -56,6 +56,14 @@ export function catalogueEntryKey(id: string) {
 export interface CatalogueListInfiniteOptions {
   /** Page size; clamped server-side to `1..=500`. Default 100. */
   pageSize?: number;
+  /**
+   * When `false`, the underlying `useInfiniteQuery` stays idle. Callers
+   * that can only supply a complete query after a user action (e.g. the
+   * cluster dialog, which needs a `bbox` from a cluster click) gate the
+   * hook on this flag instead of calling it conditionally, which would
+   * violate the Rules of Hooks. Defaults to `true`.
+   */
+  enabled?: boolean;
 }
 
 /** Default `limit` used when no `pageSize` option is supplied. */
@@ -74,6 +82,7 @@ export function useCatalogueListInfinite(
   options: CatalogueListInfiniteOptions = {},
 ): UseInfiniteQueryResult<InfiniteData<CatalogueListResponse>, Error> {
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
+  const enabled = options.enabled ?? true;
   return useInfiniteQuery<
     CatalogueListResponse,
     Error,
@@ -82,6 +91,7 @@ export function useCatalogueListInfinite(
     string | undefined
   >({
     queryKey: [...CATALOGUE_LIST_KEY, query, pageSize],
+    enabled,
     initialPageParam: undefined,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     queryFn: async ({ pageParam }): Promise<CatalogueListResponse> => {

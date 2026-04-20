@@ -1,4 +1,5 @@
-import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { type CatalogueListQuery, useCatalogueListInfinite } from "@/api/hooks/catalogue";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -6,38 +7,76 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import type { Bbox } from "@/lib/geo";
 import { EntryCard } from "./EntryCard";
 
 export interface CatalogueClusterDialogProps {
   open: boolean;
   onOpenChange(open: boolean): void;
-  entries: CatalogueEntry[];
+  /**
+   * Bucket bbox the operator clicked on the map. `null` while the dialog
+   * is closed / no cluster is selected — the dialog guards its query
+   * behind `cell !== null && open` so a stale bbox doesn't refire a
+   * fetch on the next mount.
+   */
+  cell: Bbox | null;
+  /**
+   * Outer filters applied to the catalogue list — identical in shape to
+   * the table's query, minus `bbox` (owned by the dialog). Shape, ASN,
+   * network, country, IP prefix, and name filters all flow through.
+   */
+  filters: CatalogueListQuery;
   onOpenEntry(id: string): void;
 }
 
+/** Dialog page size — clamped by the backend to `1..=500`. */
+const DIALOG_PAGE_SIZE = 50;
+
 /**
- * Modal shown when the operator clicks a marker cluster. Lists every pin in
- * the cluster with the shared `EntryCard` info block; clicking a row closes
- * the dialog and opens that entry's details drawer via `onOpenEntry`.
+ * Modal shown when the operator clicks a server-aggregated cluster pin
+ * on the catalogue map. Owns its own `useCatalogueListInfinite` query
+ * scoped to the cluster's bbox + any outer filters so the list stays
+ * consistent with the current table view. Rows stream in pages of
+ * {@link DIALOG_PAGE_SIZE}; the Load-more button pulls the next cursor.
  */
 export function CatalogueClusterDialog({
   open,
   onOpenChange,
-  entries,
+  cell,
+  filters,
   onOpenEntry,
 }: CatalogueClusterDialogProps) {
-  const count = entries.length;
+  // `bbox` is a 4-element CSV on the wire. The OpenAPI codegen surfaces
+  // it as `number[]`; serializing to CSV keeps openapi-fetch happy with
+  // the query-string shape the server expects.
+  const bbox = cell ?? undefined;
+  const infinite = useCatalogueListInfinite(
+    { ...filters, bbox },
+    { pageSize: DIALOG_PAGE_SIZE, enabled: cell !== null && open },
+  );
+
+  const rows = infinite.data?.pages.flatMap((p) => p.entries) ?? [];
+  const total = infinite.data?.pages[0]?.total ?? 0;
+  const { hasNextPage, isFetchingNextPage, fetchNextPage, isError } = infinite;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[70vh] flex-col gap-4 sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {count} {count === 1 ? "pin" : "pins"} in this area
+            Showing {rows.length} of {total} in this area
           </DialogTitle>
           <DialogDescription>Select a pin to open its details.</DialogDescription>
         </DialogHeader>
+
+        {isError ? (
+          <div role="alert" className="text-sm text-destructive">
+            Failed to load cluster contents.
+          </div>
+        ) : null}
+
         <ul className="flex flex-col divide-y divide-border overflow-y-auto">
-          {entries.map((entry) => (
+          {rows.map((entry) => (
             <li key={entry.id}>
               <button
                 type="button"
@@ -53,6 +92,18 @@ export function CatalogueClusterDialog({
             </li>
           ))}
         </ul>
+
+        <div className="flex justify-end pt-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!hasNextPage || isFetchingNextPage}
+            onClick={() => fetchNextPage()}
+          >
+            {isFetchingNextPage ? "Loading…" : hasNextPage ? "Load more" : "All loaded"}
+          </Button>
+        </div>
       </DialogContent>
     </Dialog>
   );
