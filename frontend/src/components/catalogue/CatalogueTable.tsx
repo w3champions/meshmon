@@ -180,7 +180,25 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       id: "website",
       accessorKey: "website",
       header: "Website",
-      cell: ({ row }) => row.original.website ?? "—",
+      cell: ({ row }) => {
+        const website = row.original.website;
+        if (!website) return "—";
+        // Operators may save "example.com" as well as a full URL; normalise
+        // so the href is always absolute. Assume https when no scheme is set.
+        const href = /^https?:\/\//i.test(website) ? website : `https://${website}`;
+        return (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="block max-w-[16rem] truncate text-primary underline-offset-2 hover:underline"
+            title={website}
+          >
+            {website}
+          </a>
+        );
+      },
     },
     {
       id: "notes",
