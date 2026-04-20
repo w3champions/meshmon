@@ -134,7 +134,7 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[95vw] sm:max-w-xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="w-[95vw] sm:max-w-xl h-[600px] flex flex-col">
         <DialogHeader>
           <DialogTitle>Add IPs</DialogTitle>
           <DialogDescription>
@@ -142,7 +142,7 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="mt-4 space-y-4">
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col gap-3">
           <div className="space-y-1.5">
             <Label htmlFor="paste-ip-textarea">IP addresses</Label>
             <textarea
@@ -173,15 +173,9 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
             </ul>
           )}
 
-          {pasteMutation.isError && (
-            <p role="alert" className="text-sm text-destructive">
-              Failed to add entries. Please try again.
-            </p>
-          )}
-
           {!hasPosted && outcome.accepted.length > 0 && (
-            <div>
-              <p className="mb-2 text-sm font-medium text-muted-foreground">Parsed IPs</p>
+            <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
+              <p className="px-3 pt-2 pb-1 text-sm font-medium text-muted-foreground">Parsed IPs</p>
               <Table aria-label="Parsed IPs">
                 <TableHeader>
                   <TableRow>
@@ -206,8 +200,8 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
           )}
 
           {hasPosted && stagingRows.length > 0 && (
-            <div>
-              <p className="mb-2 text-sm font-medium text-muted-foreground">Staged IPs</p>
+            <div className="flex-1 min-h-0 overflow-y-auto border rounded-md">
+              <p className="px-3 pt-2 pb-1 text-sm font-medium text-muted-foreground">Staged IPs</p>
               <Table aria-label="Staged IPs">
                 <TableHeader>
                   <TableRow>
@@ -230,9 +224,15 @@ export function PasteStaging({ open, onOpenChange }: PasteStagingProps) {
               </Table>
             </div>
           )}
+
+          {pasteMutation.isError && (
+            <p role="alert" className="text-sm text-destructive">
+              Failed to add entries. Please try again.
+            </p>
+          )}
         </div>
 
-        <DialogFooter className="mt-6 flex flex-row gap-2">
+        <DialogFooter className="flex flex-row gap-2">
           <Button
             type="button"
             onClick={() => void handleAdd()}
