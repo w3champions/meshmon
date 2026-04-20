@@ -132,6 +132,25 @@ describe("DrawMap", () => {
     ]);
   });
 
+  test("defaults cluster group to zoomToBoundsOnClick when onClusterClick is omitted", async () => {
+    const pins = [{ id: "p1", lat: 1, lon: 2 }];
+    renderWithProviders(<DrawMap shapes={[]} onShapesChange={() => {}} pins={pins} />);
+    const group = await screen.findByTestId("marker-cluster-group");
+    expect(group).toHaveAttribute("data-zoom-to-bounds-on-click", "true");
+    expect(group).toHaveAttribute("data-has-on-click", "false");
+  });
+
+  test("disables zoomToBoundsOnClick and wires onClick when onClusterClick is provided", async () => {
+    const pins = [{ id: "p1", lat: 1, lon: 2 }];
+    const handler = vi.fn<(ids: string[]) => void>();
+    renderWithProviders(
+      <DrawMap shapes={[]} onShapesChange={() => {}} pins={pins} onClusterClick={handler} />,
+    );
+    const group = await screen.findByTestId("marker-cluster-group");
+    expect(group).toHaveAttribute("data-zoom-to-bounds-on-click", "false");
+    expect(group).toHaveAttribute("data-has-on-click", "true");
+  });
+
   test("pm:edit and pm:remove also flush collected shapes through onShapesChange", async () => {
     const handler = vi.fn<(next: GeoShape[]) => void>();
     renderWithProviders(<DrawMap shapes={[]} onShapesChange={handler} />);

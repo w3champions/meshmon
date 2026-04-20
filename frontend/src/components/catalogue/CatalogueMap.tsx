@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { DrawMap } from "@/components/map/DrawMap";
 import type { GeoShape } from "@/lib/geo";
+import { CatalogueClusterDialog } from "./CatalogueClusterDialog";
 import { EntryCard } from "./EntryCard";
 
 export interface CatalogueMapProps {
@@ -40,6 +41,14 @@ export function CatalogueMap({
   onRowClick,
   className,
 }: CatalogueMapProps) {
+  const [clusterPinIds, setClusterPinIds] = useState<string[] | null>(null);
+
+  const entriesById = useMemo(() => {
+    const map = new Map<string, CatalogueEntry>();
+    for (const entry of entries) map.set(entry.id, entry);
+    return map;
+  }, [entries]);
+
   const pins = useMemo(
     () =>
       entries
@@ -53,7 +62,41 @@ export function CatalogueMap({
     [entries, onRowClick],
   );
 
+  const handleClusterClick = useCallback((ids: string[]) => {
+    setClusterPinIds(ids);
+  }, []);
+
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) setClusterPinIds(null);
+  }, []);
+
+  // Preserve the cluster's child-marker ordering while filtering out ids whose
+  // entry has since vanished (e.g. background refetch trimmed the list).
+  const clusterEntries = useMemo(() => {
+    if (!clusterPinIds) return [];
+    const out: CatalogueEntry[] = [];
+    for (const id of clusterPinIds) {
+      const entry = entriesById.get(id);
+      if (entry) out.push(entry);
+    }
+    return out;
+  }, [clusterPinIds, entriesById]);
+
   return (
-    <DrawMap shapes={shapes} onShapesChange={onShapesChange} pins={pins} className={className} />
+    <>
+      <DrawMap
+        shapes={shapes}
+        onShapesChange={onShapesChange}
+        pins={pins}
+        onClusterClick={handleClusterClick}
+        className={className}
+      />
+      <CatalogueClusterDialog
+        open={clusterPinIds !== null}
+        onOpenChange={handleDialogOpenChange}
+        entries={clusterEntries}
+        onOpenEntry={onRowClick}
+      />
+    </>
   );
 }

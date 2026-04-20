@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
@@ -19,7 +19,7 @@ vi.mock("react-leaflet-cluster", async () => {
 });
 
 import { CatalogueMap, EntryPopup } from "@/components/catalogue/CatalogueMap";
-import { resetLeafletMock } from "@/test/leaflet-mock";
+import { fireClusterClick, resetLeafletMock } from "@/test/leaflet-mock";
 import { renderWithProviders, renderWithQuery } from "@/test/query-wrapper";
 
 function makeEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry {
@@ -168,5 +168,61 @@ describe("CatalogueMap", () => {
     renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
     expect(screen.getByText("first line of the note")).toBeInTheDocument();
     expect(screen.queryByText("second line that must be hidden")).not.toBeInTheDocument();
+  });
+
+  test("cluster click opens the cluster dialog listing the cluster's members", async () => {
+    const entries = [
+      makeEntry({ id: "e1", ip: "1.1.1.1", display_name: "Alpha", latitude: 10, longitude: 20 }),
+      makeEntry({ id: "e2", ip: "2.2.2.2", display_name: "Beta", latitude: 11, longitude: 21 }),
+      makeEntry({ id: "e3", ip: "3.3.3.3", display_name: "Gamma", latitude: 12, longitude: 22 }),
+    ];
+    renderWithProviders(
+      <CatalogueMap
+        entries={entries}
+        shapes={[]}
+        onShapesChange={() => {}}
+        onRowClick={() => {}}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    // Before the click the dialog should not be rendered.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // Simulate the cluster click: the user clicked a cluster that contains
+    // e1 and e3 (but not e2).
+    fireClusterClick(["e1", "e3"]);
+
+    const dialog = await screen.findByRole("dialog");
+    const dialogUtils = within(dialog);
+    expect(dialogUtils.getByText("2 pins in this area")).toBeInTheDocument();
+    expect(dialogUtils.getByText("Alpha")).toBeInTheDocument();
+    expect(dialogUtils.getByText("Gamma")).toBeInTheDocument();
+    expect(dialogUtils.queryByText("Beta")).not.toBeInTheDocument();
+  });
+
+  test("clicking a row in the cluster dialog fires onRowClick with that entry's id", async () => {
+    const onRowClick = vi.fn();
+    const entries = [
+      makeEntry({ id: "e1", ip: "1.1.1.1", display_name: "Alpha", latitude: 10, longitude: 20 }),
+      makeEntry({ id: "e2", ip: "2.2.2.2", display_name: "Beta", latitude: 11, longitude: 21 }),
+    ];
+    const user = userEvent.setup();
+    renderWithProviders(
+      <CatalogueMap
+        entries={entries}
+        shapes={[]}
+        onShapesChange={() => {}}
+        onRowClick={onRowClick}
+      />,
+    );
+    await screen.findByTestId("draw-map-shell");
+    fireClusterClick(["e1", "e2"]);
+
+    const dialog = await screen.findByRole("dialog");
+    const betaButton = within(dialog).getByRole("button", {
+      name: /open details for Beta/i,
+    });
+    await user.click(betaButton);
+    expect(onRowClick).toHaveBeenCalledWith("e2");
   });
 });

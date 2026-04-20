@@ -165,8 +165,43 @@ export const LeafletMock = {
 
 interface MarkerClusterGroupMockProps {
   children?: ReactNode;
+  zoomToBoundsOnClick?: boolean;
+  onClick?: (event: unknown) => void;
 }
 
-export function MarkerClusterGroupMock({ children }: MarkerClusterGroupMockProps) {
-  return <div data-testid="marker-cluster-group">{children}</div>;
+/**
+ * Latest cluster-group onClick captured by the mock. Tests use
+ * `fireClusterClick(ids)` to synthesise a cluster click and drive the
+ * component's `onClusterClick` handler end-to-end.
+ */
+let latestClusterOnClick: ((event: unknown) => void) | null = null;
+
+export function fireClusterClick(pinIds: string[]): void {
+  const handler = latestClusterOnClick;
+  if (!handler) return;
+  // `DrawMap`'s handler narrows the cluster layer via duck-typing on
+  // `getAllChildMarkers`, so the fake cluster just needs that shape.
+  const cluster = {
+    getAllChildMarkers: () => pinIds.map((id) => ({ options: { meshmonPinId: id } })),
+  };
+  handler({ propagatedFrom: cluster, layer: cluster });
+}
+
+export function MarkerClusterGroupMock({
+  children,
+  zoomToBoundsOnClick,
+  onClick,
+}: MarkerClusterGroupMockProps) {
+  latestClusterOnClick = onClick ?? null;
+  return (
+    <div
+      data-testid="marker-cluster-group"
+      data-zoom-to-bounds-on-click={
+        zoomToBoundsOnClick === undefined ? "" : String(zoomToBoundsOnClick)
+      }
+      data-has-on-click={onClick ? "true" : "false"}
+    >
+      {children}
+    </div>
+  );
 }

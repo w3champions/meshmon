@@ -4,7 +4,7 @@ import "@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css";
 import "leaflet.markercluster/dist/MarkerCluster.css";
 import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 
-import L from "leaflet";
+import L, { type LeafletMouseEvent } from "leaflet";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
@@ -23,6 +23,13 @@ export interface DrawMapProps {
   shapes: GeoShape[];
   onShapesChange(next: GeoShape[]): void;
   pins?: DrawMapPin[];
+  /**
+   * Invoked when the operator clicks a cluster. Receives the ids of every
+   * pin contained in the clicked cluster, in the order Leaflet reports
+   * them. When omitted, `MarkerClusterGroup` falls back to the default
+   * zoom-to-bounds behavior.
+   */
+  onClusterClick?(pinIds: string[]): void;
   className?: string;
 }
 
@@ -52,6 +59,18 @@ const DEFAULT_CENTER: [number, number] = [20, 0];
 const DEFAULT_ZOOM = 2;
 
 const ZOOM_HINT_FADE_MS = 1500;
+
+interface MarkerClusterLike {
+  getAllChildMarkers(): Array<{ options: { meshmonPinId?: string } }>;
+}
+
+function isMarkerCluster(value: unknown): value is MarkerClusterLike {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { getAllChildMarkers?: unknown }).getAllChildMarkers === "function"
+  );
+}
 
 function detectIsMac(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -259,7 +278,7 @@ function ModifierZoomController({ onHintNeeded }: ModifierZoomControllerProps) {
   return null;
 }
 
-export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProps) {
+export function DrawMap({ shapes, onShapesChange, pins, onClusterClick, className }: DrawMapProps) {
   const [hintVisible, setHintVisible] = useState(false);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -281,6 +300,34 @@ export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProp
     };
   }, []);
 
+  // Keep a ref to the latest onClusterClick so the handler passed to the
+  // cluster group doesn't re-subscribe on every parent render.
+  const onClusterClickRef = useRef(onClusterClick);
+  useEffect(() => {
+    onClusterClickRef.current = onClusterClick;
+  }, [onClusterClick]);
+
+  const handleClusterClick = useCallback((event: LeafletMouseEvent) => {
+    const handler = onClusterClickRef.current;
+    if (!handler) return;
+    // react-leaflet-cluster wires `onClick` onto leaflet.markercluster's
+    // `clusterclick` event. The cluster layer lives on `propagatedFrom`
+    // (preferred) or the deprecated `layer` field. Narrow by duck-typing
+    // on `getAllChildMarkers` — `L.MarkerCluster` only exists once
+    // leaflet.markercluster is loaded (which is runtime-only when the
+    // cluster wrapper is live).
+    const candidate =
+      (event as LeafletMouseEvent & { propagatedFrom?: unknown }).propagatedFrom ?? event.layer;
+    if (!isMarkerCluster(candidate)) return;
+    const ids = candidate
+      .getAllChildMarkers()
+      .map((m) => m.options.meshmonPinId)
+      .filter((id): id is string => typeof id === "string");
+    handler(ids);
+  }, []);
+
+  const clusteringEnabled = !!onClusterClick;
+
   return (
     <div
       className={cn(
@@ -301,9 +348,21 @@ export function DrawMap({ shapes, onShapesChange, pins, className }: DrawMapProp
         <GeomanController shapes={shapes} onShapesChange={onShapesChange} />
         <ModifierZoomController onHintNeeded={flashHint} />
         {pins && pins.length > 0 ? (
-          <MarkerClusterGroup chunkedLoading>
+          // Zoom is handled by the +/- controls and Cmd/Ctrl wheel; cluster
+          // clicks open a list dialog instead of zooming.
+          <MarkerClusterGroup
+            chunkedLoading
+            zoomToBoundsOnClick={!clusteringEnabled}
+            onClick={clusteringEnabled ? handleClusterClick : undefined}
+          >
             {pins.map((pin) => (
-              <Marker key={pin.id} position={[pin.lat, pin.lon]}>
+              <Marker
+                key={pin.id}
+                position={[pin.lat, pin.lon]}
+                ref={(marker) => {
+                  if (marker) marker.options.meshmonPinId = pin.id;
+                }}
+              >
                 {pin.popup ? <Popup>{pin.popup}</Popup> : null}
               </Marker>
             ))}
