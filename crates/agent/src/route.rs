@@ -34,9 +34,18 @@
 //!
 //! ## Diff detection
 //!
-//! `diff_against` compares a fresh snapshot against `last_reported`. The four
-//! rules (NewIp, MissingIp, HopCountChanged, RttShift) are unchanged in
-//! structure and all use the per-probe denominator from `position_probes`.
+//! `diff_against` compares a fresh snapshot against `last_reported` and
+//! fires only on *structural* route changes:
+//!
+//! - `NewIp` — a previously-unseen IP crosses `new_ip_min_freq` at some
+//!   position (a different router is on the path).
+//! - `HopCountChanged` — path length changed by at least `hop_count_change`.
+//!
+//! Per-hop packet loss and per-hop RTT are measurement signals, not route
+//! signals: they live in rolling stats + alerts, not in route snapshots.
+//! Emitting on those would mean every near-silent first-hop router
+//! (sub-percent ICMP reply rate) produces a "route changed" event every
+//! 60 s tick.
 //!
 //! ## Complexity
 //! - `observe(hops, now)`: O(H) per call where H = hops.len() (typically ≤ 30).
@@ -134,14 +143,10 @@ impl RouteSnapshot {
 /// never surfaced on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffReason {
-    /// Rule 1: a new IP crossed `new_ip_min_freq` at some hop.
+    /// A new IP crossed `new_ip_min_freq` at some hop.
     NewIp { position: u8 },
-    /// Rule 2: a previously-≥`new_ip_min_freq` IP dropped below `missing_ip_max_freq`.
-    MissingIp { position: u8 },
-    /// Rule 3: hop count changed by ≥ `hop_count_change`.
+    /// Hop count changed by ≥ `hop_count_change`.
     HopCountChanged { from: usize, to: usize },
-    /// Rule 4: some hop's avg RTT shifted by ≥ `rtt_shift_frac`.
-    RttShift { position: u8 },
 }
 
 /// Result of a `diff_against` call. The `reasons` field contains every
@@ -468,9 +473,10 @@ impl RouteTracker {
     }
 
     /// Compare `new` to the tracker's `last_reported` snapshot. Returns
-    /// `Some(RouteDiff)` when at least one of the four rules from spec 02
-    /// § Diff detection fires. Free function form to keep the tracker's
-    /// mutable state untouched by the diff check.
+    /// `Some(RouteDiff)` when the path's structure has changed — either
+    /// a new IP crosses `new_ip_min_freq` at some position, or the hop
+    /// count moves by at least `hop_count_change`. Free function form to
+    /// keep the tracker's mutable state untouched by the diff check.
     ///
     /// Caller (supervisor) is responsible for updating `last_reported`
     /// after a successful emit via [`RouteTracker::set_last_reported`].
@@ -492,7 +498,7 @@ impl RouteTracker {
 
         let mut reasons: Vec<DiffReason> = Vec::new();
 
-        // Rule 3 — hop count change.
+        // Hop count change — path got longer or shorter.
         let from = last.hops.len();
         let to = new.hops.len();
         let delta = from.abs_diff(to);
@@ -500,20 +506,16 @@ impl RouteTracker {
             reasons.push(DiffReason::HopCountChanged { from, to });
         }
 
-        // Build position → HopSummary lookups for O(H) rules 1/2/4.
+        // New-IP rule — a previously-unseen IP crosses the minimum
+        // frequency at any position.
         let last_by_pos: HashMap<u8, &HopSummary> =
             last.hops.iter().map(|h| (h.position, h)).collect();
-        let new_by_pos: HashMap<u8, &HopSummary> =
-            new.hops.iter().map(|h| (h.position, h)).collect();
-
-        // Rule 1 — new IP ≥ threshold at any position.
         for new_hop in &new.hops {
             let last_hop = last_by_pos.get(&new_hop.position);
             for ip_entry in &new_hop.observed_ips {
                 if ip_entry.frequency < thresholds.new_ip_min_freq {
                     continue;
                 }
-                // Was this IP present at this position in `last`?
                 let previously_present = last_hop
                     .map(|h| h.observed_ips.iter().any(|o| o.ip == ip_entry.ip))
                     .unwrap_or(false);
@@ -523,51 +525,6 @@ impl RouteTracker {
                     });
                     break; // one reason per position is enough
                 }
-            }
-        }
-
-        // Rule 2 — previously-seen (≥ new_ip_min_freq) IP is now below missing_ip_max_freq.
-        for last_hop in &last.hops {
-            let new_hop = new_by_pos.get(&last_hop.position);
-            for ip_entry in &last_hop.observed_ips {
-                if ip_entry.frequency < thresholds.new_ip_min_freq {
-                    continue;
-                }
-                // Look up same IP in new snapshot; treat absent as frequency 0.
-                let new_freq = new_hop
-                    .and_then(|h| {
-                        h.observed_ips
-                            .iter()
-                            .find(|o| o.ip == ip_entry.ip)
-                            .map(|o| o.frequency)
-                    })
-                    .unwrap_or(0.0);
-                if new_freq < thresholds.missing_ip_max_freq {
-                    reasons.push(DiffReason::MissingIp {
-                        position: last_hop.position,
-                    });
-                    break; // one reason per position is enough
-                }
-            }
-        }
-
-        // Rule 4 — avg RTT shift ≥ threshold at any hop present in both.
-        for new_hop in &new.hops {
-            let Some(last_hop) = last_by_pos.get(&new_hop.position) else {
-                continue;
-            };
-            let old = last_hop.avg_rtt_micros;
-            let new_rtt = new_hop.avg_rtt_micros;
-            if old == 0 {
-                // Can't compute a relative shift against zero. Skip —
-                // rule 1 or 3 will catch truly meaningful changes.
-                continue;
-            }
-            let shift = (new_rtt as f64 - old as f64).abs() / old as f64;
-            if shift >= thresholds.rtt_shift_frac {
-                reasons.push(DiffReason::RttShift {
-                    position: new_hop.position,
-                });
             }
         }
 
@@ -937,9 +894,7 @@ mod tests {
     fn default_diff() -> DiffDetection {
         DiffDetection {
             new_ip_min_freq: 0.20,
-            missing_ip_max_freq: 0.05,
             hop_count_change: 1,
-            rtt_shift_frac: 0.50,
         }
     }
 
@@ -988,7 +943,7 @@ mod tests {
         assert_eq!(t.diff_against(&a, &default_diff()), None);
     }
 
-    // ---------------- Rule 1: new IP ≥ threshold ----------------
+    // ---------------- NewIp: new IP ≥ threshold ----------------
 
     #[test]
     fn diff_rule1_fires_on_new_ip_above_threshold() {
@@ -1060,10 +1015,15 @@ mod tests {
             .any(|r| matches!(r, DiffReason::NewIp { position: 3 })),);
     }
 
-    // ---------------- Rule 2: IP dropped below missing threshold ----------------
+    // ---------------- Per-hop IP frequency changes must not diff ----------------
 
     #[test]
-    fn diff_rule2_fires_when_previously_seen_ip_vanishes() {
+    fn diff_does_not_fire_when_previously_seen_ip_loses_frequency() {
+        // A previously-seen IP dropping off is not by itself a route change:
+        // it's either been replaced (in which case the NewIp rule fires on
+        // the replacement) or it's just gone silent (a measurement signal,
+        // not a topology signal). Pair with
+        // `diff_ignores_pure_loss_and_rtt_noise_at_near_silent_hop`.
         let last = snap(
             Protocol::Icmp,
             &[(
@@ -1072,7 +1032,6 @@ mod tests {
                 5_000,
             )],
         );
-        // IP .2 dropped to 2% (below 5% missing threshold).
         let new = snap(
             Protocol::Icmp,
             &[(
@@ -1082,46 +1041,11 @@ mod tests {
             )],
         );
         let t = tracker_with_last(Protocol::Icmp, last);
-        let diff = t.diff_against(&new, &default_diff()).expect("diff");
-        assert!(
-            diff.reasons
-                .iter()
-                .any(|r| matches!(r, DiffReason::MissingIp { position: 3 })),
-            "got {:?}",
-            diff.reasons,
-        );
+        assert_eq!(t.diff_against(&new, &default_diff()), None);
     }
 
     #[test]
-    fn diff_rule2_fires_when_ip_fully_disappears() {
-        // IP previously at frequency ≥ threshold is absent from the new
-        // snapshot. Treated as frequency = 0 → below 5% → MissingIp.
-        let last = snap(
-            Protocol::Icmp,
-            &[(
-                3,
-                vec![(ipv4(10, 0, 0, 1), 0.78), (ipv4(10, 0, 0, 2), 0.22)],
-                5_000,
-            )],
-        );
-        let new = snap(
-            Protocol::Icmp,
-            &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
-        );
-        let t = tracker_with_last(Protocol::Icmp, last);
-        let diff = t.diff_against(&new, &default_diff()).expect("diff");
-        assert!(diff
-            .reasons
-            .iter()
-            .any(|r| matches!(r, DiffReason::MissingIp { position: 3 })),);
-    }
-
-    #[test]
-    fn diff_rule2_does_not_fire_when_ip_was_minor() {
-        // IP was at 10% before (NOT ≥ 20% threshold), still at 1% now.
-        // Rule 2 requires the IP to have been "previously at frequency
-        // ≥ new_ip_min_freq" — otherwise a noisy low-freq IP flickering
-        // out would spam diffs.
+    fn diff_does_not_fire_when_minor_ip_disappears() {
         let last = snap(
             Protocol::Icmp,
             &[(
@@ -1135,14 +1059,10 @@ mod tests {
             &[(3, vec![(ipv4(10, 0, 0, 1), 1.0)], 5_000)],
         );
         let t = tracker_with_last(Protocol::Icmp, last);
-        // IP .2 was at 10% — below new_ip_min_freq (20%). Disappearing doesn't fire rule 2.
-        // Also doesn't fire rule 1 (no new IP above 20%).
-        // Also doesn't fire rule 3 (hop count unchanged).
-        // Also doesn't fire rule 4 (RTT unchanged).
         assert_eq!(t.diff_against(&new, &default_diff()), None);
     }
 
-    // ---------------- Rule 3: hop count change ----------------
+    // ---------------- HopCountChanged: hop count change ----------------
 
     #[test]
     fn diff_rule3_fires_when_route_lengthens() {
@@ -1188,10 +1108,10 @@ mod tests {
 
     #[test]
     fn diff_rule3_respects_threshold_of_2() {
-        // With hop_count_change = 2, a 1-hop change must not fire Rule 3.
-        // To isolate Rule 3, also disable Rule 1 by setting a freq
-        // threshold no real frequency can cross — otherwise a newly-added
-        // hop's IP would trip Rule 1 at the new position.
+        // With hop_count_change = 2, a 1-hop change must not fire
+        // HopCountChanged. To isolate it, also disable NewIp by setting a
+        // freq threshold no real frequency can cross — otherwise a
+        // newly-added hop's IP would trip NewIp at the new position.
         let last = snap(
             Protocol::Icmp,
             &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
@@ -1205,61 +1125,26 @@ mod tests {
         );
         let mut thr = default_diff();
         thr.hop_count_change = 2;
-        thr.new_ip_min_freq = 2.0; // disable Rule 1 so only Rule 3 can fire
+        thr.new_ip_min_freq = 2.0; // disable NewIp so only HopCountChanged can fire
         let t = tracker_with_last(Protocol::Icmp, last);
         assert_eq!(t.diff_against(&new, &thr), None);
     }
 
-    // ---------------- Rule 4: RTT shift ----------------
+    // ---------------- Per-hop RTT shifts must not diff ----------------
 
     #[test]
-    fn diff_rule4_fires_when_hop_rtt_shifts_above_threshold() {
+    fn diff_returns_none_on_large_rtt_shift_same_topology() {
+        // 60 % avg-RTT shift at an otherwise-stable hop. Per-hop RTT is a
+        // measurement signal (jitter / latency), not a route signal.
         let last = snap(
             Protocol::Icmp,
             &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 10_000)],
         );
-        // 60% shift (10_000 → 16_000) exceeds default 50% threshold.
         let new = snap(
             Protocol::Icmp,
             &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 16_000)],
         );
         let t = tracker_with_last(Protocol::Icmp, last);
-        let diff = t.diff_against(&new, &default_diff()).expect("diff");
-        assert!(diff
-            .reasons
-            .iter()
-            .any(|r| matches!(r, DiffReason::RttShift { position: 2 })));
-    }
-
-    #[test]
-    fn diff_rule4_does_not_fire_below_threshold() {
-        let last = snap(
-            Protocol::Icmp,
-            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 10_000)],
-        );
-        // 40% shift.
-        let new = snap(
-            Protocol::Icmp,
-            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 14_000)],
-        );
-        let t = tracker_with_last(Protocol::Icmp, last);
-        assert_eq!(t.diff_against(&new, &default_diff()), None);
-    }
-
-    #[test]
-    fn diff_rule4_handles_zero_previous_rtt_gracefully() {
-        // Previous avg_rtt = 0 (no successful samples last window); new
-        // snapshot has a real RTT. We can't compute a relative shift
-        // against zero; treat as "no rule 4 fire" — rule 1 or 3 will
-        // typically catch meaningful changes in that case. This is a
-        // correctness corner: division by zero would otherwise explode.
-        let last = snap(Protocol::Icmp, &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 0)]);
-        let new = snap(
-            Protocol::Icmp,
-            &[(2, vec![(ipv4(10, 0, 0, 2), 1.0)], 5_000)],
-        );
-        let t = tracker_with_last(Protocol::Icmp, last);
-        // Hop count unchanged, IP membership unchanged → no diff, no panic.
         assert_eq!(t.diff_against(&new, &default_diff()), None);
     }
 
@@ -1278,7 +1163,7 @@ mod tests {
             Protocol::Icmp,
             &[(1, vec![(ipv4(10, 0, 0, 1), 1.0)], 1_000)],
         );
-        // Both rule 1 (new IP at position 2 at 100%) AND rule 3 (hop count +1).
+        // Both NewIp (new IP at position 2 at 100%) AND HopCountChanged (+1).
         let new = snap(
             Protocol::Icmp,
             &[
@@ -1848,32 +1733,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_rule2_fires_when_dominant_ip_vanishes_at_lossy_hop() {
-        let last = snap(
-            Protocol::Icmp,
-            &[(3, vec![(ipv4(10, 0, 0, 1), 0.5)], 5_000)],
-        );
-        let mut t = tracker_with_last(Protocol::Icmp, last);
-        t.target_ip = ipv4(45, 248, 78, 119);
-
-        let now = Instant::now();
-        // Observe only silent (no-IP) hops at position 3 so the dominant IP
-        // from `last` now has frequency 0 — below missing_ip_max_freq (5%).
-        for _ in 0..10 {
-            t.observe(&[hop(3, None, None)], now);
-        }
-        let new = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
-        let diff = t.diff_against(&new, &default_diff()).expect("diff");
-        assert!(
-            diff.reasons
-                .iter()
-                .any(|r| matches!(r, DiffReason::MissingIp { position: 3, .. })),
-            "expected DiffReason::MissingIp at pos 3: {:?}",
-            diff.reasons,
-        );
-    }
-
-    #[test]
     fn diff_rule3_stable_across_silent_padded_snapshots() {
         let target: IpAddr = ipv4(45, 248, 78, 119);
         let mut t = RouteTracker::new(five_min(), target);
@@ -1905,30 +1764,6 @@ mod tests {
                 now,
             );
             now += Duration::from_secs(1);
-        }
-        let second = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
-        assert_eq!(t.diff_against(&second, &default_diff()), None);
-    }
-
-    #[test]
-    fn diff_rule4_unaffected_by_silent_samples() {
-        let target: IpAddr = ipv4(45, 248, 78, 119);
-        let mut t = RouteTracker::new(five_min(), target);
-        t.reset_for_protocol(Some(Protocol::Icmp));
-        let now = Instant::now();
-        for _ in 0..10 {
-            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
-        }
-        for _ in 0..10 {
-            t.observe(&[hop(1, None, None)], now);
-        }
-        let first = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
-        t.set_last_reported(first);
-        for _ in 0..10 {
-            t.observe(&[hop(1, Some(ipv4(10, 0, 0, 1)), Some(1_000))], now);
-        }
-        for _ in 0..10 {
-            t.observe(&[hop(1, None, None)], now);
         }
         let second = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
         assert_eq!(t.diff_against(&second, &default_diff()), None);
@@ -2080,5 +1915,83 @@ mod tests {
         );
         assert_eq!(snap.hops[0].position, 1);
         assert_eq!(snap.hops[0].observed_ips[0].ip, target);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Structural-only diff contract
+    //
+    // The diff engine only fires on topology changes (new IP at a position, or
+    // hop count change). Per-hop loss and per-hop RTT are measurement signals,
+    // not route signals — they belong in rolling stats and alerts, not in the
+    // route-snapshot stream.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn diff_ignores_pure_loss_and_rtt_noise_at_near_silent_hop() {
+        // Reproduces the production pattern: the same 15-IP path produces
+        // back-to-back snapshots where every position keeps the same
+        // dominant IP, but a first-hop router rate-limits ICMP replies to
+        // <1 % of probes. With so few successful samples its avg_rtt swings
+        // by 100s of % between snapshots. No IP changed, no hop count
+        // changed — must not diff.
+        let last = RouteSnapshot {
+            protocol: Protocol::Icmp,
+            observed_at: SystemTime::UNIX_EPOCH,
+            hops: vec![
+                HopSummary {
+                    position: 1,
+                    observed_ips: vec![ObservedIp {
+                        ip: ipv4(188, 208, 143, 254),
+                        frequency: 0.0034,
+                    }],
+                    avg_rtt_micros: 331,
+                    stddev_rtt_micros: 0,
+                    loss_pct: 0.9966,
+                },
+                HopSummary {
+                    position: 2,
+                    observed_ips: vec![ObservedIp {
+                        ip: ipv4(193, 109, 190, 156),
+                        frequency: 1.0,
+                    }],
+                    avg_rtt_micros: 1664,
+                    stddev_rtt_micros: 2094,
+                    loss_pct: 0.0,
+                },
+            ],
+        };
+        let new = RouteSnapshot {
+            protocol: Protocol::Icmp,
+            observed_at: SystemTime::UNIX_EPOCH,
+            hops: vec![
+                HopSummary {
+                    position: 1,
+                    // Same IP, same (near-zero) frequency, but a 256 % RTT
+                    // jump driven by a single extra sample landing in the
+                    // rolling window.
+                    observed_ips: vec![ObservedIp {
+                        ip: ipv4(188, 208, 143, 254),
+                        frequency: 0.0068,
+                    }],
+                    avg_rtt_micros: 1181,
+                    stddev_rtt_micros: 850,
+                    loss_pct: 0.9932,
+                },
+                HopSummary {
+                    position: 2,
+                    // Slight IP-level packet loss increase at an otherwise
+                    // stable hop — must also not fire.
+                    observed_ips: vec![ObservedIp {
+                        ip: ipv4(193, 109, 190, 156),
+                        frequency: 0.85,
+                    }],
+                    avg_rtt_micros: 1664,
+                    stddev_rtt_micros: 2094,
+                    loss_pct: 0.15,
+                },
+            ],
+        };
+        let t = tracker_with_last(Protocol::Icmp, last);
+        assert_eq!(t.diff_against(&new, &default_diff()), None);
     }
 }

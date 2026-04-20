@@ -77,17 +77,17 @@ pub struct ProbingWindows {
     pub diversity_sec: u32,
 }
 
-/// Thresholds for detecting route-change events.
+/// Thresholds for detecting structural route-change events.
+///
+/// Only topology changes (new IP at a position, hop count change) are
+/// diff-worthy. Per-hop loss and per-hop RTT are measurement signals and
+/// live in the rolling-stats / alerting pipeline, not in route snapshots.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProbingDiffDetection {
     /// Minimum observed frequency for a new IP to be considered significant.
     pub new_ip_min_freq: f64,
-    /// Maximum observed frequency for a missing IP to be considered significant.
-    pub missing_ip_max_freq: f64,
     /// Hop-count change that triggers a diff event.
     pub hop_count_change: u32,
-    /// RTT fractional shift that triggers a diff event.
-    pub rtt_shift_frac: f64,
 }
 
 /// Path-level health state-machine thresholds.
@@ -202,9 +202,7 @@ impl Default for ProbingSection {
             },
             diff_detection: ProbingDiffDetection {
                 new_ip_min_freq: 0.20,
-                missing_ip_max_freq: 0.05,
                 hop_count_change: 1,
-                rtt_shift_frac: 0.50,
             },
             path_health_thresholds: PathHealthThresholds {
                 degraded_trigger_pct: 0.05,
@@ -293,12 +291,13 @@ pub(crate) struct RawProbingWindows {
 }
 
 // On-disk override shape for `ProbingDiffDetection`. Every field is optional.
+// Unknown keys are silently ignored so legacy operator configs that still
+// carry the removed `missing_ip_max_freq` / `rtt_shift_frac` keys don't
+// refuse to boot.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct RawProbingDiffDetection {
     new_ip_min_freq: Option<f64>,
-    missing_ip_max_freq: Option<f64>,
     hop_count_change: Option<u32>,
-    rtt_shift_frac: Option<f64>,
 }
 
 // On-disk override shape for `PathHealthThresholds`. Every field is optional.
@@ -579,27 +578,15 @@ impl TryFrom<RawProbingSection> for ProbingSection {
                 .diff_detection
                 .new_ip_min_freq
                 .unwrap_or(d.new_ip_min_freq);
-            let mim = raw
-                .diff_detection
-                .missing_ip_max_freq
-                .unwrap_or(d.missing_ip_max_freq);
             let hcc = raw
                 .diff_detection
                 .hop_count_change
                 .unwrap_or(d.hop_count_change);
-            let rsf = raw
-                .diff_detection
-                .rtt_shift_frac
-                .unwrap_or(d.rtt_shift_frac);
             validate_fraction("diff_detection.new_ip_min_freq", nim)?;
-            validate_fraction("diff_detection.missing_ip_max_freq", mim)?;
-            validate_fraction("diff_detection.rtt_shift_frac", rsf)?;
             validate_positive_u32("diff_detection.hop_count_change", hcc)?;
             ProbingDiffDetection {
                 new_ip_min_freq: nim,
-                missing_ip_max_freq: mim,
                 hop_count_change: hcc,
-                rtt_shift_frac: rsf,
             }
         };
 
@@ -812,8 +799,6 @@ mod tests {
             ("udp.unhealthy", cfg.udp_thresholds.unhealthy_trigger_pct),
             ("udp.recovery", cfg.udp_thresholds.healthy_recovery_pct),
             ("diff.new_ip", cfg.diff_detection.new_ip_min_freq),
-            ("diff.missing_ip", cfg.diff_detection.missing_ip_max_freq),
-            ("diff.rtt_shift", cfg.diff_detection.rtt_shift_frac),
             (
                 "path.degraded",
                 cfg.path_health_thresholds.degraded_trigger_pct,
