@@ -482,11 +482,12 @@ export default function CampaignComposer() {
   const startDisabled =
     knobs.protocol === "mtr" || createMutation.isPending || startMutation.isPending;
 
-  // Pre-commit view: show the filter's first-page total so operators see a
-  // realistic size before Add-all. Falls back to 0 only when the catalogue
-  // query hasn't returned yet. SizePreview handles the `~` branch itself.
-  const approxDestTotal =
-    destSet.size > 0 ? destSet.size : (walkInfinite.data?.pages[0]?.total ?? 0);
+  // Pre-commit view: always mirror the operator's explicit selection. The
+  // DestinationPanel footer already advertises the filter's first-page total
+  // ("N of M matching"), so the preview doesn't double as a filter hint —
+  // that fallback made Remove-all visibly no-op because the preview kept
+  // showing the full filter total.
+  const approxDestTotal = destSet.size;
 
   // The exhaustive-walk action is disabled while the catalogue hook is
   // mid-initial-fetch (clicking before the first page lands would race the

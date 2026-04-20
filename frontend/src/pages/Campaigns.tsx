@@ -8,6 +8,7 @@ import {
   type CampaignState,
   useCampaignsList,
   useDeleteCampaign,
+  useEditCampaign,
   useStartCampaign,
   useStopCampaign,
 } from "@/api/hooks/campaigns";
@@ -229,6 +230,11 @@ export default function Campaigns() {
   // button, so we keep the full result object for that site.
   const { mutate: startCampaign } = useStartCampaign();
   const { mutate: stopCampaign } = useStopCampaign();
+  // Restart uses the edit endpoint with an empty body — the server transitions
+  // {completed, stopped, evaluated} → running without touching pair state.
+  // Operators who want to re-run every pair use "Edit pairs" with force
+  // measurement, or (post-T49) a dedicated Force-remeasure action.
+  const { mutate: editCampaign } = useEditCampaign();
   const deleteMutation = useDeleteCampaign();
   const { mutate: deleteCampaign } = deleteMutation;
 
@@ -277,6 +283,30 @@ export default function Campaigns() {
       });
     },
     [stopCampaign],
+  );
+  const handleRestart = useCallback(
+    (id: string): void => {
+      editCampaign(
+        { id, body: {} },
+        {
+          onError: (err) => {
+            const { pushToast } = useToastStore.getState();
+            if (isIllegalStateTransition(err)) {
+              pushToast({
+                kind: "error",
+                message: "Can't restart — campaign advanced before the request landed.",
+              });
+              return;
+            }
+            pushToast({
+              kind: "error",
+              message: `Restart failed: ${err.message}`,
+            });
+          },
+        },
+      );
+    },
+    [editCampaign],
   );
   const handleEditMetadata = useCallback((campaign: Campaign): void => {
     setEditMetadataTarget(campaign);
@@ -457,7 +487,36 @@ export default function Campaigns() {
           </TableHeader>
           <TableBody>
             {rows.map((campaign) => (
-              <TableRow key={campaign.id} data-testid={`campaign-row-${campaign.id}`}>
+              <TableRow
+                key={campaign.id}
+                data-testid={`campaign-row-${campaign.id}`}
+                // Click anywhere on the row to open the detail page. The
+                // title `<Link>` still carries the semantic href so
+                // right-click / middle-click / screen-reader users retain a
+                // first-class navigation target; the row-level handler is a
+                // convenience, not the sole path.
+                role="button"
+                tabIndex={0}
+                onClick={(event) => {
+                  // Ignore clicks that originated inside an interactive
+                  // child (links, buttons, the actions menu). Without this
+                  // the row-level navigation would race with (e.g.) the
+                  // Delete dropdown item and navigate mid-mutation.
+                  if ((event.target as HTMLElement).closest("a,button,[role='menuitem']")) {
+                    return;
+                  }
+                  void navigate({ to: "/campaigns/$id", params: { id: campaign.id } });
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  if ((event.target as HTMLElement).closest("a,button,[role='menuitem']")) {
+                    return;
+                  }
+                  event.preventDefault();
+                  void navigate({ to: "/campaigns/$id", params: { id: campaign.id } });
+                }}
+                className="cursor-pointer"
+              >
                 <TableCell className="font-medium">
                   <Link
                     to="/campaigns/$id"
@@ -478,6 +537,7 @@ export default function Campaigns() {
                     campaign={campaign}
                     onStart={handleStart}
                     onStop={handleStop}
+                    onRestart={handleRestart}
                     onEditMetadata={handleEditMetadata}
                     onEditPairs={handleEditPairs}
                     onDelete={handleDelete}

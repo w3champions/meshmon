@@ -5,6 +5,7 @@ import {
   type Campaign,
   useCampaign,
   useDeleteCampaign,
+  useEditCampaign,
   usePreviewDispatchCount,
   useStartCampaign,
   useStopCampaign,
@@ -137,9 +138,14 @@ export default function CampaignDetail() {
   // `isPending` read-outs in the action bar.
   const startMutation = useStartCampaign();
   const stopMutation = useStopCampaign();
+  // Restart posts an empty edit body; the server transitions the campaign
+  // back to `running` without resetting pair state. Operators who want to
+  // re-run every pair reach for "Edit pairs" with force-measurement.
+  const editMutation = useEditCampaign();
   const deleteMutation = useDeleteCampaign();
   const { mutate: startCampaign } = startMutation;
   const { mutate: stopCampaign } = stopMutation;
+  const { mutate: editCampaign } = editMutation;
   const { mutate: deleteCampaign } = deleteMutation;
 
   const [editMetadataOpen, setEditMetadataOpen] = useState<boolean>(false);
@@ -177,6 +183,25 @@ export default function CampaignDetail() {
       },
     });
   }, [stopCampaign, id]);
+
+  const handleRestart = useCallback((): void => {
+    editCampaign(
+      { id, body: {} },
+      {
+        onError: (err) => {
+          const { pushToast } = useToastStore.getState();
+          if (isIllegalStateTransition(err)) {
+            pushToast({
+              kind: "error",
+              message: "Can't restart — campaign advanced before the request landed.",
+            });
+            return;
+          }
+          pushToast({ kind: "error", message: `Restart failed: ${err.message}` });
+        },
+      },
+    );
+  }, [editCampaign, id]);
 
   const handleConfirmDelete = useCallback(
     (campaignId: string): void => {
@@ -308,6 +333,11 @@ export default function CampaignDetail() {
         {state === "running" ? (
           <Button onClick={handleStop} variant="destructive" disabled={stopMutation.isPending}>
             {stopMutation.isPending ? "Stopping…" : "Stop"}
+          </Button>
+        ) : null}
+        {isTerminal ? (
+          <Button onClick={handleRestart} disabled={editMutation.isPending}>
+            {editMutation.isPending ? "Restarting…" : "Restart"}
           </Button>
         ) : null}
         <Button variant="outline" onClick={() => setEditMetadataOpen(true)}>

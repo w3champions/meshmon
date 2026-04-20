@@ -12,6 +12,7 @@ interface CampaignRowActionsProps {
   campaign: Campaign;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onRestart: (id: string) => void;
   onEditMetadata: (campaign: Campaign) => void;
   onEditPairs: (campaign: Campaign) => void;
   onDelete: (campaign: Campaign) => void;
@@ -23,17 +24,23 @@ interface CampaignRowActionsProps {
  *
  * - `draft`: Start, Edit metadata, Delete
  * - `running`: Stop, Edit metadata
- * - `completed` / `stopped` / `evaluated`: Edit metadata, Edit pairs, Delete
+ * - `completed` / `stopped` / `evaluated`: Restart, Edit metadata, Edit pairs, Delete
+ *
+ * "Restart" calls `POST /api/campaigns/:id/edit` with an empty body — the
+ * server re-enters `running` without touching pair state. Re-measuring every
+ * pair uses "Edit pairs" with `force_measurement`.
  */
 export function CampaignRowActions({
   campaign,
   onStart,
   onStop,
+  onRestart,
   onEditMetadata,
   onEditPairs,
   onDelete,
 }: CampaignRowActionsProps) {
   const { state } = campaign;
+  const isTerminal = state === "completed" || state === "stopped" || state === "evaluated";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -48,14 +55,14 @@ export function CampaignRowActions({
         {state === "running" ? (
           <DropdownMenuItem onClick={() => onStop(campaign.id)}>Stop</DropdownMenuItem>
         ) : null}
+        {isTerminal ? (
+          <DropdownMenuItem onClick={() => onRestart(campaign.id)}>Restart</DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem onClick={() => onEditMetadata(campaign)}>Edit metadata</DropdownMenuItem>
-        {state === "completed" || state === "stopped" || state === "evaluated" ? (
+        {isTerminal ? (
           <DropdownMenuItem onClick={() => onEditPairs(campaign)}>Edit pairs</DropdownMenuItem>
         ) : null}
-        {state === "draft" ||
-        state === "completed" ||
-        state === "stopped" ||
-        state === "evaluated" ? (
+        {state === "draft" || isTerminal ? (
           <DropdownMenuItem
             className="text-destructive focus:text-destructive"
             onClick={() => onDelete(campaign)}

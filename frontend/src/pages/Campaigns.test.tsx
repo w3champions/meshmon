@@ -314,14 +314,36 @@ describe("Campaigns page — state-gated row actions", () => {
     expect(screen.getByRole("menuitem", { name: /edit metadata/i })).toBeInTheDocument();
     await user.keyboard("{Escape}");
 
-    // Completed → Edit pairs visible, Start/Stop both absent.
+    // Completed → Edit pairs + Restart visible, Start/Stop both absent.
     const completedTrigger = screen.getByRole("button", {
       name: `Actions for ${COMPLETED_CAMPAIGN.title}`,
     });
     await user.click(completedTrigger);
     expect(await screen.findByRole("menuitem", { name: /edit pairs/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^restart$/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /^start$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /^stop$/i })).not.toBeInTheDocument();
+  });
+
+  test("Restart on a completed row fires useEditCampaign with an empty body", async () => {
+    setupHookMocks({ data: [COMPLETED_CAMPAIGN] });
+    const user = userEvent.setup();
+    renderCampaigns();
+
+    const trigger = await screen.findByRole("button", {
+      name: `Actions for ${COMPLETED_CAMPAIGN.title}`,
+    });
+    await user.click(trigger);
+    const restartItem = await screen.findByRole("menuitem", { name: /^restart$/i });
+    await user.click(restartItem);
+
+    // Empty-body contract: re-enters `running` without touching pair state.
+    // The handler also passes onError for toast routing — we assert the body
+    // here; the toast spec is exercised elsewhere.
+    expect(editMutationStub.mutate).toHaveBeenCalledWith(
+      { id: COMPLETED_CAMPAIGN.id, body: {} },
+      expect.any(Object),
+    );
   });
 
   test("Stop click fires useStopCampaign.mutate with the campaign id", async () => {
@@ -355,6 +377,44 @@ describe("Campaigns page — SSE stream hook", () => {
     await screen.findByLabelText(/search title or notes/i);
     expect(useCampaignStream).toHaveBeenCalled();
     expect(CAMPAIGNS_LIST_KEY).toEqual(["campaigns", "list"]);
+  });
+});
+
+describe("Campaigns page — row navigation", () => {
+  test("clicking a row body navigates to /campaigns/$id", async () => {
+    setupHookMocks({ data: [DRAFT_CAMPAIGN] });
+    const user = userEvent.setup();
+    const { router } = renderCampaigns();
+
+    const row = await screen.findByTestId(`campaign-row-${DRAFT_CAMPAIGN.id}`);
+    // Click on the state badge cell (neutral, not on a link/button) so the
+    // row-level handler is what fires navigation, not the title Link.
+    const badge = within(row).getByText(DRAFT_CAMPAIGN.state);
+    await user.click(badge);
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/campaigns/${DRAFT_CAMPAIGN.id}`);
+    });
+  });
+
+  test("clicking the actions trigger does NOT navigate", async () => {
+    setupHookMocks({ data: [DRAFT_CAMPAIGN] });
+    const user = userEvent.setup();
+    const { router } = renderCampaigns();
+
+    const trigger = await screen.findByRole("button", {
+      name: `Actions for ${DRAFT_CAMPAIGN.title}`,
+    });
+    await user.click(trigger);
+
+    // The dropdown opens; the row-level click handler must bail out because
+    // the actual click target is an interactive descendant. Closing the menu
+    // and asserting the route hasn't changed catches any future regression
+    // where the bubbling click re-fires `navigate`.
+    await screen.findByRole("menu");
+    await user.keyboard("{Escape}");
+
+    expect(router.state.location.pathname).toBe("/campaigns");
   });
 });
 

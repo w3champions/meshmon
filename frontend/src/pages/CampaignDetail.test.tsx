@@ -289,6 +289,39 @@ describe("CampaignDetail — Stop mutation + state-change rerender", () => {
   });
 });
 
+describe("CampaignDetail — Restart action on terminal campaigns", () => {
+  test("Restart button appears on completed campaigns and fires empty-body edit", async () => {
+    // Completed is a terminal state, so Restart surfaces; Start/Stop don't.
+    setupHookMocks({ campaign: makeCampaign({ state: "completed" }) });
+    const user = userEvent.setup();
+    renderDetail();
+
+    const restart = await screen.findByRole("button", { name: /^restart$/i });
+    expect(screen.queryByRole("button", { name: /^start$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^stop$/i })).not.toBeInTheDocument();
+
+    await user.click(restart);
+    // Empty-body contract — re-enters `running` without resetting pairs.
+    expect(editMutationStub.mutate).toHaveBeenCalledWith(
+      { id: CAMPAIGN_ID, body: {} },
+      expect.any(Object),
+    );
+  });
+
+  test("Restart is absent on draft and running campaigns", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "draft" }) });
+    renderDetail();
+    await screen.findByRole("button", { name: /^start$/i });
+    expect(screen.queryByRole("button", { name: /^restart$/i })).not.toBeInTheDocument();
+
+    cleanup();
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    renderDetail();
+    await screen.findByRole("button", { name: /^stop$/i });
+    expect(screen.queryByRole("button", { name: /^restart$/i })).not.toBeInTheDocument();
+  });
+});
+
 describe("CampaignDetail — Edit metadata sheet", () => {
   test("Edit metadata button renders EditMetadataSheet with the campaign id", async () => {
     setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
