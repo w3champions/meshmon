@@ -1008,6 +1008,76 @@ The scheduler samples once per tick via `repo::metrics_snapshot`:
 The snapshot query uses runtime `sqlx::query_as::<_, (T, i64)>` so new
 metric aggregates do not require a `.sqlx/` regeneration.
 
+## Evaluation
+
+Evaluation answers "which destination X improves A → X → B over A → B?"
+using the measurements attributed to a campaign (joined via
+`campaign_pairs.measurement_id`). The algorithm runs entirely
+in-process; no worker, no queue.
+
+### Result aggregation
+
+The evaluator builds an in-memory matrix keyed by
+`(source_agent_id, destination_ip)` where the value is the attributed
+`measurements` row. Only `campaign_pairs.kind = 'campaign'` rows feed
+the matrix — detail pairs are excluded so their high-fidelity
+measurements never poison the baseline.
+
+For every `(A, B)` where both endpoints are agents and a direct
+`A → B` measurement exists, the evaluator considers every candidate `X`
+with measurements `A → X` and `B → X` (the latter approximates
+`X → B` under the symmetric-latency assumption).
+
+A triple `(A, B, X)` qualifies iff:
+
+1. All three measurements exist and have non-null `latency_avg_ms`.
+2. `compound_loss_pct ≤ loss_threshold_pct` AND
+   `direct_loss_pct ≤ loss_threshold_pct`.
+3. The mode-specific latency bar:
+   - **diversity** —
+     `transit_rtt + stddev_penalty < direct_rtt + direct_stddev_penalty`.
+   - **optimization** — same as diversity, AND transit via `X` beats
+     transit via every mesh agent `Y ≠ A, B` for which `A → Y` and
+     `Y → B` measurements exist in the campaign.
+
+Per-candidate aggregates: `pairs_improved`, `avg_improvement_ms`,
+`avg_loss_pct`,
+`composite_score = (pairs_improved / total_baseline_pairs) × avg_improvement_ms`.
+
+Results serialise into a single JSONB column on
+`campaign_evaluations.results`. The row is upserted — one evaluation
+per campaign, overwritten on every re-evaluate.
+
+### Detail measurements
+
+Detail measurements re-run a pair with much higher fidelity: one MTR
+trace plus one 250-probe latency run. Operators trigger them with
+three scopes:
+
+| Scope | Selection | Rows inserted |
+|---|---|---|
+| `all` | every `succeeded`/`reused` pair where `kind = 'campaign'` | 2 per source pair (one per detail kind) |
+| `good_candidates` | every qualifying triple from the latest evaluation | 2 per resolved dispatch pair |
+| `pair` | one explicit `{source_agent_id, destination_ip}` | 2 |
+
+Detail rows carry
+`campaign_pairs.kind ∈ {detail_ping, detail_mtr}`. The dispatcher
+treats non-`campaign` kinds as forced — the 24-hour reuse cache is
+bypassed structurally via `resolve_reuse`'s
+`WHERE cp.kind = 'campaign'` gate. The campaign transitions back to
+`running` as soon as the operator triggers detail; it returns to
+`completed` (or `evaluated`, if a prior evaluation exists) when all
+detail pairs drain. Detail rows never participate in the next
+`/evaluate`.
+
+### SSE events
+
+`POST /api/campaigns/:id/evaluate` publishes an `evaluated` SSE event
+after the row is written, so frontend caches can invalidate the
+evaluation query without waiting for a state change. Re-evaluating an
+already-`evaluated` campaign stays in the same state and emits only
+the `evaluated` event.
+
 ## SSE stream
 
 The service exposes `GET /api/campaigns/stream` as a Server-Sent-Events

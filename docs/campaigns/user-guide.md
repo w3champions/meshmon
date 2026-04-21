@@ -328,10 +328,56 @@ time or via an edit delta); that flag skips the lookup entirely.
 
 ## Evaluation
 
-The evaluation pass that produces `evaluated` results is covered by a
-later subsystem. A `completed` campaign can be flipped to `evaluated`
-once the evaluator ships; `evaluated` campaigns accept edit deltas and
-round-trip through `running → completed → evaluated` again.
+### Reading results
+
+Open the campaign in `/campaigns/:id`. The **Candidates** tab (default)
+ranks destinations by
+`composite_score = (pairs_improved / baseline_pair_count) × avg_improvement_ms`.
+Each row shows: rank, name, IP, city, ASN + network operator,
+improved/total pairs, average improvement, loss chip (green < 0.5%,
+yellow below threshold, red above), and a composite bar. Click a row
+to see the per-pair breakdown: direct vs transit RTT, loss, and any
+MTR trace IDs linked to hop visualisations.
+
+Mesh-member candidates (destinations that are themselves meshmon
+agents) render with a "mesh member — no acquisition needed" badge.
+They're useful context in `diversity` mode and automatically filter
+out of `optimization` results.
+
+### Running Evaluate
+
+Evaluate is manual. Finish a campaign, press **Evaluate**, and the
+scoring runs against every measurement attributed to the campaign.
+The result is a single row in `campaign_evaluations`, overwritten on
+every re-evaluate — no history, no audit trail.
+
+Re-evaluating is free: no measurements re-dispatch. Tweak
+`loss_threshold_pct`, `stddev_weight`, or `evaluation_mode` in the
+Evaluation-settings tab and press Re-evaluate to re-score existing
+data against the new settings.
+
+### Switching modes
+
+Use **Diversity** when you want to know every destination that beats
+the direct path, regardless of what the mesh already provides —
+useful for redundancy planning. Use **Optimization** (default) when
+you want only destinations that beat every alternative the mesh
+already has — useful for "should we acquire this server?"
+
+### Detail scopes
+
+Detail measurements re-run a pair with one MTR trace + 250-probe
+latency. Three scopes:
+
+- **Detail this candidate** (row action) — re-measure every
+  qualifying `A → X` and `X → B` for a single candidate.
+- **Detail: good candidates only** (page overflow menu) — re-measure
+  every qualifying triple in the latest evaluation.
+- **Detail: all pairs** (page overflow menu) — re-measure every pair
+  that ran in the original campaign.
+
+Detail data refines but does not invalidate the evaluation. The
+operator presses Evaluate again to fold the new data in.
 
 ## Composer workflow
 
