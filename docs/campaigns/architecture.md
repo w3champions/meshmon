@@ -962,6 +962,27 @@ catalogue surface. `RepoError::NotFound` → 404 `not_found`,
 `IllegalTransition` → 409 `illegal_state_transition`, anything else
 → 500 `database_error` (detail logged server-side, never surfaced).
 
+### History endpoints
+
+Three `/api/history/*` routes feed the `/history/pair` page, plus one
+`/api/campaigns/{id}/measurements` route feeds the Results browser's
+Raw tab. All four live in `crates/service/src/http/history.rs` and
+inherit session authentication from the user-API middleware layer.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/history/sources` | Every agent that has produced at least one `measurements` row. Alphabetised by catalogue display name. |
+| `GET` | `/api/history/destinations` | Every destination IP reachable from `?source=<agent_id>`, optionally narrowed by `?q=<partial>`. Catalogue-derived metadata (city, country, ASN, mesh-member flag) joins via `LEFT JOIN`, so deleted catalogue rows surface as raw IPs. |
+| `GET` | `/api/history/measurements` | Measurement rows (+ inline `mtr_traces.hops`) for a `(source, destination)` over an optional protocol list and time window. Hard-capped at 5 000 rows — the frontend surfaces the cap explicitly when hit. |
+| `GET` | `/api/campaigns/{id}/measurements` | Raw-tab feed: joins `campaign_pairs` to `measurements` and `mtr_traces` via `LEFT JOIN` so pending / dispatched pairs remain visible. Keyset-paginated on `(measured_at DESC NULLS LAST, pair_id DESC)`; cursor is base64-encoded JSON. Pending rows accumulate at the bottom of the first page and are unreachable via the cursor — operators narrow by `resolution_state` when they want pending-only views. A `?measurement_id=` query param short-circuits to a single row for the DrilldownDrawer's MTR lookup. |
+
+All four hit the `measurements` hypertable through the existing
+`measurements_reuse_idx
+(source_agent_id, destination_ip, protocol, probe_count DESC, measured_at DESC)`
+— no new index is required. Error envelope matches the campaign
+surface: `{ "error": "invalid_destination_ip" | "invalid_protocols" |
+"internal" }` with a 400 / 500 status.
+
 ## Campaign configuration
 
 ```toml
