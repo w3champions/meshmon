@@ -7,13 +7,15 @@
 //! (snake_case `error` key) so the SPA's shared error-handling layer
 //! applies without extra branching.
 
+use super::broker::CampaignStreamEvent;
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, EditCampaignRequest, EditPairDto,
-    ErrorEnvelope, ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest,
-    PreviewDispatchResponse,
+    ErrorEnvelope, EvaluationDto, EvaluationResultsDto, ForcePairRequest, PairDto, PairListQuery,
+    PatchCampaignRequest, PreviewDispatchResponse,
 };
-use super::model::PairResolutionState;
-use super::repo::{self, CreateInput, EditInput, RepoError};
+use super::eval::{self, EvalError};
+use super::model::{CampaignState, PairResolutionState};
+use super::repo::{self, CreateInput, EditInput, EvaluationRow, RepoError};
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -540,4 +542,134 @@ pub async fn preview_dispatch_count(
             .into_response(),
         Err(e) => repo_error("campaign::preview_dispatch_count", e),
     }
+}
+
+/// Convert an [`EvaluationRow`] into the wire DTO.
+///
+/// The stored `results` column is owned by this service (written by
+/// [`repo::write_evaluation`] as a serialised [`EvaluationResultsDto`]),
+/// so a deserialisation failure here signals data corruption from outside
+/// the normal write path. We expect it to never panic in production; tests
+/// exercise a well-formed payload.
+fn to_evaluation_dto(row: EvaluationRow) -> EvaluationDto {
+    let results: EvaluationResultsDto = serde_json::from_value(row.results)
+        .expect("campaign_evaluations.results JSONB shape is owned by this service");
+    EvaluationDto {
+        campaign_id: row.campaign_id,
+        evaluated_at: row.evaluated_at,
+        loss_threshold_pct: row.loss_threshold_pct,
+        stddev_weight: row.stddev_weight,
+        evaluation_mode: row.evaluation_mode,
+        baseline_pair_count: row.baseline_pair_count,
+        candidates_total: row.candidates_total,
+        candidates_good: row.candidates_good,
+        avg_improvement_ms: row.avg_improvement_ms,
+        results,
+    }
+}
+
+/// `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
+///
+/// Gated on `state IN ('completed','evaluated')`: re-running on an
+/// already-evaluated campaign is allowed so operators can retune
+/// `loss_threshold_pct` / `stddev_weight` without editing the row. When
+/// the campaign was in `completed`, a best-effort transition flips it to
+/// `evaluated`; a concurrent transition that loses the gate still leaves
+/// the evaluation row written and the SSE event fired.
+///
+/// Returns 422 (`no_baseline_pairs`) when the evaluator finds no
+/// agent→agent baseline — the campaign must include at least one pair
+/// whose destination IP belongs to a registered agent.
+#[utoipa::path(
+    post,
+    path = "/api/campaigns/{id}/evaluate",
+    tag = "campaigns",
+    params(("id" = Uuid, Path, description = "Campaign id")),
+    responses(
+        (status = 200, description = "Evaluation written", body = EvaluationDto),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not found", body = ErrorEnvelope),
+        (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
+        (status = 422, description = "No baseline (agent→agent) pairs", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn evaluate(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let campaign = match repo::get(&state.pool, id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+        }
+        Err(e) => return repo_error("campaign::evaluate", e),
+    };
+    if !matches!(
+        campaign.state,
+        CampaignState::Completed | CampaignState::Evaluated
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "illegal_state_transition" })),
+        )
+            .into_response();
+    }
+
+    let inputs = match repo::measurements_for_campaign(&state.pool, id).await {
+        Ok(i) => i,
+        Err(e) => return repo_error("campaign::evaluate::inputs", e),
+    };
+    let outputs = match eval::evaluate(inputs) {
+        Ok(o) => o,
+        Err(EvalError::NoBaseline) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "no_baseline_pairs" })),
+            )
+                .into_response();
+        }
+    };
+
+    let row = match repo::write_evaluation(
+        &state.pool,
+        id,
+        &outputs,
+        campaign.loss_threshold_pct,
+        campaign.stddev_weight,
+        campaign.evaluation_mode,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return repo_error("campaign::evaluate::write", e),
+    };
+
+    // Best-effort: promote completed → evaluated. A concurrent writer
+    // may have transitioned the row already, which is fine — the
+    // evaluation row is still written and the SSE event still fires.
+    if matches!(campaign.state, CampaignState::Completed) {
+        if let Err(e) = repo::transition_state(
+            &state.pool,
+            id,
+            &[CampaignState::Completed],
+            CampaignState::Evaluated,
+            Some("evaluated_at"),
+        )
+        .await
+        {
+            tracing::debug!(
+                error = %e,
+                campaign_id = %id,
+                "campaign::evaluate: skipped completed→evaluated transition (likely raced)"
+            );
+        }
+    }
+
+    state
+        .campaign_broker
+        .publish(CampaignStreamEvent::Evaluated { campaign_id: id });
+
+    (StatusCode::OK, Json(to_evaluation_dto(row))).into_response()
 }
