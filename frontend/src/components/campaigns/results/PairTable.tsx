@@ -81,6 +81,19 @@ const STATE_BADGE_CLASS: Record<PairResolutionState, string> = {
   skipped: "bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20",
 };
 
+// Sort order for the `State` column: lifecycle (pending → dispatched →
+// terminal successes → terminal failures) rather than alphabetical, so
+// asc-sort surfaces work in progress at the top and desc-sort surfaces
+// terminal failure states first — which is the shape operators scan for.
+const STATE_ORDINAL: Record<PairResolutionState, number> = {
+  pending: 0,
+  dispatched: 1,
+  reused: 2,
+  succeeded: 3,
+  unreachable: 4,
+  skipped: 5,
+};
+
 function sourceLabel(agentsById: Map<string, AgentSummary>, agentId: string): string {
   return agentsById.get(agentId)?.display_name || agentId;
 }
@@ -103,7 +116,7 @@ function compareByColumn(
     case "destination":
       return a.destination_ip.localeCompare(b.destination_ip);
     case "state":
-      return a.resolution_state.localeCompare(b.resolution_state);
+      return STATE_ORDINAL[a.resolution_state] - STATE_ORDINAL[b.resolution_state];
     case "dispatched_at":
       return (a.dispatched_at ?? "").localeCompare(b.dispatched_at ?? "");
     case "settled_at":

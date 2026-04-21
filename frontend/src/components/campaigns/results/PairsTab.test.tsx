@@ -203,6 +203,28 @@ describe("PairsTab — happy path", () => {
     expect(row2).toHaveTextContent(/pending/);
   });
 
+  test("state column sorts by lifecycle order, not alphabetical", async () => {
+    // Lifecycle order (asc): pending → dispatched → reused → succeeded
+    // → unreachable → skipped. Lexicographic comparison would place
+    // `dispatched < pending < reused < skipped < succeeded < unreachable`,
+    // which doesn't match how operators scan the queue.
+    const pairs = [
+      makePair({ id: 1, destination_ip: "10.0.0.1", resolution_state: "succeeded" }),
+      makePair({ id: 2, destination_ip: "10.0.0.2", resolution_state: "pending" }),
+      makePair({ id: 3, destination_ip: "10.0.0.3", resolution_state: "skipped" }),
+      makePair({ id: 4, destination_ip: "10.0.0.4", resolution_state: "dispatched" }),
+    ];
+    setupMocks(pairs);
+    renderTab(makeCampaign({ state: "running" }));
+
+    // Default sort is `state asc` — confirm the lifecycle ordering is
+    // applied from first render (no header click needed).
+    const rowOrder = screen
+      .getAllByTestId(/pair-row-\d/)
+      .map((row) => row.getAttribute("data-pair-destination"));
+    expect(rowOrder).toEqual(["10.0.0.2", "10.0.0.4", "10.0.0.1", "10.0.0.3"]);
+  });
+
   test("sort cycles header between desc and asc", async () => {
     const pairs = [
       makePair({ id: 1, destination_ip: "10.0.0.9" }),
