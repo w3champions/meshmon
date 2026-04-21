@@ -16,6 +16,12 @@ import type { Campaign } from "@/api/hooks/campaigns";
 import { useForcePair } from "@/api/hooks/campaigns";
 import { useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
 import {
+  RowActionMenu,
+  type RowActionPair,
+  TabOverflowPlaceholder,
+  UnqualifiedReasons,
+} from "@/components/campaigns/results/CandidatesTabParts";
+import {
   type CandidateSortColumn,
   CandidateTable,
   type CandidateTableSort,
@@ -24,12 +30,6 @@ import {
 import { DrilldownDrawer } from "@/components/campaigns/results/DrilldownDrawer";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   extractCampaignErrorCode,
@@ -105,7 +105,7 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
   // -------------------------------------------------------------------------
 
   const handleForcePair = useCallback(
-    (pair: { source_agent_id: string; destination_ip: string }): void => {
+    (pair: RowActionPair): void => {
       const { pushToast } = useToastStore.getState();
       forcePairMutation.mutate(
         { id: campaign.id, body: pair },
@@ -144,7 +144,7 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
   );
 
   const handleTriggerPairDetail = useCallback(
-    (pair: { source_agent_id: string; destination_ip: string }): void => {
+    (pair: RowActionPair): void => {
       const { pushToast } = useToastStore.getState();
       triggerDetailMutation.mutate(
         {
@@ -303,131 +303,5 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
         unqualifiedReason={unqualifiedReason}
       />
     </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Row action menu
-// ---------------------------------------------------------------------------
-
-interface RowActionMenuProps {
-  candidate: { destination_ip: string; pair_details: { source_agent_id: string }[] };
-  onForcePair: (pair: { source_agent_id: string; destination_ip: string }) => void;
-  onTriggerPairDetail: (pair: { source_agent_id: string; destination_ip: string }) => void;
-}
-
-function RowActionMenu({ candidate, onForcePair, onTriggerPairDetail }: RowActionMenuProps) {
-  // The "pair" the row actions operate on uses the first scored pair's
-  // source agent — the full (source, destination) addressing lives in
-  // `pair_details`, and both `force_pair` and detail-scope-pair hit the
-  // server-side pair row by `(source, destination_ip)`. When a candidate
-  // has multiple pairs, the drawer is the operator's lever for per-pair
-  // dispatch; the row-level shortcut targets the highest-scoring pair.
-  const firstPair = candidate.pair_details[0];
-  if (!firstPair) return null;
-
-  const pair = {
-    source_agent_id: firstPair.source_agent_id,
-    destination_ip: candidate.destination_ip,
-  };
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-label={`Actions for ${candidate.destination_ip}`}
-        >
-          ⋯
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => onForcePair(pair)}>Force re-measure pair</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onTriggerPairDetail(pair)}>
-          Dispatch detail for this pair
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Unqualified-reasons section
-// ---------------------------------------------------------------------------
-
-interface UnqualifiedReasonsProps {
-  reasons: Record<string, string>;
-}
-
-function UnqualifiedReasons({ reasons }: UnqualifiedReasonsProps) {
-  const entries = Object.entries(reasons);
-  if (entries.length === 0) return null;
-  return (
-    <Card className="flex flex-col gap-2 p-4">
-      <h3 className="text-sm font-semibold">Unqualified candidates</h3>
-      <ul className="flex flex-col gap-1 text-sm text-muted-foreground">
-        {entries.map(([ip, reason]) => (
-          <li key={ip}>
-            <span className="font-mono text-xs">{ip}</span> — {reason}
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Tab overflow placeholder
-// ---------------------------------------------------------------------------
-
-interface TabOverflowPlaceholderProps {
-  campaign: Campaign;
-}
-
-/**
- * Placeholder trigger for the Task 18 `OverflowMenu`. Task 15 gates the
- * "Detail: good candidates only" item strictly on `campaign.state ===
- * "evaluated"` (a stale evaluation on a `completed` campaign should NOT
- * re-enable it). The placeholder exposes the gate state via a disabled
- * affordance so integration tests can assert on it today; Batch 5 swaps
- * the placeholder for the real dropdown with confirmation dialogs.
- */
-function TabOverflowPlaceholder({ campaign }: TabOverflowPlaceholderProps) {
-  const goodCandidatesEnabled = campaign.state === "evaluated";
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          aria-label="Candidates tab actions"
-          data-testid="candidates-overflow-trigger"
-        >
-          Actions
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuItem
-          disabled
-          data-testid="overflow-detail-all"
-          aria-describedby="overflow-detail-all-hint"
-        >
-          Detail: all (Batch 5)
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={!goodCandidatesEnabled}
-          data-testid="overflow-detail-good"
-          aria-disabled={!goodCandidatesEnabled}
-        >
-          Detail: good candidates only (Batch 5)
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled data-testid="overflow-re-evaluate">
-          Re-evaluate (Batch 5)
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
