@@ -80,8 +80,16 @@ export default function HistoryPair() {
     navigate({ to: "/history/pair", search: nextSearch, replace: true });
   };
 
-  const rowCount = measurements.data?.length ?? 0;
-  const atCap = rowCount >= HISTORY_MEASUREMENTS_CAP;
+  // Truncation probe: the backend asks for `HISTORY_MEASUREMENTS_CAP + 1`
+  // and we display the first `HISTORY_MEASUREMENTS_CAP`. Receiving the
+  // extra row (rowCount > cap) means the underlying set is larger than the
+  // cap — i.e., the operator is seeing a truncated view. A response of
+  // exactly `cap` rows means the backend returned the full set with no
+  // truncation, so the cap notice stays hidden (mirrors the
+  // `pair_counts`-driven Clone truncation check).
+  const rawRows = measurements.data ?? [];
+  const atCap = rawRows.length > HISTORY_MEASUREMENTS_CAP;
+  const visibleRows = atCap ? rawRows.slice(0, HISTORY_MEASUREMENTS_CAP) : rawRows;
 
   return (
     <div className="flex flex-col">
@@ -116,13 +124,13 @@ export default function HistoryPair() {
               <h2 id="pair-chart-heading" className="text-lg font-semibold">
                 Latency &amp; loss
               </h2>
-              <PairChart measurements={measurements.data ?? []} />
+              <PairChart measurements={visibleRows} />
             </section>
             <section aria-labelledby="pair-mtr-heading" className="flex flex-col gap-3">
               <h2 id="pair-mtr-heading" className="text-lg font-semibold">
                 MTR traces
               </h2>
-              <MtrTracesList measurements={measurements.data ?? []} />
+              <MtrTracesList measurements={visibleRows} />
             </section>
           </>
         )}

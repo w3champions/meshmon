@@ -150,14 +150,37 @@ describe("HistoryPair", () => {
     ).toBeInTheDocument();
   });
 
-  test("shows the 5000-row notice when the response length hits the cap", async () => {
-    const big: HistoryMeasurement[] = Array.from({ length: HISTORY_MEASUREMENTS_CAP }, (_, i) =>
-      measurement({
-        id: i + 1,
-        measured_at: new Date(Date.UTC(2026, 3, 20, 0, 0, i)).toISOString(),
-      }),
+  test("shows the cap notice only when the response truly exceeds the cap", async () => {
+    // Backend asks for `cap + 1` so a response of exactly `cap` rows means
+    // no truncation, while `cap + 1` rows means the underlying set is
+    // larger and the visible view was clipped. This test exercises both
+    // boundaries to guard the false-positive regression the analogous
+    // Clone-truncation fix already addressed.
+    const exactlyCap: HistoryMeasurement[] = Array.from(
+      { length: HISTORY_MEASUREMENTS_CAP },
+      (_, i) =>
+        measurement({
+          id: i + 1,
+          measured_at: new Date(Date.UTC(2026, 3, 20, 0, 0, i)).toISOString(),
+        }),
     );
-    installFetchMock({ measurements: big });
+    installFetchMock({ measurements: exactlyCap });
+    const { rendered } = renderHistoryPair("/history/pair?source=agent-a&destination=10.0.0.1");
+    // Wait until the chart heading mounts so the post-fetch render is
+    // committed before we assert on the (absent) cap notice.
+    await screen.findByRole("heading", { level: 2, name: /latency/i });
+    expect(screen.queryByTestId("history-pair-cap-notice")).toBeNull();
+    rendered.unmount();
+
+    const overCap: HistoryMeasurement[] = Array.from(
+      { length: HISTORY_MEASUREMENTS_CAP + 1 },
+      (_, i) =>
+        measurement({
+          id: i + 1,
+          measured_at: new Date(Date.UTC(2026, 3, 20, 0, 0, i)).toISOString(),
+        }),
+    );
+    installFetchMock({ measurements: overCap });
     renderHistoryPair("/history/pair?source=agent-a&destination=10.0.0.1");
 
     const notice = await screen.findByTestId("history-pair-cap-notice");

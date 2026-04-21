@@ -334,9 +334,12 @@ pub async fn measurements(
     // Hard cap at 5 000 rows. A (source, destination) pair measured
     // every 5 min for 90 days produces ~ 25 000 rows — the cap is
     // explicit so operators don't blow a browser tab on a pathologically
-    // long history. If a future pair crosses the cap, the chart clips
-    // to the most recent 5 000 samples; the UI shows a "showing most
-    // recent 5 000 of N" notice.
+    // long history. The query asks for `cap + 1` so the frontend can
+    // tell "exactly cap rows exist" (no truncation) apart from "more
+    // than cap rows exist" (truncation): a response of `cap + 1` rows
+    // means the underlying set is larger than the cap and the visible
+    // view is the most recent `cap`. The frontend trims and surfaces
+    // the cap notice on that signal.
     match sqlx::query_as!(
         HistoryMeasurementDto,
         r#"
@@ -364,7 +367,7 @@ pub async fn measurements(
           AND ($4::timestamptz IS NULL OR m.measured_at >= $4)
           AND ($5::timestamptz IS NULL OR m.measured_at <= $5)
         ORDER BY m.measured_at DESC
-        LIMIT 5000
+        LIMIT 5001
         "#,
         q.source,
         dest_net,
