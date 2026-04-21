@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use crate::campaign::dto::ErrorEnvelope;
 use crate::campaign::model::{MeasurementKind, PairResolutionState, ProbeProtocol};
+use crate::ingestion::json_shapes::HopJson;
 use crate::state::AppState;
 
 // All history handlers use `&state.pool` (PgPool is a public field on
@@ -203,9 +204,10 @@ pub struct HistoryMeasurementsQuery {
 /// One joined `measurements` + optional `mtr_traces` row for the
 /// `/history/pair` page.
 ///
-/// `mtr_hops` decodes the `mtr_traces.hops` JSONB column. sqlx requires
-/// the `Json<_>` wrapper for JSONB columns in `query_as!`; the wire JSON
-/// stays flat thanks to `sqlx::types::Json`'s transparent serde impl.
+/// `mtr_hops` decodes the `mtr_traces.hops` JSONB column into the typed
+/// `Vec<HopJson>` wire shape. sqlx requires the `Json<_>` wrapper for
+/// JSONB columns in `query_as!`; the wire JSON stays flat thanks to
+/// `sqlx::types::Json`'s transparent serde impl.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HistoryMeasurementDto {
     /// `measurements.id`.
@@ -235,8 +237,8 @@ pub struct HistoryMeasurementDto {
     /// Observed loss percentage ([0, 100]).
     pub loss_pct: f32,
     /// MTR hop array; populated when the measurement has an `mtr_id`.
-    #[schema(value_type = Option<Object>)]
-    pub mtr_hops: Option<sqlx::types::Json<serde_json::Value>>,
+    #[schema(value_type = Option<Vec<HopJson>>)]
+    pub mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
     /// When the associated `mtr_traces` row was captured.
     pub mtr_captured_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -317,7 +319,7 @@ pub async fn measurements(
           m.latency_max_ms,
           m.latency_stddev_ms,
           m.loss_pct                       AS "loss_pct!",
-          t.hops                           AS "mtr_hops?: sqlx::types::Json<serde_json::Value>",
+          t.hops                           AS "mtr_hops?: sqlx::types::Json<Vec<HopJson>>",
           t.captured_at                    AS "mtr_captured_at?"
         FROM measurements m
         LEFT JOIN mtr_traces t ON t.id = m.mtr_id
@@ -384,7 +386,7 @@ pub struct CampaignMeasurementsQuery {
 /// DrilldownDrawer can render MTR directly from this endpoint — there
 /// is no separate `GET /api/measurements/:id` in the service. The
 /// `Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding
-/// JSONB; serde renders it as a bare JSON value on the wire.
+/// JSONB; serde renders it as a bare JSON array on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CampaignMeasurementDto {
     /// `campaign_pairs.id`.
@@ -412,8 +414,8 @@ pub struct CampaignMeasurementDto {
     pub mtr_id: Option<i64>,
     /// Inline MTR hops — populated iff `mtr_id` resolves to an
     /// `mtr_traces` row.
-    #[schema(value_type = Option<Object>)]
-    pub mtr_hops: Option<sqlx::types::Json<serde_json::Value>>,
+    #[schema(value_type = Option<Vec<HopJson>>)]
+    pub mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
 }
 
 /// One page of the Raw-tab's joined campaign+measurements feed.
@@ -496,7 +498,7 @@ async fn fetch_campaign_measurements(
           m.latency_avg_ms              AS "latency_avg_ms?",
           m.loss_pct                    AS "loss_pct?",
           m.mtr_id                      AS "mtr_id?",
-          t.hops                        AS "mtr_hops?: sqlx::types::Json<serde_json::Value>"
+          t.hops                        AS "mtr_hops?: sqlx::types::Json<Vec<HopJson>>"
         FROM campaign_pairs cp
         LEFT JOIN measurements m ON m.id = cp.measurement_id
         LEFT JOIN mtr_traces   t ON t.id = m.mtr_id
