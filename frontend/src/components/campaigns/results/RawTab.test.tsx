@@ -277,3 +277,29 @@ describe("RawTab — pagination", () => {
     expect(screen.getByText(/end of feed/i)).toBeInTheDocument();
   });
 });
+
+describe("RawTab — per-row navigation", () => {
+  test("clicking the view-history affordance navigates to /history/pair with source + destination", async () => {
+    setupMocks({
+      entries: [
+        makeMeasurement({
+          pair_id: 1,
+          source_agent_id: "agent-a",
+          destination_ip: "10.0.0.42",
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "running" }));
+
+    await user.click(screen.getByTestId("raw-row-0-history"));
+
+    expect(navigate).toHaveBeenCalledTimes(1);
+    const call = navigate.mock.calls[0][0] as {
+      to: string;
+      search: { source: string; destination: string };
+    };
+    expect(call.to).toBe("/history/pair");
+    expect(call.search).toEqual({ source: "agent-a", destination: "10.0.0.42" });
+  });
+});

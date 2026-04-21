@@ -125,12 +125,22 @@ export function computeCostEstimate(
       };
     }
     case "good_candidates": {
-      const triples = evaluation ? countQualifyingTriples(evaluation) : 0;
+      // Distinguish "evaluation not loaded yet" from "evaluation loaded, zero
+      // qualifying triples" — both look like `enqueue 0` numerically, but the
+      // operator's next step differs (wait for the fetch vs re-run Evaluate).
+      if (evaluation == null) {
+        return {
+          pairs_enqueued: 0,
+          description: "Waiting for the evaluation to load before the cost can be estimated.",
+        };
+      }
+      const triples = countQualifyingTriples(evaluation);
       return {
         pairs_enqueued: 4 * triples,
-        description: evaluation
-          ? `${triples.toLocaleString()} qualifying pair-triples × 4 measurements (A→X ping+MTR, X→B ping+MTR).`
-          : "Good-candidate scope requires a persisted evaluation. Run Evaluate first.",
+        description:
+          triples > 0
+            ? `${triples.toLocaleString()} qualifying pair-triples × 4 measurements (A→X ping+MTR, X→B ping+MTR).`
+            : "No qualifying pairs in the current evaluation — re-run Evaluate if the thresholds changed.",
       };
     }
     case "pair": {
@@ -141,6 +151,29 @@ export function computeCostEstimate(
       };
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Disabled-reason disambiguation
+// ---------------------------------------------------------------------------
+
+/**
+ * The confirm button can be disabled for three distinct reasons. Collapsing
+ * them into one "enqueue 0" label hides which follow-up action the operator
+ * should take (wait for a fetch, re-run Evaluate, or widen the scope).
+ */
+export type ConfirmDisableReason = "inflight" | "loading_evaluation" | "no_pairs";
+
+export function resolveDisableReason(
+  scope: DetailPreviewScope,
+  evaluation: Evaluation | null | undefined,
+  pairsEnqueued: number,
+  inflight: boolean,
+): ConfirmDisableReason | null {
+  if (inflight) return "inflight";
+  if (scope === "good_candidates" && evaluation == null) return "loading_evaluation";
+  if (pairsEnqueued === 0) return "no_pairs";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +188,19 @@ function scopeTitle(scope: DetailPreviewScope): string {
       return "Dispatch detail for good candidates";
     case "pair":
       return "Dispatch detail for this pair";
+  }
+}
+
+function confirmLabel(disableReason: ConfirmDisableReason | null, pairsEnqueued: number): string {
+  switch (disableReason) {
+    case "inflight":
+      return "Dispatching…";
+    case "loading_evaluation":
+      return "Loading evaluation…";
+    case "no_pairs":
+      return "No pairs to enqueue";
+    case null:
+      return `Confirm · enqueue ${pairsEnqueued}`;
   }
 }
 
@@ -185,6 +231,8 @@ export function DetailCostPreview({
     () => computeCostEstimate(scope, campaign, evaluation, pair),
     [scope, campaign, evaluation, pair],
   );
+
+  const disableReason = resolveDisableReason(scope, evaluation, estimate.pairs_enqueued, inflight);
 
   const handleConfirm = (): void => {
     if (inflight) return;
@@ -280,10 +328,10 @@ export function DetailCostPreview({
           <Button
             type="button"
             onClick={handleConfirm}
-            disabled={inflight || estimate.pairs_enqueued === 0}
+            disabled={disableReason !== null}
             data-testid="cost-preview-confirm"
           >
-            {inflight ? "Dispatching…" : `Confirm · enqueue ${estimate.pairs_enqueued}`}
+            {confirmLabel(disableReason, estimate.pairs_enqueued)}
           </Button>
         </DialogFooter>
       </DialogContent>

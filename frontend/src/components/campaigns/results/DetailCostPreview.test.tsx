@@ -221,13 +221,52 @@ describe("DetailCostPreview — dialog behaviour", () => {
       },
     );
     const user = userEvent.setup();
-    renderDialog({ scope: "good_candidates" });
+    // A non-null evaluation with qualifying triples keeps the confirm button
+    // enabled so the server can reach its `no_evaluation` branch — the race
+    // the toast is designed for (evaluation disappeared between the UI
+    // rendering and the server-side dispatch).
+    const evaluation = makeEvaluation([qualifyingCandidate("10.0.0.1", [["agent-a", "agent-b"]])]);
+    renderDialog({ scope: "good_candidates", evaluation });
 
     await user.click(screen.getByTestId("cost-preview-confirm"));
 
     await waitFor(() => {
       expect(screen.getByText(/run evaluate first/i)).toBeInTheDocument();
     });
+  });
+
+  test("scope=good_candidates with evaluation=null shows loading label (not zero-pairs)", () => {
+    renderDialog({
+      scope: "good_candidates",
+      evaluation: null,
+      campaign: makeCampaign({ state: "evaluated" }),
+    });
+    const confirm = screen.getByTestId("cost-preview-confirm");
+    expect(confirm).toBeDisabled();
+    // The disabled label distinguishes "evaluation not loaded" from
+    // "evaluation loaded, zero qualifying pairs" — both numerically enqueue 0,
+    // but the operator's next step differs.
+    expect(confirm).toHaveTextContent(/loading evaluation/i);
+    expect(confirm).not.toHaveTextContent(/enqueue 0/i);
+    // Description copy should not steer toward "Run Evaluate first" when the
+    // evaluation is simply still loading.
+    expect(screen.queryByText(/Run Evaluate first/i)).not.toBeInTheDocument();
+  });
+
+  test("scope=good_candidates with zero qualifying triples shows no-pairs label", () => {
+    const evaluation = makeEvaluation([
+      qualifyingCandidate("10.0.0.1", [["agent-a", "agent-b"]], false),
+    ]);
+    renderDialog({
+      scope: "good_candidates",
+      evaluation,
+      campaign: makeCampaign({ state: "evaluated" }),
+    });
+    const confirm = screen.getByTestId("cost-preview-confirm");
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveTextContent(/no pairs to enqueue/i);
+    // And the description explains the *why* (not a loading message).
+    expect(screen.getByText(/no qualifying pairs/i)).toBeInTheDocument();
   });
 
   test("scope=pair body carries the supplied pair identifier", async () => {

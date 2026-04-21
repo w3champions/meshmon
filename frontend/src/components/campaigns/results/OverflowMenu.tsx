@@ -154,7 +154,7 @@ export function OverflowMenu({ campaign, evaluation }: OverflowMenuProps) {
 
       {dialogScope ? (
         <DetailCostPreview
-          open={dialogScope !== null}
+          open
           onOpenChange={(next) => {
             if (!next) setDialogScope(null);
           }}

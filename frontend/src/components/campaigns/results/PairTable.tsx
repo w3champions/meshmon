@@ -189,10 +189,10 @@ function RowMenu({ pair, onForcePair, onTriggerPairDetail }: RowMenuProps) {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => onForcePair(action)}>
+        <DropdownMenuItem onSelect={() => onForcePair(action)}>
           Force re-measure pair
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onTriggerPairDetail(action)}>
+        <DropdownMenuItem onSelect={() => onTriggerPairDetail(action)}>
           Dispatch detail for this pair
         </DropdownMenuItem>
       </DropdownMenuContent>

@@ -59,7 +59,7 @@ const INITIAL_SCROLL_RECT = { width: 1024, height: 600 };
 
 /** Grid track template — fixed widths for dense columns, `fr` for wide text. */
 const GRID_TEMPLATE =
-  "minmax(180px, 1.2fr) minmax(140px, 1fr) 80px 110px minmax(140px, 1fr) 100px 90px 90px 40px";
+  "minmax(180px, 1.2fr) minmax(140px, 1fr) 80px 110px minmax(140px, 1fr) 100px 90px 90px 80px";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -135,6 +135,20 @@ export function RawTab({ campaign }: RawTabProps) {
   // Row actions
   // -------------------------------------------------------------------------
 
+  const handleViewHistory = useCallback(
+    (row: CampaignMeasurement): void => {
+      const navigateHistory = navigate as unknown as (opts: {
+        to: string;
+        search: { source: string; destination: string };
+      }) => void;
+      navigateHistory({
+        to: "/history/pair",
+        search: { source: row.source_agent_id, destination: row.destination_ip },
+      });
+    },
+    [navigate],
+  );
+
   const forcePairMutation = useForcePair();
   const handleForcePair = useCallback(
     (row: CampaignMeasurement): void => {
@@ -196,14 +210,20 @@ export function RawTab({ campaign }: RawTabProps) {
   // Auto-fetch: when the last rendered virtual row approaches the tail of
   // the currently-loaded page set, kick the next page. The callback is a
   // cheap no-op if `hasNextPage` is false, so it's safe to over-fire.
+  // Destructure the infinite-query fields the effect reads — react-query does
+  // not guarantee reference-stable result objects across unrelated flag
+  // changes, so depending on `measurementsQuery` as a whole would re-run the
+  // effect on every refetch tick; listing the three fields keeps the
+  // dependency surface tight.
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = measurementsQuery;
   useEffect(() => {
-    if (!measurementsQuery.hasNextPage || measurementsQuery.isFetchingNextPage) return;
+    if (!hasNextPage || isFetchingNextPage) return;
     const lastItem = virtualItems[virtualItems.length - 1];
     if (!lastItem) return;
     if (lastItem.index >= rows.length - 5) {
-      void measurementsQuery.fetchNextPage();
+      void fetchNextPage();
     }
-  }, [virtualItems, rows.length, measurementsQuery]);
+  }, [virtualItems, rows.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // Clock ticks "just now → 45s → …" — driver lives here so every row
   // re-renders in lockstep without individual `useInterval` hooks.
@@ -274,6 +294,7 @@ export function RawTab({ campaign }: RawTabProps) {
                     nowMs={nowMs}
                     onOpenMtr={(r) => setActiveMtrRow(r)}
                     onForcePair={handleForcePair}
+                    onViewHistory={handleViewHistory}
                   />
                 );
               })}
@@ -342,6 +363,7 @@ interface MeasurementRowProps {
   nowMs: number;
   onOpenMtr: (row: CampaignMeasurement) => void;
   onForcePair: (row: CampaignMeasurement) => void;
+  onViewHistory: (row: CampaignMeasurement) => void;
 }
 
 function MeasurementRow({
@@ -353,6 +375,7 @@ function MeasurementRow({
   nowMs,
   onOpenMtr,
   onForcePair,
+  onViewHistory,
 }: MeasurementRowProps) {
   const sourceAgent = agentsById.get(row.source_agent_id);
   const sourceLabel = sourceAgent?.display_name || row.source_agent_id;
@@ -418,17 +441,31 @@ function MeasurementRow({
         )}
       </Cell>
       <Cell>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="h-6 w-6 p-0 text-xs"
-          onClick={() => onForcePair(row)}
-          aria-label={`Force re-measure ${row.source_agent_id} → ${row.destination_ip}`}
-          title="Force re-measure"
-        >
-          ↻
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 w-6 p-0 text-xs"
+            onClick={() => onForcePair(row)}
+            aria-label={`Force re-measure ${row.source_agent_id} → ${row.destination_ip}`}
+            title="Force re-measure"
+          >
+            ↻
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 w-6 p-0 text-xs"
+            onClick={() => onViewHistory(row)}
+            aria-label={`View history for ${row.source_agent_id} → ${row.destination_ip}`}
+            title="View history"
+            data-testid={`raw-row-${index}-history`}
+          >
+            ⧉
+          </Button>
+        </div>
       </Cell>
     </div>
   );
