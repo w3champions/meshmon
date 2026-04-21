@@ -50,6 +50,16 @@ export function campaignEvaluationKey(id: string) {
   return ["campaigns", "entry", id, "evaluation"] as const;
 }
 
+/**
+ * Prefix key covering every cached `/measurements` page for a campaign
+ * (regardless of filter). Used by the SSE `pair_settled` handler and by
+ * `useTriggerDetail`'s `onSuccess` so in-flight detail rows surface live on
+ * the Raw tab.
+ */
+export function campaignMeasurementsPrefixKey(id: string) {
+  return ["campaigns", "entry", id, "measurements"] as const;
+}
+
 /** Polling cadence for the filtered campaign list. */
 const CAMPAIGNS_LIST_REFETCH_MS = 15_000;
 

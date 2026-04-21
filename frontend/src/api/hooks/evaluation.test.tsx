@@ -1,0 +1,152 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import {
+  campaignEvaluationKey,
+  campaignKey,
+  campaignMeasurementsPrefixKey,
+  campaignPairsKey,
+  campaignPreviewKey,
+} from "@/api/hooks/campaigns";
+import {
+  type Evaluation,
+  useEvaluateCampaign,
+  useEvaluation,
+  useTriggerDetail,
+} from "@/api/hooks/evaluation";
+
+const CAMPAIGN_ID = "11111111-1111-1111-1111-111111111111";
+
+const EVALUATION: Evaluation = {
+  campaign_id: CAMPAIGN_ID,
+  evaluated_at: "2026-04-20T00:00:00Z",
+  loss_threshold_pct: 5,
+  stddev_weight: 1,
+  evaluation_mode: "diversity",
+  baseline_pair_count: 4,
+  candidates_total: 2,
+  candidates_good: 1,
+  avg_improvement_ms: 12,
+  results: {
+    candidates: [],
+    unqualified_reasons: {},
+  },
+};
+
+function makeQueryClient(): QueryClient {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
+}
+
+function wrapWith(qc: QueryClient) {
+  return ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  );
+}
+
+function wrap() {
+  return wrapWith(makeQueryClient());
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("useEvaluation", () => {
+  test("returns null on 404 (campaign not evaluated)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "not_evaluated" }), { status: 404 }),
+    );
+
+    const { result } = renderHook(() => useEvaluation(CAMPAIGN_ID), {
+      wrapper: wrap(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeNull();
+  });
+
+  test("is disabled when id is undefined", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const { result } = renderHook(() => useEvaluation(undefined), { wrapper: wrap() });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("returns the evaluation row on 200", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(EVALUATION), { status: 200 }),
+    );
+
+    const { result } = renderHook(() => useEvaluation(CAMPAIGN_ID), {
+      wrapper: wrap(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(EVALUATION);
+  });
+});
+
+describe("useEvaluateCampaign", () => {
+  test("seeds the evaluation cache from the response and invalidates the shell", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(EVALUATION), { status: 200 }),
+    );
+    const qc = makeQueryClient();
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const { result } = renderHook(() => useEvaluateCampaign(), {
+      wrapper: wrapWith(qc),
+    });
+    await act(async () => {
+      result.current.mutate(CAMPAIGN_ID);
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // Cache was seeded directly — no refetch round-trip. A subsequent
+    // `invalidate` would be visible as a second call, but none should fire.
+    expect(qc.getQueryData(campaignEvaluationKey(CAMPAIGN_ID))).toEqual(EVALUATION);
+    const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
+    expect(invalidatedKeys).toContainEqual(campaignKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).not.toContainEqual(campaignEvaluationKey(CAMPAIGN_ID));
+  });
+});
+
+describe("useTriggerDetail", () => {
+  test("invalidates pairs, preview, and the measurements prefix", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ campaign_state: "running", pairs_enqueued: 4 }),
+        { status: 200 },
+      ),
+    );
+    const qc = makeQueryClient();
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const { result } = renderHook(() => useTriggerDetail(), { wrapper: wrapWith(qc) });
+    await act(async () => {
+      result.current.mutate({
+        id: CAMPAIGN_ID,
+        body: { scope: "good_candidates" },
+      });
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
+    expect(invalidatedKeys).toContainEqual(campaignKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).toContainEqual(campaignPairsKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN_ID));
+  });
+
+  test("surfaces 409 illegal_state_transition via mutation.error", async () => {
+    const errorBody = { error: "illegal_state_transition" };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(errorBody), { status: 409 }),
+    );
+    const qc = makeQueryClient();
+
+    const { result } = renderHook(() => useTriggerDetail(), { wrapper: wrapWith(qc) });
+    await act(async () => {
+      result.current.mutate({ id: CAMPAIGN_ID, body: { scope: "all" } });
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.cause).toEqual(errorBody);
+  });
+});
