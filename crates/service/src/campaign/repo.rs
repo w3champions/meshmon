@@ -1504,12 +1504,15 @@ pub async fn write_evaluation(
     .fetch_one(&mut *tx)
     .await?;
 
-    // Best-effort promotion of completed → evaluated. No-op when the row
-    // is already `evaluated` (re-evaluation path).
+    // Stamp the campaign's own `evaluated_at` breadcrumb and promote
+    // `completed → evaluated`. Re-evaluating an already-`evaluated`
+    // campaign still restamps the timestamp so consumers of
+    // `measurement_campaigns.evaluated_at` (UI / metadata APIs) don't
+    // show a stale evaluation time after repeat `/evaluate` calls.
     sqlx::query!(
         r#"UPDATE measurement_campaigns
               SET state = 'evaluated', evaluated_at = now()
-            WHERE id = $1 AND state = 'completed'"#,
+            WHERE id = $1 AND state IN ('completed', 'evaluated')"#,
         campaign_id,
     )
     .execute(&mut *tx)

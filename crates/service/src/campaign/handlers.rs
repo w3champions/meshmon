@@ -672,9 +672,11 @@ pub async fn evaluate(
         Err(e) => return repo_error("campaign::evaluate::write", e),
     };
 
-    state
-        .campaign_broker
-        .publish(CampaignStreamEvent::Evaluated { campaign_id: id });
+    // No in-process broker publish here. The `campaign_evaluations_notify`
+    // trigger fires `campaign_evaluated` inside the same transaction, and
+    // the campaign SSE listener fans that out to every subscriber (this
+    // instance's and its peers') — a direct publish here would cause
+    // same-instance clients to receive a duplicate `evaluated` frame.
 
     match to_evaluation_dto(row) {
         Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),

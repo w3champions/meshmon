@@ -123,6 +123,30 @@ async fn evaluate_then_reevaluate_different_mode_no_redispatch() {
         .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
         .await;
     assert_eq!(got["evaluation_mode"], "diversity", "body = {got}");
+
+    // `measurement_campaigns.evaluated_at` must restamp on re-evaluate,
+    // not just `campaign_evaluations.evaluated_at`. UI consumers reading
+    // campaign metadata would otherwise see a stale timestamp.
+    let first_eval_at = eval1["evaluated_at"].as_str().expect("evaluated_at first");
+    let second_eval_at = eval2["evaluated_at"].as_str().expect("evaluated_at second");
+    assert_ne!(
+        first_eval_at, second_eval_at,
+        "re-evaluate must restamp campaign_evaluations.evaluated_at"
+    );
+    let mc_eval_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT evaluated_at FROM measurement_campaigns WHERE id = $1::uuid")
+            .bind(&campaign_id)
+            .fetch_one(&h.state.pool)
+            .await
+            .expect("read measurement_campaigns.evaluated_at");
+    let mc_eval_at = mc_eval_at.expect("evaluated_at populated after second /evaluate");
+    let second_eval_ts: chrono::DateTime<chrono::Utc> =
+        second_eval_at.parse().expect("parse second eval timestamp");
+    // Equal to the second `/evaluate`'s timestamp (same `now()` tx-scope).
+    assert_eq!(
+        mc_eval_at, second_eval_ts,
+        "measurement_campaigns.evaluated_at must track the latest /evaluate"
+    );
 }
 
 #[tokio::test]

@@ -28,7 +28,7 @@
 //! - Exits promptly when the supplied [`CancellationToken`] fires.
 
 use super::broker::{CampaignBroker, CampaignStreamEvent};
-use super::events::{NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL};
+use super::events::{EVALUATED_CHANNEL, NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL};
 use super::model::CampaignState;
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
@@ -139,7 +139,7 @@ async fn session(
     };
 
     if let Err(e) = listener
-        .listen_all([NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL])
+        .listen_all([NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL, EVALUATED_CHANNEL])
         .await
     {
         warn!(
@@ -241,6 +241,9 @@ async fn handle_notification(
         }
         PAIR_SETTLED_CHANNEL => {
             broker.publish(CampaignStreamEvent::PairSettled { campaign_id });
+        }
+        EVALUATED_CHANNEL => {
+            broker.publish(CampaignStreamEvent::Evaluated { campaign_id });
         }
         other => {
             warn!(
