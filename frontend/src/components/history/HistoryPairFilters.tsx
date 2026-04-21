@@ -144,14 +144,20 @@ export function HistoryPairFilters({ value, onChange }: HistoryPairFiltersProps)
         <CustomRangeInputs
           from={value.from ?? ""}
           to={value.to ?? ""}
-          onChange={({ from, to }) =>
+          onChange={({ from, to }) => {
+            // Drop transient invalid states while editing. `historyPairSearchSchema`
+            // rejects empty datetime strings (via `z.string().datetime()`) and
+            // requires both bounds for `range=custom`, so propagating an empty
+            // field would throw inside `validateSearch` and silently lose the
+            // edit. The next complete change takes effect normally.
+            if (!from || !to) return;
             onChange({
               ...value,
               range: "custom",
-              from: from || undefined,
-              to: to || undefined,
-            })
-          }
+              from,
+              to,
+            });
+          }}
         />
       )}
     </div>
@@ -194,16 +200,20 @@ function SourcePicker({ sources, loading, selected, fallbackId, onSelect }: Sour
     );
   }, [sources, query]);
 
-  // Reset virtual focus when the popover closes; keep it clamped inside the
-  // current options length so the highlight never points past the end after
-  // the list shrinks. Query-driven resets live on the input's `onChange` so
-  // the effect deps stay honest.
+  // Reset virtual focus when the popover closes; clear it on any change to
+  // the filtered identity so a same-length content swap (e.g. a background
+  // refetch returning a different source set) can't leave the
+  // active-descendant pointing at a stale row and silently select the
+  // wrong entry on Enter.
   useEffect(() => {
     if (!open) setFocusedIndex(-1);
   }, [open]);
   useEffect(() => {
-    setFocusedIndex((prev) => (prev >= filtered.length ? filtered.length - 1 : prev));
-  }, [filtered.length]);
+    // Touching `.length` keeps biome's useExhaustiveDependencies happy
+    // while the real signal we care about is `filtered`'s identity.
+    void filtered.length;
+    setFocusedIndex(-1);
+  }, [filtered]);
 
   const label = selected ? selected.display_name : fallbackId ? fallbackId : "Pick a source";
   const focusedOption = focusedIndex >= 0 ? filtered[focusedIndex] : undefined;
@@ -350,14 +360,18 @@ function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerPr
 
   const options = useMemo(() => destinations.data ?? [], [destinations.data]);
 
-  // See `SourcePicker` — query-driven resets live on the input's `onChange`,
-  // popover-close resets in this effect.
+  // See `SourcePicker` — same rationale: reset on any options identity
+  // change so a content swap doesn't leave `aria-activedescendant` pointing
+  // at a stale row.
   useEffect(() => {
     if (!open) setFocusedIndex(-1);
   }, [open]);
   useEffect(() => {
-    setFocusedIndex((prev) => (prev >= options.length ? options.length - 1 : prev));
-  }, [options.length]);
+    // See `SourcePicker` — `.length` read keeps biome quiet; identity is
+    // what we actually react to.
+    void options.length;
+    setFocusedIndex(-1);
+  }, [options]);
 
   const selected = useMemo(
     () => options.find((d) => d.destination_ip === selectedId),

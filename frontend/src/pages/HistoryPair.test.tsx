@@ -8,7 +8,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
@@ -117,11 +117,12 @@ function renderHistoryPair(initialUrl: string) {
     routeTree: rootRoute.addChildren([pageRoute]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });
-  return render(
+  const rendered = render(
     <QueryClientProvider client={qc}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  return { rendered, router };
 }
 
 describe("HistoryPair", () => {
@@ -161,6 +162,29 @@ describe("HistoryPair", () => {
 
     const notice = await screen.findByTestId("history-pair-cap-notice");
     expect(notice).toHaveTextContent(/most recent 5,000/i);
+  });
+
+  test("clearing a custom-range bound keeps the URL on the prior valid window", async () => {
+    // `datetime-local` inputs can emit an empty string while the user edits
+    // (e.g. the browser's × clear control). `historyPairSearchSchema` rejects
+    // empty datetime strings and requires both bounds for `range=custom`, so
+    // the filters must drop the transient state rather than letting
+    // `validateSearch` throw and silently losing the operator's next edit.
+    installFetchMock({});
+    const initialFrom = "2026-04-13T10:00:00.000Z";
+    const initialTo = "2026-04-13T14:00:00.000Z";
+    const url =
+      `/history/pair?source=agent-a&range=custom` +
+      `&from=${encodeURIComponent(initialFrom)}&to=${encodeURIComponent(initialTo)}`;
+    const { router } = renderHistoryPair(url);
+
+    const fromInput = await screen.findByLabelText(/^from$/i);
+    fireEvent.change(fromInput, { target: { value: "" } });
+
+    const search = router.state.location.search as Record<string, unknown>;
+    expect(search.range).toBe("custom");
+    expect(search.from).toBe(initialFrom);
+    expect(search.to).toBe(initialTo);
   });
 
   test("renders a raw-IP fallback when the catalogue metadata is missing", async () => {
