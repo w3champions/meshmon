@@ -475,7 +475,6 @@ pub struct CampaignMeasurementsPage {
     responses(
         (status = 200, description = "Measurement page", body = CampaignMeasurementsPage),
         (status = 401, description = "No active session"),
-        (status = 404, description = "Campaign not found", body = ErrorEnvelope),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
