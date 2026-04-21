@@ -276,6 +276,36 @@ describe("RawTab — pagination", () => {
     renderTab(makeCampaign({ state: "running" }));
     expect(screen.getByText(/end of feed/i)).toBeInTheDocument();
   });
+
+  test("surfaces the pending-tail caveat when a pending row is visible without a cursor", () => {
+    // Backend emits `next_cursor=null` when a page saturates inside the
+    // pending-row tail (the cursor is `measured_at`-keyed with NULLS LAST).
+    // The generic "End of feed" would hide remaining in-flight work; the
+    // footer must instead steer the operator at the `Resolution state`
+    // filter that actually enumerates pending/dispatched rows.
+    setupMocks({
+      entries: [
+        makeMeasurement({ pair_id: 1, resolution_state: "succeeded" }),
+        makeMeasurement({ pair_id: 2, resolution_state: "pending" }),
+      ],
+      hasNextPage: false,
+    });
+    renderTab(makeCampaign({ state: "running" }));
+    expect(screen.getByText(/end of settled measurements/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^end of feed —/i)).toBeNull();
+  });
+
+  test("keeps the generic footer when the operator already narrowed by resolution_state", () => {
+    // If the filter bar is already scoping to `pending`, the pending-tail
+    // caveat would be redundant — the user is already seeing that bucket.
+    currentSearch = { tab: "raw", raw_state: "pending" };
+    setupMocks({
+      entries: [makeMeasurement({ pair_id: 1, resolution_state: "pending" })],
+      hasNextPage: false,
+    });
+    renderTab(makeCampaign({ state: "running" }));
+    expect(screen.getByText(/^end of feed —/i)).toBeInTheDocument();
+  });
 });
 
 describe("RawTab — per-row navigation", () => {

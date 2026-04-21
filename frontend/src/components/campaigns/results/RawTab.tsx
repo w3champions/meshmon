@@ -129,6 +129,17 @@ export function RawTab({ campaign }: RawTabProps) {
     [measurementsQuery.data],
   );
 
+  // The backend's keyset cursor walks settled rows (`measured_at IS NOT NULL`)
+  // and emits `next_cursor` only when the last row on a page has
+  // `measured_at`. If a page saturates inside the pending-row tail, the
+  // remainder of the pending tail is unreachable — the footer must not
+  // claim "End of feed" without pointing the operator at the state filter
+  // that actually enumerates in-flight work.
+  const hasPendingTail = useMemo(
+    () => rows.some((r) => r.resolution_state === "pending" || r.resolution_state === "dispatched"),
+    [rows],
+  );
+
   const [activeMtrRow, setActiveMtrRow] = useState<CampaignMeasurement | null>(null);
 
   // -------------------------------------------------------------------------
@@ -311,7 +322,15 @@ export function RawTab({ campaign }: RawTabProps) {
           </div>
           {!measurementsQuery.hasNextPage && rows.length > 0 ? (
             <footer className="border-t px-3 py-2 text-xs text-muted-foreground">
-              End of feed — {rows.length.toLocaleString()} rows.
+              {hasPendingTail && selection.resolution_state === undefined ? (
+                <>
+                  End of settled measurements — {rows.length.toLocaleString()} rows shown. Narrow by{" "}
+                  <strong>Resolution state: pending</strong> or <strong>dispatched</strong> to
+                  enumerate in-flight work.
+                </>
+              ) : (
+                <>End of feed — {rows.length.toLocaleString()} rows.</>
+              )}
             </footer>
           ) : null}
         </div>
