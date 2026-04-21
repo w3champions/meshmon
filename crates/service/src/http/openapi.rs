@@ -193,6 +193,11 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(
             crate::campaign::handlers::preview_dispatch_count
         ))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::evaluate))
+        .routes(utoipa_axum::routes!(
+            crate::campaign::handlers::get_evaluation
+        ))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::detail))
         // SSE stream carries campaign lifecycle + pair-settle events. The
         // static `/stream` segment is matched before any future `{id}`
         // path param by `matchit`; registering it alongside the other
