@@ -24,6 +24,7 @@ export type PairResolutionState = components["schemas"]["PairResolutionState"];
 export type MeasurementKind = components["schemas"]["MeasurementKind"];
 export type CampaignMeasurement = components["schemas"]["CampaignMeasurementDto"];
 export type CampaignMeasurementsPage = components["schemas"]["CampaignMeasurementsPage"];
+export type CampaignPair = components["schemas"]["PairDto"];
 
 /**
  * Query shape for `GET /api/campaigns`. Sourced directly from the generated
@@ -375,6 +376,54 @@ export function useCampaignMeasurements(
       if (error) throw new Error("failed to fetch campaign measurements", { cause: error });
       if (!data) throw new Error("empty response");
       return data as CampaignMeasurementsPage;
+    },
+  });
+}
+
+/**
+ * Filter shape for `GET /api/campaigns/{id}/pairs`. Empty `state` expands
+ * server-side to "every resolution state"; the endpoint is limit-paginated
+ * only (no cursor), so callers render the full response in one shot.
+ */
+export interface CampaignPairsFilter {
+  state?: PairResolutionState[];
+  limit?: number;
+}
+
+/**
+ * Fetch the campaign's full pair list. The endpoint is limit-paginated —
+ * no cursor — so callers materialise the entire (bounded) response in one
+ * query. The scheduler bumps `pair_counts` on every `campaign_pair_settled`
+ * NOTIFY, which invalidates the campaign shell key; the SSE stream does
+ * NOT touch `campaignPairsKey` today, so `refetchInterval: 15s` keeps the
+ * Pairs tab eventually-consistent without a dedicated stream subscription.
+ * A force-pair or detail-trigger mutation invalidates this key eagerly.
+ */
+const CAMPAIGN_PAIRS_REFETCH_MS = 15_000;
+
+export function useCampaignPairs(
+  id: string | undefined,
+  filter: CampaignPairsFilter = {},
+): UseQueryResult<CampaignPair[], Error> {
+  return useQuery({
+    queryKey: id ? [...campaignPairsKey(id), filter] : ["campaigns", "entry", "__disabled__", "pairs"],
+    enabled: !!id,
+    refetchInterval: CAMPAIGN_PAIRS_REFETCH_MS,
+    queryFn: async (): Promise<CampaignPair[]> => {
+      // queryFn only runs when enabled → id is defined.
+      const campaignId = id as string;
+      const { data, error } = await api.GET("/api/campaigns/{id}/pairs", {
+        params: {
+          path: { id: campaignId },
+          query: {
+            ...(filter.state && filter.state.length > 0 ? { state: filter.state } : {}),
+            ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch campaign pairs", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data as CampaignPair[];
     },
   });
 }
