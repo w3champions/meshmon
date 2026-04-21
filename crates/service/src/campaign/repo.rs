@@ -7,7 +7,8 @@
 //! into HTTP 409 without a second SELECT.
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, PairResolutionState, PairRow, ProbeProtocol,
+    CampaignRow, CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, PairRow,
+    ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{types::ipnetwork::IpNetwork, PgPool, Postgres, Transaction};
@@ -346,14 +347,19 @@ pub async fn apply_edit(
         });
     }
 
-    // 2. Remove pairs the operator dropped.
+    // 2. Remove baseline pairs the operator dropped.
+    //    Detail rows (kind in {detail_ping, detail_mtr}) are operator-
+    //    triggered ephemera for the same (source, destination) tuple; a
+    //    /edit payload should not silently cancel them. Scope the DELETE
+    //    to kind='campaign' so detail measurements survive the edit.
     for (src, dst) in &edit.remove_pairs {
         let dst_net = IpNetwork::from(*dst);
         sqlx::query!(
             "DELETE FROM campaign_pairs
               WHERE campaign_id = $1
                 AND source_agent_id = $2
-                AND destination_ip = $3",
+                AND destination_ip = $3
+                AND kind = 'campaign'",
             id,
             src,
             dst_net
@@ -385,7 +391,7 @@ pub async fn apply_edit(
             "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)
              SELECT $1, src, dst
                FROM UNNEST($2::text[], $3::inet[]) AS p(src, dst)
-             ON CONFLICT (campaign_id, source_agent_id, destination_ip) DO UPDATE
+             ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) DO UPDATE
                 SET resolution_state = 'pending',
                     settled_at       = NULL,
                     dispatched_at    = NULL,
@@ -416,6 +422,9 @@ pub async fn apply_edit(
         // A late settle response arriving after this reset finds
         // `pending` and updates the row — the worst case is a slightly
         // stale reading, not a stuck campaign.
+        // Reset baseline pairs only. Detail rows are independently
+        // triggered and must not re-run just because the operator asked
+        // to re-run the campaign's baseline measurements.
         sqlx::query!(
             "UPDATE campaign_pairs
                 SET resolution_state = 'pending',
@@ -425,6 +434,7 @@ pub async fn apply_edit(
                     attempt_count    = 0,
                     last_error       = NULL
               WHERE campaign_id = $1
+                AND kind = 'campaign'
                 AND resolution_state IN ('dispatched','reused','succeeded','unreachable','skipped')",
             id
         )
@@ -442,8 +452,10 @@ pub async fn apply_edit(
     )
     .await?;
 
-    // TODO(T48): also dismiss any existing campaign_evaluations row for
-    // this campaign once that table exists.
+    // NOTE: `campaign_evaluations` rows intentionally persist across
+    // edit-delta re-runs. The operator presses Evaluate to refresh once
+    // the re-dispatched measurements settle — an auto-dismiss here
+    // would wipe the last-known analysis every time a pair is nudged.
 
     tx.commit().await?;
     Ok(row)
@@ -489,6 +501,13 @@ pub async fn force_pair(
         _ => Some("started_at"),
     };
 
+    // Scope to `kind='campaign'`: after the T5 widening the 4-column
+    // UNIQUE key can legitimately hold `campaign + detail_ping +
+    // detail_mtr` rows on the same tuple, so an unfiltered UPDATE would
+    // RETURN multiple rows (sqlx's `fetch_optional` treats that as an
+    // error) and would also silently reset the detail rows — `/detail`
+    // runs their own lifecycle. Force-pair is a baseline-only operator
+    // action; detail rows can be re-triggered via `/detail` instead.
     let dst_net = IpNetwork::from(destination_ip);
     let matched = sqlx::query_scalar!(
         "UPDATE campaign_pairs
@@ -501,6 +520,7 @@ pub async fn force_pair(
           WHERE campaign_id = $1
             AND source_agent_id = $2
             AND destination_ip = $3
+            AND kind = 'campaign'
          RETURNING id",
         id,
         source_agent_id,
@@ -529,8 +549,16 @@ pub async fn force_pair(
     Ok(row)
 }
 
-/// List pairs for a campaign, optionally filtered to a specific set of
-/// resolution states. Results ordered by id, capped at `min(limit, 5000)`.
+/// List baseline (`kind='campaign'`) pairs for a campaign, optionally
+/// filtered to a specific set of resolution states. Results ordered by
+/// id, capped at `min(limit, 5000)`.
+///
+/// Detail rows (`kind ∈ {detail_ping, detail_mtr}`) are excluded
+/// structurally — they have their own lifecycle and are surfaced via
+/// `/detail`-scoped endpoints, not the generic campaign pair list.
+/// Without this filter, `PairDto` consumers (which don't surface `kind`)
+/// would see duplicate-looking rows on the same `(source, destination)`
+/// tuple once an operator has triggered `/detail`.
 pub async fn list_pairs(
     pool: &PgPool,
     id: Uuid,
@@ -543,9 +571,11 @@ pub async fn list_pairs(
         r#"
         SELECT id, campaign_id, source_agent_id, destination_ip,
                resolution_state AS "resolution_state: PairResolutionState",
-               measurement_id, dispatched_at, settled_at, attempt_count, last_error
+               measurement_id, dispatched_at, settled_at, attempt_count, last_error,
+               kind AS "kind: MeasurementKind"
           FROM campaign_pairs
          WHERE campaign_id = $1
+           AND kind = 'campaign'
            AND (cardinality($2::pair_resolution_state[]) = 0
                 OR resolution_state = ANY($2::pair_resolution_state[]))
          ORDER BY id
@@ -580,7 +610,8 @@ pub async fn preview_dispatch_count_for_campaign(
 ) -> Result<PreviewCounts, RepoError> {
     if force_measurement {
         let total: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) AS \"total!\" FROM campaign_pairs WHERE campaign_id = $1",
+            "SELECT COUNT(*) AS \"total!\" FROM campaign_pairs \
+              WHERE campaign_id = $1 AND kind = 'campaign'",
             id
         )
         .fetch_one(pool)
@@ -591,12 +622,16 @@ pub async fn preview_dispatch_count_for_campaign(
             fresh: total,
         });
     }
+    // Baseline-only: the preview reports how many campaign-kind pairs
+    // would dispatch on start/edit. Detail rows are independently
+    // triggered via `/detail` and must not inflate the preview.
     let row = sqlx::query!(
         r#"
         WITH pairs AS (
             SELECT source_agent_id, destination_ip
               FROM campaign_pairs
              WHERE campaign_id = $1
+               AND kind = 'campaign'
         ),
         reusable AS (
             SELECT DISTINCT ON (p.source_agent_id, p.destination_ip)
@@ -776,7 +811,8 @@ pub async fn take_pending_batch(
                    campaign_pairs.dispatched_at,
                    campaign_pairs.settled_at,
                    campaign_pairs.attempt_count,
-                   campaign_pairs.last_error
+                   campaign_pairs.last_error,
+                   campaign_pairs.kind AS "kind: MeasurementKind"
         "#,
         campaign_id,
         source_agent_id,
@@ -808,9 +844,11 @@ pub async fn resolve_reuse(
     let rows = sqlx::query!(
         r#"
         WITH requested AS (
-            SELECT pair_id, source_agent_id, destination_ip_str
+            SELECT r.pair_id, r.source_agent_id, r.destination_ip_str
               FROM UNNEST($1::bigint[], $2::text[], $3::text[])
                      AS r(pair_id, source_agent_id, destination_ip_str)
+              JOIN campaign_pairs cp ON cp.id = r.pair_id
+             WHERE cp.kind = 'campaign'
         ),
         latest AS (
             SELECT DISTINCT ON (r.source_agent_id, r.destination_ip_str)
@@ -821,6 +859,14 @@ pub async fn resolve_reuse(
                AND m.destination_ip = r.destination_ip_str::inet
                AND m.protocol = $4::probe_protocol
                AND m.measured_at > now() - interval '24 hours'
+               -- Reuse requires usable baseline data. `detail_mtr` rows
+               -- (and any future kind that omits latency) carry
+               -- `latency_avg_ms IS NULL` by design; binding one to a
+               -- baseline pair would leave the evaluator unable to
+               -- score against it (see `eval::evaluate`'s inner
+               -- `Some(direct_rtt)` gate) and could falsely trigger
+               -- `no_baseline_pairs` on low-probe campaigns.
+               AND m.latency_avg_ms IS NOT NULL
              ORDER BY r.source_agent_id, r.destination_ip_str,
                       m.probe_count DESC, m.measured_at DESC
         )
@@ -965,13 +1011,19 @@ pub async fn metrics_snapshot(pool: &PgPool) -> Result<MetricsSnapshot, RepoErro
     .fetch_all(pool)
     .await?;
 
+    // Baseline-only: `reuse_ratio` reports dispatch-efficiency for
+    // campaign-kind pairs. `/detail` rows dispatch with
+    // `force_measurement=true` and can never `reuse`, so including
+    // them would pull the metric toward zero whenever detail traffic
+    // runs — an artefact of operator action, not a real reuse regression.
     let reuse_ratio: Option<f64> = sqlx::query_scalar(
         "SELECT CASE WHEN COUNT(*) = 0 THEN NULL \
                 ELSE COUNT(*) FILTER (WHERE resolution_state='reused')::float8 \
                      / COUNT(*)::float8 \
               END \
            FROM campaign_pairs \
-          WHERE resolution_state IN ('reused','succeeded','unreachable','skipped')",
+          WHERE kind = 'campaign' \
+            AND resolution_state IN ('reused','succeeded','unreachable','skipped')",
     )
     .fetch_one(pool)
     .await?;
@@ -986,6 +1038,17 @@ pub async fn metrics_snapshot(pool: &PgPool) -> Result<MetricsSnapshot, RepoErro
 /// Atomically flip a `running` campaign to `completed` iff no pair
 /// remains in `pending` or `dispatched`. Returns `true` if the flip
 /// happened. Safe to call repeatedly.
+///
+/// The `NOT EXISTS` guard is intentionally kind-agnostic — detail rows
+/// (kind ∈ {detail_ping, detail_mtr}) block completion just like
+/// baseline pairs. Rationale: `insert_detail_pairs` transitions the
+/// campaign back to `running` when detail work lands, and the
+/// scheduler only ticks `running` campaigns; if the guard excluded
+/// detail rows, `maybe_complete` would flip the campaign back to
+/// `completed` between ticks and the scheduler would stop picking up
+/// pending detail pairs. Keeping detail rows in the guard is what
+/// makes the "campaign re-enters running until all detail drains"
+/// contract work with the current single-scheduler-state model.
 pub async fn maybe_complete(pool: &PgPool, campaign_id: Uuid) -> Result<bool, RepoError> {
     let updated = sqlx::query_scalar!(
         "UPDATE measurement_campaigns
@@ -1024,7 +1087,7 @@ pub async fn transition_state(
     Ok(row)
 }
 
-async fn transition_state_in_tx(
+pub(crate) async fn transition_state_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
     expected: &[CampaignState],
@@ -1190,7 +1253,7 @@ async fn insert_pairs_in_tx(
         "INSERT INTO campaign_pairs (campaign_id, source_agent_id, destination_ip)
          SELECT $1, src, dst
            FROM UNNEST($2::text[], $3::inet[]) AS p(src, dst)
-         ON CONFLICT (campaign_id, source_agent_id, destination_ip) DO NOTHING",
+         ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) DO NOTHING",
         campaign_id,
         &expanded_sources as &[&str],
         &expanded_dests as &[IpNetwork],
@@ -1261,6 +1324,7 @@ struct PairRowRaw {
     settled_at: Option<DateTime<Utc>>,
     attempt_count: i16,
     last_error: Option<String>,
+    kind: MeasurementKind,
 }
 
 impl From<PairRowRaw> for PairRow {
@@ -1276,6 +1340,463 @@ impl From<PairRowRaw> for PairRow {
             settled_at: r.settled_at,
             attempt_count: r.attempt_count,
             last_error: r.last_error,
+            kind: r.kind,
         }
     }
+}
+
+// ----- Evaluation persistence (T48) -------------------------------------
+
+use crate::campaign::eval::{
+    AgentRow as EvalAgentRow, AttributedMeasurement, CatalogueLookup, EvaluationInputs,
+    EvaluationOutputs,
+};
+use std::collections::HashMap;
+
+/// Builds the pure-function evaluator's inputs from DB state.
+///
+/// - Reads only `campaign_pairs.kind='campaign'` rows — detail rows
+///   never feed the baseline/candidate matrix.
+/// - Joins `measurements` via `campaign_pairs.measurement_id`.
+/// - Pulls agents + enrichment from `agents_with_catalogue` +
+///   `ip_catalogue` in one pass so the evaluator stays pure.
+pub async fn measurements_for_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<EvaluationInputs, RepoError> {
+    let campaign = sqlx::query!(
+        r#"SELECT loss_threshold_pct, stddev_weight,
+                  evaluation_mode AS "evaluation_mode: EvaluationMode"
+             FROM measurement_campaigns WHERE id = $1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    .ok_or(RepoError::NotFound(campaign_id))?;
+
+    // Baseline-only: `cp.kind='campaign'` is the load-bearing filter. We
+    // deliberately do NOT filter `m.kind` because `resolve_reuse` can
+    // legitimately bind a `detail_ping`-kind measurement from the 24 h
+    // reuse window to a baseline pair — excluding those would undercount
+    // the baseline whenever an operator runs `/detail` before the next
+    // campaign covering the same (source, destination, protocol) tuple.
+    let rows = sqlx::query!(
+        r#"SELECT m.source_agent_id,
+                  m.destination_ip,
+                  m.latency_avg_ms,
+                  m.latency_stddev_ms,
+                  m.loss_pct,
+                  m.id AS measurement_id,
+                  m.mtr_id
+             FROM measurements m
+             JOIN campaign_pairs cp ON cp.measurement_id = m.id
+            WHERE cp.campaign_id = $1
+              AND cp.kind = 'campaign'"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // `mtr_measurement_id` is the DTO's documented FK to `measurements.id`
+    // (see `EvaluationPairDetailDto::mtr_measurement_id_ax` / `_xb`),
+    // populated only for legs whose backing measurement carries an MTR
+    // trace. Surfacing `m.mtr_id` (which FKs to `mtr_traces.id`) would
+    // have pointed clients at the wrong table entirely.
+    let measurements: Vec<AttributedMeasurement> = rows
+        .into_iter()
+        .map(|r| AttributedMeasurement {
+            source_agent_id: r.source_agent_id,
+            destination_ip: r.destination_ip.ip(),
+            latency_avg_ms: r.latency_avg_ms,
+            latency_stddev_ms: r.latency_stddev_ms,
+            loss_pct: r.loss_pct,
+            mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
+        })
+        .collect();
+
+    let agent_rows = sqlx::query!(
+        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+             FROM agents_with_catalogue
+            WHERE ip IN (
+                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )
+               OR agent_id IN (
+                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let agents: Vec<EvalAgentRow> = agent_rows
+        .into_iter()
+        .map(|r| EvalAgentRow {
+            agent_id: r.agent_id,
+            ip: r.ip.ip(),
+        })
+        .collect();
+
+    let enr_rows = sqlx::query!(
+        r#"SELECT c.ip,
+                  c.display_name,
+                  c.city,
+                  c.country_code,
+                  c.asn,
+                  c.network_operator
+             FROM ip_catalogue c
+            WHERE c.ip IN (
+                SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let enrichment: HashMap<IpAddr, CatalogueLookup> = enr_rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.ip.ip(),
+                CatalogueLookup {
+                    display_name: r.display_name,
+                    city: r.city,
+                    country_code: r.country_code,
+                    asn: r.asn.map(|v| v as i64),
+                    network_operator: r.network_operator,
+                },
+            )
+        })
+        .collect();
+
+    Ok(EvaluationInputs {
+        measurements,
+        agents,
+        enrichment,
+        loss_threshold_pct: campaign.loss_threshold_pct,
+        stddev_weight: campaign.stddev_weight,
+        mode: campaign.evaluation_mode,
+    })
+}
+
+/// Persisted evaluation artefact, one row per campaign.
+#[derive(Debug, Clone)]
+pub struct EvaluationRow {
+    /// Primary key of the evaluation row.
+    pub id: Uuid,
+    /// Owning campaign.
+    pub campaign_id: Uuid,
+    /// Wall-clock stamp from the most recent UPSERT.
+    pub evaluated_at: DateTime<Utc>,
+    /// Loss threshold (percent) used during scoring.
+    pub loss_threshold_pct: f32,
+    /// RTT-stddev weight used during scoring.
+    pub stddev_weight: f32,
+    /// Evaluator strategy that produced this row.
+    pub evaluation_mode: EvaluationMode,
+    /// Baseline pair count from the evaluator pass.
+    pub baseline_pair_count: i32,
+    /// Total candidate transit destinations scored.
+    pub candidates_total: i32,
+    /// Candidates with at least one qualifying baseline pair.
+    pub candidates_good: i32,
+    /// Mean improvement (ms) across qualifying pair details; `None` when nothing qualified.
+    pub avg_improvement_ms: Option<f32>,
+    /// Serialised `EvaluationResultsDto` (persisted verbatim).
+    pub results: serde_json::Value,
+}
+
+/// UPSERT the evaluator's output into `campaign_evaluations` and return
+/// the freshly persisted row. Uniqueness is on `campaign_id`, so a
+/// second call for the same campaign replaces the previous result and
+/// restamps `evaluated_at`.
+///
+/// The state gate, UPSERT, and `completed → evaluated` promotion all
+/// run inside one transaction. A `SELECT ... FOR UPDATE` on the
+/// campaign row at the top holds a row-level lock until commit, so a
+/// concurrent `/detail` call cannot flip the row to `running` between
+/// the handler's initial state check and our persistence step — an
+/// illegal-transition race that would otherwise let `/evaluate` write
+/// a fresh evaluation against a now-running campaign. If the locked
+/// state is not `completed` or `evaluated`, returns
+/// `RepoError::IllegalTransition` so the handler maps to HTTP 409.
+pub async fn write_evaluation(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    outputs: &EvaluationOutputs,
+    loss_threshold_pct: f32,
+    stddev_weight: f32,
+    mode: EvaluationMode,
+) -> Result<EvaluationRow, RepoError> {
+    let results_json = serde_json::to_value(&outputs.results)
+        .expect("EvaluationResultsDto is owned by this service and always serialises");
+
+    let mut tx = pool.begin().await?;
+
+    // Lock the campaign row and recheck state. The handler's gate is
+    // advisory only — without the lock, a concurrent `/detail` flip
+    // to `running` between read and write would still let us persist.
+    let locked_state: Option<CampaignState> = sqlx::query_scalar!(
+        r#"SELECT state AS "state: CampaignState"
+             FROM measurement_campaigns
+            WHERE id = $1
+              FOR UPDATE"#,
+        campaign_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let locked_state = match locked_state {
+        Some(s) => s,
+        None => return Err(RepoError::NotFound(campaign_id)),
+    };
+    if !matches!(
+        locked_state,
+        CampaignState::Completed | CampaignState::Evaluated
+    ) {
+        return Err(RepoError::IllegalTransition {
+            campaign_id,
+            from: Some(locked_state),
+            expected: vec![CampaignState::Completed, CampaignState::Evaluated],
+        });
+    }
+
+    let row = sqlx::query!(
+        r#"INSERT INTO campaign_evaluations
+              (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,
+               baseline_pair_count, candidates_total, candidates_good,
+               avg_improvement_ms, results, evaluated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+           ON CONFLICT (campaign_id) DO UPDATE SET
+               loss_threshold_pct   = EXCLUDED.loss_threshold_pct,
+               stddev_weight        = EXCLUDED.stddev_weight,
+               evaluation_mode      = EXCLUDED.evaluation_mode,
+               baseline_pair_count  = EXCLUDED.baseline_pair_count,
+               candidates_total     = EXCLUDED.candidates_total,
+               candidates_good      = EXCLUDED.candidates_good,
+               avg_improvement_ms   = EXCLUDED.avg_improvement_ms,
+               results              = EXCLUDED.results,
+               evaluated_at         = now()
+           RETURNING id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
+                     evaluation_mode AS "evaluation_mode: EvaluationMode",
+                     baseline_pair_count, candidates_total, candidates_good,
+                     avg_improvement_ms, results"#,
+        campaign_id,
+        loss_threshold_pct,
+        stddev_weight,
+        mode as EvaluationMode,
+        outputs.baseline_pair_count,
+        outputs.candidates_total,
+        outputs.candidates_good,
+        outputs.avg_improvement_ms,
+        results_json,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // Stamp `evaluated_at` and (only on a real transition) promote
+    // `completed → evaluated`. The branches are split to avoid
+    // touching the `state` column during a repeat `/evaluate` on an
+    // already-evaluated campaign: `measurement_campaigns_notify` is
+    // `AFTER UPDATE OF state`, so including `state` in the SET list
+    // fires the trigger whether or not the value actually changes —
+    // producing a redundant `campaign_state_changed` NOTIFY and SSE
+    // frame on every re-evaluate. Using `locked_state` from the
+    // earlier `FOR UPDATE` read lets us pick the right UPDATE shape
+    // without a second lookup.
+    match locked_state {
+        CampaignState::Completed => {
+            sqlx::query!(
+                r#"UPDATE measurement_campaigns
+                      SET state = 'evaluated', evaluated_at = now()
+                    WHERE id = $1 AND state = 'completed'"#,
+                campaign_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        CampaignState::Evaluated => {
+            sqlx::query!(
+                r#"UPDATE measurement_campaigns
+                      SET evaluated_at = now()
+                    WHERE id = $1 AND state = 'evaluated'"#,
+                campaign_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Unreachable given the gate above, but handled defensively
+        // rather than panicking if a future refactor widens the gate
+        // without updating this match.
+        _ => {}
+    }
+
+    tx.commit().await?;
+
+    Ok(EvaluationRow {
+        id: row.id,
+        campaign_id: row.campaign_id,
+        evaluated_at: row.evaluated_at,
+        loss_threshold_pct: row.loss_threshold_pct,
+        stddev_weight: row.stddev_weight,
+        evaluation_mode: row.evaluation_mode,
+        baseline_pair_count: row.baseline_pair_count,
+        candidates_total: row.candidates_total,
+        candidates_good: row.candidates_good,
+        avg_improvement_ms: row.avg_improvement_ms,
+        results: row.results,
+    })
+}
+
+/// Read the persisted evaluation row for a campaign. `Ok(None)` when
+/// the campaign has never been evaluated.
+pub async fn read_evaluation(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Option<EvaluationRow>, RepoError> {
+    let row = sqlx::query!(
+        r#"SELECT id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
+                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                  baseline_pair_count, candidates_total, candidates_good,
+                  avg_improvement_ms, results
+             FROM campaign_evaluations WHERE campaign_id = $1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| EvaluationRow {
+        id: r.id,
+        campaign_id: r.campaign_id,
+        evaluated_at: r.evaluated_at,
+        loss_threshold_pct: r.loss_threshold_pct,
+        stddev_weight: r.stddev_weight,
+        evaluation_mode: r.evaluation_mode,
+        baseline_pair_count: r.baseline_pair_count,
+        candidates_total: r.candidates_total,
+        candidates_good: r.candidates_good,
+        avg_improvement_ms: r.avg_improvement_ms,
+        results: r.results,
+    }))
+}
+
+/// Returns every (source_agent_id, destination_ip) tuple for baseline
+/// pairs that the campaign settled — used by the `POST /detail` handler's
+/// `all` scope. Detail pairs are excluded structurally via `kind='campaign'`.
+pub async fn settled_campaign_pairs(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Vec<(String, IpAddr)>, RepoError> {
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT source_agent_id, destination_ip
+             FROM campaign_pairs
+            WHERE campaign_id = $1
+              AND kind = 'campaign'
+              AND resolution_state IN ('succeeded', 'reused')"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.source_agent_id, r.destination_ip.ip()))
+        .collect())
+}
+
+/// Inserts detail-pair rows for the `POST /detail` handler and flips
+/// the campaign state back to `running`. Returns
+/// `(inserted, post_state)`:
+///
+/// - `inserted` — number of rows **actually inserted** (not requested);
+///   duplicates skip silently via `ON CONFLICT DO NOTHING`.
+/// - `post_state` — the campaign's state at commit time, read back
+///   under the same transaction lock. The caller compares this to the
+///   pre-call state to decide whether to publish a state-changed event
+///   and to populate the `DetailResponse.campaign_state` field with
+///   the actual post-insert state (not the potentially-stale pre-read).
+///
+/// Each requested `(source, destination)` tuple produces TWO rows:
+/// one `kind='detail_ping'`, one `kind='detail_mtr'`. Dispatch (T45)
+/// will treat each as a separate measurement; the `resolve_reuse`
+/// filter (T1) structurally skips them regardless of the campaign's
+/// `force_measurement` flag. The widened 4-column UNIQUE constraint
+/// (`campaign_id, source_agent_id, destination_ip, kind`) makes each
+/// kind a distinct row under conflict resolution.
+///
+/// The state transition routes through [`transition_state_in_tx`] (the
+/// canonical Completed|Evaluated → Running flip, mirroring `force_pair`):
+/// it restamps `started_at` so the scheduler's rotation key advances,
+/// and leaves the historical `completed_at` / `evaluated_at`
+/// breadcrumbs intact.
+pub async fn insert_detail_pairs(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    pairs: &[(String, IpAddr)],
+) -> Result<(i32, CampaignState), RepoError> {
+    let mut tx = pool.begin().await?;
+    let mut inserted = 0i32;
+    for (source_agent_id, destination_ip) in pairs {
+        for kind in ["detail_ping", "detail_mtr"] {
+            let result = sqlx::query(
+                r#"INSERT INTO campaign_pairs
+                      (campaign_id, source_agent_id, destination_ip,
+                       resolution_state, kind)
+                   VALUES ($1, $2, $3, 'pending', $4::measurement_kind)
+                   ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind)
+                     DO NOTHING"#,
+            )
+            .bind(campaign_id)
+            .bind(source_agent_id)
+            .bind(IpNetwork::from(*destination_ip))
+            .bind(kind)
+            .execute(&mut *tx)
+            .await?;
+            inserted += result.rows_affected() as i32;
+        }
+    }
+
+    // Only attempt the state flip when we actually queued new work.
+    // A repeat `/detail` call where every requested row already exists
+    // (inserted == 0) must not restart a completed campaign — that
+    // would be spurious state churn visible in the API + SSE stream.
+    let post_state = if inserted == 0 {
+        // No transition attempted — read the current state under the
+        // transaction lock so the caller sees the actual post-commit
+        // state rather than its stale pre-read.
+        sqlx::query_scalar!(
+            r#"SELECT state AS "state: CampaignState"
+                 FROM measurement_campaigns
+                WHERE id = $1
+                  FOR UPDATE"#,
+            campaign_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(RepoError::NotFound(campaign_id))?
+    } else {
+        match transition_state_in_tx(
+            &mut tx,
+            campaign_id,
+            &[CampaignState::Completed, CampaignState::Evaluated],
+            CampaignState::Running,
+            Some("started_at"),
+        )
+        .await
+        {
+            Ok(row) => row.state,
+            // Benign race: a concurrent writer already flipped the row to
+            // `running` (e.g. another `/detail` or `force_pair`). The
+            // detail pairs we inserted still land; we just don't need to
+            // flip state again. State is known: `Running`.
+            Err(RepoError::IllegalTransition {
+                from: Some(CampaignState::Running),
+                ..
+            }) => CampaignState::Running,
+            // Any other observed state (Draft, Stopped, or row absent) is
+            // a real precondition mismatch; propagate so the transaction
+            // rolls back rather than leaving orphan detail rows behind.
+            Err(e) => return Err(e),
+        }
+    };
+
+    tx.commit().await?;
+    Ok((inserted, post_state))
 }

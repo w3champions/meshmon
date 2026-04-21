@@ -46,9 +46,17 @@ use utoipa_swagger_ui::SwaggerUi;
     components(schemas(
         crate::campaign::dto::CampaignDto,
         crate::campaign::dto::CreateCampaignRequest,
+        crate::campaign::dto::DetailPairIdentifier,
+        crate::campaign::dto::DetailRequest,
+        crate::campaign::dto::DetailResponse,
+        crate::campaign::dto::DetailScope,
         crate::campaign::dto::EditCampaignRequest,
         crate::campaign::dto::EditPairDto,
         crate::campaign::dto::ErrorEnvelope,
+        crate::campaign::dto::EvaluationCandidateDto,
+        crate::campaign::dto::EvaluationDto,
+        crate::campaign::dto::EvaluationPairDetailDto,
+        crate::campaign::dto::EvaluationResultsDto,
         crate::campaign::dto::ForcePairRequest,
         crate::campaign::dto::PairDto,
         crate::campaign::dto::PatchCampaignRequest,
@@ -185,6 +193,11 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(
             crate::campaign::handlers::preview_dispatch_count
         ))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::evaluate))
+        .routes(utoipa_axum::routes!(
+            crate::campaign::handlers::get_evaluation
+        ))
+        .routes(utoipa_axum::routes!(crate::campaign::handlers::detail))
         // SSE stream carries campaign lifecycle + pair-settle events. The
         // static `/stream` segment is matched before any future `{id}`
         // path param by `matchit`; registering it alongside the other

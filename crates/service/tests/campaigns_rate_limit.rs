@@ -15,7 +15,7 @@ use meshmon_agent::command::{AgentCommandService, StubProber};
 use meshmon_protocol::AgentCommandServer;
 use meshmon_revtunnel::TunnelManager;
 use meshmon_service::campaign::dispatch::{PairDispatcher, PendingPair};
-use meshmon_service::campaign::model::ProbeProtocol;
+use meshmon_service::campaign::model::{MeasurementKind, ProbeProtocol};
 use meshmon_service::campaign::repo::{self, CreateInput};
 use meshmon_service::campaign::rpc_dispatcher::RpcDispatcher;
 use meshmon_service::campaign::writer::SettleWriter;
@@ -152,6 +152,7 @@ async fn per_destination_rps_caps_cross_agent_traffic() {
         probe_stagger_ms: 100,
         force_measurement: true,
         protocol: ProbeProtocol::Icmp,
+        kind: MeasurementKind::Campaign,
     };
 
     let pairs_x: Vec<PendingPair> = all_pairs

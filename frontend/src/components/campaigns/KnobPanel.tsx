@@ -14,16 +14,14 @@ const MTR_HINT =
   "MTR is expensive — prefer ICMP/TCP/UDP here and use the per-pair Detail action in the results view.";
 const FORCE_HELP =
   "When on, the 24 h reuse cache is ignored and the reusable count collapses to zero.";
-// Diversity and Optimization describe what the evaluator (T48) will do with
-// the measurements this campaign collects. Operators pick the mode up front
-// so T48 can score candidates without a re-dispatch. Hints below summarise
-// the predicate each mode applies — full semantics in spec 04 §2.
+// Diversity and Optimization describe what the evaluator does with the
+// measurements this campaign collects. Operators pick the mode up front so
+// the evaluator can score candidates without a re-dispatch. Hints below
+// summarise the predicate each mode applies — full semantics in spec 04 §2.
 const DIVERSITY_HINT =
   "Evaluator qualifies a transit agent X when A → X → B beats the direct A → B path. Broader result set; surfaces every viable alternative route.";
 const OPTIMIZATION_HINT =
   "Evaluator qualifies X only when A → X → B beats direct AND every existing mesh transit. Tighter result set; surfaces the genuinely best candidates.";
-const EVAL_MODE_DEFERRED =
-  "Stored on the campaign now; the evaluator pass that consumes it lands with the Candidates tab (T48/T49).";
 
 export interface KnobPanelProps {
   value: CampaignKnobs;
@@ -140,7 +138,6 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
         <p id="knob-evaluation-mode-hint" className="text-xs text-muted-foreground">
           {value.evaluation_mode === "diversity" ? DIVERSITY_HINT : OPTIMIZATION_HINT}
         </p>
-        <p className="text-xs italic text-muted-foreground">{EVAL_MODE_DEFERRED}</p>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">

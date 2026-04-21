@@ -225,6 +225,49 @@ export interface paths {
         patch: operations["campaigns_patch"];
         trace?: never;
     };
+    "/api/campaigns/{id}/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/campaigns/{id}/detail` — enqueue detail-ping + detail-mtr
+         *     rows for a slice of `(source_agent, destination_ip)` pairs.
+         * @description Gated on `state IN ('completed','evaluated')`. The three scopes:
+         *
+         *     - `all`: every `kind='campaign'` pair whose baseline resolution
+         *       `succeeded` or `reused`. Selects directly from `campaign_pairs`
+         *       because an evaluation row is not required for this scope.
+         *     - `good_candidates`: pulls the persisted evaluation row and expands
+         *       each qualifying `(source_agent, destination_agent, transit_ip)`
+         *       triple into a pair of `(source_agent → transit_ip)` +
+         *       `(destination_agent → transit_ip)` detail entries so both legs
+         *       get a higher-resolution measurement. Requires a prior evaluation;
+         *       400 with `no_evaluation` otherwise.
+         *     - `pair`: a single operator-chosen `(source_agent_id,
+         *       destination_ip)` tuple from the request body.
+         *
+         *     All scopes flow through [`repo::insert_detail_pairs`], which owns
+         *     the transition back to `running` and emits `campaign_state_changed`
+         *     through the Postgres NOTIFY trigger. The campaign SSE listener
+         *     translates that NOTIFY into a broker broadcast for every
+         *     subscriber (same-instance and peers) — this handler does not
+         *     publish to the in-process broker directly, to avoid sending a
+         *     duplicate `state_changed` frame on the request's own instance.
+         *     No-op detail inserts (inserted == 0 or an already-`running` race)
+         *     don't touch `state`, so the trigger stays silent correctly.
+         */
+        post: operations["detail"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/campaigns/{id}/edit": {
         parameters: {
             query?: never;
@@ -242,6 +285,59 @@ export interface paths {
          *     every non-delta pair is reset so the whole campaign re-runs.
          */
         post: operations["edit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
+         * @description Gated on `state IN ('completed','evaluated')`: re-running on an
+         *     already-evaluated campaign is allowed so operators can retune
+         *     `loss_threshold_pct` / `stddev_weight` without editing the row. When
+         *     the campaign was in `completed`, a best-effort transition flips it to
+         *     `evaluated`; a concurrent transition that loses the gate still leaves
+         *     the evaluation row written and the SSE event fired.
+         *
+         *     Returns 422 (`no_baseline_pairs`) when the evaluator finds no
+         *     agent→agent baseline — the campaign must include at least one pair
+         *     whose destination IP belongs to a registered agent.
+         */
+        post: operations["evaluate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/evaluation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}/evaluation` — read-through on the persisted
+         *     evaluation row.
+         * @description 404 (`not_evaluated`) when the campaign has never been evaluated.
+         *     The same snake_case envelope pattern as every other handler lets the
+         *     SPA's shared error layer branch on the stable code without parsing
+         *     prose.
+         */
+        get: operations["get_evaluation"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -975,6 +1071,14 @@ export interface components {
             campaign_id: string;
             /** @enum {string} */
             kind: "pair_settled";
+        } | {
+            /**
+             * Format: uuid
+             * @description Primary key of the campaign whose evaluation was rewritten.
+             */
+            campaign_id: string;
+            /** @enum {string} */
+            kind: "evaluated";
         };
         /**
          * @description Latitude / longitude pair sourced from the IP catalogue join.
@@ -1183,6 +1287,34 @@ export interface components {
             /** @description Operator-facing title. Rejected when blank. */
             title: string;
         };
+        /** @description Pair coordinates for [`DetailScope::Pair`] requests. */
+        DetailPairIdentifier: {
+            /** @description Destination IP of the pair to re-measure. */
+            destination_ip: string;
+            /** @description Source agent id of the pair to re-measure. */
+            source_agent_id: string;
+        };
+        /** @description Body for `POST /api/campaigns/{id}/detail`. */
+        DetailRequest: {
+            pair?: null | components["schemas"]["DetailPairIdentifier"];
+            /** @description Which slice of candidates to enqueue for re-measurement. */
+            scope: components["schemas"]["DetailScope"];
+        };
+        /** @description Response body for `POST /api/campaigns/{id}/detail`. */
+        DetailResponse: {
+            /** @description Campaign state after enqueueing (typically `running`). */
+            campaign_state: components["schemas"]["CampaignState"];
+            /**
+             * Format: int32
+             * @description Number of detail pairs enqueued by this request.
+             */
+            pairs_enqueued: number;
+        };
+        /**
+         * @description Which slice of candidates the detail-trigger handler should re-measure.
+         * @enum {string}
+         */
+        DetailScope: "all" | "good_candidates" | "pair";
         /** @description Body for `POST /api/campaigns/{id}/edit`. */
         EditCampaignRequest: {
             /** @description Pairs to add (or reset to `pending` if they already exist). */
@@ -1215,12 +1347,197 @@ export interface components {
             /** @description Snake-case error code; stable across versions. */
             error: string;
         };
+        /** @description Per-candidate transit destination scoring row. */
+        EvaluationCandidateDto: {
+            /**
+             * Format: int64
+             * @description Catalogue ASN, when present.
+             */
+            asn?: number | null;
+            /**
+             * Format: float
+             * @description Average improvement (ms) across considered pairs. Defined as
+             *     `direct_rtt − transit_rtt − (transit_stddev_penalty − direct_stddev_penalty)`,
+             *     so a positive value means the transit candidate is faster than
+             *     the direct A→B baseline.
+             */
+            avg_improvement_ms?: number | null;
+            /**
+             * Format: float
+             * @description Average compound loss (percent) across transit triples that
+             *     cleared the loss gate during scoring.
+             */
+            avg_loss_pct?: number | null;
+            /** @description Catalogue city, when present. */
+            city?: string | null;
+            /**
+             * Format: float
+             * @description Composite score `(pairs_improved / baseline_pair_count) ×
+             *     avg_improvement_ms`; higher is better. Candidates are returned
+             *     in descending composite-score order.
+             */
+            composite_score: number;
+            /** @description Catalogue ISO country code, when present. */
+            country_code?: string | null;
+            /** @description Transit destination IP as a bare host string. */
+            destination_ip: string;
+            /** @description Operator-facing label from the catalogue, when present. */
+            display_name?: string | null;
+            /**
+             * @description True when destination_ip appears in agents.ip. UI renders a
+             *     "mesh member — no acquisition needed" badge.
+             */
+            is_mesh_member: boolean;
+            /** @description Catalogue network operator, when present. */
+            network_operator?: string | null;
+            /** @description Per-pair scoring detail for this candidate. */
+            pair_details: components["schemas"]["EvaluationPairDetailDto"][];
+            /**
+             * Format: int32
+             * @description Number of baseline pairs this candidate improved.
+             */
+            pairs_improved: number;
+            /**
+             * Format: int32
+             * @description Number of baseline pairs this candidate was scored against.
+             */
+            pairs_total_considered: number;
+        };
+        /**
+         * @description Wire shape for `GET /api/campaigns/{id}/evaluation`.
+         *
+         *     Also the exact JSON persisted into `campaign_evaluations.results` —
+         *     the evaluator serialises [`EvaluationResultsDto`] directly into the
+         *     JSONB column so the read handler can hand the stored document back
+         *     to the client without rehydrating through a domain model.
+         */
+        EvaluationDto: {
+            /**
+             * Format: float
+             * @description Average end-to-end improvement (ms) across qualifying candidates.
+             *     Same sign convention as
+             *     [`EvaluationCandidateDto::avg_improvement_ms`] — positive means
+             *     the transit beats the direct A→B baseline. `None` when no
+             *     candidate qualified.
+             */
+            avg_improvement_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Number of `(source, destination)` baseline pairs considered.
+             */
+            baseline_pair_count: number;
+            /**
+             * Format: uuid
+             * @description Owning campaign.
+             */
+            campaign_id: string;
+            /**
+             * Format: int32
+             * @description Candidate transit destinations that cleared the `qualifies` bar.
+             */
+            candidates_good: number;
+            /**
+             * Format: int32
+             * @description Total candidate transit destinations scored.
+             */
+            candidates_total: number;
+            /**
+             * Format: date-time
+             * @description When the evaluator produced this result set.
+             */
+            evaluated_at: string;
+            /** @description Evaluation strategy that produced this result. */
+            evaluation_mode: components["schemas"]["EvaluationMode"];
+            /**
+             * Format: float
+             * @description Loss-rate threshold (percent) that was applied.
+             */
+            loss_threshold_pct: number;
+            /** @description Full candidate breakdown + unqualified-reason map. */
+            results: components["schemas"]["EvaluationResultsDto"];
+            /**
+             * Format: float
+             * @description Weight applied to RTT stddev during scoring.
+             */
+            stddev_weight: number;
+        };
         /**
          * @description Evaluation strategy for the campaign's result-aggregation pass
          *     (spec 04). Storage here; consumed by T48.
          * @enum {string}
          */
         EvaluationMode: "diversity" | "optimization";
+        /** @description Per-pair scoring row inside an [`EvaluationCandidateDto`]. */
+        EvaluationPairDetailDto: {
+            /** @description Destination agent id of the baseline pair. */
+            destination_agent_id: string;
+            /** @description Transit destination IP (also a candidate key). */
+            destination_ip: string;
+            /**
+             * Format: float
+             * @description Direct A→B observed loss (percent).
+             */
+            direct_loss_pct: number;
+            /**
+             * Format: float
+             * @description Direct A→B RTT (ms).
+             */
+            direct_rtt_ms: number;
+            /**
+             * Format: float
+             * @description Direct A→B RTT stddev (ms).
+             */
+            direct_stddev_ms: number;
+            /**
+             * Format: float
+             * @description `direct_rtt − transit_rtt − (transit_stddev_penalty −
+             *     direct_stddev_penalty)`; positive means the transit beats the
+             *     direct A→B baseline by that many ms after stddev-penalty
+             *     adjustment.
+             */
+            improvement_ms: number;
+            /**
+             * Format: int64
+             * @description FK to the `measurements` row covering A→X, when available.
+             */
+            mtr_measurement_id_ax?: number | null;
+            /**
+             * Format: int64
+             * @description FK to the `measurements` row covering X→B, when available.
+             */
+            mtr_measurement_id_xb?: number | null;
+            /** @description Whether this pair cleared the evaluator's qualify predicate. */
+            qualifies: boolean;
+            /** @description Source agent id of the baseline pair. */
+            source_agent_id: string;
+            /**
+             * Format: float
+             * @description Composed A→X→B transit observed loss (percent).
+             */
+            transit_loss_pct: number;
+            /**
+             * Format: float
+             * @description Composed A→X→B transit RTT (ms).
+             */
+            transit_rtt_ms: number;
+            /**
+             * Format: float
+             * @description Composed A→X→B transit RTT stddev (ms).
+             */
+            transit_stddev_ms: number;
+        };
+        /** @description Candidate breakdown persisted in `campaign_evaluations.results`. */
+        EvaluationResultsDto: {
+            /** @description Per-candidate scoring rows, ordered by composite score. */
+            candidates: components["schemas"]["EvaluationCandidateDto"][];
+            /**
+             * @description Keyed by destination IP (string); value is an explanatory
+             *     sentence the UI renders verbatim.
+             */
+            unqualified_reasons?: {
+                [key: string]: string;
+            };
+        };
         /** @description Aggregate facets used by the catalogue's filter UI. */
         FacetsResponse: {
             /** @description Top 250 ASN buckets, descending by count. */
@@ -2382,6 +2699,76 @@ export interface operations {
             };
         };
     };
+    detail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DetailRequest"];
+            };
+        };
+        responses: {
+            /** @description Pairs enqueued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DetailResponse"];
+                };
+            };
+            /** @description Bad scope payload or no_evaluation precondition */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Campaign not in completed/evaluated state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     edit: {
         parameters: {
             query?: never;
@@ -2434,6 +2821,120 @@ export interface operations {
             };
             /** @description Illegal state transition */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    evaluate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Evaluation written */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluationDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Campaign not in completed/evaluated state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No baseline (agent→agent) pairs */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_evaluation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Evaluation result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluationDto"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign not evaluated */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

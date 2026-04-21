@@ -36,7 +36,7 @@
 //! and winds down its in-flight probes.
 
 use super::dispatch::{DispatchOutcome, PairDispatcher, PendingPair};
-use super::model::ProbeProtocol;
+use super::model::{MeasurementKind, ProbeProtocol};
 use super::writer::{SettleOutcome, SettleWriter};
 use crate::metrics;
 use crate::registry::AgentRegistry;
@@ -44,7 +44,8 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use meshmon_protocol::{
-    AgentCommandClient, MeasurementKind, MeasurementTarget, Protocol, RunMeasurementBatchRequest,
+    AgentCommandClient, MeasurementKind as WireMeasurementKind, MeasurementTarget, Protocol,
+    RunMeasurementBatchRequest,
 };
 use meshmon_revtunnel::TunnelManager;
 use moka::future::Cache;
@@ -214,20 +215,19 @@ impl RpcDispatcher {
     }
 
     /// Build the wire request from the allowed subset. Every pair in a
-    /// batch shares the same campaign (scheduler invariant:
-    /// `take_pending_batch` is per-`(campaign, agent)`), so per-campaign
-    /// knobs come from the first pair.
+    /// batch shares the same campaign AND the same [`MeasurementKind`]
+    /// (scheduler invariant: `take_pending_batch` is per-`(campaign,
+    /// agent)` and `Scheduler::dispatch_for_campaign` splits the claim
+    /// by `kind` before calling the dispatcher), so per-campaign knobs
+    /// and the wire `MeasurementKind` come from the first pair.
     fn build_request(&self, allowed: &[PendingPair]) -> RunMeasurementBatchRequest {
         let head = &allowed[0];
-        // T45 heuristic: `probe_count == 1` comes from detail MTR
-        // re-runs (spec 03 §4.5 forces `probe_count=1` for MTR;
-        // campaign default is 10). T48 will introduce an explicit
-        // `measurement_kind` on `PendingPair` when detail_mtr campaigns
-        // land — until then, `probe_count == 1` is the stable signal.
-        let kind = if head.probe_count == 1 {
-            MeasurementKind::Mtr
-        } else {
-            MeasurementKind::Latency
+        // Detail MTR rows (`kind = DetailMtr`) map to the wire MTR
+        // measurement. Campaign and detail-ping rows both run the
+        // latency path with their respective `probe_count`.
+        let kind = match head.kind {
+            MeasurementKind::DetailMtr => WireMeasurementKind::Mtr,
+            MeasurementKind::Campaign | MeasurementKind::DetailPing => WireMeasurementKind::Latency,
         };
         let protocol = match head.protocol {
             ProbeProtocol::Icmp => Protocol::Icmp,
@@ -311,8 +311,8 @@ fn resize_or_init_agent_semaphore(
 
 /// Short stable string used as the `kind` label on the dispatch metric.
 fn kind_label(req: &RunMeasurementBatchRequest) -> &'static str {
-    match MeasurementKind::try_from(req.kind).unwrap_or(MeasurementKind::Latency) {
-        MeasurementKind::Mtr => "mtr",
+    match WireMeasurementKind::try_from(req.kind).unwrap_or(WireMeasurementKind::Latency) {
+        WireMeasurementKind::Mtr => "mtr",
         _ => "latency",
     }
 }
@@ -538,7 +538,7 @@ mod tests {
     fn kind_label_maps_mtr_and_latency() {
         let req = RunMeasurementBatchRequest {
             batch_id: 0,
-            kind: MeasurementKind::Mtr as i32,
+            kind: WireMeasurementKind::Mtr as i32,
             protocol: Protocol::Icmp as i32,
             probe_count: 1,
             timeout_ms: 0,
@@ -547,10 +547,53 @@ mod tests {
         };
         assert_eq!(kind_label(&req), "mtr");
         let req = RunMeasurementBatchRequest {
-            kind: MeasurementKind::Latency as i32,
+            kind: WireMeasurementKind::Latency as i32,
             ..req
         };
         assert_eq!(kind_label(&req), "latency");
+    }
+
+    fn sample_pending(pair_id: i64, kind: MeasurementKind, probe_count: i16) -> PendingPair {
+        PendingPair {
+            pair_id,
+            campaign_id: uuid::Uuid::nil(),
+            source_agent_id: "agent-x".into(),
+            destination_ip: "198.51.100.7".parse().unwrap(),
+            probe_count,
+            timeout_ms: 2_000,
+            probe_stagger_ms: 100,
+            force_measurement: false,
+            protocol: ProbeProtocol::Icmp,
+            kind,
+        }
+    }
+
+    fn fresh_dispatcher() -> RpcDispatcher {
+        let tunnels = Arc::new(meshmon_revtunnel::TunnelManager::new());
+        let registry = Arc::new(AgentRegistry::new(
+            sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool"),
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+        ));
+        let writer =
+            SettleWriter::new(sqlx::PgPool::connect_lazy("postgres://unused").expect("lazy pool"));
+        RpcDispatcher::new(
+            tunnels, registry, writer, /*default*/ 4, /*rps*/ 100, 1024,
+        )
+    }
+
+    #[tokio::test]
+    async fn build_request_kind_follows_pair_kind() {
+        let disp = fresh_dispatcher();
+        // DetailMtr → wire MTR.
+        let req = disp.build_request(&[sample_pending(1, MeasurementKind::DetailMtr, 1)]);
+        assert_eq!(req.kind, WireMeasurementKind::Mtr as i32);
+        // Campaign → wire Latency even when probe_count happens to be 1.
+        let req = disp.build_request(&[sample_pending(2, MeasurementKind::Campaign, 1)]);
+        assert_eq!(req.kind, WireMeasurementKind::Latency as i32);
+        // DetailPing → wire Latency.
+        let req = disp.build_request(&[sample_pending(3, MeasurementKind::DetailPing, 250)]);
+        assert_eq!(req.kind, WireMeasurementKind::Latency as i32);
     }
 
     #[test]

@@ -136,6 +136,59 @@ async fn pairs_endpoint_filters_by_state() {
 }
 
 #[tokio::test]
+async fn get_one_pair_counts_excludes_detail_rows() {
+    // `GET /api/campaigns/:id` returns baseline `pair_counts`. Detail
+    // rows have independent state and must not inflate baseline
+    // pending/dispatched/settled counters that operators read to track
+    // campaign completion.
+    let h = common::HttpHarness::start().await;
+
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "http-pair-counts-detail",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-pc1"],
+                "destination_ips": ["198.51.100.240"],
+            }),
+        )
+        .await;
+    let id = created["id"].as_str().expect("id is string");
+
+    // Seed a detail_mtr row on a different destination so it is not
+    // collapsed onto the baseline row under the 4-col UNIQUE.
+    let uuid_id: uuid::Uuid = id.parse().expect("id is uuid");
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, kind) \
+         VALUES ($1::uuid, 'agent-pc1', '198.51.100.241'::inet, \
+                 'pending', 'detail_mtr')",
+    )
+    .bind(uuid_id)
+    .execute(&h.state.pool)
+    .await
+    .expect("seed detail_mtr row");
+
+    let got: serde_json::Value = h.get_json(&format!("/api/campaigns/{id}")).await;
+    let counts = got["pair_counts"]
+        .as_array()
+        .expect("pair_counts array present");
+    // Exactly one baseline pair seeded, all `pending`; the detail_mtr
+    // row must NOT appear in the aggregate.
+    let pending_total: i64 = counts
+        .iter()
+        .filter(|c| c[0] == "pending")
+        .map(|c| c[1].as_i64().unwrap_or(0))
+        .sum();
+    assert_eq!(
+        pending_total, 1,
+        "only baseline pair counted; got: {counts:?}"
+    );
+}
+
+#[tokio::test]
 async fn patch_rejects_blank_title() {
     // `create` refuses a blank title (handler check at create-time).
     // PATCH must mirror that invariant so an existing campaign can't

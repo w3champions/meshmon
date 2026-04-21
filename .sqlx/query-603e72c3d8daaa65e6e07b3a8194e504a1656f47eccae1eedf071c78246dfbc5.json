@@ -1,0 +1,92 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms, results\n             FROM campaign_evaluations WHERE campaign_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "campaign_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "evaluated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "loss_threshold_pct",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 4,
+        "name": "stddev_weight",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 5,
+        "name": "evaluation_mode: EvaluationMode",
+        "type_info": {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "baseline_pair_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "candidates_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "candidates_good",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "avg_improvement_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 10,
+        "name": "results",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "603e72c3d8daaa65e6e07b3a8194e504a1656f47eccae1eedf071c78246dfbc5"
+}

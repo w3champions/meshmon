@@ -914,6 +914,74 @@ pub async fn insert_agent_with_ip(pool: &PgPool, id: &str, ip: std::net::IpAddr)
     .unwrap_or_else(|e| panic!("insert_agent_with_ip({id}, {ip}) failed: {e}"));
 }
 
+/// Seed campaign-kind measurements for an existing campaign.
+///
+/// For each `(src, dst, rtt_ms, stddev_ms, loss_pct)`, inserts a
+/// `measurements` row + upserts the matching `campaign_pairs` row to
+/// point at the new measurement (kind `'campaign'`, resolution
+/// `'succeeded'`). The campaign's other knobs (protocol, probe_count)
+/// stay at the campaign's catalog defaults — this helper exists to
+/// short-circuit the dispatch path for evaluator tests, not to
+/// replicate the full settle-writer.
+pub async fn seed_measurements(
+    pool: &PgPool,
+    campaign_id: &str,
+    rows: &[(&str, &str, f32, f32, f32)],
+) {
+    let campaign_uuid: Uuid = campaign_id.parse().expect("campaign_id is a uuid");
+    for (src, dst, rtt, stddev, loss) in rows {
+        let m_id: i64 = sqlx::query_scalar(
+            "INSERT INTO measurements \
+                 (source_agent_id, destination_ip, protocol, probe_count, \
+                  latency_avg_ms, latency_stddev_ms, loss_pct, kind) \
+             VALUES ($1, $2::inet, 'icmp', 10, $3, $4, $5, 'campaign') \
+             RETURNING id",
+        )
+        .bind(src)
+        .bind(dst)
+        .bind(rtt)
+        .bind(stddev)
+        .bind(loss)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed_measurements insert measurement ({src} -> {dst}): {e}"));
+        sqlx::query(
+            "INSERT INTO campaign_pairs \
+                 (campaign_id, source_agent_id, destination_ip, \
+                  resolution_state, measurement_id, kind) \
+             VALUES ($1, $2, $3::inet, 'succeeded', $4, 'campaign') \
+             ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) \
+               DO UPDATE SET measurement_id   = EXCLUDED.measurement_id, \
+                             resolution_state = 'succeeded'",
+        )
+        .bind(campaign_uuid)
+        .bind(src)
+        .bind(dst)
+        .bind(m_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed_measurements upsert campaign_pair ({src} -> {dst}): {e}"));
+    }
+}
+
+/// Force a campaign into `state='completed'` for tests that need to
+/// short-circuit the dispatch loop (e.g. evaluator coverage without
+/// running the scheduler). Mirrors the columns
+/// [`meshmon_service::campaign::repo::transition_state`] would update
+/// on a natural running → completed transition.
+pub async fn mark_completed(pool: &PgPool, campaign_id: &str) {
+    let id: Uuid = campaign_id.parse().expect("campaign_id is a uuid");
+    sqlx::query(
+        "UPDATE measurement_campaigns \
+             SET state = 'completed', completed_at = now() \
+           WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("mark_completed({campaign_id}) failed: {e}"));
+}
+
 /// Response-body byte ceiling for `HttpHarness` helpers. 4 MiB is
 /// enough for every catalogue response the integration tests send and
 /// receive today; larger payloads should build requests by hand so the
@@ -1435,6 +1503,80 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
             .await
             .expect("collect body bytes");
         serde_json::from_slice::<T>(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
+    }
+
+    /// Fire a `POST` with a JSON body, assert the response status equals
+    /// `expected_status`, and return the parsed JSON body. Unlike
+    /// [`Self::post_json`] which panics on non-200, this is the dedicated
+    /// path for tests that deliberately expect a 4xx/5xx envelope and
+    /// want to assert on its `error` code.
+    pub async fn post_expect_status(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        expected_status: u16,
+    ) -> serde_json::Value {
+        use axum::http::{header, Request};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("build POST request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        assert_eq!(
+            status.as_u16(),
+            expected_status,
+            "POST {path} expected {expected_status}, got {status}; body = {:?}",
+            String::from_utf8_lossy(&bytes),
+        );
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
+    }
+
+    /// Fire a `GET`, assert the response status equals `expected_status`,
+    /// and return the parsed JSON body. Dedicated path for non-200 error
+    /// envelopes — [`Self::get_json`] panics on non-200.
+    pub async fn get_expect_status(&self, path: &str, expected_status: u16) -> serde_json::Value {
+        use axum::http::{header, Request};
+        use tower::util::ServiceExt;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::COOKIE, &self.cookie)
+            .body(axum::body::Body::empty())
+            .expect("build GET request");
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("oneshot dispatch");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("collect body bytes");
+        assert_eq!(
+            status.as_u16(),
+            expected_status,
+            "GET {path} expected {expected_status}, got {status}; body = {:?}",
+            String::from_utf8_lossy(&bytes),
+        );
+        serde_json::from_slice::<serde_json::Value>(&bytes)
             .unwrap_or_else(|e| panic!("decode {path} body: {e}; raw = {:?}", &bytes))
     }
 

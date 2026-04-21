@@ -27,10 +27,14 @@ Measurement-campaign subsystem.
   `measurement_campaigns_notify` trigger on lifecycle changes.
 - `campaign_pair_settled` — fired by `SettleWriter` inside the settle
   transaction on every successful terminal UPDATE.
+- `campaign_evaluated` — fired by the `campaign_evaluations_notify`
+  trigger on INSERT / UPDATE of `campaign_evaluations`. Drives the
+  cross-instance `evaluated` SSE fan-out.
 
-Both payloads are the campaign UUID as text. Constants live in
+All payloads are the campaign UUID as text. Constants live in
 `events.rs`; a unit test pins each name. The scheduler listens on
-both via `PgListener::listen_all`.
+the first two; the SSE listener listens on all three via
+`PgListener::listen_all`.
 
 ## Files
 
@@ -51,6 +55,10 @@ both via `PgListener::listen_all`.
 - `sse.rs` — `/api/campaigns/stream` handler; subscribes to the broker
   and serializes events as `Event::data` frames.
 - `dto.rs` — wire DTOs; `utoipa::ToSchema` on every public type.
+- `eval.rs` — pure-function evaluator core. Builds the (A,B,X) triple
+  matrix from attributed measurements, applies the mode-specific
+  predicate (diversity / optimization), serialises to the JSONB shape
+  persisted in `campaign_evaluations`.
 - `handlers.rs` — axum handlers for every campaign HTTP endpoint.
 
 ## SSE event stream
@@ -68,6 +76,7 @@ Every frame is a single-line `data:` payload carrying JSON with a top-level
 |------------------|------------------------------------------------|----------------------------------------------------------------------------------|
 | `state_changed`  | `campaign_id: uuid`, `state: CampaignState`    | Campaign moved into `state` (handler call or scheduler-driven `running→completed`) |
 | `pair_settled`   | `campaign_id: uuid`                            | `SettleWriter` terminally resolved a pair belonging to `campaign_id`             |
+| `evaluated`      | `campaign_id: uuid`                            | `campaign_evaluations` INSERT / UPDATE for `campaign_id` (fired by the `campaign_evaluations_notify` trigger; fanned out via `campaign_evaluated`) |
 | `lag`            | `missed: u64`                                  | Subscriber fell behind the broker's 512-slot buffer; re-fetch to reconcile       |
 
 The `lag` frame is synthetic — emitted by the SSE handler when the

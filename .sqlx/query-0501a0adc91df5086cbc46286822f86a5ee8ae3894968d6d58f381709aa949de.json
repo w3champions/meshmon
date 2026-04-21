@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, campaign_id, source_agent_id, destination_ip,\n               resolution_state AS \"resolution_state: PairResolutionState\",\n               measurement_id, dispatched_at, settled_at, attempt_count, last_error\n          FROM campaign_pairs\n         WHERE campaign_id = $1\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY id\n         LIMIT $3\n        ",
+  "query": "\n        SELECT id, campaign_id, source_agent_id, destination_ip,\n               resolution_state AS \"resolution_state: PairResolutionState\",\n               measurement_id, dispatched_at, settled_at, attempt_count, last_error,\n               kind AS \"kind: MeasurementKind\"\n          FROM campaign_pairs\n         WHERE campaign_id = $1\n           AND kind = 'campaign'\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY id\n         LIMIT $3\n        ",
   "describe": {
     "columns": [
       {
@@ -66,6 +66,22 @@
         "ordinal": 9,
         "name": "last_error",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "kind: MeasurementKind",
+        "type_info": {
+          "Custom": {
+            "name": "measurement_kind",
+            "kind": {
+              "Enum": [
+                "campaign",
+                "detail_ping",
+                "detail_mtr"
+              ]
+            }
+          }
+        }
       }
     ],
     "parameters": {
@@ -106,8 +122,9 @@
       true,
       true,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "f5d62c0d5d96bf319b1dae658ee3b2fa5028a8cd0d48f85e2d995e339a2b186c"
+  "hash": "0501a0adc91df5086cbc46286822f86a5ee8ae3894968d6d58f381709aa949de"
 }

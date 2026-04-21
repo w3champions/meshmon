@@ -29,7 +29,7 @@
 
 use super::dispatch::PendingPair;
 use super::events::PAIR_SETTLED_CHANNEL;
-use super::model::{PairResolutionState, ProbeProtocol};
+use super::model::{MeasurementKind, PairResolutionState, ProbeProtocol};
 use crate::ingestion::json_shapes::{HopIpJson, HopJson};
 use meshmon_protocol::pb::measurement_result::Outcome;
 use meshmon_protocol::{HopSummary, MeasurementFailureCode, MeasurementResult};
@@ -141,6 +141,11 @@ impl SettleWriter {
             Option<&'static str>,
         ) = match &result.outcome {
             Some(Outcome::Success(s)) => {
+                // Latency path handles both `campaign` and `detail_ping`
+                // dispatches — propagate the pair's kind onto the
+                // measurement row rather than hardcoding `campaign`, or
+                // detail-ping results would be indistinguishable from
+                // baseline data in `measurements.kind`.
                 let m_id: i64 = sqlx::query_scalar!(
                     r#"
                     INSERT INTO measurements
@@ -150,7 +155,7 @@ impl SettleWriter {
                          loss_pct, kind)
                     VALUES ($1, $2, $3::probe_protocol, $4,
                             $5, $6, $7, $8, $9, $10, $11,
-                            'campaign'::measurement_kind)
+                            $12::measurement_kind)
                     RETURNING id
                     "#,
                     pair.source_agent_id,
@@ -164,6 +169,7 @@ impl SettleWriter {
                     s.latency_max_ms,
                     s.latency_stddev_ms,
                     s.loss_pct,
+                    pair.kind as MeasurementKind,
                 )
                 .fetch_one(&mut *tx)
                 .await?;
@@ -191,18 +197,25 @@ impl SettleWriter {
                 )
                 .fetch_one(&mut *tx)
                 .await?;
+                // MTR path: today only `detail_mtr` pairs dispatch as
+                // MTR (see `rpc_dispatcher::build_request`), so
+                // `pair.kind` is always `DetailMtr` here. Binding the
+                // pair's actual kind instead of hardcoding the literal
+                // keeps the measurement row honest if a future dispatch
+                // policy ever routes a campaign-kind pair through MTR.
                 let m_id: i64 = sqlx::query_scalar!(
                     r#"
                     INSERT INTO measurements
                         (source_agent_id, destination_ip, protocol, probe_count,
                          loss_pct, kind, mtr_id)
                     VALUES ($1, $2, $3::probe_protocol, 1,
-                            0.0, 'detail_mtr'::measurement_kind, $4)
+                            0.0, $4::measurement_kind, $5)
                     RETURNING id
                     "#,
                     pair.source_agent_id,
                     IpNetwork::from(pair.destination_ip),
                     pair.protocol as ProbeProtocol,
+                    pair.kind as MeasurementKind,
                     trace_id,
                 )
                 .fetch_one(&mut *tx)

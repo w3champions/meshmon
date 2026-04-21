@@ -173,6 +173,7 @@ async fn seed_dispatched_batch(
             probe_stagger_ms: campaign.probe_stagger_ms,
             force_measurement: campaign.force_measurement,
             protocol: campaign.protocol,
+            kind: r.kind,
         })
         .collect();
     (campaign.id, pending)

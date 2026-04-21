@@ -19,7 +19,7 @@ mod common;
 
 use common::SseStream;
 use futures::StreamExt;
-use meshmon_service::campaign::events::PAIR_SETTLED_CHANNEL;
+use meshmon_service::campaign::events::{EVALUATED_CHANNEL, PAIR_SETTLED_CHANNEL};
 use meshmon_service::campaign::listener::spawn_campaign_listener;
 use meshmon_service::state::AppState;
 use sqlx::PgPool;
@@ -265,5 +265,42 @@ async fn pair_settled_arrives_when_notify_fires() {
     assert!(
         saw_settled,
         "expected pair_settled frame for campaign {campaign_id}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn evaluated_arrives_when_notify_fires() {
+    // Cross-instance fan-out for `/evaluate`. The
+    // `campaign_evaluations_notify` trigger fires `NOTIFY
+    // campaign_evaluated` in the same tx as the UPSERT; the listener
+    // translates it to a `CampaignStreamEvent::Evaluated`, which the
+    // SSE handler renders as `{"kind":"evaluated","campaign_id":"…"}`.
+    // Firing NOTIFY directly isolates the listener branch from the
+    // full `/evaluate` handler surface.
+    let h = CampaignSseHarness::start().await;
+
+    let mut sse = h.sse("/api/campaigns/stream").await;
+
+    let campaign_id = uuid::Uuid::new_v4();
+
+    sqlx::query("SELECT pg_notify($1, $2::text)")
+        .bind(EVALUATED_CHANNEL)
+        .bind(campaign_id.to_string())
+        .execute(&h.pool)
+        .await
+        .expect("fire pg_notify");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_evaluated = false;
+    while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, sse.next()).await {
+        let ev = frame.expect("sse frame parse");
+        if ev["kind"] == "evaluated" && ev["campaign_id"] == campaign_id.to_string() {
+            saw_evaluated = true;
+            break;
+        }
+    }
+    assert!(
+        saw_evaluated,
+        "expected evaluated frame for campaign {campaign_id}"
     );
 }

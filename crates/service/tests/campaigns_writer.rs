@@ -17,7 +17,7 @@ use meshmon_protocol::{
     MeasurementSummary, MtrTraceResult,
 };
 use meshmon_service::campaign::dispatch::PendingPair;
-use meshmon_service::campaign::model::ProbeProtocol;
+use meshmon_service::campaign::model::{MeasurementKind, ProbeProtocol};
 use meshmon_service::campaign::repo::{self, CreateInput};
 use meshmon_service::campaign::writer::{SettleOutcome, SettleWriter};
 use sqlx::PgPool;
@@ -81,6 +81,7 @@ fn mk_pair(campaign_id: uuid::Uuid, pair_id: i64, dest: IpAddr) -> PendingPair {
         probe_stagger_ms: 100,
         force_measurement: false,
         protocol: ProbeProtocol::Icmp,
+        kind: MeasurementKind::Campaign,
     }
 }
 
@@ -136,8 +137,10 @@ async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
     assert!(measurement_id.is_some());
     assert!(last_error.is_none());
 
-    // The inserted measurement must be a campaign-kind row with the
-    // agent's stats; the writer never writes detail_* kinds on success.
+    // The inserted measurement must carry the dispatching pair's kind;
+    // `mk_pair` uses `MeasurementKind::Campaign`, so the row must be
+    // `kind='campaign'`. See `settle_detail_ping_success_writes_detail_kind`
+    // for the `/detail`-path assertion.
     let m_id = measurement_id.unwrap();
     let (kind, probe_count, loss_pct): (String, i16, f32) =
         sqlx::query_as("SELECT kind::text, probe_count, loss_pct FROM measurements WHERE id = $1")
@@ -148,6 +151,44 @@ async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
     assert_eq!(kind, "campaign");
     assert_eq!(probe_count, 10);
     assert_eq!(loss_pct, 0.0);
+
+    repo::delete(&pool, campaign_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn settle_detail_ping_success_writes_detail_kind() {
+    // A `detail_ping` pair dispatched through the latency RPC path must
+    // persist `measurements.kind = 'detail_ping'`, not `'campaign'`.
+    // Without this, detail data is indistinguishable from baseline in
+    // the measurements table and the evaluator's reuse window can bind
+    // baseline pairs to detail measurements with no way to tell.
+    let pool = common::shared_migrated_pool().await.clone();
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
+    let writer = SettleWriter::new(pool.clone());
+
+    let mut pair = mk_pair(campaign_id, pair_id, dest);
+    pair.kind = MeasurementKind::DetailPing;
+
+    let settled = writer.settle(&pair, &ok_result(pair_id)).await.unwrap();
+    assert_eq!(settled, SettleOutcome::Settled);
+
+    let m_id: i64 = sqlx::query_scalar(
+        "SELECT measurement_id FROM campaign_pairs WHERE id = $1 AND measurement_id IS NOT NULL",
+    )
+    .bind(pair_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let kind: String = sqlx::query_scalar("SELECT kind::text FROM measurements WHERE id = $1")
+        .bind(m_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        kind, "detail_ping",
+        "detail_ping pair must persist measurements.kind=detail_ping"
+    );
 
     repo::delete(&pool, campaign_id).await.unwrap();
 }
@@ -341,10 +382,14 @@ async fn settle_mtr_writes_trace_and_links_measurement() {
         })),
     };
 
-    writer
-        .settle(&mk_pair(campaign_id, pair_id, dest), &result)
-        .await
-        .expect("settle");
+    // MTR outcomes only ever come from `DetailMtr` pairs (the only
+    // kind the RPC dispatcher routes through `MeasurementKind::Mtr`),
+    // and the writer now derives `measurements.kind` from the pair's
+    // kind. Match that invariant explicitly in the fixture.
+    let mut pair = mk_pair(campaign_id, pair_id, dest);
+    pair.kind = MeasurementKind::DetailMtr;
+
+    writer.settle(&pair, &result).await.expect("settle");
 
     let (state, measurement_id): (String, Option<i64>) = sqlx::query_as(
         "SELECT resolution_state::text, measurement_id FROM campaign_pairs WHERE id = $1",

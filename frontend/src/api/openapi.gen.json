@@ -582,6 +582,93 @@
         }
       }
     },
+    "/api/campaigns/{id}/detail": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns/{id}/detail` — enqueue detail-ping + detail-mtr\nrows for a slice of `(source_agent, destination_ip)` pairs.",
+        "description": "Gated on `state IN ('completed','evaluated')`. The three scopes:\n\n- `all`: every `kind='campaign'` pair whose baseline resolution\n  `succeeded` or `reused`. Selects directly from `campaign_pairs`\n  because an evaluation row is not required for this scope.\n- `good_candidates`: pulls the persisted evaluation row and expands\n  each qualifying `(source_agent, destination_agent, transit_ip)`\n  triple into a pair of `(source_agent → transit_ip)` +\n  `(destination_agent → transit_ip)` detail entries so both legs\n  get a higher-resolution measurement. Requires a prior evaluation;\n  400 with `no_evaluation` otherwise.\n- `pair`: a single operator-chosen `(source_agent_id,\n  destination_ip)` tuple from the request body.\n\nAll scopes flow through [`repo::insert_detail_pairs`], which owns\nthe transition back to `running` and emits `campaign_state_changed`\nthrough the Postgres NOTIFY trigger. The campaign SSE listener\ntranslates that NOTIFY into a broker broadcast for every\nsubscriber (same-instance and peers) — this handler does not\npublish to the in-process broker directly, to avoid sending a\nduplicate `state_changed` frame on the request's own instance.\nNo-op detail inserts (inserted == 0 or an already-`running` race)\ndon't touch `state`, so the trigger stays silent correctly.",
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Pairs enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad scope payload or no_evaluation precondition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Campaign not in completed/evaluated state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/campaigns/{id}/edit": {
       "post": {
         "tags": [
@@ -648,6 +735,140 @@
           },
           "409": {
             "description": "Illegal state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/evaluate": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.",
+        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_pct` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nReturns 422 (`no_baseline_pairs`) when the evaluator finds no\nagent→agent baseline — the campaign must include at least one pair\nwhose destination IP belongs to a registered agent.",
+        "operationId": "evaluate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evaluation written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Campaign not in completed/evaluated state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No baseline (agent→agent) pairs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{id}/evaluation": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns/{id}/evaluation` — read-through on the persisted\nevaluation row.",
+        "description": "404 (`not_evaluated`) when the campaign has never been evaluated.\nThe same snake_case envelope pattern as every other handler lets the\nSPA's shared error layer branch on the stable code without parsing\nprose.",
+        "operationId": "get_evaluation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evaluation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not evaluated",
             "content": {
               "application/json": {
                 "schema": {
@@ -2550,6 +2771,27 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "The campaign's `campaign_evaluations` row was rewritten. Emitted\nby the `POST /api/campaigns/:id/evaluate` handler after the\nevaluation is persisted. Distinct from `StateChanged` because\nre-evaluating an already-`Evaluated` campaign does not transition\nstate, yet must still invalidate the frontend's evaluation query\ncache.",
+            "required": [
+              "campaign_id",
+              "kind"
+            ],
+            "properties": {
+              "campaign_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Primary key of the campaign whose evaluation was rewritten."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "evaluated"
+                ]
+              }
+            }
           }
         ],
         "description": "Campaign lifecycle event delivered to every SSE subscriber.\n\nThe `tag = \"kind\"` serde representation matches the wire shape the\nfrontend expects: one top-level `kind` discriminant plus flat\nper-variant fields. Keep variant names in `snake_case` on the wire."
@@ -2959,6 +3201,76 @@
           }
         }
       },
+      "DetailPairIdentifier": {
+        "type": "object",
+        "description": "Pair coordinates for [`DetailScope::Pair`] requests.",
+        "required": [
+          "source_agent_id",
+          "destination_ip"
+        ],
+        "properties": {
+          "destination_ip": {
+            "type": "string",
+            "description": "Destination IP of the pair to re-measure."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent id of the pair to re-measure."
+          }
+        }
+      },
+      "DetailRequest": {
+        "type": "object",
+        "description": "Body for `POST /api/campaigns/{id}/detail`.",
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "pair": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailPairIdentifier",
+                "description": "Required iff scope == \"pair\". Rejected on other scopes."
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DetailScope",
+            "description": "Which slice of candidates to enqueue for re-measurement."
+          }
+        }
+      },
+      "DetailResponse": {
+        "type": "object",
+        "description": "Response body for `POST /api/campaigns/{id}/detail`.",
+        "required": [
+          "pairs_enqueued",
+          "campaign_state"
+        ],
+        "properties": {
+          "campaign_state": {
+            "$ref": "#/components/schemas/CampaignState",
+            "description": "Campaign state after enqueueing (typically `running`)."
+          },
+          "pairs_enqueued": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of detail pairs enqueued by this request."
+          }
+        }
+      },
+      "DetailScope": {
+        "type": "string",
+        "description": "Which slice of candidates the detail-trigger handler should re-measure.",
+        "enum": [
+          "all",
+          "good_candidates",
+          "pair"
+        ]
+      },
       "EditCampaignRequest": {
         "type": "object",
         "description": "Body for `POST /api/campaigns/{id}/edit`.",
@@ -3026,6 +3338,170 @@
           }
         }
       },
+      "EvaluationCandidateDto": {
+        "type": "object",
+        "description": "Per-candidate transit destination scoring row.",
+        "required": [
+          "destination_ip",
+          "is_mesh_member",
+          "pairs_improved",
+          "pairs_total_considered",
+          "composite_score",
+          "pair_details"
+        ],
+        "properties": {
+          "asn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Catalogue ASN, when present."
+          },
+          "avg_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Average improvement (ms) across considered pairs. Defined as\n`direct_rtt − transit_rtt − (transit_stddev_penalty − direct_stddev_penalty)`,\nso a positive value means the transit candidate is faster than\nthe direct A→B baseline."
+          },
+          "avg_loss_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Average compound loss (percent) across transit triples that\ncleared the loss gate during scoring."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Catalogue city, when present."
+          },
+          "composite_score": {
+            "type": "number",
+            "format": "float",
+            "description": "Composite score `(pairs_improved / baseline_pair_count) ×\navg_improvement_ms`; higher is better. Candidates are returned\nin descending composite-score order."
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Catalogue ISO country code, when present."
+          },
+          "destination_ip": {
+            "type": "string",
+            "description": "Transit destination IP as a bare host string."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-facing label from the catalogue, when present."
+          },
+          "is_mesh_member": {
+            "type": "boolean",
+            "description": "True when destination_ip appears in agents.ip. UI renders a\n\"mesh member — no acquisition needed\" badge."
+          },
+          "network_operator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Catalogue network operator, when present."
+          },
+          "pair_details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvaluationPairDetailDto"
+            },
+            "description": "Per-pair scoring detail for this candidate."
+          },
+          "pairs_improved": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of baseline pairs this candidate improved."
+          },
+          "pairs_total_considered": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of baseline pairs this candidate was scored against."
+          }
+        }
+      },
+      "EvaluationDto": {
+        "type": "object",
+        "description": "Wire shape for `GET /api/campaigns/{id}/evaluation`.\n\nAlso the exact JSON persisted into `campaign_evaluations.results` —\nthe evaluator serialises [`EvaluationResultsDto`] directly into the\nJSONB column so the read handler can hand the stored document back\nto the client without rehydrating through a domain model.",
+        "required": [
+          "campaign_id",
+          "evaluated_at",
+          "loss_threshold_pct",
+          "stddev_weight",
+          "evaluation_mode",
+          "baseline_pair_count",
+          "candidates_total",
+          "candidates_good",
+          "results"
+        ],
+        "properties": {
+          "avg_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Average end-to-end improvement (ms) across qualifying candidates.\nSame sign convention as\n[`EvaluationCandidateDto::avg_improvement_ms`] — positive means\nthe transit beats the direct A→B baseline. `None` when no\ncandidate qualified."
+          },
+          "baseline_pair_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of `(source, destination)` baseline pairs considered."
+          },
+          "campaign_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Owning campaign."
+          },
+          "candidates_good": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidate transit destinations that cleared the `qualifies` bar."
+          },
+          "candidates_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total candidate transit destinations scored."
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the evaluator produced this result set."
+          },
+          "evaluation_mode": {
+            "$ref": "#/components/schemas/EvaluationMode",
+            "description": "Evaluation strategy that produced this result."
+          },
+          "loss_threshold_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Loss-rate threshold (percent) that was applied."
+          },
+          "results": {
+            "$ref": "#/components/schemas/EvaluationResultsDto",
+            "description": "Full candidate breakdown + unqualified-reason map."
+          },
+          "stddev_weight": {
+            "type": "number",
+            "format": "float",
+            "description": "Weight applied to RTT stddev during scoring."
+          }
+        }
+      },
       "EvaluationMode": {
         "type": "string",
         "description": "Evaluation strategy for the campaign's result-aggregation pass\n(spec 04). Storage here; consumed by T48.",
@@ -3033,6 +3509,118 @@
           "diversity",
           "optimization"
         ]
+      },
+      "EvaluationPairDetailDto": {
+        "type": "object",
+        "description": "Per-pair scoring row inside an [`EvaluationCandidateDto`].",
+        "required": [
+          "source_agent_id",
+          "destination_agent_id",
+          "destination_ip",
+          "direct_rtt_ms",
+          "direct_stddev_ms",
+          "direct_loss_pct",
+          "transit_rtt_ms",
+          "transit_stddev_ms",
+          "transit_loss_pct",
+          "improvement_ms",
+          "qualifies"
+        ],
+        "properties": {
+          "destination_agent_id": {
+            "type": "string",
+            "description": "Destination agent id of the baseline pair."
+          },
+          "destination_ip": {
+            "type": "string",
+            "description": "Transit destination IP (also a candidate key)."
+          },
+          "direct_loss_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Direct A→B observed loss (percent)."
+          },
+          "direct_rtt_ms": {
+            "type": "number",
+            "format": "float",
+            "description": "Direct A→B RTT (ms)."
+          },
+          "direct_stddev_ms": {
+            "type": "number",
+            "format": "float",
+            "description": "Direct A→B RTT stddev (ms)."
+          },
+          "improvement_ms": {
+            "type": "number",
+            "format": "float",
+            "description": "`direct_rtt − transit_rtt − (transit_stddev_penalty −\ndirect_stddev_penalty)`; positive means the transit beats the\ndirect A→B baseline by that many ms after stddev-penalty\nadjustment."
+          },
+          "mtr_measurement_id_ax": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "FK to the `measurements` row covering A→X, when available."
+          },
+          "mtr_measurement_id_xb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "FK to the `measurements` row covering X→B, when available."
+          },
+          "qualifies": {
+            "type": "boolean",
+            "description": "Whether this pair cleared the evaluator's qualify predicate."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent id of the baseline pair."
+          },
+          "transit_loss_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Composed A→X→B transit observed loss (percent)."
+          },
+          "transit_rtt_ms": {
+            "type": "number",
+            "format": "float",
+            "description": "Composed A→X→B transit RTT (ms)."
+          },
+          "transit_stddev_ms": {
+            "type": "number",
+            "format": "float",
+            "description": "Composed A→X→B transit RTT stddev (ms)."
+          }
+        }
+      },
+      "EvaluationResultsDto": {
+        "type": "object",
+        "description": "Candidate breakdown persisted in `campaign_evaluations.results`.",
+        "required": [
+          "candidates"
+        ],
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvaluationCandidateDto"
+            },
+            "description": "Per-candidate scoring rows, ordered by composite score."
+          },
+          "unqualified_reasons": {
+            "type": "object",
+            "description": "Keyed by destination IP (string); value is an explanatory\nsentence the UI renders verbatim.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
       },
       "FacetsResponse": {
         "type": "object",

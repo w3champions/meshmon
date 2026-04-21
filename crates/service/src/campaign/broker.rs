@@ -58,6 +58,16 @@ pub enum CampaignStreamEvent {
         /// Primary key of the campaign owning the settled pair.
         campaign_id: Uuid,
     },
+    /// The campaign's `campaign_evaluations` row was rewritten. Emitted
+    /// by the `POST /api/campaigns/:id/evaluate` handler after the
+    /// evaluation is persisted. Distinct from `StateChanged` because
+    /// re-evaluating an already-`Evaluated` campaign does not transition
+    /// state, yet must still invalidate the frontend's evaluation query
+    /// cache.
+    Evaluated {
+        /// Primary key of the campaign whose evaluation was rewritten.
+        campaign_id: Uuid,
+    },
 }
 
 /// In-process fan-out broker for [`CampaignStreamEvent`]s.
@@ -189,5 +199,14 @@ mod tests {
         let json = serde_json::to_value(&settled).expect("serialize pair_settled");
         assert_eq!(json["kind"], "pair_settled");
         assert_eq!(json["campaign_id"], id.to_string());
+    }
+
+    #[test]
+    fn evaluated_event_wire_name() {
+        let ev = CampaignStreamEvent::Evaluated {
+            campaign_id: Uuid::nil(),
+        };
+        let j = serde_json::to_value(&ev).unwrap();
+        assert_eq!(j["kind"], "evaluated");
     }
 }

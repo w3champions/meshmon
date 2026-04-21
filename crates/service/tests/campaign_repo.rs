@@ -8,7 +8,7 @@
 mod common;
 
 use meshmon_service::campaign::model::{
-    CampaignState, EvaluationMode, PairResolutionState, ProbeProtocol,
+    CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, ProbeProtocol,
 };
 use meshmon_service::campaign::repo::{self, CreateInput, EditInput, RepoError};
 use std::net::IpAddr;
@@ -305,6 +305,45 @@ async fn list_pairs_filters_by_state_and_limit() {
 }
 
 #[tokio::test]
+async fn list_pairs_excludes_detail_rows() {
+    // `GET /api/campaigns/:id/pairs` is baseline-only. Without this
+    // filter, `/detail`-triggered rows would surface as duplicate-
+    // looking entries on the same `(source, destination)` tuple
+    // because `PairDto` does not expose `kind`.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-list-pairs-detail"))
+        .await
+        .unwrap();
+
+    // Seed a detail_mtr row sharing a tuple with one of the baseline
+    // pairs `make_input` inserted.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, kind) \
+         VALUES ($1::uuid, 'agent-a', '198.51.100.1'::inet, \
+                 'pending', 'detail_mtr')",
+    )
+    .bind(row.id)
+    .execute(&pool)
+    .await
+    .expect("seed detail_mtr row");
+
+    let pairs = repo::list_pairs(&pool, row.id, &[], 100).await.unwrap();
+    assert_eq!(
+        pairs.len(),
+        4,
+        "only baseline rows returned; detail_mtr excluded"
+    );
+    assert!(
+        pairs.iter().all(|p| p.kind == MeasurementKind::Campaign),
+        "every row must carry kind=Campaign"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn preview_dispatch_count_returns_total_reusable_fresh() {
     let pool = common::shared_migrated_pool().await;
 
@@ -388,10 +427,15 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
     input.destination_ips = vec![dst];
     let row = repo::create(&pool, input).await.unwrap();
 
-    // Seed a reusable measurement younger than 24 h.
+    // Seed a reusable measurement younger than 24 h. `resolve_reuse`
+    // now filters `m.latency_avg_ms IS NOT NULL` (see repo.rs comment)
+    // so RTT-less rows can never bind to a baseline pair; seed a
+    // populated RTT here to exercise the happy-path match.
     let measurement_id: i64 = sqlx::query_scalar(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
-         VALUES ($1, $2, 'icmp', 10, 0.0) RETURNING id",
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
     .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
@@ -731,6 +775,80 @@ async fn force_pair_preserves_started_at_on_running_campaign() {
 }
 
 #[tokio::test]
+async fn force_pair_targets_baseline_only_when_detail_rows_coexist() {
+    // After the T5 widening, the 4-col UNIQUE key lets campaign +
+    // detail_ping + detail_mtr rows coexist on the same (agent, ip)
+    // tuple. `force_pair` must scope to `kind='campaign'` — otherwise
+    // sqlx's `fetch_optional` on `RETURNING id` sees >1 rows and errors
+    // out, and the detail rows get silently reset.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-force-detail-coexist"))
+        .await
+        .unwrap();
+    let agent = "agent-a".to_string();
+    let dst = IpAddr::from_str("198.51.100.1").unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+    sqlx::query(
+        "UPDATE campaign_pairs SET resolution_state='succeeded', settled_at=now() \
+         WHERE campaign_id = $1",
+    )
+    .bind(row.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    repo::maybe_complete(&pool, row.id).await.unwrap();
+
+    // Seed a detail_mtr row on the same tuple, in `succeeded` state —
+    // force_pair must leave this alone.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, settled_at, kind) \
+         VALUES ($1::uuid, $2, $3, 'succeeded', now(), 'detail_mtr')",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .execute(&pool)
+    .await
+    .expect("seed detail_mtr row");
+
+    let forced = repo::force_pair(&pool, row.id, &agent, dst).await.unwrap();
+    assert_eq!(forced.state, CampaignState::Running);
+
+    let baseline_state: String = sqlx::query_scalar(
+        "SELECT resolution_state::text FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = $2 \
+           AND destination_ip = $3 AND kind = 'campaign'",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(baseline_state, "pending", "baseline row was reset");
+
+    let detail_state: String = sqlx::query_scalar(
+        "SELECT resolution_state::text FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = $2 \
+           AND destination_ip = $3 AND kind = 'detail_mtr'",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        detail_state, "succeeded",
+        "detail_mtr row must not be reset by force_pair"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn skip_pending_for_inactive_sources_targets_offline_agents_only() {
     // A campaign targeting (agent-a, agent-b). Feed the sweep only
     // agent-a as active — agent-b's pairs must flip to skipped with
@@ -975,4 +1093,857 @@ async fn preview_dispatch_count_for_campaign_uses_actual_pair_set() {
         .execute(&pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn resolve_reuse_skips_detail_kind_pairs() {
+    // A detail measurement (kind='detail_ping'/'detail_mtr') must always run
+    // fresh — the 24h reuse cache is for campaign-kind rows only. This test
+    // seeds one campaign with two destinations: one pair stays kind='campaign'
+    // (MUST reuse), the other is flipped to kind='detail_ping' (MUST NOT
+    // reuse even when a matching measurement exists in the window).
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("detail-skip-{}", uuid::Uuid::new_v4().simple());
+    let dst_campaign = IpAddr::from_str("198.51.100.201").unwrap();
+    let dst_detail = IpAddr::from_str("198.51.100.202").unwrap();
+
+    let mut input = make_input("t-detail-skip");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst_campaign, dst_detail];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Seed a reusable measurement younger than 24h for both
+    // destinations, with `latency_avg_ms` populated — `resolve_reuse`
+    // now rejects RTT-less rows (see repo.rs comment), so the match
+    // would otherwise fail before the kind filter has anything to do.
+    let m_campaign_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
+    )
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_campaign))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let m_detail_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
+    )
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Flip the detail-destination pair to kind='detail_ping'. The campaign
+    // pair keeps the default kind='campaign'.
+    sqlx::query(
+        "UPDATE campaign_pairs SET kind = 'detail_ping' \
+         WHERE campaign_id = $1 AND destination_ip = $2",
+    )
+    .bind(row.id)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // `list_pairs` narrows to `kind='campaign'` (baseline-only), so
+    // fetch the actual two-kind pair set via a raw SELECT — this test
+    // needs to feed BOTH kinds into `resolve_reuse` to prove the detail
+    // row is filtered by the `cp.kind='campaign'` CTE clause.
+    use meshmon_service::campaign::model::PairRow;
+    use sqlx::types::ipnetwork::IpNetwork;
+    let rows: Vec<(i64, String, IpNetwork, MeasurementKind)> =
+        sqlx::query_as::<_, (i64, String, IpNetwork, MeasurementKind)>(
+            "SELECT id, source_agent_id, destination_ip, kind \
+           FROM campaign_pairs WHERE campaign_id = $1 ORDER BY id",
+        )
+        .bind(row.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two pairs seeded");
+    let pairs: Vec<PairRow> = rows
+        .into_iter()
+        .map(|(id, src, dst, kind)| PairRow {
+            id,
+            campaign_id: row.id,
+            source_agent_id: src,
+            destination_ip: dst,
+            resolution_state: PairResolutionState::Pending,
+            measurement_id: None,
+            dispatched_at: None,
+            settled_at: None,
+            attempt_count: 0,
+            last_error: None,
+            kind,
+        })
+        .collect();
+
+    let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
+        .await
+        .unwrap();
+
+    let campaign_pair_id = pairs
+        .iter()
+        .find(|p| p.destination_ip.ip() == dst_campaign)
+        .expect("campaign pair present")
+        .id;
+    let detail_pair_id = pairs
+        .iter()
+        .find(|p| p.destination_ip.ip() == dst_detail)
+        .expect("detail pair present")
+        .id;
+
+    assert_eq!(decisions.len(), 1, "only the campaign-kind pair reuses");
+    assert_eq!(
+        decisions[0].0, campaign_pair_id,
+        "campaign-kind pair id present"
+    );
+    assert_eq!(
+        decisions[0].1, m_campaign_id,
+        "campaign pair points at its own seeded measurement"
+    );
+    assert!(
+        decisions.iter().all(|(pid, _)| *pid != detail_pair_id),
+        "detail_ping pair must never appear in reuse output"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE id = ANY($1)")
+        .bind(&[m_campaign_id, m_detail_id][..])
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn resolve_reuse_skips_rtt_null_measurements() {
+    // Reuse must reject measurement rows with `latency_avg_ms IS NULL`
+    // — the writer's MTR branch always produces such rows, and
+    // binding one to a baseline pair would leave the evaluator unable
+    // to score against it (falling back to `no_baseline_pairs` on
+    // low-probe campaigns).
+    use meshmon_service::campaign::model::PairRow;
+    use sqlx::types::ipnetwork::IpNetwork;
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("reuse-rtt-null-{}", uuid::Uuid::new_v4().simple());
+    let dst = IpAddr::from_str("198.51.100.240").unwrap();
+
+    let mut input = make_input("t-reuse-rtt-null");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Seed a measurement with `latency_avg_ms = NULL` (the shape the
+    // MTR writer produces today).
+    let m_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             loss_pct, kind) \
+         VALUES ($1, $2, 'icmp', 1, 0.0, 'detail_mtr') RETURNING id",
+    )
+    .bind(&agent)
+    .bind(IpNetwork::from(dst))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (pair_id, source_agent_id, dest_ip): (i64, String, IpNetwork) = sqlx::query_as(
+        "SELECT id, source_agent_id, destination_ip FROM campaign_pairs \
+          WHERE campaign_id = $1",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let pairs = vec![PairRow {
+        id: pair_id,
+        campaign_id: row.id,
+        source_agent_id,
+        destination_ip: dest_ip,
+        resolution_state: PairResolutionState::Pending,
+        measurement_id: None,
+        dispatched_at: None,
+        settled_at: None,
+        attempt_count: 0,
+        last_error: None,
+        kind: MeasurementKind::Campaign,
+    }];
+    let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
+        .await
+        .unwrap();
+    assert!(
+        decisions.is_empty(),
+        "RTT-null measurement must not bind: {decisions:?}"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE id = $1")
+        .bind(m_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn measurements_for_campaign_filters_detail_kind() {
+    // measurements_for_campaign must only surface rows attached to
+    // `kind='campaign'` pairs. A detail-kind pair with its own
+    // measurement attached must not leak into the evaluator's inputs.
+    use meshmon_service::campaign::eval::AttributedMeasurement;
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("mfc-{}", uuid::Uuid::new_v4().simple());
+    let dst_campaign = IpAddr::from_str("198.51.100.211").unwrap();
+    let dst_detail = IpAddr::from_str("198.51.100.212").unwrap();
+
+    let mut input = make_input("t-mfc");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst_campaign, dst_detail];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Flip one pair to kind='detail_ping' so it must not leak.
+    sqlx::query(
+        "UPDATE campaign_pairs SET kind = 'detail_ping' \
+         WHERE campaign_id = $1 AND destination_ip = $2",
+    )
+    .bind(row.id)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Seed two measurements — one per pair — and attach them via
+    // campaign_pairs.measurement_id so the JOIN in
+    // measurements_for_campaign picks them up.
+    let m_campaign_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, \
+                                   probe_count, latency_avg_ms, latency_stddev_ms, \
+                                   loss_pct, kind) \
+         VALUES ($1, $2, 'icmp', 10, 25.0, 1.5, 0.0, 'campaign') RETURNING id",
+    )
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_campaign))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let m_detail_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, \
+                                   probe_count, latency_avg_ms, latency_stddev_ms, \
+                                   loss_pct, kind) \
+         VALUES ($1, $2, 'icmp', 250, 18.0, 0.7, 0.0, 'detail_ping') RETURNING id",
+    )
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE campaign_pairs SET measurement_id = $1 \
+         WHERE campaign_id = $2 AND destination_ip = $3",
+    )
+    .bind(m_campaign_id)
+    .bind(row.id)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_campaign))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE campaign_pairs SET measurement_id = $1 \
+         WHERE campaign_id = $2 AND destination_ip = $3",
+    )
+    .bind(m_detail_id)
+    .bind(row.id)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let inputs = repo::measurements_for_campaign(&pool, row.id)
+        .await
+        .unwrap();
+
+    let destinations: Vec<IpAddr> = inputs
+        .measurements
+        .iter()
+        .map(|m: &AttributedMeasurement| m.destination_ip)
+        .collect();
+    assert!(
+        destinations.contains(&dst_campaign),
+        "campaign-kind pair surfaces in inputs: {destinations:?}",
+    );
+    assert!(
+        !destinations.contains(&dst_detail),
+        "detail-kind pair must not leak into inputs: {destinations:?}",
+    );
+    assert_eq!(
+        inputs.measurements.len(),
+        1,
+        "only the campaign-kind measurement attached",
+    );
+    assert_eq!(
+        inputs.loss_threshold_pct, row.loss_threshold_pct,
+        "campaign scoring knobs thread through"
+    );
+    assert_eq!(inputs.stddev_weight, row.stddev_weight);
+    assert_eq!(inputs.mode, row.evaluation_mode);
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE id = ANY($1)")
+        .bind(&[m_campaign_id, m_detail_id][..])
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn write_then_read_evaluation_round_trip() {
+    // Write a synthetic evaluation, read it back, then UPSERT a second
+    // time with a different mode and verify the old row is gone and the
+    // timestamp did not regress.
+    use meshmon_service::campaign::dto::EvaluationResultsDto;
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+    let pool = common::shared_migrated_pool().await;
+
+    let row = repo::create(&pool, make_input("t-eval-rt")).await.unwrap();
+    // `write_evaluation` now locks the row and rechecks state inside
+    // its transaction — drafts are rejected. Force completed so the
+    // persistence path opens.
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    let first = EvaluationOutputs {
+        baseline_pair_count: 3,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: Some(12.5),
+        results: EvaluationResultsDto {
+            candidates: Vec::new(),
+            unqualified_reasons: Default::default(),
+        },
+    };
+    let persisted_first =
+        repo::write_evaluation(&pool, row.id, &first, 2.5, 1.25, EvaluationMode::Diversity)
+            .await
+            .unwrap();
+    assert_eq!(persisted_first.campaign_id, row.id);
+    assert_eq!(persisted_first.baseline_pair_count, 3);
+    assert_eq!(persisted_first.candidates_good, 1);
+    assert_eq!(persisted_first.evaluation_mode, EvaluationMode::Diversity);
+
+    let read_first = repo::read_evaluation(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("row present after first UPSERT");
+    assert_eq!(read_first.id, persisted_first.id);
+    assert_eq!(read_first.avg_improvement_ms, Some(12.5));
+    assert_eq!(read_first.loss_threshold_pct, 2.5);
+    assert_eq!(read_first.stddev_weight, 1.25);
+
+    // Force a clock delta so evaluated_at is strictly greater on the
+    // second write regardless of platform timestamp resolution.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let second = EvaluationOutputs {
+        baseline_pair_count: 7,
+        candidates_total: 5,
+        candidates_good: 4,
+        avg_improvement_ms: Some(20.0),
+        results: EvaluationResultsDto {
+            candidates: Vec::new(),
+            unqualified_reasons: Default::default(),
+        },
+    };
+    let persisted_second = repo::write_evaluation(
+        &pool,
+        row.id,
+        &second,
+        3.0,
+        0.5,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_second.id, persisted_first.id,
+        "UPSERT keeps the same row id (unique on campaign_id)"
+    );
+    assert!(
+        persisted_second.evaluated_at >= persisted_first.evaluated_at,
+        "evaluated_at must not regress: {:?} vs {:?}",
+        persisted_first.evaluated_at,
+        persisted_second.evaluated_at
+    );
+
+    let read_second = repo::read_evaluation(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("row present after second UPSERT");
+    assert_eq!(read_second.evaluation_mode, EvaluationMode::Optimization);
+    assert_eq!(read_second.baseline_pair_count, 7);
+    assert_eq!(read_second.candidates_good, 4);
+    assert_eq!(read_second.loss_threshold_pct, 3.0);
+    assert_eq!(read_second.stddev_weight, 0.5);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "UPSERT collapses into a single row per campaign");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn write_evaluation_rejects_running_campaign() {
+    // Race guard: `write_evaluation` must recheck state under the row
+    // lock. If a concurrent `/detail` flipped the campaign to `running`
+    // between the handler's initial gate and our UPSERT, persistence
+    // must abort with IllegalTransition rather than silently writing a
+    // fresh evaluation against a now-running campaign.
+    use meshmon_service::campaign::dto::EvaluationResultsDto;
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+    let pool = common::shared_migrated_pool().await;
+
+    let row = repo::create(&pool, make_input("t-eval-gate"))
+        .await
+        .unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+    // Campaign is now in `running`.
+
+    let outputs = EvaluationOutputs {
+        baseline_pair_count: 0,
+        candidates_total: 0,
+        candidates_good: 0,
+        avg_improvement_ms: None,
+        results: EvaluationResultsDto {
+            candidates: Vec::new(),
+            unqualified_reasons: Default::default(),
+        },
+    };
+
+    let err = repo::write_evaluation(
+        &pool,
+        row.id,
+        &outputs,
+        1.0,
+        1.0,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .expect_err("write_evaluation must reject running state");
+    match err {
+        RepoError::IllegalTransition { from, .. } => {
+            assert_eq!(
+                from,
+                Some(CampaignState::Running),
+                "from-state must reflect the observed running lock"
+            );
+        }
+        other => panic!("expected IllegalTransition, got {other:?}"),
+    }
+
+    // No evaluation row should have been written either.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "nothing persisted on the reject path");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
+    // A completed campaign re-enters `running` when detail pairs land,
+    // the same pair inserted twice produces no new rows on the second
+    // call, and the 4-column UNIQUE lets one (source, destination) hold
+    // both detail_ping and detail_mtr rows side-by-side.
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("det-{}", uuid::Uuid::new_v4().simple());
+    let dst = IpAddr::from_str("198.51.100.221").unwrap();
+    let mut input = make_input("t-detail-insert");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Move the campaign to `completed` so we can observe the state flip.
+    sqlx::query(
+        "UPDATE measurement_campaigns \
+            SET state = 'completed', \
+                started_at = now(), \
+                completed_at = now(), \
+                evaluated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(row.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (inserted, post_state) = repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted, 2,
+        "one requested pair spawns detail_ping + detail_mtr"
+    );
+    assert_eq!(
+        post_state,
+        CampaignState::Running,
+        "completed → running transition must be reported"
+    );
+
+    let campaign_after = repo::get(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("campaign still present");
+    assert_eq!(
+        campaign_after.state,
+        CampaignState::Running,
+        "detail insert reopens the campaign"
+    );
+    // Historical breadcrumbs are preserved (matching force_pair's
+    // convention): only the state and started_at get updated.
+    assert!(
+        campaign_after.completed_at.is_some(),
+        "completed_at preserved as historical breadcrumb on reopen"
+    );
+    assert!(
+        campaign_after.evaluated_at.is_some(),
+        "evaluated_at preserved as historical breadcrumb on reopen"
+    );
+
+    // Verify both kinds landed against the same (source, destination).
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind::text FROM campaign_pairs \
+          WHERE campaign_id = $1 AND source_agent_id = $2 AND destination_ip = $3 \
+          ORDER BY kind::text",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kinds,
+        vec![
+            "campaign".to_string(),
+            "detail_mtr".into(),
+            "detail_ping".into()
+        ],
+        "detail insert coexists with the original campaign pair"
+    );
+
+    // Second call with the same pair: duplicates skip silently.
+    let (inserted_again, post_state_again) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
+    assert_eq!(
+        inserted_again, 0,
+        "duplicate detail pairs skip via ON CONFLICT DO NOTHING"
+    );
+    assert_eq!(
+        post_state_again,
+        CampaignState::Running,
+        "second call observes the already-running state under the lock"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn insert_detail_pairs_no_op_does_not_flip_state() {
+    // A repeat `/detail` call where every requested row already exists
+    // (inserted == 0) must NOT transition a completed campaign back to
+    // `running`. Re-flipping without new work causes spurious state
+    // churn visible in both the API response and the SSE stream.
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("det-noop-{}", uuid::Uuid::new_v4().simple());
+    let dst = IpAddr::from_str("198.51.100.233").unwrap();
+    let mut input = make_input("t-detail-noop");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    // Seed detail rows once (flips completed → running).
+    let (first_inserted, first_state) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
+    assert_eq!(first_inserted, 2);
+    assert_eq!(first_state, CampaignState::Running);
+
+    // Force back to completed so the second call sees a gateable state.
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    let (second_inserted, second_state) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
+    assert_eq!(
+        second_inserted, 0,
+        "all requested pairs already exist — nothing to insert"
+    );
+    assert_eq!(
+        second_state,
+        CampaignState::Completed,
+        "no inserts → no state flip: observed state is the pre-call Completed"
+    );
+
+    let after = repo::get(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("campaign still present");
+    assert_eq!(
+        after.state,
+        CampaignState::Completed,
+        "campaign must remain completed when no detail rows are queued"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_edit_preserves_detail_rows() {
+    // `/edit remove_pairs` must only drop baseline (kind='campaign')
+    // rows. The T5 UNIQUE key was widened to include `kind`, so a
+    // DELETE without a kind filter would wipe detail_ping + detail_mtr
+    // rows sharing the same (source, destination) tuple.
+    let pool = common::shared_migrated_pool().await;
+    common::insert_agent_with_ip(&pool, "ae-edit-a", "192.0.2.101".parse().unwrap()).await;
+    common::insert_agent_with_ip(&pool, "ae-edit-b", "192.0.2.102".parse().unwrap()).await;
+
+    let campaign = repo::create(
+        &pool,
+        CreateInput {
+            title: "edit preserves detail".into(),
+            notes: String::new(),
+            protocol: ProbeProtocol::Icmp,
+            source_agent_ids: vec!["ae-edit-a".into()],
+            destination_ips: vec!["192.0.2.102".parse().unwrap()],
+            force_measurement: false,
+            probe_count: None,
+            probe_count_detail: None,
+            timeout_ms: None,
+            probe_stagger_ms: None,
+            loss_threshold_pct: None,
+            stddev_weight: None,
+            evaluation_mode: None,
+            created_by: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let src = "ae-edit-a".to_string();
+    let dst: IpAddr = "192.0.2.102".parse().unwrap();
+
+    // Force the campaign to `completed` first so `insert_detail_pairs`'
+    // state-transition gate accepts it. The insert flips state back to
+    // `running`; `apply_edit` needs `completed|stopped|evaluated`, so
+    // force-complete again after seeding.
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
+    repo::insert_detail_pairs(&pool, campaign.id, &[(src.clone(), dst)])
+        .await
+        .unwrap();
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
+
+    repo::apply_edit(
+        &pool,
+        campaign.id,
+        EditInput {
+            remove_pairs: vec![(src.clone(), dst)],
+            add_pairs: vec![],
+            force_measurement: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let detail_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+          WHERE campaign_id = $1 \
+            AND kind IN ('detail_ping','detail_mtr')",
+    )
+    .bind(campaign.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(detail_rows, 2, "detail rows must survive remove_pairs");
+
+    let baseline_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+          WHERE campaign_id = $1 AND kind = 'campaign'",
+    )
+    .bind(campaign.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(baseline_rows, 0, "baseline pair should be gone");
+
+    repo::delete(&pool, campaign.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_edit_force_measurement_preserves_detail_rows() {
+    // `force_measurement=true` resets every pair back to pending so the
+    // baseline re-runs. Detail rows (kind in {detail_ping, detail_mtr})
+    // are independently triggered and must not re-run just because the
+    // operator asked to re-run the campaign's baseline measurements.
+    let pool = common::shared_migrated_pool().await;
+    common::insert_agent_with_ip(&pool, "ae-force-a", "192.0.2.111".parse().unwrap()).await;
+    common::insert_agent_with_ip(&pool, "ae-force-b", "192.0.2.112".parse().unwrap()).await;
+
+    let campaign = repo::create(
+        &pool,
+        CreateInput {
+            title: "force preserves detail".into(),
+            notes: String::new(),
+            protocol: ProbeProtocol::Icmp,
+            source_agent_ids: vec!["ae-force-a".into()],
+            destination_ips: vec!["192.0.2.112".parse().unwrap()],
+            force_measurement: false,
+            probe_count: None,
+            probe_count_detail: None,
+            timeout_ms: None,
+            probe_stagger_ms: None,
+            loss_threshold_pct: None,
+            stddev_weight: None,
+            evaluation_mode: None,
+            created_by: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let src = "ae-force-a".to_string();
+    let dst: IpAddr = "192.0.2.112".parse().unwrap();
+
+    // Force `completed` first so `insert_detail_pairs` accepts the
+    // transition, then reset to `completed` after seeding so the
+    // subsequent `apply_edit` is legal.
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
+    repo::insert_detail_pairs(&pool, campaign.id, &[(src.clone(), dst)])
+        .await
+        .unwrap();
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
+
+    // Manually mark the detail_mtr row as succeeded so force_measurement
+    // would have reset it before the fix.
+    sqlx::query(
+        "UPDATE campaign_pairs SET resolution_state = 'succeeded' \
+          WHERE campaign_id = $1 AND kind = 'detail_mtr'",
+    )
+    .bind(campaign.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    repo::apply_edit(
+        &pool,
+        campaign.id,
+        EditInput {
+            remove_pairs: vec![],
+            add_pairs: vec![],
+            force_measurement: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+
+    let detail_state: PairResolutionState = sqlx::query_scalar::<_, PairResolutionState>(
+        "SELECT resolution_state FROM campaign_pairs \
+          WHERE campaign_id = $1 AND kind = 'detail_mtr'",
+    )
+    .bind(campaign.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        detail_state,
+        PairResolutionState::Succeeded,
+        "detail_mtr row must stay succeeded after force_measurement on campaign kind"
+    );
+
+    repo::delete(&pool, campaign.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn campaign_evaluations_cascade_on_campaign_delete() {
+    // `campaign_evaluations.campaign_id` has an `ON DELETE CASCADE` FK
+    // to `measurement_campaigns.id`. Deleting the parent must drop the
+    // evaluation row in the same transaction — otherwise orphan rows
+    // would accumulate and the `UNIQUE (campaign_id)` constraint would
+    // block a future re-creation of a campaign reusing the same UUID
+    // (tests and disaster-recovery paths both rely on reusable ids).
+    use meshmon_service::campaign::dto::EvaluationResultsDto;
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-eval-cascade"))
+        .await
+        .unwrap();
+    // `write_evaluation` locks the row and rechecks state — force
+    // completed so the persistence path opens.
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    let outputs = EvaluationOutputs {
+        baseline_pair_count: 1,
+        candidates_total: 0,
+        candidates_good: 0,
+        avg_improvement_ms: None,
+        results: EvaluationResultsDto {
+            candidates: Vec::new(),
+            unqualified_reasons: Default::default(),
+        },
+    };
+    repo::write_evaluation(
+        &pool,
+        row.id,
+        &outputs,
+        2.0,
+        1.0,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .unwrap();
+
+    let before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, 1, "baseline: evaluation row exists");
+
+    repo::delete(&pool, row.id).await.unwrap();
+
+    let after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, 0,
+        "ON DELETE CASCADE must drop the evaluation row alongside the campaign"
+    );
 }

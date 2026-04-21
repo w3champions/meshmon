@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE campaign_pairs SET resolution_state='succeeded', settled_at=now() WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fd7fac84510be84b1b5859a5458775c94c32a8c3df43429bc2cc112c854ce153"
+}

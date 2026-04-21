@@ -8,12 +8,14 @@
 //! applies without extra branching.
 
 use super::dto::{
-    CampaignDto, CampaignListQuery, CreateCampaignRequest, EditCampaignRequest, EditPairDto,
-    ErrorEnvelope, ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest,
+    CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
+    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
+    EvaluationResultsDto, ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest,
     PreviewDispatchResponse,
 };
-use super::model::PairResolutionState;
-use super::repo::{self, CreateInput, EditInput, RepoError};
+use super::eval::{self, EvalError};
+use super::model::{CampaignState, PairResolutionState};
+use super::repo::{self, CreateInput, EditInput, EvaluationRow, RepoError};
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -193,6 +195,10 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         Err(e) => return repo_error("campaign::get", e),
     };
 
+    // Baseline-only: `pair_counts` tracks the campaign's own dispatch
+    // lifecycle for operators. `/detail`-triggered rows have their own
+    // state and must not inflate counters like `pending` when the
+    // campaign itself is otherwise settled.
     let counts: Vec<(PairResolutionState, i64)> = match sqlx::query_as::<
         _,
         (PairResolutionState, i64),
@@ -200,6 +206,7 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         "SELECT resolution_state, COUNT(*) \
                FROM campaign_pairs \
               WHERE campaign_id = $1 \
+                AND kind = 'campaign' \
               GROUP BY 1",
     )
     .bind(id)
@@ -540,4 +547,381 @@ pub async fn preview_dispatch_count(
             .into_response(),
         Err(e) => repo_error("campaign::preview_dispatch_count", e),
     }
+}
+
+/// Convert an [`EvaluationRow`] into the wire DTO.
+///
+/// The stored `results` column is owned by this service (written by
+/// [`repo::write_evaluation`] as a serialised [`EvaluationResultsDto`]),
+/// so a deserialisation failure here signals data corruption from outside
+/// the normal write path. Returns `Err` so the caller can map it to a
+/// `500 invalid_evaluation_payload` response instead of panicking a tokio
+/// worker.
+fn to_evaluation_dto(row: EvaluationRow) -> Result<EvaluationDto, serde_json::Error> {
+    let results: EvaluationResultsDto = serde_json::from_value(row.results)?;
+    Ok(EvaluationDto {
+        campaign_id: row.campaign_id,
+        evaluated_at: row.evaluated_at,
+        loss_threshold_pct: row.loss_threshold_pct,
+        stddev_weight: row.stddev_weight,
+        evaluation_mode: row.evaluation_mode,
+        baseline_pair_count: row.baseline_pair_count,
+        candidates_total: row.candidates_total,
+        candidates_good: row.candidates_good,
+        avg_improvement_ms: row.avg_improvement_ms,
+        results,
+    })
+}
+
+fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Response {
+    tracing::error!(
+        %campaign_id,
+        error = %err,
+        "campaign_evaluations.results failed to deserialise"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "invalid_evaluation_payload" })),
+    )
+        .into_response()
+}
+
+/// `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
+///
+/// Gated on `state IN ('completed','evaluated')`: re-running on an
+/// already-evaluated campaign is allowed so operators can retune
+/// `loss_threshold_pct` / `stddev_weight` without editing the row. When
+/// the campaign was in `completed`, a best-effort transition flips it to
+/// `evaluated`; a concurrent transition that loses the gate still leaves
+/// the evaluation row written and the SSE event fired.
+///
+/// Returns 422 (`no_baseline_pairs`) when the evaluator finds no
+/// agent→agent baseline — the campaign must include at least one pair
+/// whose destination IP belongs to a registered agent.
+#[utoipa::path(
+    post,
+    path = "/api/campaigns/{id}/evaluate",
+    tag = "campaigns",
+    params(("id" = Uuid, Path, description = "Campaign id")),
+    responses(
+        (status = 200, description = "Evaluation written", body = EvaluationDto),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not found", body = ErrorEnvelope),
+        (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
+        (status = 422, description = "No baseline (agent→agent) pairs", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn evaluate(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let campaign = match repo::get(&state.pool, id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+        }
+        Err(e) => return repo_error("campaign::evaluate", e),
+    };
+    if !matches!(
+        campaign.state,
+        CampaignState::Completed | CampaignState::Evaluated
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "illegal_state_transition" })),
+        )
+            .into_response();
+    }
+
+    let inputs = match repo::measurements_for_campaign(&state.pool, id).await {
+        Ok(i) => i,
+        Err(e) => return repo_error("campaign::evaluate::inputs", e),
+    };
+    // Snapshot the evaluator knobs from `inputs` (not `campaign`) so a
+    // concurrent `PATCH /campaigns/{id}` that lands between the two reads
+    // cannot desync the scored knobs from the persisted evaluation row.
+    // `campaign` stays in use only for its `state` gate above; it is no
+    // longer the source of knob values.
+    let loss_threshold_pct = inputs.loss_threshold_pct;
+    let stddev_weight = inputs.stddev_weight;
+    let evaluation_mode = inputs.mode;
+    let outputs = match eval::evaluate(inputs) {
+        Ok(o) => o,
+        Err(EvalError::NoBaseline) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "no_baseline_pairs" })),
+            )
+                .into_response();
+        }
+    };
+
+    // `write_evaluation` writes the evaluation row AND promotes
+    // `completed → evaluated` in the same transaction. A crash between
+    // the UPSERT and the state flip would otherwise leave the campaign
+    // stuck in `completed` with a written evaluation row (inconsistent).
+    let row = match repo::write_evaluation(
+        &state.pool,
+        id,
+        &outputs,
+        loss_threshold_pct,
+        stddev_weight,
+        evaluation_mode,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return repo_error("campaign::evaluate::write", e),
+    };
+
+    // No in-process broker publish here. The `campaign_evaluations_notify`
+    // trigger fires `campaign_evaluated` inside the same transaction, and
+    // the campaign SSE listener fans that out to every subscriber (this
+    // instance's and its peers') — a direct publish here would cause
+    // same-instance clients to receive a duplicate `evaluated` frame.
+
+    match to_evaluation_dto(row) {
+        Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),
+        Err(e) => invalid_evaluation_payload(id, e),
+    }
+}
+
+/// `GET /api/campaigns/{id}/evaluation` — read-through on the persisted
+/// evaluation row.
+///
+/// 404 (`not_evaluated`) when the campaign has never been evaluated.
+/// The same snake_case envelope pattern as every other handler lets the
+/// SPA's shared error layer branch on the stable code without parsing
+/// prose.
+#[utoipa::path(
+    get,
+    path = "/api/campaigns/{id}/evaluation",
+    tag = "campaigns",
+    params(("id" = Uuid, Path, description = "Campaign id")),
+    responses(
+        (status = 200, description = "Evaluation result", body = EvaluationDto),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not evaluated", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn get_evaluation(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match repo::read_evaluation(&state.pool, id).await {
+        Ok(Some(row)) => match to_evaluation_dto(row) {
+            Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),
+            Err(e) => invalid_evaluation_payload(id, e),
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "not_evaluated" })),
+        )
+            .into_response(),
+        Err(e) => repo_error("campaign::get_evaluation", e),
+    }
+}
+
+/// `POST /api/campaigns/{id}/detail` — enqueue detail-ping + detail-mtr
+/// rows for a slice of `(source_agent, destination_ip)` pairs.
+///
+/// Gated on `state IN ('completed','evaluated')`. The three scopes:
+///
+/// - `all`: every `kind='campaign'` pair whose baseline resolution
+///   `succeeded` or `reused`. Selects directly from `campaign_pairs`
+///   because an evaluation row is not required for this scope.
+/// - `good_candidates`: pulls the persisted evaluation row and expands
+///   each qualifying `(source_agent, destination_agent, transit_ip)`
+///   triple into a pair of `(source_agent → transit_ip)` +
+///   `(destination_agent → transit_ip)` detail entries so both legs
+///   get a higher-resolution measurement. Requires a prior evaluation;
+///   400 with `no_evaluation` otherwise.
+/// - `pair`: a single operator-chosen `(source_agent_id,
+///   destination_ip)` tuple from the request body.
+///
+/// All scopes flow through [`repo::insert_detail_pairs`], which owns
+/// the transition back to `running` and emits `campaign_state_changed`
+/// through the Postgres NOTIFY trigger. The campaign SSE listener
+/// translates that NOTIFY into a broker broadcast for every
+/// subscriber (same-instance and peers) — this handler does not
+/// publish to the in-process broker directly, to avoid sending a
+/// duplicate `state_changed` frame on the request's own instance.
+/// No-op detail inserts (inserted == 0 or an already-`running` race)
+/// don't touch `state`, so the trigger stays silent correctly.
+#[utoipa::path(
+    post,
+    path = "/api/campaigns/{id}/detail",
+    tag = "campaigns",
+    params(("id" = Uuid, Path, description = "Campaign id")),
+    request_body = DetailRequest,
+    responses(
+        (status = 200, description = "Pairs enqueued", body = DetailResponse),
+        (status = 400, description = "Bad scope payload or no_evaluation precondition", body = ErrorEnvelope),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not found", body = ErrorEnvelope),
+        (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn detail(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DetailRequest>,
+) -> Response {
+    let campaign = match repo::get(&state.pool, id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+        }
+        Err(e) => return repo_error("campaign::detail", e),
+    };
+    if !matches!(
+        campaign.state,
+        CampaignState::Completed | CampaignState::Evaluated
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "illegal_state_transition" })),
+        )
+            .into_response();
+    }
+
+    // Scope contract (see `DetailRequest::pair` docstring): `pair` is
+    // required iff scope=='pair' and must be absent otherwise.
+    // Silently ignoring an extraneous payload hides client bugs.
+    if body.pair.is_some() && !matches!(body.scope, DetailScope::Pair) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unexpected_pair_payload" })),
+        )
+            .into_response();
+    }
+
+    let pairs: Vec<(String, IpAddr)> = match body.scope {
+        DetailScope::All => match repo::settled_campaign_pairs(&state.pool, id).await {
+            Ok(p) => p,
+            Err(e) => return repo_error("campaign::detail::all", e),
+        },
+        DetailScope::GoodCandidates => {
+            // Tighten the state gate for this scope: only `evaluated`
+            // is valid. The outer gate admits `completed` too so that
+            // `/detail?scope=all` keeps working, but a `completed`
+            // campaign that carries an old `campaign_evaluations` row
+            // (from a prior run preserved across `apply_edit` /
+            // `force_pair` / re-run flows) must NOT expand that stale
+            // candidate set into fresh detail pairs — the candidates
+            // might target IPs that are no longer in the pair graph.
+            // `no_evaluation` covers both "no row yet" and "row exists
+            // but is not fresh for the current run state"; either way
+            // the operator fix is an explicit re-`/evaluate`.
+            if !matches!(campaign.state, CampaignState::Evaluated) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "no_evaluation" })),
+                )
+                    .into_response();
+            }
+            let row = match repo::read_evaluation(&state.pool, id).await {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    // Defensive: `state=evaluated` implies a row exists
+                    // (write_evaluation is the only writer that sets
+                    // that state). Reaching this arm would mean a
+                    // concurrent DELETE raced the read; treat as
+                    // missing evaluation.
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "no_evaluation" })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return repo_error("campaign::detail::eval", e),
+            };
+            let results: EvaluationResultsDto = match serde_json::from_value(row.results) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        campaign_id = %id,
+                        "campaign::detail: stored evaluation row failed to deserialise"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "invalid_evaluation_payload" })),
+                    )
+                        .into_response();
+                }
+            };
+            let mut acc: Vec<(String, IpAddr)> = Vec::new();
+            for cand in results.candidates.iter().filter(|c| c.pairs_improved >= 1) {
+                let Ok(transit_ip) = IpAddr::from_str(&cand.destination_ip) else {
+                    tracing::warn!(
+                        campaign_id = %id,
+                        destination_ip = %cand.destination_ip,
+                        "campaign::detail: skipping candidate with unparseable destination_ip"
+                    );
+                    continue;
+                };
+                for pd in cand.pair_details.iter().filter(|p| p.qualifies) {
+                    acc.push((pd.source_agent_id.clone(), transit_ip));
+                    acc.push((pd.destination_agent_id.clone(), transit_ip));
+                }
+            }
+            acc.sort();
+            acc.dedup();
+            acc
+        }
+        DetailScope::Pair => {
+            let Some(p) = body.pair else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "missing_pair" })),
+                )
+                    .into_response();
+            };
+            let Ok(ip) = IpAddr::from_str(&p.destination_ip) else {
+                return invalid_destination_ip_response();
+            };
+            vec![(p.source_agent_id, ip)]
+        }
+    };
+
+    if pairs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "no_pairs_selected" })),
+        )
+            .into_response();
+    }
+
+    let (enqueued, post_state) = match repo::insert_detail_pairs(&state.pool, id, &pairs).await {
+        Ok(out) => out,
+        Err(e) => return repo_error("campaign::detail::insert", e),
+    };
+
+    // No in-process broker publish here. The `measurement_campaigns_notify`
+    // trigger fires `campaign_state_changed` inside the same transaction
+    // as the `Completed|Evaluated → Running` flip, and the campaign SSE
+    // listener fans that out to every subscriber (this instance and
+    // peers alike) — a direct publish would cause same-instance clients
+    // to receive a duplicate `state_changed` frame for one transition.
+    // No-flip paths (inserted==0 or already-running race) don't fire
+    // the trigger, so the listener stays silent correctly.
+
+    (
+        StatusCode::OK,
+        Json(DetailResponse {
+            pairs_enqueued: enqueued,
+            // `post_state` is read back inside the insert transaction's
+            // lock, so it reflects the campaign's actual state at
+            // commit time (not the stale pre-read).
+            campaign_state: post_state,
+        }),
+    )
+        .into_response()
 }
