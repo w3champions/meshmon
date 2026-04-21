@@ -9,9 +9,10 @@
 
 use super::broker::CampaignStreamEvent;
 use super::dto::{
-    CampaignDto, CampaignListQuery, CreateCampaignRequest, EditCampaignRequest, EditPairDto,
-    ErrorEnvelope, EvaluationDto, EvaluationResultsDto, ForcePairRequest, PairDto, PairListQuery,
-    PatchCampaignRequest, PreviewDispatchResponse,
+    CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
+    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
+    EvaluationResultsDto, ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest,
+    PreviewDispatchResponse,
 };
 use super::eval::{self, EvalError};
 use super::model::{CampaignState, PairResolutionState};
@@ -707,4 +708,176 @@ pub async fn get_evaluation(
             .into_response(),
         Err(e) => repo_error("campaign::get_evaluation", e),
     }
+}
+
+/// `POST /api/campaigns/{id}/detail` — enqueue detail-ping + detail-mtr
+/// rows for a slice of `(source_agent, destination_ip)` pairs.
+///
+/// Gated on `state IN ('completed','evaluated')`. The three scopes:
+///
+/// - `all`: every `kind='campaign'` pair whose baseline resolution
+///   `succeeded` or `reused`. Selects directly from `campaign_pairs`
+///   because an evaluation row is not required for this scope.
+/// - `good_candidates`: pulls the persisted evaluation row and expands
+///   each qualifying `(source_agent, destination_agent, transit_ip)`
+///   triple into a pair of `(source_agent → transit_ip)` +
+///   `(destination_agent → transit_ip)` detail entries so both legs
+///   get a higher-resolution measurement. Requires a prior evaluation;
+///   400 with `no_evaluation` otherwise.
+/// - `pair`: a single operator-chosen `(source_agent_id,
+///   destination_ip)` tuple from the request body.
+///
+/// All scopes flow through [`repo::insert_detail_pairs`], which owns
+/// the transition back to `running` and emits
+/// `campaign_state_changed`. The handler additionally publishes
+/// `CampaignStreamEvent::StateChanged { running }` for the same campaign
+/// so clients subscribed to the broker see the transition even before
+/// the NOTIFY listener wakes up; duplicates are idempotent on the
+/// frontend (`StateChanged` invalidates a single React Query key).
+#[utoipa::path(
+    post,
+    path = "/api/campaigns/{id}/detail",
+    tag = "campaigns",
+    params(("id" = Uuid, Path, description = "Campaign id")),
+    request_body = DetailRequest,
+    responses(
+        (status = 200, description = "Pairs enqueued", body = DetailResponse),
+        (status = 400, description = "Bad scope payload or no_evaluation precondition", body = ErrorEnvelope),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not found", body = ErrorEnvelope),
+        (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn detail(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DetailRequest>,
+) -> Response {
+    let campaign = match repo::get(&state.pool, id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+        }
+        Err(e) => return repo_error("campaign::detail", e),
+    };
+    if !matches!(
+        campaign.state,
+        CampaignState::Completed | CampaignState::Evaluated
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "illegal_state_transition" })),
+        )
+            .into_response();
+    }
+
+    let pairs: Vec<(String, IpAddr)> = match body.scope {
+        DetailScope::All => match sqlx::query!(
+            r#"SELECT DISTINCT source_agent_id, destination_ip
+                 FROM campaign_pairs
+                WHERE campaign_id = $1
+                  AND kind = 'campaign'
+                  AND resolution_state IN ('succeeded','reused')"#,
+            id,
+        )
+        .fetch_all(&state.pool)
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| (r.source_agent_id, r.destination_ip.ip()))
+                .collect(),
+            Err(e) => return repo_error("campaign::detail::all", RepoError::Sqlx(e)),
+        },
+        DetailScope::GoodCandidates => {
+            let row = match repo::read_evaluation(&state.pool, id).await {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "no_evaluation" })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return repo_error("campaign::detail::eval", e),
+            };
+            let results: EvaluationResultsDto = match serde_json::from_value(row.results) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        campaign_id = %id,
+                        "campaign::detail: stored evaluation row failed to deserialise"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "invalid_evaluation_payload" })),
+                    )
+                        .into_response();
+                }
+            };
+            let mut acc: Vec<(String, IpAddr)> = Vec::new();
+            for cand in results.candidates.iter().filter(|c| c.pairs_improved >= 1) {
+                let Ok(transit_ip) = IpAddr::from_str(&cand.destination_ip) else {
+                    tracing::warn!(
+                        campaign_id = %id,
+                        destination_ip = %cand.destination_ip,
+                        "campaign::detail: skipping candidate with unparseable destination_ip"
+                    );
+                    continue;
+                };
+                for pd in cand.pair_details.iter().filter(|p| p.qualifies) {
+                    acc.push((pd.source_agent_id.clone(), transit_ip));
+                    acc.push((pd.destination_agent_id.clone(), transit_ip));
+                }
+            }
+            acc.sort();
+            acc.dedup();
+            acc
+        }
+        DetailScope::Pair => {
+            let Some(p) = body.pair else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "missing_pair" })),
+                )
+                    .into_response();
+            };
+            let Ok(ip) = IpAddr::from_str(&p.destination_ip) else {
+                return invalid_destination_ip_response();
+            };
+            vec![(p.source_agent_id, ip)]
+        }
+    };
+
+    if pairs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "no_pairs_selected" })),
+        )
+            .into_response();
+    }
+
+    let enqueued = match repo::insert_detail_pairs(&state.pool, id, &pairs).await {
+        Ok(n) => n,
+        Err(e) => return repo_error("campaign::detail::insert", e),
+    };
+
+    state
+        .campaign_broker
+        .publish(CampaignStreamEvent::StateChanged {
+            campaign_id: id,
+            state: CampaignState::Running,
+        });
+
+    (
+        StatusCode::OK,
+        Json(DetailResponse {
+            pairs_enqueued: enqueued,
+            campaign_state: CampaignState::Running,
+        }),
+    )
+        .into_response()
 }
