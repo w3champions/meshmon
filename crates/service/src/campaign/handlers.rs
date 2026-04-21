@@ -673,3 +673,38 @@ pub async fn evaluate(
 
     (StatusCode::OK, Json(to_evaluation_dto(row))).into_response()
 }
+
+/// `GET /api/campaigns/{id}/evaluation` — read-through on the persisted
+/// evaluation row.
+///
+/// 404 (`not_evaluated`) when the campaign has never been evaluated.
+/// The same snake_case envelope pattern as every other handler lets the
+/// SPA's shared error layer branch on the stable code without parsing
+/// prose.
+#[utoipa::path(
+    get,
+    path = "/api/campaigns/{id}/evaluation",
+    tag = "campaigns",
+    params(("id" = Uuid, Path, description = "Campaign id")),
+    responses(
+        (status = 200, description = "Evaluation result", body = EvaluationDto),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not evaluated", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn get_evaluation(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match repo::read_evaluation(&state.pool, id).await {
+        Ok(Some(row)) => (StatusCode::OK, Json(to_evaluation_dto(row))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "not_evaluated" })),
+        )
+            .into_response(),
+        Err(e) => repo_error("campaign::get_evaluation", e),
+    }
+}
