@@ -114,6 +114,15 @@ jobs:
       matrix:
         image: [meshmon-service, meshmon-agent, meshmon-grafana, meshmon-vmalert, meshmon-alertmanager]
     steps:
+      # Checkout so Trivy can read `.trivyignore.yaml` from the workspace.
+      # Without this the scan job runs with an empty $GITHUB_WORKSPACE and
+      # the ignore file is silently absent (auto-discovery fails, VEX
+      # statements get ignored).
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Download amd64 digest
         uses: actions/download-artifact@v4
         with:
@@ -156,6 +165,7 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           vuln-type: os,library
+          trivyignores: .trivyignore.yaml
 
       - name: Trivy scan (SARIF forensics)
         uses: aquasecurity/trivy-action@v0.35.0
@@ -170,6 +180,7 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           exit-code: '0'
+          trivyignores: .trivyignore.yaml
 
       - name: Upload Trivy SARIF artifact
         if: always()
