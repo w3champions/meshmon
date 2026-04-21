@@ -79,6 +79,18 @@ describe("useHistoryDestinations", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  test("is disabled when source is an empty string", () => {
+    // `enabled: !!source` correctly treats `""` as disabled. This test pins
+    // that behavior so a future refactor can't accidentally let the hook
+    // fire a `?source=` request against the backend.
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const { result } = renderHook(() => useHistoryDestinations("", undefined), {
+      wrapper: wrap(),
+    });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   test("appends `q` only when set", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
@@ -93,6 +105,22 @@ describe("useHistoryDestinations", () => {
     const url = call instanceof Request ? call.url : String(call);
     expect(url).toContain("source=agent-a");
     expect(url).toContain("q=paris");
+  });
+
+  test("omits `q` when undefined", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify([DESTINATION]), { status: 200 }));
+
+    const { result } = renderHook(() => useHistoryDestinations("agent-a", undefined), {
+      wrapper: wrap(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const call = fetchSpy.mock.calls[0]?.[0];
+    const url = call instanceof Request ? call.url : String(call);
+    expect(url).toContain("source=agent-a");
+    expect(url).not.toContain("q=");
   });
 
   test("surfaces 400 invalid source through mutation.error", async () => {
