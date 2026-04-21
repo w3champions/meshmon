@@ -347,7 +347,9 @@ destinations by
 `composite_score = (pairs_improved / baseline_pair_count) × avg_improvement_ms`.
 Each row shows: rank, name, IP, city, ASN + network operator,
 improved/total pairs, average improvement, and a loss chip (green
-< 0.5%, yellow below threshold, red above). Click a row to open the
+< 0.5%, yellow below threshold, red above). Columns are sortable by
+clicking the header (round-tripped through the URL as `?cand_sort=…&cand_dir=…`);
+the default is `composite_score desc`. Click a row to open the
 drilldown drawer: per-pair direct-vs-transit RTT with green/red
 improvement deltas (positive means transit is faster than direct), loss
 per leg, and an inline `RouteTopology` view for any MTR trace linked to
@@ -388,9 +390,9 @@ the operator can compare campaign samples against the broader history.
 ### Settings tab
 
 Shows the three evaluator knobs (`loss_threshold_pct`, `stddev_weight`,
-`evaluation_mode`) along with a **Re-evaluate** button. Available only
-on `completed` or `evaluated` campaigns — `running` and terminal-but-
-unsettled states hide the button. Re-evaluating is free: it re-scores
+`evaluation_mode`) along with a **Re-evaluate** button. Only `completed`
+and `evaluated` states enable Re-evaluate; it's hidden on `draft`,
+`running`, and `stopped` campaigns. Re-evaluating is free: it re-scores
 existing measurements against the new settings without dispatching
 anything.
 
