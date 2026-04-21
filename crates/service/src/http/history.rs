@@ -482,6 +482,7 @@ pub struct CampaignMeasurementsPage {
     ),
     responses(
         (status = 200, description = "Measurement page", body = CampaignMeasurementsPage),
+        (status = 400, description = "Malformed cursor", body = ErrorEnvelope),
         (status = 401, description = "No active session"),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
@@ -493,7 +494,24 @@ pub async fn campaign_measurements(
 ) -> Response {
     let pool = &state.pool;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    let cursor = q.cursor.as_deref().and_then(decode_measurements_cursor);
+    // A malformed cursor (URL-mangled, clipped by a proxy, or pre-schema-change)
+    // must 400 rather than silently restart at page 1 — the client would
+    // render stale rows as "next page" and duplicate entries otherwise.
+    let cursor = match q.cursor.as_deref() {
+        Some(s) => match decode_measurements_cursor(s) {
+            Some(c) => Some(c),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorEnvelope {
+                        error: "invalid_cursor".into(),
+                    }),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
 
     match fetch_campaign_measurements(pool, id, &q, limit, cursor).await {
         Ok(page) => (StatusCode::OK, Json(page)).into_response(),

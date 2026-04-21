@@ -396,6 +396,32 @@ async fn campaign_measurements_cursor_walks_pages() {
 }
 
 #[tokio::test]
+async fn campaign_measurements_rejects_malformed_cursor() {
+    // A malformed `?cursor=` must 400 rather than silently restart at
+    // page 1 — the client would otherwise render stale page-1 rows as
+    // "next page" and duplicate entries.
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+    let campaign_id =
+        common::seed_minimal_campaign_for_measurements(pool, "camp-bad-cursor-agent").await;
+    let (status, body) = h
+        .get(&format!(
+            "/api/campaigns/{campaign_id}/measurements?cursor=not-a-valid-base64-json"
+        ))
+        .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "malformed cursor must 400; got {status} with body {body}"
+    );
+    let parsed: Value = serde_json::from_str(&body).expect("error envelope is JSON");
+    assert_eq!(
+        parsed["error"], "invalid_cursor",
+        "expected invalid_cursor envelope; got {parsed}"
+    );
+}
+
+#[tokio::test]
 async fn campaign_measurements_filters_by_measurement_id() {
     let h = common::HttpHarness::start().await;
     let pool = &h.state.pool;
