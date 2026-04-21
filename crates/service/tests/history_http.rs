@@ -269,3 +269,180 @@ async fn campaign_measurements_shows_pending_and_settled_rows() {
         entries[0],
     );
 }
+
+#[tokio::test]
+async fn history_measurements_rejects_invalid_protocol() {
+    let h = common::HttpHarness::start().await;
+
+    // No seeding required — the 400 fires on the parsed query params
+    // before the DB is touched.
+    let body = h
+        .get_expect_status(
+            "/api/history/measurements?source=hist-inv&destination=203.0.113.99&protocols=icmp,banana",
+            400,
+        )
+        .await;
+    assert_eq!(
+        body["error"], "invalid_protocols",
+        "expected invalid_protocols envelope; got {body}"
+    );
+}
+
+#[tokio::test]
+async fn history_measurements_rejects_malformed_destination() {
+    let h = common::HttpHarness::start().await;
+
+    let body = h
+        .get_expect_status(
+            "/api/history/measurements?source=hist-malformed&destination=not-an-ip",
+            400,
+        )
+        .await;
+    assert_eq!(
+        body["error"], "invalid_destination_ip",
+        "expected invalid_destination_ip envelope; got {body}"
+    );
+}
+
+#[tokio::test]
+async fn campaign_measurements_cursor_walks_pages() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // Six settled pairs on a shared (source, dest); distinct
+    // `measured_at` values one hour apart so keyset ordering is
+    // deterministic. The seed helper writes `now()`; we UPDATE after
+    // insert to backdate each measurement.
+    let campaign_id =
+        common::seed_minimal_campaign_for_measurements(pool, "camp-cursor-agent").await;
+    let base = Utc::now();
+    let mut measurement_ids = Vec::new();
+    // Use six distinct pair kinds — the `(campaign_id, source,
+    // destination_ip, kind)` unique index forbids duplicates, but by
+    // rotating through campaign / detail_ping / detail_mtr across two
+    // destinations we get six pairs on the same campaign.
+    let rows = [
+        ("203.0.113.160", "campaign"),
+        ("203.0.113.160", "detail_ping"),
+        ("203.0.113.160", "detail_mtr"),
+        ("203.0.113.161", "campaign"),
+        ("203.0.113.161", "detail_ping"),
+        ("203.0.113.161", "detail_mtr"),
+    ];
+    for (i, (dest, kind)) in rows.iter().enumerate() {
+        let (_pair_id, measurement_id) =
+            common::seed_settled_pair(pool, campaign_id, "camp-cursor-agent", dest, kind).await;
+        let measured_at = base - Duration::hours(i as i64);
+        query!(
+            "UPDATE measurements SET measured_at = $1 WHERE id = $2",
+            measured_at,
+            measurement_id,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        measurement_ids.push(measurement_id);
+    }
+
+    // Page 1: first 4 rows (page full), cursor present.
+    let page1: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id}/measurements?limit=4"
+        ))
+        .await;
+    let entries1 = page1["entries"].as_array().unwrap();
+    assert_eq!(entries1.len(), 4, "page1 size: {page1}");
+    let cursor = page1["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("page1 missing next_cursor: {page1}"))
+        .to_owned();
+    assert!(!cursor.is_empty(), "page1 cursor empty: {page1}");
+
+    // Page 2: remaining 2 rows (page under-full), no further cursor —
+    // `next_cursor` is only emitted when `entries.len() == limit`, so
+    // a partial page terminates the walk.
+    let page2: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id}/measurements?limit=4&cursor={cursor}",
+        ))
+        .await;
+    let entries2 = page2["entries"].as_array().unwrap();
+    assert_eq!(entries2.len(), 2, "page2 size: {page2}");
+    assert!(
+        page2["next_cursor"].is_null(),
+        "page2 next_cursor must be null on final (partial) page: {page2}",
+    );
+
+    // Ordering continuity: every page1 measured_at >= every page2
+    // measured_at (ORDER BY measured_at DESC).
+    let page1_last = entries1
+        .last()
+        .unwrap()
+        .get("measured_at")
+        .and_then(|v| v.as_str())
+        .expect("page1 last measured_at")
+        .to_owned();
+    let page2_first = entries2
+        .first()
+        .unwrap()
+        .get("measured_at")
+        .and_then(|v| v.as_str())
+        .expect("page2 first measured_at")
+        .to_owned();
+    assert!(
+        page1_last >= page2_first,
+        "keyset ordering broken: page1_last={page1_last}, page2_first={page2_first}",
+    );
+}
+
+#[tokio::test]
+async fn campaign_measurements_filters_by_measurement_id() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign_id = common::seed_minimal_campaign_for_measurements(pool, "camp-mid-agent").await;
+    // Three settled pairs across three distinct kinds on the same
+    // destination — pick the middle one and confirm the handler
+    // returns exactly that row.
+    let (_p1, _m1) = common::seed_settled_pair(
+        pool,
+        campaign_id,
+        "camp-mid-agent",
+        "203.0.113.170",
+        "campaign",
+    )
+    .await;
+    let (_p2, m2) = common::seed_settled_pair(
+        pool,
+        campaign_id,
+        "camp-mid-agent",
+        "203.0.113.170",
+        "detail_ping",
+    )
+    .await;
+    let (_p3, _m3) = common::seed_settled_pair(
+        pool,
+        campaign_id,
+        "camp-mid-agent",
+        "203.0.113.170",
+        "detail_mtr",
+    )
+    .await;
+
+    let body: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id}/measurements?measurement_id={m2}",
+        ))
+        .await;
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "measurement_id filter must return exactly one row: {body}",
+    );
+    assert_eq!(
+        entries[0]["measurement_id"].as_i64(),
+        Some(m2),
+        "row must carry the requested measurement_id: {body}",
+    );
+}
