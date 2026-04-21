@@ -15,16 +15,18 @@
 //! Auth is inherited from the user-API middleware layer; handlers do not
 //! take an `AuthSession` extractor.
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::types::ipnetwork::IpNetwork;
+use sqlx::PgPool;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::campaign::dto::ErrorEnvelope;
-use crate::campaign::model::{MeasurementKind, ProbeProtocol};
+use crate::campaign::model::{MeasurementKind, PairResolutionState, ProbeProtocol};
 use crate::state::AppState;
 
 // All history handlers use `&state.pool` (PgPool is a public field on
@@ -339,4 +341,235 @@ pub async fn measurements(
         Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
         Err(e) => internal_error("history::measurements", e),
     }
+}
+
+// --- campaign measurements ---------------------------------------------
+
+/// Query params for `GET /api/campaigns/{id}/measurements`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct CampaignMeasurementsQuery {
+    /// Narrow to a single `campaign_pairs.resolution_state`.
+    #[serde(default)]
+    pub resolution_state: Option<PairResolutionState>,
+    /// Narrow to a single `measurements.protocol`. Pending/dispatched
+    /// pairs (no joined measurement) stay visible under this filter so
+    /// operators can monitor in-flight detail work.
+    #[serde(default)]
+    pub protocol: Option<ProbeProtocol>,
+    /// Narrow to a single `campaign_pairs.kind` (`campaign`,
+    /// `detail_ping`, `detail_mtr`).
+    #[serde(default)]
+    pub kind: Option<MeasurementKind>,
+    /// Keyset cursor — base64(JSON) `{t, i}` pair from the previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Resolve a single (pair, measurement) row by measurement id —
+    /// used by the DrilldownDrawer for MTR lookup.
+    #[serde(default)]
+    pub measurement_id: Option<i64>,
+    /// Page size. Defaults to 200, clamped to `[1, 1000]`.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.
+///
+/// Every field but `pair_id`, `source_agent_id`, `destination_ip`,
+/// `resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`
+/// row with `pending` or `dispatched` state has no joined `measurements`
+/// row yet, but the Raw tab still renders it so operators can monitor
+/// in-flight detail work.
+///
+/// `mtr_hops` is inlined rather than referenced by id so the
+/// DrilldownDrawer can render MTR directly from this endpoint — there
+/// is no separate `GET /api/measurements/:id` in the service. The
+/// `Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding
+/// JSONB; serde renders it as a bare JSON value on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CampaignMeasurementDto {
+    /// `campaign_pairs.id`.
+    pub pair_id: i64,
+    /// Source agent id from the pair envelope.
+    pub source_agent_id: String,
+    /// Destination IP as a host string.
+    pub destination_ip: String,
+    /// Current lifecycle of the pair.
+    pub resolution_state: PairResolutionState,
+    /// Kind of work the pair represents
+    /// (`campaign`, `detail_ping`, `detail_mtr`).
+    pub pair_kind: MeasurementKind,
+    /// Populated when the pair has a joined `measurements` row.
+    pub measurement_id: Option<i64>,
+    /// Protocol of the joined measurement (null when pending/dispatched).
+    pub protocol: Option<ProbeProtocol>,
+    /// When the measurement was produced (null when pending/dispatched).
+    pub measured_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Average round-trip latency in ms (nullable).
+    pub latency_avg_ms: Option<f32>,
+    /// Observed loss percentage ([0, 100]) (nullable).
+    pub loss_pct: Option<f32>,
+    /// `measurements.mtr_id` FK — reference to `mtr_traces.id`.
+    pub mtr_id: Option<i64>,
+    /// Inline MTR hops — populated iff `mtr_id` resolves to an
+    /// `mtr_traces` row.
+    #[schema(value_type = Option<Object>)]
+    pub mtr_hops: Option<sqlx::types::Json<serde_json::Value>>,
+}
+
+/// One page of the Raw-tab's joined campaign+measurements feed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignMeasurementsPage {
+    /// Entries in `(measured_at DESC NULLS LAST, pair_id DESC)` order.
+    pub entries: Vec<CampaignMeasurementDto>,
+    /// Opaque cursor for the next page, or `null` when this is the
+    /// final page. Only populated when the final row has a non-null
+    /// `measured_at` (pending rows cannot be resumed via keyset).
+    pub next_cursor: Option<String>,
+}
+
+/// `GET /api/campaigns/{id}/measurements` — joined campaign+measurements
+/// feed for the Results browser's Raw tab. Paginated via a keyset
+/// cursor; the first page returns the most recent settled rows
+/// interleaved with any pending/dispatched pairs.
+#[utoipa::path(
+    get,
+    path = "/api/campaigns/{id}/measurements",
+    tag = "campaigns",
+    operation_id = "campaign_measurements",
+    params(
+        ("id" = Uuid, Path, description = "Campaign id"),
+        CampaignMeasurementsQuery,
+    ),
+    responses(
+        (status = 200, description = "Measurement page", body = CampaignMeasurementsPage),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign not found", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn campaign_measurements(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<CampaignMeasurementsQuery>,
+) -> Response {
+    let pool = &state.pool;
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let cursor = q.cursor.as_deref().and_then(decode_measurements_cursor);
+
+    match fetch_campaign_measurements(pool, id, &q, limit, cursor).await {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(e) => internal_error("history::campaign_measurements", e),
+    }
+}
+
+/// Private repo helper for `campaign_measurements`.
+///
+/// Uses LEFT JOINs on `measurements` and `mtr_traces` so pending /
+/// dispatched pairs remain visible (the Raw tab must surface in-flight
+/// detail work even when the pair has no measurement yet). The cursor
+/// and ORDER BY use `NULLS LAST` on `measured_at` — pending rows
+/// accumulate at the bottom of the first page and are unreachable by
+/// keyset pagination in v1 (acceptable: operators narrow by
+/// `resolution_state` when they want pending-only views).
+async fn fetch_campaign_measurements(
+    pool: &PgPool,
+    id: Uuid,
+    q: &CampaignMeasurementsQuery,
+    limit: i64,
+    cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
+) -> sqlx::Result<CampaignMeasurementsPage> {
+    let cur_t = cursor.map(|(t, _)| t);
+    let cur_i = cursor.map(|(_, i)| i);
+
+    let rows: Vec<CampaignMeasurementDto> = sqlx::query_as!(
+        CampaignMeasurementDto,
+        r#"
+        SELECT
+          cp.id                         AS "pair_id!",
+          cp.source_agent_id            AS "source_agent_id!",
+          host(cp.destination_ip)       AS "destination_ip!",
+          cp.resolution_state           AS "resolution_state!: PairResolutionState",
+          cp.kind                       AS "pair_kind!: MeasurementKind",
+          m.id                          AS "measurement_id?",
+          m.protocol                    AS "protocol?: ProbeProtocol",
+          m.measured_at                 AS "measured_at?",
+          m.latency_avg_ms              AS "latency_avg_ms?",
+          m.loss_pct                    AS "loss_pct?",
+          m.mtr_id                      AS "mtr_id?",
+          t.hops                        AS "mtr_hops?: sqlx::types::Json<serde_json::Value>"
+        FROM campaign_pairs cp
+        LEFT JOIN measurements m ON m.id = cp.measurement_id
+        LEFT JOIN mtr_traces   t ON t.id = m.mtr_id
+        WHERE cp.campaign_id = $1
+          AND ($2::pair_resolution_state IS NULL OR cp.resolution_state = $2)
+          -- Pending/dispatched pairs have no joined measurement, so
+          -- `m.protocol` is NULL. We intentionally retain those rows
+          -- under a protocol filter so operators can still see
+          -- in-flight detail work; the UI renders "protocol: —" until
+          -- the measurement lands.
+          AND ($3::probe_protocol        IS NULL OR m.protocol IS NULL OR m.protocol = $3)
+          AND ($4::measurement_kind      IS NULL OR cp.kind = $4)
+          -- measurement_id filter short-circuits to the single pair that
+          -- owns the requested measurement (DrilldownDrawer MTR resolver).
+          AND ($5::bigint                IS NULL OR m.id = $5)
+          -- Cursor predicate: rows with NULL measured_at can never be
+          -- reached via keyset once the first page scrolls past them.
+          -- That is acceptable in v1 per the Raw-tab contract.
+          AND ($6::timestamptz IS NULL
+               OR (m.measured_at IS NOT NULL
+                   AND (m.measured_at, cp.id) < ($6, $7::bigint)))
+        ORDER BY m.measured_at DESC NULLS LAST, cp.id DESC
+        LIMIT $8
+        "#,
+        id,
+        q.resolution_state as _,
+        q.protocol as _,
+        q.kind as _,
+        q.measurement_id,
+        cur_t,
+        cur_i,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Emit next_cursor only when the page is full AND the last row has a
+    // settled `measured_at`. Pending-row tails don't paginate; the
+    // operator refines with `resolution_state` if they want more.
+    let next_cursor = rows
+        .last()
+        .filter(|r| rows.len() as i64 == limit && r.measured_at.is_some())
+        .and_then(|r| {
+            r.measured_at
+                .map(|t| encode_measurements_cursor(t, r.pair_id))
+        });
+
+    Ok(CampaignMeasurementsPage {
+        entries: rows,
+        next_cursor,
+    })
+}
+
+/// Base64-JSON cursor payload. Private — callers round-trip the opaque
+/// string surfaced on `CampaignMeasurementsPage.next_cursor`.
+#[derive(Serialize, Deserialize)]
+struct CursorPayload {
+    t: chrono::DateTime<chrono::Utc>,
+    i: i64,
+}
+
+fn encode_measurements_cursor(t: chrono::DateTime<chrono::Utc>, i: i64) -> String {
+    use base64::Engine;
+    let json =
+        serde_json::to_vec(&CursorPayload { t, i }).expect("CursorPayload always serializes");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+fn decode_measurements_cursor(s: &str) -> Option<(chrono::DateTime<chrono::Utc>, i64)> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s)
+        .ok()?;
+    let p: CursorPayload = serde_json::from_slice(&bytes).ok()?;
+    Some((p.t, p.i))
 }

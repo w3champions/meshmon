@@ -175,9 +175,7 @@ async fn history_measurements_returns_joined_rows_in_range() {
 
     // Protocol filter narrows to two ICMP rows.
     let body: Value = h
-        .get_json(
-            "/api/history/measurements?source=hist-e&destination=203.0.113.21&protocols=icmp",
-        )
+        .get_json("/api/history/measurements?source=hist-e&destination=203.0.113.21&protocols=icmp")
         .await;
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 2, "expected only icmp rows; body = {body}");
@@ -187,4 +185,87 @@ async fn history_measurements_returns_joined_rows_in_range() {
             "unexpected protocol in filtered row: {r}"
         );
     }
+}
+
+#[tokio::test]
+async fn campaign_measurements_shows_pending_and_settled_rows() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // One campaign + three pairs sharing the same (source, dest):
+    //   campaign kind: settled (measurement row + latency)
+    //   detail_ping : settled (second measurement row)
+    //   detail_mtr  : dispatched, no measurement yet
+    let campaign_id = common::seed_minimal_campaign_for_measurements(pool, "camp-agent-1").await;
+    common::seed_settled_pair(
+        pool,
+        campaign_id,
+        "camp-agent-1",
+        "203.0.113.50",
+        "campaign",
+    )
+    .await;
+    common::seed_settled_pair(
+        pool,
+        campaign_id,
+        "camp-agent-1",
+        "203.0.113.50",
+        "detail_ping",
+    )
+    .await;
+    common::seed_pending_pair(
+        pool,
+        campaign_id,
+        "camp-agent-1",
+        "203.0.113.50",
+        "detail_mtr",
+    )
+    .await;
+
+    // No filter — all three rows (including the in-flight detail_mtr).
+    let body: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/measurements"))
+        .await;
+    assert_eq!(
+        body["entries"].as_array().unwrap().len(),
+        3,
+        "no-filter page: body = {body}"
+    );
+
+    // kind=campaign filters to one row.
+    let body: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id}/measurements?kind=campaign"
+        ))
+        .await;
+    assert_eq!(
+        body["entries"].as_array().unwrap().len(),
+        1,
+        "kind=campaign page: body = {body}"
+    );
+
+    // kind=detail_mtr returns the dispatched row with measured_at=null
+    // and resolution_state='dispatched'.
+    let body: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id}/measurements?kind=detail_mtr"
+        ))
+        .await;
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "detail_mtr page: body = {body}");
+    assert!(
+        entries[0]["measured_at"].is_null(),
+        "dispatched detail_mtr must have null measured_at: {:?}",
+        entries[0],
+    );
+    assert_eq!(
+        entries[0]["resolution_state"], "dispatched",
+        "detail_mtr row: {:?}",
+        entries[0],
+    );
+    assert_eq!(
+        entries[0]["pair_kind"], "detail_mtr",
+        "detail_mtr row: {:?}",
+        entries[0],
+    );
 }
