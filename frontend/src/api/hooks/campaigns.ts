@@ -260,7 +260,8 @@ export interface EditCampaignVariables {
  * Apply an edit delta to a finished campaign. The server re-enters `running`
  * on success, which can both add/remove pairs and (with `force_measurement`)
  * reset the whole campaign — invalidate the preview key so the dispatch
- * estimate refreshes immediately.
+ * estimate refreshes immediately, and the measurements prefix so the Raw tab
+ * drops any rows that belonged to now-removed pairs or a force-reset sweep.
  */
 export function useEditCampaign(): UseMutationResult<Campaign, Error, EditCampaignVariables> {
   const queryClient = useQueryClient();
@@ -278,6 +279,10 @@ export function useEditCampaign(): UseMutationResult<Campaign, Error, EditCampai
       queryClient.setQueryData(campaignKey(id), data);
       queryClient.invalidateQueries({ queryKey: CAMPAIGNS_LIST_KEY });
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(id) });
+      // Prefix invalidation so every filter variant of the Raw tab refetches —
+      // an edit that removes pairs or sets `force_measurement` can mutate the
+      // measurement set without emitting a matching SSE `pair_settled`.
+      queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
     },
   });
 }
@@ -377,7 +382,9 @@ export function useCampaignMeasurements(
 /**
  * Force-reset a single pair and re-enter `running`. The campaign shell, the
  * paginated pair list, and the dispatch preview all shift — invalidate
- * all three.
+ * all three. Also invalidate the measurements prefix: when the force-pair
+ * outcome reuses an existing measurement the writer does not emit a
+ * `pair_settled` frame, so the Raw tab would otherwise stay stale.
  */
 export function useForcePair(): UseMutationResult<Campaign, Error, ForcePairVariables> {
   const queryClient = useQueryClient();
@@ -395,6 +402,7 @@ export function useForcePair(): UseMutationResult<Campaign, Error, ForcePairVari
       queryClient.setQueryData(campaignKey(id), data);
       queryClient.invalidateQueries({ queryKey: campaignPairsKey(id) });
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(id) });
+      queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
     },
   });
 }

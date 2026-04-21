@@ -7,6 +7,8 @@ import {
   type Campaign,
   type CampaignMeasurementsPage,
   campaignKey,
+  campaignMeasurementsKey,
+  campaignMeasurementsPrefixKey,
   campaignPairsKey,
   campaignPreviewKey,
   useCampaign,
@@ -237,11 +239,17 @@ describe("useStopCampaign", () => {
 });
 
 describe("useEditCampaign", () => {
-  test("POSTs the edit body unchanged and invalidates the three keys", async () => {
+  test("POSTs the edit body unchanged and invalidates list + preview + measurements prefix", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify(CAMPAIGN), { status: 200 }));
     const qc = makeQueryClient();
+    // Prime a filtered measurements entry so we can verify the prefix
+    // invalidation flips it to `isInvalidated`.
+    const measurementsFilterKey = campaignMeasurementsKey(CAMPAIGN.id, {
+      resolution_state: "succeeded",
+    });
+    qc.setQueryData(measurementsFilterKey, { pages: [], pageParams: [] });
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
     const { result } = renderHook(() => useEditCampaign(), { wrapper: wrapWith(qc) });
@@ -264,6 +272,10 @@ describe("useEditCampaign", () => {
     const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
     expect(invalidatedKeys).toContainEqual(CAMPAIGNS_LIST_KEY);
     expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN.id));
+    expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN.id));
+    // Prefix invalidation sweeps every filter variant — the primed entry
+    // should flip to invalidated even though it was keyed by a filter.
+    expect(qc.getQueryState(measurementsFilterKey)?.isInvalidated).toBe(true);
   });
 });
 
@@ -380,11 +392,15 @@ describe("useCampaignMeasurements", () => {
 });
 
 describe("useForcePair", () => {
-  test("seeds the entry cache and invalidates pairs + preview on success", async () => {
+  test("seeds the entry cache and invalidates pairs + preview + measurements prefix on success", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify(CAMPAIGN), { status: 200 }),
     );
     const qc = makeQueryClient();
+    // Prime a filtered measurements entry so the prefix invalidation can be
+    // observed as `isInvalidated` on a real cache entry.
+    const measurementsFilterKey = campaignMeasurementsKey(CAMPAIGN.id, { protocol: "icmp" });
+    qc.setQueryData(measurementsFilterKey, { pages: [], pageParams: [] });
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
     const { result } = renderHook(() => useForcePair(), { wrapper: wrapWith(qc) });
@@ -408,5 +424,9 @@ describe("useForcePair", () => {
     expect(invalidatedKeys).not.toContainEqual(campaignKey(CAMPAIGN.id));
     expect(invalidatedKeys).toContainEqual(campaignPairsKey(CAMPAIGN.id));
     expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN.id));
+    expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN.id));
+    // A force-pair outcome that reuses an existing measurement does not emit
+    // a `pair_settled` SSE frame — the Raw tab relies on this invalidation.
+    expect(qc.getQueryState(measurementsFilterKey)?.isInvalidated).toBe(true);
   });
 });
