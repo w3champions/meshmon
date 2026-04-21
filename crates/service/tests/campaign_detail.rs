@@ -263,6 +263,52 @@ async fn detail_scope_pair_missing_identifier_returns_400() {
     assert_eq!(res["error"], "missing_pair", "body = {res}");
 }
 
+#[tokio::test]
+async fn detail_rejects_pair_payload_for_non_pair_scope() {
+    // `DetailRequest::pair` is documented as "required iff scope == pair,
+    // rejected on other scopes" — silently ignoring a stray payload for
+    // scope=all / scope=good_candidates would mask client bugs that set
+    // `pair` unconditionally.
+    let h = common::HttpHarness::start().await;
+
+    common::insert_agent_with_ip(&h.state.pool, "det-stray-a", "192.0.2.101".parse().unwrap())
+        .await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "stray pair payload",
+                "protocol": "icmp",
+                "source_agent_ids": ["det-stray-a"],
+                "destination_ips": ["192.0.2.102"],
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    for scope in ["all", "good_candidates"] {
+        let res = h
+            .post_expect_status(
+                &format!("/api/campaigns/{campaign_id}/detail"),
+                &json!({
+                    "scope": scope,
+                    "pair": {
+                        "source_agent_id": "det-stray-a",
+                        "destination_ip": "192.0.2.102",
+                    },
+                }),
+                400,
+            )
+            .await;
+        assert_eq!(
+            res["error"], "unexpected_pair_payload",
+            "scope={scope} body = {res}"
+        );
+    }
+}
+
 /// Invariant: `/detail` inserts `detail_ping` + `detail_mtr` rows on the
 /// same `campaign_pairs` table that the evaluator reads. If the
 /// evaluator's WHERE clause isn't kind-gated, a second `/evaluate` call

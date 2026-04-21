@@ -792,6 +792,17 @@ pub async fn detail(
             .into_response();
     }
 
+    // Scope contract (see `DetailRequest::pair` docstring): `pair` is
+    // required iff scope=='pair' and must be absent otherwise.
+    // Silently ignoring an extraneous payload hides client bugs.
+    if body.pair.is_some() && !matches!(body.scope, DetailScope::Pair) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unexpected_pair_payload" })),
+        )
+            .into_response();
+    }
+
     let pairs: Vec<(String, IpAddr)> = match body.scope {
         DetailScope::All => match repo::settled_campaign_pairs(&state.pool, id).await {
             Ok(p) => p,
