@@ -33,9 +33,11 @@ export interface RowActionMenuProps {
 /**
  * Per-row dropdown with the "force re-measure" + "dispatch detail for
  * this pair" actions. The server-side pair row is keyed by
- * `(source_agent_id, destination_ip)`; when a candidate has multiple
- * scored pairs the drawer is the operator's lever for per-pair dispatch
- * and the row-level shortcut targets the first scored pair.
+ * `(source_agent_id, destination_ip)`; this row-level action targets
+ * `pair_details[0]` as a one-click shortcut. The PairsTab (Task 16 /
+ * Batch 5) is the operator's lever for per-pair dispatch across the
+ * full pair list — the drilldown drawer here only renders per-pair
+ * metrics, not per-pair action buttons.
  */
 export function RowActionMenu({ candidate, onForcePair, onTriggerPairDetail }: RowActionMenuProps) {
   const firstPair = candidate.pair_details[0];

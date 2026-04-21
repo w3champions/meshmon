@@ -222,11 +222,16 @@ export const campaignDetailSearchSchema = z.object({
     .enum(["campaign", "detail_ping", "detail_mtr"])
     .catch(() => undefined as never)
     .optional(),
-  // Candidates-tab sort column. Namespaced (`cand_`) so future Pairs-tab
-  // sort can use its own prefix without stepping on this value.
+  // Candidates-tab sort column + direction. Namespaced (`cand_`) so a
+  // future Pairs-tab sort can use its own prefix without stepping on
+  // this value. Application default when both fields are absent:
+  // `composite_score` / `desc` (resolved in `CandidatesTab`'s
+  // `DEFAULT_SORT`). Per-field `.catch(() => undefined)` means a stale
+  // shared URL with an unknown enum value (e.g. `?cand_sort=rank` from
+  // an earlier build where `rank` was a separate key) falls back to the
+  // application default instead of throwing.
   cand_sort: z
     .enum([
-      "rank",
       "display_name",
       "destination_ip",
       "city",

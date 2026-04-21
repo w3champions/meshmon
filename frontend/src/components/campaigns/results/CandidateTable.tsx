@@ -32,7 +32,6 @@ import { cn } from "@/lib/utils";
 type Candidate = Evaluation["results"]["candidates"][number];
 
 export type CandidateSortColumn =
-  | "rank"
   | "display_name"
   | "destination_ip"
   | "city"
@@ -114,7 +113,6 @@ function cityLabel(candidate: Candidate): string {
 
 function compareByColumn(a: Candidate, b: Candidate, col: CandidateSortColumn): number {
   switch (col) {
-    case "rank":
     case "composite_score":
       return a.composite_score - b.composite_score;
     case "display_name":
@@ -206,8 +204,13 @@ export function CandidateTable({
           <Table aria-label="Evaluation candidates">
             <TableHeader>
               <TableRow>
+                {/* The `#` column renders the position index (1, 2, …) as
+                    the visual rank, but sorts by `composite_score` — that's
+                    the signal the rank reflects. Wiring it to `rank` as a
+                    separate sort key would duplicate the Score column and
+                    mislead aria-sort consumers about which header is active. */}
                 <SortableHead
-                  column="rank"
+                  column="composite_score"
                   label="#"
                   sort={sort}
                   onSortChange={onSortChange}

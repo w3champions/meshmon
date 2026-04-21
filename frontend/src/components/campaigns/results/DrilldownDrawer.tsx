@@ -104,11 +104,7 @@ export function DrilldownDrawer({
 
   return (
     <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent
-        side="right"
-        className="w-full max-w-3xl sm:max-w-3xl overflow-y-auto"
-        aria-describedby={undefined}
-      >
+      <SheetContent side="right" className="w-full max-w-3xl sm:max-w-3xl overflow-y-auto">
         {candidate ? (
           <CandidateBody
             candidate={candidate}
@@ -135,7 +131,6 @@ interface CandidateBodyProps {
 
 function CandidateBody({ candidate, campaign, agentsById, unqualifiedReason }: CandidateBodyProps) {
   const [activeMtr, setActiveMtr] = useState<{
-    pairKey: string;
     measurementId: number;
     label: string;
   } | null>(null);
@@ -177,12 +172,9 @@ function CandidateBody({ candidate, campaign, agentsById, unqualifiedReason }: C
                 <PairRow
                   key={pairKey}
                   pair={pair}
-                  pairKey={pairKey}
                   sourceAgent={agentsById.get(pair.source_agent_id)}
                   destAgent={agentsById.get(pair.destination_agent_id)}
-                  onOpenMtr={(measurementId, label) =>
-                    setActiveMtr({ pairKey, measurementId, label })
-                  }
+                  onOpenMtr={(measurementId, label) => setActiveMtr({ measurementId, label })}
                 />
               );
             })}
@@ -208,7 +200,6 @@ function CandidateBody({ candidate, campaign, agentsById, unqualifiedReason }: C
 
 interface PairRowProps {
   pair: PairDetail;
-  pairKey: string;
   sourceAgent: AgentSummary | undefined;
   destAgent: AgentSummary | undefined;
   onOpenMtr: (measurementId: number, label: string) => void;
