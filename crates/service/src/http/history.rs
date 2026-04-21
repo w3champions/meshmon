@@ -72,15 +72,20 @@ pub struct HistorySourceDto {
 )]
 pub async fn sources(State(state): State<AppState>) -> Response {
     let pool = &state.pool;
+    // Semi-join via `WHERE EXISTS` — cheaper than `JOIN + DISTINCT`
+    // against the `measurements` hypertable and lets
+    // `measurements_reuse_idx (source_agent_id, …)` short-circuit the
+    // agent-by-agent existence check. Blank catalogue / agent names are
+    // filtered with NULLIF so the display_name never renders as "".
     match sqlx::query_as!(
         HistorySourceDto,
         r#"
-        SELECT DISTINCT
-               awc.agent_id AS "source_agent_id!",
-               COALESCE(awc.catalogue_display_name, awc.agent_display_name, awc.agent_id)
-                 AS "display_name!"
+        SELECT awc.agent_id AS "source_agent_id!",
+               COALESCE(NULLIF(awc.catalogue_display_name, ''),
+                        NULLIF(awc.agent_display_name, ''),
+                        awc.agent_id) AS "display_name!"
           FROM agents_with_catalogue awc
-          JOIN measurements m ON m.source_agent_id = awc.agent_id
+         WHERE EXISTS (SELECT 1 FROM measurements m WHERE m.source_agent_id = awc.agent_id)
          ORDER BY 2 ASC
         "#,
     )
