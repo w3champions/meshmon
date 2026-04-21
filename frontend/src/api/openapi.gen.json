@@ -967,6 +967,148 @@
         }
       }
     },
+    "/api/campaigns/{id}/measurements": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns/{id}/measurements` — joined campaign+measurements\nfeed for the Results browser's Raw tab. Paginated via a keyset\ncursor; the first page returns the most recent settled rows\ninterleaved with any pending/dispatched pairs.",
+        "operationId": "campaign_measurements",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "resolution_state",
+            "in": "query",
+            "description": "Narrow to a single `campaign_pairs.resolution_state`.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/PairResolutionState"
+                }
+              ]
+            }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "description": "Narrow to a single `measurements.protocol`. Pending/dispatched\npairs (no joined measurement) stay visible under this filter so\noperators can monitor in-flight detail work.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ProbeProtocol"
+                }
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Narrow to a single `campaign_pairs.kind` (`campaign`,\n`detail_ping`, `detail_mtr`).",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/MeasurementKind"
+                }
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Keyset cursor — base64(JSON) `{t, i}` pair from the previous page.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "measurement_id",
+            "in": "query",
+            "description": "Resolve a single (pair, measurement) row by measurement id —\nused by the DrilldownDrawer for MTR lookup.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size. Defaults to 200, clamped to `[1, 1000]`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Measurement page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignMeasurementsPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/campaigns/{id}/pairs": {
       "get": {
         "tags": [
@@ -1913,6 +2055,208 @@
         }
       }
     },
+    "/api/history/destinations": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "`GET /api/history/destinations` — every destination reachable from\n`source`, optionally narrowed by partial match on IP or display\nname (case-insensitive).",
+        "operationId": "history_destinations",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Source agent id — required.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Partial match on `destination_ip` or catalogue `display_name`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Destination list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HistoryDestinationDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/history/measurements": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "`GET /api/history/measurements` — measurement rows (+ optional MTR\nhops) for a (source, destination) range. Hard-capped at 5 000 rows\nso a pathologically long history can't blow a browser tab; the\nfrontend surfaces the cap explicitly.",
+        "operationId": "history_measurements",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Source agent id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "description": "Destination IP (v4 or v6 host string).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "protocols",
+            "in": "query",
+            "description": "Comma-separated list: `icmp,tcp,udp`. Empty/absent = all protocols.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "RFC 3339 lower bound (inclusive).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "RFC 3339 upper bound (inclusive).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Measurement list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HistoryMeasurementDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/history/sources": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "`GET /api/history/sources` — agents with at least one measurement.",
+        "operationId": "history_sources",
+        "responses": {
+          "200": {
+            "description": "Source list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HistorySourceDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/query": {
       "get": {
         "tags": [
@@ -2709,6 +3053,121 @@
           "title": {
             "type": "string",
             "description": "Operator-facing title."
+          }
+        }
+      },
+      "CampaignMeasurementDto": {
+        "type": "object",
+        "description": "One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDrawer can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON value on the wire.",
+        "required": [
+          "pair_id",
+          "source_agent_id",
+          "destination_ip",
+          "resolution_state",
+          "pair_kind"
+        ],
+        "properties": {
+          "destination_ip": {
+            "type": "string",
+            "description": "Destination IP as a host string."
+          },
+          "latency_avg_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Average round-trip latency in ms (nullable)."
+          },
+          "loss_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Observed loss percentage ([0, 100]) (nullable)."
+          },
+          "measured_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the measurement was produced (null when pending/dispatched)."
+          },
+          "measurement_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Populated when the pair has a joined `measurements` row."
+          },
+          "mtr_hops": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Inline MTR hops — populated iff `mtr_id` resolves to an\n`mtr_traces` row."
+          },
+          "mtr_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`measurements.mtr_id` FK — reference to `mtr_traces.id`."
+          },
+          "pair_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`campaign_pairs.id`."
+          },
+          "pair_kind": {
+            "$ref": "#/components/schemas/MeasurementKind",
+            "description": "Kind of work the pair represents\n(`campaign`, `detail_ping`, `detail_mtr`)."
+          },
+          "protocol": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProbeProtocol",
+                "description": "Protocol of the joined measurement (null when pending/dispatched)."
+              }
+            ]
+          },
+          "resolution_state": {
+            "$ref": "#/components/schemas/PairResolutionState",
+            "description": "Current lifecycle of the pair."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent id from the pair envelope."
+          }
+        }
+      },
+      "CampaignMeasurementsPage": {
+        "type": "object",
+        "description": "One page of the Raw-tab's joined campaign+measurements feed.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CampaignMeasurementDto"
+            },
+            "description": "Entries in `(measured_at DESC NULLS LAST, pair_id DESC)` order."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or `null` when this is the\nfinal page. Only populated when the final row has a non-null\n`measured_at` (pending rows cannot be resumed via keyset)."
           }
         }
       },
@@ -3677,6 +4136,176 @@
           "source_agent_id": {
             "type": "string",
             "description": "Source agent id of the pair to force."
+          }
+        }
+      },
+      "HistoryDestinationDto": {
+        "type": "object",
+        "description": "One destination reachable from a given source.\n\n`display_name` falls back to `host(destination_ip)` when no catalogue\nrow exists (either never enriched or later deleted). The frontend\nrenders this as \"raw IP — no metadata\", a supported state rather than\na rendering bug — `city`, `country_code`, and `asn` all stay NULL.",
+        "required": [
+          "destination_ip",
+          "display_name",
+          "is_mesh_member"
+        ],
+        "properties": {
+          "asn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Catalogue ASN (nullable). Postgres `INTEGER` → `i32`."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Catalogue city (nullable)."
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Catalogue country code (nullable)."
+          },
+          "destination_ip": {
+            "type": "string",
+            "description": "Raw destination IP as a host string."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Catalogue-derived label when known, else the IP string."
+          },
+          "is_mesh_member": {
+            "type": "boolean",
+            "description": "Whether the destination IP is itself a mesh-agent IP."
+          }
+        }
+      },
+      "HistoryMeasurementDto": {
+        "type": "object",
+        "description": "One joined `measurements` + optional `mtr_traces` row for the\n`/history/pair` page.\n\n`mtr_hops` decodes the `mtr_traces.hops` JSONB column. sqlx requires\nthe `Json<_>` wrapper for JSONB columns in `query_as!`; the wire JSON\nstays flat thanks to `sqlx::types::Json`'s transparent serde impl.",
+        "required": [
+          "id",
+          "source_agent_id",
+          "destination_ip",
+          "protocol",
+          "kind",
+          "probe_count",
+          "measured_at",
+          "loss_pct"
+        ],
+        "properties": {
+          "destination_ip": {
+            "type": "string",
+            "description": "Destination IP as a host string."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`measurements.id`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MeasurementKind",
+            "description": "Measurement kind (`campaign`, `detail_ping`, `detail_mtr`)."
+          },
+          "latency_avg_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Average round-trip latency in ms."
+          },
+          "latency_max_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Maximum round-trip latency in ms."
+          },
+          "latency_min_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Minimum round-trip latency in ms."
+          },
+          "latency_p95_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "95th-percentile round-trip latency in ms."
+          },
+          "latency_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Latency standard deviation in ms."
+          },
+          "loss_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Observed loss percentage ([0, 100])."
+          },
+          "measured_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the row was produced (UTC)."
+          },
+          "mtr_captured_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the associated `mtr_traces` row was captured."
+          },
+          "mtr_hops": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "MTR hop array; populated when the measurement has an `mtr_id`."
+          },
+          "probe_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of probes in the sample."
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/ProbeProtocol",
+            "description": "Protocol the probe used."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Source agent id that produced the row."
+          }
+        }
+      },
+      "HistorySourceDto": {
+        "type": "object",
+        "description": "One entry in the `/api/history/sources` list.",
+        "required": [
+          "source_agent_id",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "Display name from `agents_with_catalogue` — the catalogue-derived\nname when set, else the agent's own `display_name`, else the id."
+          },
+          "source_agent_id": {
+            "type": "string",
+            "description": "Agent id."
           }
         }
       },
