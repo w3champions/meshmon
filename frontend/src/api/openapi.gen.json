@@ -588,7 +588,7 @@
           "campaigns"
         ],
         "summary": "`POST /api/campaigns/{id}/detail` — enqueue detail-ping + detail-mtr\nrows for a slice of `(source_agent, destination_ip)` pairs.",
-        "description": "Gated on `state IN ('completed','evaluated')`. The three scopes:\n\n- `all`: every `kind='campaign'` pair whose baseline resolution\n  `succeeded` or `reused`. Selects directly from `campaign_pairs`\n  because an evaluation row is not required for this scope.\n- `good_candidates`: pulls the persisted evaluation row and expands\n  each qualifying `(source_agent, destination_agent, transit_ip)`\n  triple into a pair of `(source_agent → transit_ip)` +\n  `(destination_agent → transit_ip)` detail entries so both legs\n  get a higher-resolution measurement. Requires a prior evaluation;\n  400 with `no_evaluation` otherwise.\n- `pair`: a single operator-chosen `(source_agent_id,\n  destination_ip)` tuple from the request body.\n\nAll scopes flow through [`repo::insert_detail_pairs`], which owns\nthe transition back to `running` and emits\n`campaign_state_changed`. The handler additionally publishes\n`CampaignStreamEvent::StateChanged { running }` for the same campaign\nso clients subscribed to the broker see the transition even before\nthe NOTIFY listener wakes up; duplicates are idempotent on the\nfrontend (`StateChanged` invalidates a single React Query key).",
+        "description": "Gated on `state IN ('completed','evaluated')`. The three scopes:\n\n- `all`: every `kind='campaign'` pair whose baseline resolution\n  `succeeded` or `reused`. Selects directly from `campaign_pairs`\n  because an evaluation row is not required for this scope.\n- `good_candidates`: pulls the persisted evaluation row and expands\n  each qualifying `(source_agent, destination_agent, transit_ip)`\n  triple into a pair of `(source_agent → transit_ip)` +\n  `(destination_agent → transit_ip)` detail entries so both legs\n  get a higher-resolution measurement. Requires a prior evaluation;\n  400 with `no_evaluation` otherwise.\n- `pair`: a single operator-chosen `(source_agent_id,\n  destination_ip)` tuple from the request body.\n\nAll scopes flow through [`repo::insert_detail_pairs`], which owns\nthe transition back to `running` and emits `campaign_state_changed`\nthrough the Postgres NOTIFY trigger. The handler additionally\npublishes `CampaignStreamEvent::StateChanged { running }` for the\nsame campaign so clients subscribed to the broker see the\ntransition even before the NOTIFY listener wakes up — but **only**\nwhen a real transition occurred (`state_changed=true`). A\nno-op call against an already-`running` campaign skips the\nbroadcast to avoid spurious client refreshes.",
         "operationId": "detail",
         "parameters": [
           {
@@ -3364,7 +3364,7 @@
               "null"
             ],
             "format": "float",
-            "description": "Average improvement (ms) across considered pairs; negative means faster."
+            "description": "Average improvement (ms) across considered pairs. Defined as\n`direct_rtt − transit_rtt − (transit_stddev_penalty − direct_stddev_penalty)`,\nso a positive value means the transit candidate is faster than\nthe direct A→B baseline."
           },
           "avg_loss_pct": {
             "type": [
@@ -3384,7 +3384,7 @@
           "composite_score": {
             "type": "number",
             "format": "float",
-            "description": "Composite score; lower is better."
+            "description": "Composite score `(pairs_improved / baseline_pair_count) ×\navg_improvement_ms`; higher is better. Candidates are returned\nin descending composite-score order."
           },
           "country_code": {
             "type": [
@@ -3455,7 +3455,7 @@
               "null"
             ],
             "format": "float",
-            "description": "Average end-to-end improvement (ms) across qualifying candidates;\nnegative means faster. `None` when no candidate qualified."
+            "description": "Average end-to-end improvement (ms) across qualifying candidates.\nSame sign convention as\n[`EvaluationCandidateDto::avg_improvement_ms`] — positive means\nthe transit beats the direct A→B baseline. `None` when no\ncandidate qualified."
           },
           "baseline_pair_count": {
             "type": "integer",
@@ -3553,7 +3553,7 @@
           "improvement_ms": {
             "type": "number",
             "format": "float",
-            "description": "Transit minus direct RTT (ms); negative means faster via transit."
+            "description": "`direct_rtt − transit_rtt − (transit_stddev_penalty −\ndirect_stddev_penalty)`; positive means the transit beats the\ndirect A→B baseline by that many ms after stddev-penalty\nadjustment."
           },
           "mtr_measurement_id_ax": {
             "type": [

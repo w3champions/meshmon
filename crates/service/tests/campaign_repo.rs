@@ -1341,7 +1341,7 @@ async fn write_then_read_evaluation_round_trip() {
         baseline_pair_count: 3,
         candidates_total: 2,
         candidates_good: 1,
-        avg_improvement_ms: Some(-12.5),
+        avg_improvement_ms: Some(12.5),
         results: EvaluationResultsDto {
             candidates: Vec::new(),
             unqualified_reasons: Default::default(),
@@ -1361,7 +1361,7 @@ async fn write_then_read_evaluation_round_trip() {
         .unwrap()
         .expect("row present after first UPSERT");
     assert_eq!(read_first.id, persisted_first.id);
-    assert_eq!(read_first.avg_improvement_ms, Some(-12.5));
+    assert_eq!(read_first.avg_improvement_ms, Some(12.5));
     assert_eq!(read_first.loss_threshold_pct, 2.5);
     assert_eq!(read_first.stddev_weight, 1.25);
 
@@ -1373,7 +1373,7 @@ async fn write_then_read_evaluation_round_trip() {
         baseline_pair_count: 7,
         candidates_total: 5,
         candidates_good: 4,
-        avg_improvement_ms: Some(-20.0),
+        avg_improvement_ms: Some(20.0),
         results: EvaluationResultsDto {
             candidates: Vec::new(),
             unqualified_reasons: Default::default(),
@@ -1511,16 +1511,16 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
     .await
     .unwrap();
 
-    let (inserted, state_changed) =
-        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
-            .await
-            .unwrap();
+    let (inserted, post_state) = repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+        .await
+        .unwrap();
     assert_eq!(
         inserted, 2,
         "one requested pair spawns detail_ping + detail_mtr"
     );
-    assert!(
-        state_changed,
+    assert_eq!(
+        post_state,
+        CampaignState::Running,
         "completed → running transition must be reported"
     );
 
@@ -1567,7 +1567,7 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
     );
 
     // Second call with the same pair: duplicates skip silently.
-    let (inserted_again, state_changed_again) =
+    let (inserted_again, post_state_again) =
         repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
             .await
             .unwrap();
@@ -1575,9 +1575,10 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
         inserted_again, 0,
         "duplicate detail pairs skip via ON CONFLICT DO NOTHING"
     );
-    assert!(
-        !state_changed_again,
-        "second call finds campaign already running and reports no-op"
+    assert_eq!(
+        post_state_again,
+        CampaignState::Running,
+        "second call observes the already-running state under the lock"
     );
 
     repo::delete(&pool, row.id).await.unwrap();
@@ -1601,17 +1602,17 @@ async fn insert_detail_pairs_no_op_does_not_flip_state() {
     common::mark_completed(&pool, &row.id.to_string()).await;
 
     // Seed detail rows once (flips completed → running).
-    let (first_inserted, first_changed) =
+    let (first_inserted, first_state) =
         repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
             .await
             .unwrap();
     assert_eq!(first_inserted, 2);
-    assert!(first_changed);
+    assert_eq!(first_state, CampaignState::Running);
 
     // Force back to completed so the second call sees a gateable state.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
-    let (second_inserted, second_changed) =
+    let (second_inserted, second_state) =
         repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
             .await
             .unwrap();
@@ -1619,9 +1620,10 @@ async fn insert_detail_pairs_no_op_does_not_flip_state() {
         second_inserted, 0,
         "all requested pairs already exist — nothing to insert"
     );
-    assert!(
-        !second_changed,
-        "no inserts → no state flip (spurious churn regression guard)"
+    assert_eq!(
+        second_state,
+        CampaignState::Completed,
+        "no inserts → no state flip: observed state is the pre-call Completed"
     );
 
     let after = repo::get(&pool, row.id)

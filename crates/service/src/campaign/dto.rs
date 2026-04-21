@@ -357,8 +357,11 @@ pub struct EvaluationDto {
     pub candidates_total: i32,
     /// Candidate transit destinations that cleared the `qualifies` bar.
     pub candidates_good: i32,
-    /// Average end-to-end improvement (ms) across qualifying candidates;
-    /// negative means faster. `None` when no candidate qualified.
+    /// Average end-to-end improvement (ms) across qualifying candidates.
+    /// Same sign convention as
+    /// [`EvaluationCandidateDto::avg_improvement_ms`] — positive means
+    /// the transit beats the direct A→B baseline. `None` when no
+    /// candidate qualified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_improvement_ms: Option<f32>,
     /// Full candidate breakdown + unqualified-reason map.
@@ -442,7 +445,10 @@ pub struct EvaluationPairDetailDto {
     pub transit_stddev_ms: f32,
     /// Composed A→X→B transit observed loss (percent).
     pub transit_loss_pct: f32,
-    /// Transit minus direct RTT (ms); negative means faster via transit.
+    /// `direct_rtt − transit_rtt − (transit_stddev_penalty −
+    /// direct_stddev_penalty)`; positive means the transit beats the
+    /// direct A→B baseline by that many ms after stddev-penalty
+    /// adjustment.
     pub improvement_ms: f32,
     /// Whether this pair cleared the evaluator's qualify predicate.
     pub qualifies: bool,
@@ -509,7 +515,7 @@ mod tests {
             baseline_pair_count: 24,
             candidates_total: 10,
             candidates_good: 3,
-            avg_improvement_ms: Some(-58.0),
+            avg_improvement_ms: Some(58.0),
             results: EvaluationResultsDto {
                 candidates: vec![],
                 unqualified_reasons: Default::default(),

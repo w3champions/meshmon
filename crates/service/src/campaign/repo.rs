@@ -1665,13 +1665,16 @@ pub async fn settled_campaign_pairs(
 }
 
 /// Inserts detail-pair rows for the `POST /detail` handler and flips
-/// the campaign state back to `running`. Returns `(inserted, state_changed)`:
+/// the campaign state back to `running`. Returns
+/// `(inserted, post_state)`:
 ///
 /// - `inserted` — number of rows **actually inserted** (not requested);
 ///   duplicates skip silently via `ON CONFLICT DO NOTHING`.
-/// - `state_changed` — `true` when the campaign moved into `running`
-///   from one of `{completed, evaluated}`; `false` when it was already
-///   `running`. Lets the handler suppress a redundant SSE broadcast.
+/// - `post_state` — the campaign's state at commit time, read back
+///   under the same transaction lock. The caller compares this to the
+///   pre-call state to decide whether to publish a state-changed event
+///   and to populate the `DetailResponse.campaign_state` field with
+///   the actual post-insert state (not the potentially-stale pre-read).
 ///
 /// Each requested `(source, destination)` tuple produces TWO rows:
 /// one `kind='detail_ping'`, one `kind='detail_mtr'`. Dispatch (T45)
@@ -1690,7 +1693,7 @@ pub async fn insert_detail_pairs(
     pool: &PgPool,
     campaign_id: Uuid,
     pairs: &[(String, IpAddr)],
-) -> Result<(i32, bool), RepoError> {
+) -> Result<(i32, CampaignState), RepoError> {
     let mut tx = pool.begin().await?;
     let mut inserted = 0i32;
     for (source_agent_id, destination_ip) in pairs {
@@ -1715,10 +1718,22 @@ pub async fn insert_detail_pairs(
 
     // Only attempt the state flip when we actually queued new work.
     // A repeat `/detail` call where every requested row already exists
-    // (inserted == 0) must not restart a completed campaign — that would
-    // be a spurious state churn visible in the API + SSE stream.
-    let state_changed = if inserted == 0 {
-        false
+    // (inserted == 0) must not restart a completed campaign — that
+    // would be spurious state churn visible in the API + SSE stream.
+    let post_state = if inserted == 0 {
+        // No transition attempted — read the current state under the
+        // transaction lock so the caller sees the actual post-commit
+        // state rather than its stale pre-read.
+        sqlx::query_scalar!(
+            r#"SELECT state AS "state: CampaignState"
+                 FROM measurement_campaigns
+                WHERE id = $1
+                  FOR UPDATE"#,
+            campaign_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(RepoError::NotFound(campaign_id))?
     } else {
         match transition_state_in_tx(
             &mut tx,
@@ -1729,15 +1744,15 @@ pub async fn insert_detail_pairs(
         )
         .await
         {
-            Ok(_) => true,
+            Ok(row) => row.state,
             // Benign race: a concurrent writer already flipped the row to
             // `running` (e.g. another `/detail` or `force_pair`). The
             // detail pairs we inserted still land; we just don't need to
-            // flip state again.
+            // flip state again. State is known: `Running`.
             Err(RepoError::IllegalTransition {
                 from: Some(CampaignState::Running),
                 ..
-            }) => false,
+            }) => CampaignState::Running,
             // Any other observed state (Draft, Stopped, or row absent) is
             // a real precondition mismatch; propagate so the transaction
             // rolls back rather than leaving orphan detail rows behind.
@@ -1746,5 +1761,5 @@ pub async fn insert_detail_pairs(
     };
 
     tx.commit().await?;
-    Ok((inserted, state_changed))
+    Ok((inserted, post_state))
 }

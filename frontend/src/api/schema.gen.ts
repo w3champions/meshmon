@@ -252,12 +252,14 @@ export interface paths {
          *       destination_ip)` tuple from the request body.
          *
          *     All scopes flow through [`repo::insert_detail_pairs`], which owns
-         *     the transition back to `running` and emits
-         *     `campaign_state_changed`. The handler additionally publishes
-         *     `CampaignStreamEvent::StateChanged { running }` for the same campaign
-         *     so clients subscribed to the broker see the transition even before
-         *     the NOTIFY listener wakes up; duplicates are idempotent on the
-         *     frontend (`StateChanged` invalidates a single React Query key).
+         *     the transition back to `running` and emits `campaign_state_changed`
+         *     through the Postgres NOTIFY trigger. The handler additionally
+         *     publishes `CampaignStreamEvent::StateChanged { running }` for the
+         *     same campaign so clients subscribed to the broker see the
+         *     transition even before the NOTIFY listener wakes up — but **only**
+         *     when a real transition occurred (`state_changed=true`). A
+         *     no-op call against an already-`running` campaign skips the
+         *     broadcast to avoid spurious client refreshes.
          */
         post: operations["detail"];
         delete?: never;
@@ -1354,7 +1356,10 @@ export interface components {
             asn?: number | null;
             /**
              * Format: float
-             * @description Average improvement (ms) across considered pairs; negative means faster.
+             * @description Average improvement (ms) across considered pairs. Defined as
+             *     `direct_rtt − transit_rtt − (transit_stddev_penalty − direct_stddev_penalty)`,
+             *     so a positive value means the transit candidate is faster than
+             *     the direct A→B baseline.
              */
             avg_improvement_ms?: number | null;
             /**
@@ -1367,7 +1372,9 @@ export interface components {
             city?: string | null;
             /**
              * Format: float
-             * @description Composite score; lower is better.
+             * @description Composite score `(pairs_improved / baseline_pair_count) ×
+             *     avg_improvement_ms`; higher is better. Candidates are returned
+             *     in descending composite-score order.
              */
             composite_score: number;
             /** @description Catalogue ISO country code, when present. */
@@ -1407,8 +1414,11 @@ export interface components {
         EvaluationDto: {
             /**
              * Format: float
-             * @description Average end-to-end improvement (ms) across qualifying candidates;
-             *     negative means faster. `None` when no candidate qualified.
+             * @description Average end-to-end improvement (ms) across qualifying candidates.
+             *     Same sign convention as
+             *     [`EvaluationCandidateDto::avg_improvement_ms`] — positive means
+             *     the transit beats the direct A→B baseline. `None` when no
+             *     candidate qualified.
              */
             avg_improvement_ms?: number | null;
             /**
@@ -1480,7 +1490,10 @@ export interface components {
             direct_stddev_ms: number;
             /**
              * Format: float
-             * @description Transit minus direct RTT (ms); negative means faster via transit.
+             * @description `direct_rtt − transit_rtt − (transit_stddev_penalty −
+             *     direct_stddev_penalty)`; positive means the transit beats the
+             *     direct A→B baseline by that many ms after stddev-penalty
+             *     adjustment.
              */
             improvement_ms: number;
             /**

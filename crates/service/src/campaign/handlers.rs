@@ -866,43 +866,36 @@ pub async fn detail(
             .into_response();
     }
 
-    let (enqueued, state_changed) = match repo::insert_detail_pairs(&state.pool, id, &pairs).await {
+    let (enqueued, post_state) = match repo::insert_detail_pairs(&state.pool, id, &pairs).await {
         Ok(out) => out,
         Err(e) => return repo_error("campaign::detail::insert", e),
     };
 
-    // Only publish the SSE state-change when an actual transition
-    // occurred. A campaign already in `running` (e.g. operator racing
-    // with the scheduler) keeps its prior state and does not emit a
-    // synthetic `StateChanged { running }` event.
-    if state_changed {
+    // Publish the SSE state-change only when the actual state crossed
+    // from the pre-insert observation to something new. A concurrent
+    // writer that had already flipped to `running` leaves
+    // `post_state == Running == pre_state (if pre_state==Running was
+    // somehow reached)` — but the handler's gate only admits
+    // Completed|Evaluated, so any observed post_state != pre_state
+    // represents our transition or a race-winner's. Compare explicitly
+    // to avoid emitting a redundant frame.
+    if post_state != campaign.state {
         state
             .campaign_broker
             .publish(CampaignStreamEvent::StateChanged {
                 campaign_id: id,
-                state: CampaignState::Running,
+                state: post_state,
             });
     }
-
-    // Post-call state: the canonical transition promoted
-    // Completed|Evaluated to Running when `state_changed`; otherwise the
-    // campaign stayed in its prior state (which, per the state gate at
-    // the top of this handler, is one of {Completed, Evaluated} —
-    // except for the race where a concurrent writer already flipped it
-    // to Running, in which case the prior read is stale). Report the
-    // prior-read state in the stable-case, which is accurate for every
-    // caller that was not racing another writer.
-    let campaign_state = if state_changed {
-        CampaignState::Running
-    } else {
-        campaign.state
-    };
 
     (
         StatusCode::OK,
         Json(DetailResponse {
             pairs_enqueued: enqueued,
-            campaign_state,
+            // `post_state` is read back inside the insert transaction's
+            // lock, so it reflects the campaign's actual state at
+            // commit time (not the stale pre-read).
+            campaign_state: post_state,
         }),
     )
         .into_response()
