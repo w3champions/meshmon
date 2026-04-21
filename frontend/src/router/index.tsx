@@ -313,10 +313,17 @@ export const historyPairSearchSchema = z
   .object({
     source: z.string().optional(),
     destination: z.string().optional(),
-    protocol: z.array(z.enum(["icmp", "tcp", "udp"])).optional(),
+    // Per-field `.catch(undefined)` lets a bad shared URL (e.g.
+    // `?protocol=foo` or `?from=garbage`) degrade silently instead of
+    // failing validation. The only failure mode left is the `.refine`
+    // below, which the route-level `parseHistoryPairSearch` swallows.
+    protocol: z
+      .array(z.enum(["icmp", "tcp", "udp"]))
+      .optional()
+      .catch(undefined),
     range: z.enum(["24h", "7d", "30d", "90d", "custom"]).catch("30d").default("30d"),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().datetime().optional().catch(undefined),
+    to: z.string().datetime().optional().catch(undefined),
   })
   .refine((s) => s.range !== "custom" || (s.from && s.to), {
     message: "custom range requires from and to",
@@ -324,11 +331,36 @@ export const historyPairSearchSchema = z
 
 export type HistoryPairSearch = z.infer<typeof historyPairSearchSchema>;
 
+const HISTORY_PAIR_DEFAULT: HistoryPairSearch = { range: "30d" };
+
+/**
+ * Route-level resilience for `/history/pair`. Per-field `.catch(undefined)`
+ * already absorbs malformed enum/datetime values; this wrapper only needs
+ * to cover the `range=custom` refine (e.g. a shared URL clipped of its
+ * `from`/`to` bounds). On that one failure mode we drop the range back to
+ * the default so navigation still resolves instead of throwing and
+ * locking the operator out of the page.
+ */
+export function parseHistoryPairSearch(search: unknown): HistoryPairSearch {
+  const result = historyPairSearchSchema.safeParse(search);
+  if (result.success) return result.data;
+  const raw: Record<string, unknown> =
+    typeof search === "object" && search !== null ? (search as Record<string, unknown>) : {};
+  const retry = historyPairSearchSchema.safeParse({
+    ...raw,
+    range: undefined,
+    from: undefined,
+    to: undefined,
+  });
+  return retry.success ? retry.data : HISTORY_PAIR_DEFAULT;
+}
+
 export const historyPairRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/history/pair",
   component: HistoryPair,
-  validateSearch: (search) => historyPairSearchSchema.parse(search),
+  validateSearch: (search: Record<string, unknown>): HistoryPairSearch =>
+    parseHistoryPairSearch(search),
 });
 
 const routeTree = rootRoute.addChildren([
