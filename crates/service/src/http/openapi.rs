@@ -94,6 +94,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
         crate::http::history::HistoryDestinationDto,
+        crate::http::history::HistoryMeasurementDto,
         crate::http::history::HistorySourceDto,
         crate::http::metrics_proxy::InstantQuery,
         crate::http::metrics_proxy::RangeQuery,
@@ -211,6 +212,7 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         // (T49 addition — joined campaign_pairs + measurements + mtr_traces).
         .routes(utoipa_axum::routes!(crate::http::history::sources))
         .routes(utoipa_axum::routes!(crate::http::history::destinations))
+        .routes(utoipa_axum::routes!(crate::http::history::measurements))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

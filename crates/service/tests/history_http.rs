@@ -8,6 +8,7 @@
 
 mod common;
 
+use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::query;
 
@@ -125,4 +126,65 @@ async fn history_destinations_filters_by_source_and_partial_match() {
         !ips.contains(&"203.0.113.11"),
         "filtered list unexpectedly contains 203.0.113.11; ips = {ips:?}"
     );
+}
+
+#[tokio::test]
+async fn history_measurements_returns_joined_rows_in_range() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    query!(
+        r#"INSERT INTO agents
+             (id, display_name, ip, tcp_probe_port, udp_probe_port)
+           VALUES
+             ('hist-e', 'Agent E', '10.0.2.1'::inet, 3555, 3552)
+           ON CONFLICT (id) DO NOTHING"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let recent = Utc::now();
+    let old = recent - Duration::days(60);
+
+    query!(
+        r#"INSERT INTO measurements
+             (source_agent_id, destination_ip, protocol, probe_count,
+              measured_at, latency_avg_ms, loss_pct, kind)
+           VALUES
+             ('hist-e', '203.0.113.21'::inet, 'icmp', 10, $1, 12.0, 0.0, 'campaign'),
+             ('hist-e', '203.0.113.21'::inet, 'tcp',  10, $1, 15.0, 0.0, 'campaign'),
+             ('hist-e', '203.0.113.21'::inet, 'icmp', 10, $2, 99.0, 1.0, 'campaign')"#,
+        recent,
+        old,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Default (no from/to) returns all three rows.
+    let body: Value = h
+        .get_json("/api/history/measurements?source=hist-e&destination=203.0.113.21")
+        .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "expected three rows when no range filter; body = {body}"
+    );
+
+    // Protocol filter narrows to two ICMP rows.
+    let body: Value = h
+        .get_json(
+            "/api/history/measurements?source=hist-e&destination=203.0.113.21&protocols=icmp",
+        )
+        .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "expected only icmp rows; body = {body}");
+    for r in rows {
+        assert_eq!(
+            r["protocol"], "icmp",
+            "unexpected protocol in filtered row: {r}"
+        );
+    }
 }
