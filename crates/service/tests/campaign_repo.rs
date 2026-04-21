@@ -1535,3 +1535,62 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
 
     repo::delete(&pool, campaign.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn campaign_evaluations_cascade_on_campaign_delete() {
+    // `campaign_evaluations.campaign_id` has an `ON DELETE CASCADE` FK
+    // to `measurement_campaigns.id`. Deleting the parent must drop the
+    // evaluation row in the same transaction — otherwise orphan rows
+    // would accumulate and the `UNIQUE (campaign_id)` constraint would
+    // block a future re-creation of a campaign reusing the same UUID
+    // (tests and disaster-recovery paths both rely on reusable ids).
+    use meshmon_service::campaign::dto::EvaluationResultsDto;
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-eval-cascade"))
+        .await
+        .unwrap();
+
+    let outputs = EvaluationOutputs {
+        baseline_pair_count: 1,
+        candidates_total: 0,
+        candidates_good: 0,
+        avg_improvement_ms: None,
+        results: EvaluationResultsDto {
+            candidates: Vec::new(),
+            unqualified_reasons: Default::default(),
+        },
+    };
+    repo::write_evaluation(
+        &pool,
+        row.id,
+        &outputs,
+        2.0,
+        1.0,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .unwrap();
+
+    let before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, 1, "baseline: evaluation row exists");
+
+    repo::delete(&pool, row.id).await.unwrap();
+
+    let after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, 0,
+        "ON DELETE CASCADE must drop the evaluation row alongside the campaign"
+    );
+}

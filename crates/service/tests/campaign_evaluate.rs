@@ -14,6 +14,7 @@
 //! | `evaluate_running_campaign_409`                       | `eval-t2-a`                              | `192.0.2.21`                     |
 //! | `evaluate_empty_baseline_422`                         | `eval-t3-a`                              | `192.0.2.33`                     |
 //! | `get_evaluation_404_before_evaluate`                  | `eval-t4-a`                              | `192.0.2.41`                     |
+//! | `reused_pair_surfaces_in_baseline`                    | `eval-t5-a`, `eval-t5-b`                | `192.0.2.51`, `.52`, `.59`       |
 //!
 //! The campaign scheduler is not spawned in the test harness (its
 //! cancel token stays at `None` on the `AppState`), so
@@ -191,6 +192,115 @@ async fn evaluate_empty_baseline_422() {
         )
         .await;
     assert_eq!(res["error"], "no_baseline_pairs", "body = {res}");
+}
+
+#[tokio::test]
+async fn reused_pair_surfaces_in_baseline() {
+    // A pair resolved via reuse (`resolution_state='reused'`,
+    // `measurement_id` pointing at a prior measurement) must contribute
+    // to the evaluator's baseline just like a freshly-settled pair.
+    // Otherwise the scheduler's reuse optimisation would silently shrink
+    // the baseline every time a campaign covered already-probed legs.
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "192.0.2.51".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.52".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t5-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t5-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-reuse",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t5-a", "eval-t5-b"],
+                "destination_ips": ["192.0.2.52", "192.0.2.51", "192.0.2.59"],
+                "loss_threshold_pct": 5.0,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "optimization",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+
+    // Seed three fresh measurements (the transit legs stay fresh —
+    // reuse is applied only to the A→B baseline leg). This mirrors the
+    // `apply_reuse` write path: resolution_state='reused' + measurement_id
+    // populated from a pre-existing measurement row.
+    let m_ab: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+             (source_agent_id, destination_ip, protocol, probe_count, \
+              latency_avg_ms, latency_stddev_ms, loss_pct, kind) \
+         VALUES ('eval-t5-a', '192.0.2.52'::inet, 'icmp', 10, 300.0, 20.0, 0.0, 'campaign') \
+         RETURNING id",
+    )
+    .fetch_one(&h.state.pool)
+    .await
+    .expect("insert reused measurement (A→B)");
+
+    // Upsert the (A→B) baseline pair as `reused` with the pre-existing
+    // measurement id. `seed_measurements` would use `succeeded`; the
+    // difference is the whole point of this test.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, measurement_id, kind) \
+         VALUES ($1::uuid, 'eval-t5-a', '192.0.2.52'::inet, 'reused', $2, 'campaign') \
+         ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind) \
+           DO UPDATE SET measurement_id = EXCLUDED.measurement_id, \
+                         resolution_state = 'reused'",
+    )
+    .bind(&campaign_id)
+    .bind(m_ab)
+    .execute(&h.state.pool)
+    .await
+    .expect("upsert reused pair (A→B)");
+
+    // Transit legs settle normally via `seed_measurements`.
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("eval-t5-a", "192.0.2.59", 120.0, 8.0, 0.0),
+            ("eval-t5-b", "192.0.2.59", 120.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    let baseline = eval["baseline_pair_count"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("eval missing baseline_pair_count: {eval}"));
+    assert!(
+        baseline >= 1,
+        "reused baseline pair must be counted: body={eval}"
+    );
+
+    let results = &eval["results"];
+    let candidates = results["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("results missing candidates array: {eval}"));
+    let candidate = candidates
+        .iter()
+        .find(|c| c["destination_ip"] == "192.0.2.59")
+        .unwrap_or_else(|| panic!("candidate for 192.0.2.59 missing: {eval}"));
+
+    let pair_details = candidate["pair_details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pair_details missing on candidate: {candidate}"));
+    let has_reused_leg = pair_details.iter().any(|pd| {
+        pd["source_agent_id"] == "eval-t5-a" && pd["destination_agent_id"] == "eval-t5-b"
+    });
+    assert!(
+        has_reused_leg,
+        "reused measurement's source/destination must appear in pair_details: {candidate}"
+    );
 }
 
 #[tokio::test]

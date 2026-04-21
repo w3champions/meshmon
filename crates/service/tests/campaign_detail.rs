@@ -18,6 +18,7 @@
 //! | `detail_scope_pair_inserts_two_kind_rows`                        | `det-t4-a`                 | `192.0.2.51/.52`                 |
 //! | `detail_scope_pair_missing_identifier_returns_400`               | `det-t5-a`                 | `192.0.2.61/.62`                 |
 //! | `detail_pairs_excluded_from_next_evaluate_baseline`              | `det-t6-a`, `det-t6-b`     | `192.0.2.71/.72`, `203.0.113.71` |
+//! | `detail_pair_scope_rejects_malformed_destination_ip`             | `det-t7-a`                 | `192.0.2.91/.92`                 |
 
 mod common;
 
@@ -190,6 +191,46 @@ async fn detail_scope_pair_inserts_two_kind_rows() {
     // 1 pair × 2 detail kinds = 2 inserted rows.
     assert_eq!(res["pairs_enqueued"], 2, "body = {res}");
     assert_eq!(res["campaign_state"], "running", "body = {res}");
+}
+
+#[tokio::test]
+async fn detail_pair_scope_rejects_malformed_destination_ip() {
+    // `scope=pair` must reject a non-parseable `destination_ip` up front
+    // with a 400 and the shared `invalid_destination_ip` envelope — the
+    // same stable error code the `/edit` and `/force_pair` handlers use
+    // so the SPA branches once on the code rather than parsing prose.
+    let h = common::HttpHarness::start().await;
+
+    common::insert_agent_with_ip(&h.state.pool, "det-t7-a", "192.0.2.91".parse().unwrap()).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "detail bad ip",
+                "protocol": "icmp",
+                "source_agent_ids": ["det-t7-a"],
+                "destination_ips": ["192.0.2.92"],
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let res = h
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/detail"),
+            &json!({
+                "scope": "pair",
+                "pair": {
+                    "source_agent_id": "det-t7-a",
+                    "destination_ip": "not-an-ip"
+                }
+            }),
+            400,
+        )
+        .await;
+    assert_eq!(res["error"], "invalid_destination_ip", "body = {res}");
 }
 
 #[tokio::test]
