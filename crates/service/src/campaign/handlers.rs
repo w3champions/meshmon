@@ -809,9 +809,32 @@ pub async fn detail(
             Err(e) => return repo_error("campaign::detail::all", e),
         },
         DetailScope::GoodCandidates => {
+            // Tighten the state gate for this scope: only `evaluated`
+            // is valid. The outer gate admits `completed` too so that
+            // `/detail?scope=all` keeps working, but a `completed`
+            // campaign that carries an old `campaign_evaluations` row
+            // (from a prior run preserved across `apply_edit` /
+            // `force_pair` / re-run flows) must NOT expand that stale
+            // candidate set into fresh detail pairs — the candidates
+            // might target IPs that are no longer in the pair graph.
+            // `no_evaluation` covers both "no row yet" and "row exists
+            // but is not fresh for the current run state"; either way
+            // the operator fix is an explicit re-`/evaluate`.
+            if !matches!(campaign.state, CampaignState::Evaluated) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "no_evaluation" })),
+                )
+                    .into_response();
+            }
             let row = match repo::read_evaluation(&state.pool, id).await {
                 Ok(Some(r)) => r,
                 Ok(None) => {
+                    // Defensive: `state=evaluated` implies a row exists
+                    // (write_evaluation is the only writer that sets
+                    // that state). Reaching this arm would mean a
+                    // concurrent DELETE raced the read; treat as
+                    // missing evaluation.
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(json!({ "error": "no_evaluation" })),

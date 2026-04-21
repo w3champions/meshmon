@@ -1578,19 +1578,42 @@ pub async fn write_evaluation(
     .fetch_one(&mut *tx)
     .await?;
 
-    // Stamp the campaign's own `evaluated_at` breadcrumb and promote
-    // `completed → evaluated`. Re-evaluating an already-`evaluated`
-    // campaign still restamps the timestamp so consumers of
-    // `measurement_campaigns.evaluated_at` (UI / metadata APIs) don't
-    // show a stale evaluation time after repeat `/evaluate` calls.
-    sqlx::query!(
-        r#"UPDATE measurement_campaigns
-              SET state = 'evaluated', evaluated_at = now()
-            WHERE id = $1 AND state IN ('completed', 'evaluated')"#,
-        campaign_id,
-    )
-    .execute(&mut *tx)
-    .await?;
+    // Stamp `evaluated_at` and (only on a real transition) promote
+    // `completed → evaluated`. The branches are split to avoid
+    // touching the `state` column during a repeat `/evaluate` on an
+    // already-evaluated campaign: `measurement_campaigns_notify` is
+    // `AFTER UPDATE OF state`, so including `state` in the SET list
+    // fires the trigger whether or not the value actually changes —
+    // producing a redundant `campaign_state_changed` NOTIFY and SSE
+    // frame on every re-evaluate. Using `locked_state` from the
+    // earlier `FOR UPDATE` read lets us pick the right UPDATE shape
+    // without a second lookup.
+    match locked_state {
+        CampaignState::Completed => {
+            sqlx::query!(
+                r#"UPDATE measurement_campaigns
+                      SET state = 'evaluated', evaluated_at = now()
+                    WHERE id = $1 AND state = 'completed'"#,
+                campaign_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        CampaignState::Evaluated => {
+            sqlx::query!(
+                r#"UPDATE measurement_campaigns
+                      SET evaluated_at = now()
+                    WHERE id = $1 AND state = 'evaluated'"#,
+                campaign_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Unreachable given the gate above, but handled defensively
+        // rather than panicking if a future refactor widens the gate
+        // without updating this match.
+        _ => {}
+    }
 
     tx.commit().await?;
 

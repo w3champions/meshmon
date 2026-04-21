@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE measurement_campaigns\n                      SET state = 'evaluated', evaluated_at = now()\n                    WHERE id = $1 AND state = 'completed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f4b5bd1d102d2bab27faad6fccc84b6784bbcb276380a9247369948462fa1468"
+}

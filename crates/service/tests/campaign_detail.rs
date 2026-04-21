@@ -264,6 +264,65 @@ async fn detail_scope_pair_missing_identifier_returns_400() {
 }
 
 #[tokio::test]
+async fn detail_scope_good_candidates_rejects_stale_evaluation() {
+    // Repro the stale-evaluation hazard:
+    //   1. Evaluate a campaign (→ `evaluated`, row persisted).
+    //   2. Force state back to `completed` (simulates a re-run /
+    //      edit flow that preserves the historical evaluation row).
+    //   3. /detail?scope=good_candidates must now refuse — the
+    //      evaluation row is from an earlier run and expanding it
+    //      into detail pairs would target a stale candidate set.
+    let h = common::HttpHarness::start().await;
+
+    common::insert_agent_with_ip(&h.state.pool, "det-stale-a", "192.0.2.151".parse().unwrap())
+        .await;
+    common::insert_agent_with_ip(&h.state.pool, "det-stale-b", "192.0.2.152".parse().unwrap())
+        .await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "detail stale",
+                "protocol": "icmp",
+                "source_agent_ids": ["det-stale-a", "det-stale-b"],
+                "destination_ips": ["192.0.2.152", "192.0.2.151", "203.0.113.151"],
+                "evaluation_mode": "diversity",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("det-stale-a", "192.0.2.152", 318.0, 24.0, 0.0),
+            ("det-stale-a", "203.0.113.151", 120.0, 8.0, 0.0),
+            ("det-stale-b", "203.0.113.151", 121.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+    let _: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // Force the campaign back to `completed` — the evaluation row
+    // stays (apply_edit / force_pair preserve it), but the state no
+    // longer matches the evaluation.
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let res = h
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/detail"),
+            &json!({ "scope": "good_candidates" }),
+            400,
+        )
+        .await;
+    assert_eq!(res["error"], "no_evaluation", "body = {res}");
+}
+
+#[tokio::test]
 async fn detail_rejects_pair_payload_for_non_pair_scope() {
     // `DetailRequest::pair` is documented as "required iff scope == pair,
     // rejected on other scopes" — silently ignoring a stray payload for
