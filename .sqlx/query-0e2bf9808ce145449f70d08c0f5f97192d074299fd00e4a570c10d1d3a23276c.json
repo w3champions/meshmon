@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO agents\n             (id, display_name, ip, tcp_probe_port, udp_probe_port)\n           VALUES\n             ('hist-a', 'Agent A', '10.0.0.1'::inet, 3555, 3552),\n             ('hist-b', 'Agent B', '10.0.0.2'::inet, 3555, 3552),\n             ('hist-c', 'Agent C', '10.0.0.3'::inet, 3555, 3552)\n           ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "0e2bf9808ce145449f70d08c0f5f97192d074299fd00e4a570c10d1d3a23276c"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT\n               awc.agent_id AS \"source_agent_id!\",\n               COALESCE(awc.catalogue_display_name, awc.agent_display_name, awc.agent_id)\n                 AS \"display_name!\"\n          FROM agents_with_catalogue awc\n          JOIN measurements m ON m.source_agent_id = awc.agent_id\n         ORDER BY 2 ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_agent_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "82245901aef3291da3463de842e68323ee87d21da226cbb132369c3e4279929e"
+}
