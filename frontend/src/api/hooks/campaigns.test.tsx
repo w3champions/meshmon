@@ -5,10 +5,12 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   CAMPAIGNS_LIST_KEY,
   type Campaign,
+  type CampaignMeasurementsPage,
   campaignKey,
   campaignPairsKey,
   campaignPreviewKey,
   useCampaign,
+  useCampaignMeasurements,
   useCampaignsList,
   useCreateCampaign,
   useDeleteCampaign,
@@ -262,6 +264,46 @@ describe("useEditCampaign", () => {
     const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
     expect(invalidatedKeys).toContainEqual(CAMPAIGNS_LIST_KEY);
     expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN.id));
+  });
+});
+
+describe("useCampaignMeasurements", () => {
+  test("is disabled when id is undefined (no network call)", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const { result } = renderHook(() => useCampaignMeasurements(undefined, {}), {
+      wrapper: wrap(),
+    });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("threads filter params through the query string", async () => {
+    const page: CampaignMeasurementsPage = { entries: [], next_cursor: null };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify(page), { status: 200 }));
+
+    const { result } = renderHook(
+      () =>
+        useCampaignMeasurements(CAMPAIGN.id, {
+          resolution_state: "succeeded",
+          protocol: "icmp",
+          kind: "campaign",
+          cursor: "abc",
+          limit: 50,
+        }),
+      { wrapper: wrap() },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const call = fetchSpy.mock.calls[0]?.[0];
+    const url = call instanceof Request ? call.url : String(call);
+    expect(url).toContain(`/api/campaigns/${CAMPAIGN.id}/measurements`);
+    expect(url).toContain("resolution_state=succeeded");
+    expect(url).toContain("protocol=icmp");
+    expect(url).toContain("kind=campaign");
+    expect(url).toContain("cursor=abc");
+    expect(url).toContain("limit=50");
   });
 });
 

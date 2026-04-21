@@ -18,6 +18,9 @@ export type CampaignState = components["schemas"]["CampaignState"];
 export type EvaluationMode = components["schemas"]["EvaluationMode"];
 export type ProbeProtocol = components["schemas"]["ProbeProtocol"];
 export type PairResolutionState = components["schemas"]["PairResolutionState"];
+export type MeasurementKind = components["schemas"]["MeasurementKind"];
+export type CampaignMeasurement = components["schemas"]["CampaignMeasurementDto"];
+export type CampaignMeasurementsPage = components["schemas"]["CampaignMeasurementsPage"];
 
 /**
  * Query shape for `GET /api/campaigns`. Sourced directly from the generated
@@ -58,6 +61,16 @@ export function campaignEvaluationKey(id: string) {
  */
 export function campaignMeasurementsPrefixKey(id: string) {
   return ["campaigns", "entry", id, "measurements"] as const;
+}
+
+/**
+ * Narrow variant of {@link campaignMeasurementsPrefixKey} that also keys on
+ * the active filter set. Each filter permutation is a separate cache entry so
+ * the Raw tab can switch facets without stomping a sibling view; prefix
+ * invalidation from SSE / detail-trigger sweeps them all at once.
+ */
+export function campaignMeasurementsKey(id: string, filter: CampaignMeasurementsFilter) {
+  return ["campaigns", "entry", id, "measurements", filter] as const;
 }
 
 /** Polling cadence for the filtered campaign list. */
@@ -289,6 +302,63 @@ export function useDeleteCampaign(): UseMutationResult<void, Error, string> {
 export interface ForcePairVariables {
   id: string;
   body: ForcePairBody;
+}
+
+/**
+ * Filters for the campaign-scoped measurements feed (Raw tab).
+ *
+ * Cursor is a first-class filter field so each page is its own cache entry;
+ * the consumer threads `next_cursor` back in to fetch the next page.
+ * `measurement_id` supports the DrilldownDrawer's single-row MTR resolution.
+ */
+export interface CampaignMeasurementsFilter {
+  resolution_state?: PairResolutionState;
+  protocol?: ProbeProtocol;
+  kind?: MeasurementKind;
+  measurement_id?: number;
+  cursor?: string;
+  limit?: number;
+}
+
+/**
+ * Fetch one page of the campaign's joined `campaign_pairs → measurements`
+ * feed. The endpoint paginates via a keyset cursor in
+ * `measured_at DESC NULLS LAST, cp.id DESC` order; callers drive pagination
+ * by threading `next_cursor` back into the filter and calling the hook with
+ * the new key. Disabled while `id` is undefined.
+ */
+export function useCampaignMeasurements(
+  id: string | undefined,
+  filter: CampaignMeasurementsFilter,
+): UseQueryResult<CampaignMeasurementsPage, Error> {
+  return useQuery({
+    queryKey: id
+      ? campaignMeasurementsKey(id, filter)
+      : ["campaigns", "entry", "__disabled__", "measurements"],
+    enabled: !!id,
+    queryFn: async (): Promise<CampaignMeasurementsPage> => {
+      // queryFn only runs when enabled → id is defined.
+      const campaignId = id as string;
+      const { data, error } = await api.GET("/api/campaigns/{id}/measurements", {
+        params: {
+          path: { id: campaignId },
+          query: {
+            ...(filter.resolution_state ? { resolution_state: filter.resolution_state } : {}),
+            ...(filter.protocol ? { protocol: filter.protocol } : {}),
+            ...(filter.kind ? { kind: filter.kind } : {}),
+            ...(filter.measurement_id !== undefined
+              ? { measurement_id: filter.measurement_id }
+              : {}),
+            ...(filter.cursor ? { cursor: filter.cursor } : {}),
+            ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch campaign measurements", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data as CampaignMeasurementsPage;
+    },
+  });
 }
 
 /**
