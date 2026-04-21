@@ -234,20 +234,29 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                             if y.agent_id == *a_id || y.agent_id == *b_id {
                                 continue;
                             }
+                            // Same symmetry convention as the X-transit
+                            // legs above: source-is-baseline-agent,
+                            // destination-is-transit. `a→y` is "A
+                            // pings Y"; `b→y` is "B pings Y" — the
+                            // symmetry-approx for Y→B. Using `y→b`
+                            // here would require Y to be a source
+                            // agent in the campaign, which is a
+                            // stricter invariant than what the baseline
+                            // scan assumes.
                             let ay = by_pair.get(&(a_id.clone(), y.ip));
-                            let yb = by_pair.get(&(y.agent_id.clone(), *b_ip));
-                            if let (Some(ay), Some(yb)) = (ay, yb) {
+                            let by = by_pair.get(&(b_id.clone(), y.ip));
+                            if let (Some(ay), Some(by)) = (ay, by) {
                                 let Some(ay_rtt) = ay.latency_avg_ms else {
                                     continue;
                                 };
-                                let Some(yb_rtt) = yb.latency_avg_ms else {
+                                let Some(by_rtt) = by.latency_avg_ms else {
                                     continue;
                                 };
                                 let ay_stddev = ay.latency_stddev_ms.unwrap_or(0.0);
-                                let yb_stddev = yb.latency_stddev_ms.unwrap_or(0.0);
-                                let ty_rtt = ay_rtt + yb_rtt;
+                                let by_stddev = by.latency_stddev_ms.unwrap_or(0.0);
+                                let ty_rtt = ay_rtt + by_rtt;
                                 let ty_stddev_pen = inputs.stddev_weight
-                                    * (ay_stddev * ay_stddev + yb_stddev * yb_stddev).sqrt();
+                                    * (ay_stddev * ay_stddev + by_stddev * by_stddev).sqrt();
                                 // Tiebreaker: reject X when any Y ties X exactly (cf. spec §2.4).
                                 if transit_rtt + transit_penalty >= ty_rtt + ty_stddev_pen {
                                     beats_every_y = false;
@@ -269,7 +278,12 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             pair_details.push(EvaluationPairDetailDto {
                 source_agent_id: a_id.clone(),
                 destination_agent_id: b_id.clone(),
-                destination_ip: b_ip.to_string(),
+                // Transit IP (X), matching the candidate this pair
+                // detail is nested under. The baseline destination
+                // agent's IP is recoverable via `destination_agent_id`
+                // through `agents_with_catalogue`; surfacing X here
+                // makes the DTO self-contained.
+                destination_ip: x_ip.to_string(),
                 direct_rtt_ms: direct_rtt,
                 direct_stddev_ms: direct_stddev,
                 direct_loss_pct: direct_loss,
@@ -517,19 +531,23 @@ mod tests {
 
     #[test]
     fn optimization_filters_out_when_existing_mesh_y_already_better() {
-        // Four agents: a, b, y (mesh), plus third-party 203.0.113.7 = X.
+        // Three agents a, b, y (mesh), plus third-party 203.0.113.7 = X.
         // Baseline A→B = 318ms.
         // Transit via X: A→X(120) + B→X(121) = 241ms (beats direct).
-        // Transit via Y (mesh): A→Y(100) + Y→B(80) = 180ms (beats X).
+        // Transit via Y (mesh): A→Y(100) + B→Y(80) = 180ms (beats X).
+        // The Y legs mirror the X legs' symmetry convention
+        // (source-is-baseline-agent, destination-is-transit), so the
+        // Y→B direction is modelled as B→Y under the same symmetry
+        // approximation the X→B leg already uses.
         // Under optimization mode, X must NOT qualify because Y is
         // already a better transit.
         let inputs = EvaluationInputs {
             measurements: vec![
                 m("a", "10.0.0.2", 318.0, 24.0, 0.0),   // A→B baseline
                 m("a", "203.0.113.7", 120.0, 8.0, 0.0), // A→X
-                m("b", "203.0.113.7", 121.0, 8.0, 0.0), // B→X (symmetry-approx X→B)
+                m("b", "203.0.113.7", 121.0, 8.0, 0.0), // B→X (sym-approx X→B)
                 m("a", "10.0.0.3", 100.0, 5.0, 0.0),    // A→Y
-                m("y", "10.0.0.2", 80.0, 5.0, 0.0),     // Y→B
+                m("b", "10.0.0.3", 80.0, 5.0, 0.0),     // B→Y (sym-approx Y→B)
             ],
             agents: vec![
                 agent("a", "10.0.0.1"),
