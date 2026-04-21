@@ -17,6 +17,7 @@ import CampaignComposer from "@/pages/CampaignComposer";
 import CampaignDetail from "@/pages/CampaignDetail";
 import Campaigns from "@/pages/Campaigns";
 import Catalogue from "@/pages/Catalogue";
+import HistoryPair from "@/pages/HistoryPair";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
@@ -302,6 +303,34 @@ export const campaignDetailRoute = createRoute({
     parseCampaignDetailSearch(search),
 });
 
+// ---------------------------------------------------------------------------
+// /history/pair — latency/loss + MTR history for one (source, destination).
+// URL is the source of truth for the picker state; Batch 5's Raw-tab drilldown
+// links here with `?source=…&destination=…` and expects the page to preseed
+// both pickers and kick off the measurements fetch on first render.
+// ---------------------------------------------------------------------------
+export const historyPairSearchSchema = z
+  .object({
+    source: z.string().optional(),
+    destination: z.string().optional(),
+    protocol: z.array(z.enum(["icmp", "tcp", "udp"])).optional(),
+    range: z.enum(["24h", "7d", "30d", "90d", "custom"]).catch("30d").default("30d"),
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+  })
+  .refine((s) => s.range !== "custom" || (s.from && s.to), {
+    message: "custom range requires from and to",
+  });
+
+export type HistoryPairSearch = z.infer<typeof historyPairSearchSchema>;
+
+export const historyPairRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/history/pair",
+  component: HistoryPair,
+  validateSearch: (search) => historyPairSearchSchema.parse(search),
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   authRoute.addChildren([
@@ -316,6 +345,7 @@ const routeTree = rootRoute.addChildren([
     campaignsRoute,
     campaignNewRoute,
     campaignDetailRoute,
+    historyPairRoute,
   ]),
 ]);
 
