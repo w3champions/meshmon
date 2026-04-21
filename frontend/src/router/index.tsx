@@ -222,6 +222,26 @@ export const campaignDetailSearchSchema = z.object({
     .enum(["campaign", "detail_ping", "detail_mtr"])
     .catch(() => undefined as never)
     .optional(),
+  // Candidates-tab sort column. Namespaced (`cand_`) so future Pairs-tab
+  // sort can use its own prefix without stepping on this value.
+  cand_sort: z
+    .enum([
+      "rank",
+      "display_name",
+      "destination_ip",
+      "city",
+      "asn",
+      "pairs_improved",
+      "avg_improvement_ms",
+      "avg_loss_pct",
+      "composite_score",
+    ])
+    .catch(() => undefined as never)
+    .optional(),
+  cand_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
 });
 
 /**
@@ -264,6 +284,8 @@ function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
     raw_state: parsed.raw_state,
     raw_protocol: parsed.raw_protocol,
     raw_kind: parsed.raw_kind,
+    cand_sort: parsed.cand_sort,
+    cand_dir: parsed.cand_dir,
   };
 }
 

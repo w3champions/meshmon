@@ -225,8 +225,18 @@ export function CandidateTable({
                   sort={sort}
                   onSortChange={onSortChange}
                 />
-                <SortableHead column="city" label="Location" sort={sort} onSortChange={onSortChange} />
-                <SortableHead column="asn" label="ASN / operator" sort={sort} onSortChange={onSortChange} />
+                <SortableHead
+                  column="city"
+                  label="Location"
+                  sort={sort}
+                  onSortChange={onSortChange}
+                />
+                <SortableHead
+                  column="asn"
+                  label="ASN / operator"
+                  sort={sort}
+                  onSortChange={onSortChange}
+                />
                 <SortableHead
                   column="pairs_improved"
                   label="Pairs"
@@ -293,13 +303,21 @@ export function CandidateTable({
                     <TableCell className="text-sm tabular-nums">
                       {candidate.pairs_improved} / {candidate.pairs_total_considered}
                     </TableCell>
-                    <TableCell className={cn("text-sm tabular-nums", improvementClass(candidate.avg_improvement_ms))}>
+                    <TableCell
+                      className={cn(
+                        "text-sm tabular-nums",
+                        improvementClass(candidate.avg_improvement_ms),
+                      )}
+                    >
                       {formatImprovement(candidate.avg_improvement_ms)}
                     </TableCell>
                     <TableCell>
                       <Badge
                         variant="outline"
-                        className={cn("font-mono text-xs", lossClass(candidate.avg_loss_pct, threshold))}
+                        className={cn(
+                          "font-mono text-xs",
+                          lossClass(candidate.avg_loss_pct, threshold),
+                        )}
                       >
                         {formatLoss(candidate.avg_loss_pct)}
                       </Badge>
@@ -334,10 +352,7 @@ interface KpiStripProps {
 function KpiStrip({ evaluation }: KpiStripProps) {
   const avgImprovement = evaluation.avg_improvement_ms;
   return (
-    <section
-      aria-label="Evaluation summary"
-      className="grid grid-cols-2 gap-3 sm:grid-cols-4"
-    >
+    <section aria-label="Evaluation summary" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <KpiCard label="Baseline pairs" value={evaluation.baseline_pair_count.toLocaleString()} />
       <KpiCard label="Candidates" value={evaluation.candidates_total.toLocaleString()} />
       <KpiCard

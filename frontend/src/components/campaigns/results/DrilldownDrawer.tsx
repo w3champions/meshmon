@@ -10,9 +10,9 @@
  */
 
 import { useMemo, useState } from "react";
+import { type AgentSummary, useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import { useCampaignMeasurements } from "@/api/hooks/campaigns";
-import { useAgents, type AgentSummary } from "@/api/hooks/agents";
 import type { Evaluation } from "@/api/hooks/evaluation";
 import { RouteTopology } from "@/components/RouteTopology";
 import { Badge } from "@/components/ui/badge";
@@ -308,7 +308,13 @@ interface MtrLinkButtonProps {
 function MtrLinkButton({ measurementId, label, onOpen }: MtrLinkButtonProps) {
   if (measurementId === null || measurementId === undefined) {
     return (
-      <Button type="button" size="sm" variant="ghost" disabled aria-label={`${label} (unavailable)`}>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        disabled
+        aria-label={`${label} (unavailable)`}
+      >
         {label.split(" ")[0]} n/a
       </Button>
     );

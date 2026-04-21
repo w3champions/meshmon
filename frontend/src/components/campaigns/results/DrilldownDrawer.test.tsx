@@ -25,9 +25,9 @@ vi.mock("@/api/hooks/campaigns", async () => {
 // on graph-engine internals.
 vi.mock("@/components/RouteTopology", () => ({
   RouteTopology: ({ hops, ariaLabel }: { hops: unknown[]; ariaLabel?: string }) => (
-    <div data-testid="route-topology" aria-label={ariaLabel}>
+    <section data-testid="route-topology" aria-label={ariaLabel ?? "route topology"}>
       hops: {hops.length}
-    </div>
+    </section>
   ),
 }));
 
@@ -91,7 +91,7 @@ function makeAgent(id: string, display_name: string, ip: string): AgentSummary {
 const CAMPAIGN: Campaign = {
   id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
   title: "Demo",
-  notes: null,
+  notes: "",
   state: "evaluated",
   protocol: "icmp",
   evaluation_mode: "optimization",
@@ -123,7 +123,10 @@ function wireAgents(agents: AgentSummary[]): void {
   } as unknown as ReturnType<typeof useAgents>);
 }
 
-function wireMeasurements(entry: unknown | null, opts?: { isLoading?: boolean; isError?: boolean }) {
+function wireMeasurements(
+  entry: unknown | null,
+  opts?: { isLoading?: boolean; isError?: boolean },
+) {
   vi.mocked(useCampaignMeasurements).mockReturnValue({
     data: entry
       ? { pages: [{ entries: [entry], next_cursor: null }], pageParams: [null] }
@@ -135,10 +138,7 @@ function wireMeasurements(entry: unknown | null, opts?: { isLoading?: boolean; i
 }
 
 beforeEach(() => {
-  wireAgents([
-    makeAgent("agent-a", "alpha", "10.0.0.1"),
-    makeAgent("agent-b", "beta", "10.0.0.2"),
-  ]);
+  wireAgents([makeAgent("agent-a", "alpha", "10.0.0.1"), makeAgent("agent-b", "beta", "10.0.0.2")]);
   wireMeasurements(null);
 });
 
