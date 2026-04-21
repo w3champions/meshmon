@@ -972,7 +972,7 @@
         "tags": [
           "campaigns"
         ],
-        "summary": "`GET /api/campaigns/{id}/measurements` — joined campaign+measurements\nfeed for the Results browser's Raw tab. Paginated via a keyset\ncursor; the first page returns the most recent settled rows\ninterleaved with any pending/dispatched pairs.",
+        "summary": "`GET /api/campaigns/{id}/measurements` — joined campaign+measurements\nfeed for the Results browser's Raw tab. Paginated via a keyset\ncursor; rows are ordered `measured_at DESC NULLS LAST, cp.id DESC`,\nso settled rows lead each page and pending/dispatched pairs (no\n`measured_at`) trail at the bottom of the first page. Pending rows\nare not reachable via keyset pagination — see\n[`fetch_campaign_measurements`] for the v1 contract.",
         "operationId": "campaign_measurements",
         "parameters": [
           {
@@ -1085,16 +1085,6 @@
           },
           "401": {
             "description": "No active session"
-          },
-          "404": {
-            "description": "Campaign not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
           },
           "500": {
             "description": "Internal error",
@@ -2195,7 +2185,7 @@
             }
           },
           "400": {
-            "description": "Malformed destination",
+            "description": "Malformed destination or invalid protocol token",
             "content": {
               "application/json": {
                 "schema": {
@@ -3058,7 +3048,7 @@
       },
       "CampaignMeasurementDto": {
         "type": "object",
-        "description": "One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDrawer can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON value on the wire.",
+        "description": "One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDrawer can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON array on the wire.",
         "required": [
           "pair_id",
           "source_agent_id",
@@ -3105,9 +3095,12 @@
           },
           "mtr_hops": {
             "type": [
-              "object",
+              "array",
               "null"
             ],
+            "items": {
+              "$ref": "#/components/schemas/HopJson"
+            },
             "description": "Inline MTR hops — populated iff `mtr_id` resolves to an\n`mtr_traces` row."
           },
           "mtr_id": {
@@ -4186,7 +4179,7 @@
       },
       "HistoryMeasurementDto": {
         "type": "object",
-        "description": "One joined `measurements` + optional `mtr_traces` row for the\n`/history/pair` page.\n\n`mtr_hops` decodes the `mtr_traces.hops` JSONB column. sqlx requires\nthe `Json<_>` wrapper for JSONB columns in `query_as!`; the wire JSON\nstays flat thanks to `sqlx::types::Json`'s transparent serde impl.",
+        "description": "One joined `measurements` + optional `mtr_traces` row for the\n`/history/pair` page.\n\n`mtr_hops` decodes the `mtr_traces.hops` JSONB column into the typed\n`Vec<HopJson>` wire shape. sqlx requires the `Json<_>` wrapper for\nJSONB columns in `query_as!`; the wire JSON stays flat thanks to\n`sqlx::types::Json`'s transparent serde impl.",
         "required": [
           "id",
           "source_agent_id",
@@ -4271,9 +4264,12 @@
           },
           "mtr_hops": {
             "type": [
-              "object",
+              "array",
               "null"
             ],
+            "items": {
+              "$ref": "#/components/schemas/HopJson"
+            },
             "description": "MTR hop array; populated when the measurement has an `mtr_id`."
           },
           "probe_count": {

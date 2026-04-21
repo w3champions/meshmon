@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n          m.id                             AS \"id!\",\n          m.source_agent_id                AS \"source_agent_id!\",\n          host(m.destination_ip)           AS \"destination_ip!\",\n          m.protocol                       AS \"protocol!: ProbeProtocol\",\n          m.kind                           AS \"kind!: MeasurementKind\",\n          m.probe_count                    AS \"probe_count!\",\n          m.measured_at                    AS \"measured_at!\",\n          m.latency_min_ms,\n          m.latency_avg_ms,\n          m.latency_p95_ms,\n          m.latency_max_ms,\n          m.latency_stddev_ms,\n          m.loss_pct                       AS \"loss_pct!\",\n          t.hops                           AS \"mtr_hops?: sqlx::types::Json<serde_json::Value>\",\n          t.captured_at                    AS \"mtr_captured_at?\"\n        FROM measurements m\n        LEFT JOIN mtr_traces t ON t.id = m.mtr_id\n        WHERE m.source_agent_id = $1\n          AND m.destination_ip  = $2\n          AND ($3::probe_protocol[] IS NULL OR m.protocol = ANY($3))\n          AND ($4::timestamptz IS NULL OR m.measured_at >= $4)\n          AND ($5::timestamptz IS NULL OR m.measured_at <= $5)\n        ORDER BY m.measured_at DESC\n        LIMIT 5000\n        ",
+  "query": "\n        SELECT\n          m.id                             AS \"id!\",\n          m.source_agent_id                AS \"source_agent_id!\",\n          host(m.destination_ip)           AS \"destination_ip!\",\n          m.protocol                       AS \"protocol!: ProbeProtocol\",\n          m.kind                           AS \"kind!: MeasurementKind\",\n          m.probe_count                    AS \"probe_count!\",\n          m.measured_at                    AS \"measured_at!\",\n          m.latency_min_ms,\n          m.latency_avg_ms,\n          m.latency_p95_ms,\n          m.latency_max_ms,\n          m.latency_stddev_ms,\n          m.loss_pct                       AS \"loss_pct!\",\n          t.hops                           AS \"mtr_hops?: sqlx::types::Json<Vec<HopJson>>\",\n          t.captured_at                    AS \"mtr_captured_at?\"\n        FROM measurements m\n        LEFT JOIN mtr_traces t ON t.id = m.mtr_id\n        WHERE m.source_agent_id = $1\n          AND m.destination_ip  = $2\n          AND ($3::probe_protocol[] IS NULL OR m.protocol = ANY($3))\n          AND ($4::timestamptz IS NULL OR m.measured_at >= $4)\n          AND ($5::timestamptz IS NULL OR m.measured_at <= $5)\n        ORDER BY m.measured_at DESC\n        LIMIT 5000\n        ",
   "describe": {
     "columns": [
       {
@@ -92,7 +92,7 @@
       },
       {
         "ordinal": 13,
-        "name": "mtr_hops?: sqlx::types::Json<serde_json::Value>",
+        "name": "mtr_hops?: sqlx::types::Json<Vec<HopJson>>",
         "type_info": "Jsonb"
       },
       {
@@ -146,5 +146,5 @@
       false
     ]
   },
-  "hash": "d23315c32f85176c74cf1ab0ff19b1298c3a676f96c75c2c9511863c4ef88d60"
+  "hash": "74a32f824f5d09590f7dc50ec9f27c2d949bdc43fe6457a097e32f7d5f66bef2"
 }

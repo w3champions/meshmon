@@ -376,8 +376,11 @@ export interface paths {
         /**
          * `GET /api/campaigns/{id}/measurements` — joined campaign+measurements
          *     feed for the Results browser's Raw tab. Paginated via a keyset
-         *     cursor; the first page returns the most recent settled rows
-         *     interleaved with any pending/dispatched pairs.
+         *     cursor; rows are ordered `measured_at DESC NULLS LAST, cp.id DESC`,
+         *     so settled rows lead each page and pending/dispatched pairs (no
+         *     `measured_at`) trail at the bottom of the first page. Pending rows
+         *     are not reachable via keyset pagination — see
+         *     [`fetch_campaign_measurements`] for the v1 contract.
          */
         get: operations["campaign_measurements"];
         put?: never;
@@ -1135,7 +1138,7 @@ export interface components {
          *     DrilldownDrawer can render MTR directly from this endpoint — there
          *     is no separate `GET /api/measurements/:id` in the service. The
          *     `Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding
-         *     JSONB; serde renders it as a bare JSON value on the wire.
+         *     JSONB; serde renders it as a bare JSON array on the wire.
          */
         CampaignMeasurementDto: {
             /** @description Destination IP as a host string. */
@@ -1164,7 +1167,7 @@ export interface components {
              * @description Inline MTR hops — populated iff `mtr_id` resolves to an
              *     `mtr_traces` row.
              */
-            mtr_hops?: Record<string, never> | null;
+            mtr_hops?: components["schemas"]["HopJson"][] | null;
             /**
              * Format: int64
              * @description `measurements.mtr_id` FK — reference to `mtr_traces.id`.
@@ -1742,9 +1745,10 @@ export interface components {
          * @description One joined `measurements` + optional `mtr_traces` row for the
          *     `/history/pair` page.
          *
-         *     `mtr_hops` decodes the `mtr_traces.hops` JSONB column. sqlx requires
-         *     the `Json<_>` wrapper for JSONB columns in `query_as!`; the wire JSON
-         *     stays flat thanks to `sqlx::types::Json`'s transparent serde impl.
+         *     `mtr_hops` decodes the `mtr_traces.hops` JSONB column into the typed
+         *     `Vec<HopJson>` wire shape. sqlx requires the `Json<_>` wrapper for
+         *     JSONB columns in `query_as!`; the wire JSON stays flat thanks to
+         *     `sqlx::types::Json`'s transparent serde impl.
          */
         HistoryMeasurementDto: {
             /** @description Destination IP as a host string. */
@@ -1797,7 +1801,7 @@ export interface components {
              */
             mtr_captured_at?: string | null;
             /** @description MTR hop array; populated when the measurement has an `mtr_id`. */
-            mtr_hops?: Record<string, never> | null;
+            mtr_hops?: components["schemas"]["HopJson"][] | null;
             /**
              * Format: int32
              * @description Number of probes in the sample.
@@ -3327,15 +3331,6 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Campaign not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
             /** @description Internal error */
             500: {
                 headers: {
@@ -4175,7 +4170,7 @@ export interface operations {
                     "application/json": components["schemas"]["HistoryMeasurementDto"][];
                 };
             };
-            /** @description Malformed destination */
+            /** @description Malformed destination or invalid protocol token */
             400: {
                 headers: {
                     [name: string]: unknown;
