@@ -1141,8 +1141,38 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     .await
     .unwrap();
 
-    let pairs = repo::list_pairs(&pool, row.id, &[], 100).await.unwrap();
-    assert_eq!(pairs.len(), 2, "two pairs seeded");
+    // `list_pairs` narrows to `kind='campaign'` (baseline-only), so
+    // fetch the actual two-kind pair set via a raw SELECT — this test
+    // needs to feed BOTH kinds into `resolve_reuse` to prove the detail
+    // row is filtered by the `cp.kind='campaign'` CTE clause.
+    use meshmon_service::campaign::model::PairRow;
+    use sqlx::types::ipnetwork::IpNetwork;
+    let rows: Vec<(i64, String, IpNetwork, MeasurementKind)> =
+        sqlx::query_as::<_, (i64, String, IpNetwork, MeasurementKind)>(
+            "SELECT id, source_agent_id, destination_ip, kind \
+           FROM campaign_pairs WHERE campaign_id = $1 ORDER BY id",
+        )
+        .bind(row.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two pairs seeded");
+    let pairs: Vec<PairRow> = rows
+        .into_iter()
+        .map(|(id, src, dst, kind)| PairRow {
+            id,
+            campaign_id: row.id,
+            source_agent_id: src,
+            destination_ip: dst,
+            resolution_state: PairResolutionState::Pending,
+            measurement_id: None,
+            dispatched_at: None,
+            settled_at: None,
+            attempt_count: 0,
+            last_error: None,
+            kind,
+        })
+        .collect();
 
     let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
         .await
