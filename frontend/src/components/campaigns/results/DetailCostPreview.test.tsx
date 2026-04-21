@@ -157,7 +157,21 @@ describe("computeCostEstimate", () => {
     expect(est.pairs_enqueued).toBe(20);
   });
 
-  test("scope=good_candidates returns 4 × de-duped qualifying triples", () => {
+  test("scope=good_candidates mirrors the backend's (agent, transit_ip) dedup", () => {
+    // The backend's `POST /detail` handler appends `(source, transit)`
+    // and `(destination_agent, transit)` per qualifying triple, then
+    // sort+dedupes on that tuple (not on triple identity) before
+    // expanding into ping+MTR rows. Two triples sharing an agent against
+    // the same transit must collapse to one (agent, transit) entry.
+    //
+    // Fixture:
+    //  - candidate-one (transit=10.0.0.1): triples (a→b), (c→d)
+    //      contributes {(a, .1), (b, .1), (c, .1), (d, .1)} = 4 entries
+    //  - candidate-two (transit=10.0.0.2): triples (a→b), (a→d)
+    //      contributes {(a, .2), (b, .2), (d, .2)} = 3 entries
+    //      (agent `a` against transit .2 appears in both triples → dedup)
+    //  - candidate-three (transit=10.0.0.3): one unqualified triple → 0 entries
+    // Total deduped = 7 entries × 2 measurements (ping+MTR) = 14.
     const candidates = [
       qualifyingCandidate("10.0.0.1", [
         ["agent-a", "agent-b"],
@@ -176,8 +190,27 @@ describe("computeCostEstimate", () => {
       evaluation,
       undefined,
     );
-    // 4 qualifying triples (2 from candidate-one, 2 from candidate-two) × 4 = 16.
-    expect(est.pairs_enqueued).toBe(16);
+    expect(est.pairs_enqueued).toBe(14);
+  });
+
+  test("scope=good_candidates skips candidates with pairs_improved=0", () => {
+    // The backend filters `candidates.iter().filter(|c| c.pairs_improved >= 1)`
+    // before expanding. A candidate with qualifying pair_details but
+    // `pairs_improved=0` must be ignored.
+    const candidates = [
+      {
+        ...qualifyingCandidate("10.0.0.1", [["agent-a", "agent-b"]]),
+        pairs_improved: 0,
+      },
+    ];
+    const evaluation = makeEvaluation(candidates);
+    const est = computeCostEstimate(
+      "good_candidates",
+      makeCampaign({ state: "evaluated" }),
+      evaluation,
+      undefined,
+    );
+    expect(est.pairs_enqueued).toBe(0);
   });
 
   test("scope=pair returns 2", () => {

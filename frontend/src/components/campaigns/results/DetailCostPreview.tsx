@@ -3,11 +3,18 @@
  *
  * Previews the expected `pairs_enqueued` count so the operator can gauge
  * the cost before firing a scope that may fan out across the full pair
- * list. Cost formulas (per spec §Task 18):
+ * list. Cost formulas mirror the backend's `POST /detail` handler:
  *
- * - `scope = "all"`:    2 × (count of pairs in a settled state)
- * - `scope = "good_candidates"`: 4 × (de-duped qualifying pair-triples)
- * - `scope = "pair"`:   2 (a single pair → two pings + two MTR traces)
+ * - `scope = "all"`:            2 × (succeeded + reused baseline pairs)
+ * - `scope = "good_candidates"`: 2 × (de-duped `(agent, transit_ip)` entries
+ *                                across qualifying triples — each triple
+ *                                contributes one `(source, transit)` and
+ *                                one `(destination_agent, transit)` entry
+ *                                BEFORE dedup; the backend's
+ *                                `insert_detail_pairs` then produces a
+ *                                `detail_ping` + `detail_mtr` row per
+ *                                deduped entry)
+ * - `scope = "pair"`:           2 (one ping + one MTR trace)
  *
  * On confirm the dialog fires `useTriggerDetail` with the pre-selected
  * scope. Error branches (`no_pairs_selected`, `no_evaluation`,
@@ -86,23 +93,33 @@ function countSettledPairs(campaign: Campaign): number {
 }
 
 /**
- * De-duped qualifying-triple count off the evaluation's pair_details. Plan
- * §Task 18: `pairs_enqueued ≈ 4 × (qualifying-triple count)`; de-dup key
- * is `(source_agent_id, destination_ip, pair_kind-analogue)`. The
- * evaluation DTO does not carry a per-triple `kind`, so we dedupe on
- * `(source, destination_agent_id, candidate_destination_ip)` which is the
- * same triple identity the evaluator scored on.
+ * Enqueue count for `scope=good_candidates`, matching the backend's
+ * `POST /detail` handler exactly. For each qualifying triple
+ * `(source, destination_agent, transit_ip)` the handler appends two
+ * entries — `(source, transit_ip)` and `(destination_agent, transit_ip)` —
+ * into a set that is then sort+deduped, and finally expanded into
+ * `detail_ping + detail_mtr` rows (× 2 measurements per deduped entry).
+ *
+ * The dedup is `(agent, transit_ip)` — NOT `(source, destination_agent,
+ * transit_ip)` — so triples that share an agent against the same transit
+ * collapse to one enqueue, not four. Mirroring that dedup here keeps the
+ * preview count aligned with the actual `DetailResponse.pairs_enqueued`
+ * the server returns.
+ *
+ * Also gates candidates on `pairs_improved >= 1` to match the backend's
+ * `results.candidates.iter().filter(|c| c.pairs_improved >= 1)`.
  */
-function countQualifyingTriples(evaluation: Evaluation): number {
+function countGoodCandidateMeasurements(evaluation: Evaluation): number {
   const seen = new Set<string>();
   for (const candidate of evaluation.results.candidates) {
+    if (candidate.pairs_improved < 1) continue;
     for (const pd of candidate.pair_details) {
       if (!pd.qualifies) continue;
-      const key = `${pd.source_agent_id}|${pd.destination_agent_id}|${candidate.destination_ip}`;
-      seen.add(key);
+      seen.add(`${pd.source_agent_id}|${candidate.destination_ip}`);
+      seen.add(`${pd.destination_agent_id}|${candidate.destination_ip}`);
     }
   }
-  return seen.size;
+  return 2 * seen.size;
 }
 
 interface CostEstimate {
@@ -134,12 +151,12 @@ export function computeCostEstimate(
           description: "Waiting for the evaluation to load before the cost can be estimated.",
         };
       }
-      const triples = countQualifyingTriples(evaluation);
+      const pairsEnqueued = countGoodCandidateMeasurements(evaluation);
       return {
-        pairs_enqueued: 4 * triples,
+        pairs_enqueued: pairsEnqueued,
         description:
-          triples > 0
-            ? `${triples.toLocaleString()} qualifying pair-triples × 4 measurements (A→X ping+MTR, X→B ping+MTR).`
+          pairsEnqueued > 0
+            ? `Expands qualifying triples into ${pairsEnqueued.toLocaleString()} detail measurements (ping + MTR per de-duped agent → transit leg).`
             : "No qualifying pairs in the current evaluation — re-run Evaluate if the thresholds changed.",
       };
     }

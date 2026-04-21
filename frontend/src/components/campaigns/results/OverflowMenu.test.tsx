@@ -294,7 +294,7 @@ describe("OverflowMenu — Detail: all dialog", () => {
 });
 
 describe("OverflowMenu — Detail: good candidates dialog", () => {
-  test("good-candidates preview counts qualifying triples × 4 with de-dup", async () => {
+  test("good-candidates preview matches the backend's (agent, transit_ip) dedup", async () => {
     const user = userEvent.setup();
     renderMenu(makeCampaign({ state: "evaluated" }), makeEvaluation());
 
@@ -304,8 +304,12 @@ describe("OverflowMenu — Detail: good candidates dialog", () => {
     await waitFor(() => {
       expect(screen.getByTestId("detail-cost-preview")).toBeInTheDocument();
     });
-    // Two qualifying pair_details × 4 = 8 (third is qualifies=false).
-    expect(screen.getByTestId("cost-preview-pairs")).toHaveTextContent("8");
+    // Qualifying pair_details at transit 10.0.0.1:
+    //   (agent-a → agent-b), (agent-b → agent-c)
+    // Dedupe on `(agent, transit_ip)` yields {(a, .1), (b, .1), (c, .1)}
+    // — agent-b appears in both triples against the same transit, so it
+    // collapses. 3 deduped entries × 2 measurements = 6.
+    expect(screen.getByTestId("cost-preview-pairs")).toHaveTextContent("6");
   });
 
   test("confirm dispatches a scope=good_candidates detail request", async () => {
