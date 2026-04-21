@@ -793,22 +793,9 @@ pub async fn detail(
     }
 
     let pairs: Vec<(String, IpAddr)> = match body.scope {
-        DetailScope::All => match sqlx::query!(
-            r#"SELECT DISTINCT source_agent_id, destination_ip
-                 FROM campaign_pairs
-                WHERE campaign_id = $1
-                  AND kind = 'campaign'
-                  AND resolution_state IN ('succeeded','reused')"#,
-            id,
-        )
-        .fetch_all(&state.pool)
-        .await
-        {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|r| (r.source_agent_id, r.destination_ip.ip()))
-                .collect(),
-            Err(e) => return repo_error("campaign::detail::all", RepoError::Sqlx(e)),
+        DetailScope::All => match repo::settled_campaign_pairs(&state.pool, id).await {
+            Ok(p) => p,
+            Err(e) => return repo_error("campaign::detail::all", e),
         },
         DetailScope::GoodCandidates => {
             let row = match repo::read_evaluation(&state.pool, id).await {

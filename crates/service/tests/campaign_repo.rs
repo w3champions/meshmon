@@ -1362,3 +1362,164 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
 
     repo::delete(&pool, row.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn apply_edit_preserves_detail_rows() {
+    // `/edit remove_pairs` must only drop baseline (kind='campaign')
+    // rows. The T5 UNIQUE key was widened to include `kind`, so a
+    // DELETE without a kind filter would wipe detail_ping + detail_mtr
+    // rows sharing the same (source, destination) tuple.
+    let pool = common::shared_migrated_pool().await;
+    common::insert_agent_with_ip(&pool, "ae-edit-a", "192.0.2.101".parse().unwrap()).await;
+    common::insert_agent_with_ip(&pool, "ae-edit-b", "192.0.2.102".parse().unwrap()).await;
+
+    let campaign = repo::create(
+        &pool,
+        CreateInput {
+            title: "edit preserves detail".into(),
+            notes: String::new(),
+            protocol: ProbeProtocol::Icmp,
+            source_agent_ids: vec!["ae-edit-a".into()],
+            destination_ips: vec!["192.0.2.102".parse().unwrap()],
+            force_measurement: false,
+            probe_count: None,
+            probe_count_detail: None,
+            timeout_ms: None,
+            probe_stagger_ms: None,
+            loss_threshold_pct: None,
+            stddev_weight: None,
+            evaluation_mode: None,
+            created_by: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let src = "ae-edit-a".to_string();
+    let dst: IpAddr = "192.0.2.102".parse().unwrap();
+
+    // Inject detail_ping + detail_mtr on the same (src, dst) tuple.
+    repo::insert_detail_pairs(&pool, campaign.id, &[(src.clone(), dst)])
+        .await
+        .unwrap();
+
+    // Move the campaign into `completed` so apply_edit is legal.
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
+
+    repo::apply_edit(
+        &pool,
+        campaign.id,
+        EditInput {
+            remove_pairs: vec![(src.clone(), dst)],
+            add_pairs: vec![],
+            force_measurement: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let detail_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+          WHERE campaign_id = $1 \
+            AND kind IN ('detail_ping','detail_mtr')",
+    )
+    .bind(campaign.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(detail_rows, 2, "detail rows must survive remove_pairs");
+
+    let baseline_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_pairs \
+          WHERE campaign_id = $1 AND kind = 'campaign'",
+    )
+    .bind(campaign.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(baseline_rows, 0, "baseline pair should be gone");
+
+    repo::delete(&pool, campaign.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_edit_force_measurement_preserves_detail_rows() {
+    // `force_measurement=true` resets every pair back to pending so the
+    // baseline re-runs. Detail rows (kind in {detail_ping, detail_mtr})
+    // are independently triggered and must not re-run just because the
+    // operator asked to re-run the campaign's baseline measurements.
+    let pool = common::shared_migrated_pool().await;
+    common::insert_agent_with_ip(&pool, "ae-force-a", "192.0.2.111".parse().unwrap()).await;
+    common::insert_agent_with_ip(&pool, "ae-force-b", "192.0.2.112".parse().unwrap()).await;
+
+    let campaign = repo::create(
+        &pool,
+        CreateInput {
+            title: "force preserves detail".into(),
+            notes: String::new(),
+            protocol: ProbeProtocol::Icmp,
+            source_agent_ids: vec!["ae-force-a".into()],
+            destination_ips: vec!["192.0.2.112".parse().unwrap()],
+            force_measurement: false,
+            probe_count: None,
+            probe_count_detail: None,
+            timeout_ms: None,
+            probe_stagger_ms: None,
+            loss_threshold_pct: None,
+            stddev_weight: None,
+            evaluation_mode: None,
+            created_by: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let src = "ae-force-a".to_string();
+    let dst: IpAddr = "192.0.2.112".parse().unwrap();
+
+    repo::insert_detail_pairs(&pool, campaign.id, &[(src.clone(), dst)])
+        .await
+        .unwrap();
+
+    // Manually mark the detail_mtr row as succeeded so force_measurement
+    // would have reset it before the fix.
+    sqlx::query(
+        "UPDATE campaign_pairs SET resolution_state = 'succeeded' \
+          WHERE campaign_id = $1 AND kind = 'detail_mtr'",
+    )
+    .bind(campaign.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Move the campaign into `completed` so apply_edit is legal.
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
+
+    repo::apply_edit(
+        &pool,
+        campaign.id,
+        EditInput {
+            remove_pairs: vec![],
+            add_pairs: vec![],
+            force_measurement: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+
+    let detail_state: PairResolutionState = sqlx::query_scalar::<_, PairResolutionState>(
+        "SELECT resolution_state FROM campaign_pairs \
+          WHERE campaign_id = $1 AND kind = 'detail_mtr'",
+    )
+    .bind(campaign.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        detail_state,
+        PairResolutionState::Succeeded,
+        "detail_mtr row must stay succeeded after force_measurement on campaign kind"
+    );
+
+    repo::delete(&pool, campaign.id).await.unwrap();
+}

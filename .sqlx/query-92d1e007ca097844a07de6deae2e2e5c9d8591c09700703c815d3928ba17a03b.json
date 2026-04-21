@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE campaign_pairs\n                SET resolution_state = 'pending',\n                    measurement_id   = NULL,\n                    settled_at       = NULL,\n                    dispatched_at    = NULL,\n                    attempt_count    = 0,\n                    last_error       = NULL\n              WHERE campaign_id = $1\n                AND kind = 'campaign'\n                AND resolution_state IN ('dispatched','reused','succeeded','unreachable','skipped')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "92d1e007ca097844a07de6deae2e2e5c9d8591c09700703c815d3928ba17a03b"
+}

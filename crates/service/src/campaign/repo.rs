@@ -346,14 +346,19 @@ pub async fn apply_edit(
         });
     }
 
-    // 2. Remove pairs the operator dropped.
+    // 2. Remove baseline pairs the operator dropped.
+    //    Detail rows (kind in {detail_ping, detail_mtr}) are operator-
+    //    triggered ephemera for the same (source, destination) tuple; a
+    //    /edit payload should not silently cancel them. Scope the DELETE
+    //    to kind='campaign' so detail measurements survive the edit.
     for (src, dst) in &edit.remove_pairs {
         let dst_net = IpNetwork::from(*dst);
         sqlx::query!(
             "DELETE FROM campaign_pairs
               WHERE campaign_id = $1
                 AND source_agent_id = $2
-                AND destination_ip = $3",
+                AND destination_ip = $3
+                AND kind = 'campaign'",
             id,
             src,
             dst_net
@@ -416,6 +421,9 @@ pub async fn apply_edit(
         // A late settle response arriving after this reset finds
         // `pending` and updates the row — the worst case is a slightly
         // stale reading, not a stuck campaign.
+        // Reset baseline pairs only. Detail rows are independently
+        // triggered and must not re-run just because the operator asked
+        // to re-run the campaign's baseline measurements.
         sqlx::query!(
             "UPDATE campaign_pairs
                 SET resolution_state = 'pending',
@@ -425,6 +433,7 @@ pub async fn apply_edit(
                     attempt_count    = 0,
                     last_error       = NULL
               WHERE campaign_id = $1
+                AND kind = 'campaign'
                 AND resolution_state IN ('dispatched','reused','succeeded','unreachable','skipped')",
             id
         )
@@ -1332,7 +1341,7 @@ pub async fn measurements_for_campaign(
         .into_iter()
         .map(|r| AttributedMeasurement {
             source_agent_id: r.source_agent_id,
-            destination_ip: inet_to_ip(r.destination_ip),
+            destination_ip: r.destination_ip.ip(),
             latency_avg_ms: r.latency_avg_ms,
             latency_stddev_ms: r.latency_stddev_ms,
             loss_pct: r.loss_pct,
@@ -1358,7 +1367,7 @@ pub async fn measurements_for_campaign(
         .into_iter()
         .map(|r| EvalAgentRow {
             agent_id: r.agent_id,
-            ip: inet_to_ip(r.ip),
+            ip: r.ip.ip(),
         })
         .collect();
 
@@ -1382,7 +1391,7 @@ pub async fn measurements_for_campaign(
         .into_iter()
         .map(|r| {
             (
-                inet_to_ip(r.ip),
+                r.ip.ip(),
                 CatalogueLookup {
                     display_name: r.display_name,
                     city: r.city,
@@ -1402,13 +1411,6 @@ pub async fn measurements_for_campaign(
         stddev_weight: campaign.stddev_weight,
         mode: campaign.evaluation_mode,
     })
-}
-
-fn inet_to_ip(v: IpNetwork) -> IpAddr {
-    match v {
-        IpNetwork::V4(x) => x.ip().into(),
-        IpNetwork::V6(x) => x.ip().into(),
-    }
 }
 
 /// Persisted evaluation artefact, one row per campaign.
@@ -1529,6 +1531,30 @@ pub async fn read_evaluation(
         avg_improvement_ms: r.avg_improvement_ms,
         results: r.results,
     }))
+}
+
+/// Returns every (source_agent_id, destination_ip) tuple for baseline
+/// pairs that the campaign settled — used by the `POST /detail` handler's
+/// `all` scope. Detail pairs are excluded structurally via `kind='campaign'`.
+pub async fn settled_campaign_pairs(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Vec<(String, IpAddr)>, RepoError> {
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT source_agent_id, destination_ip
+             FROM campaign_pairs
+            WHERE campaign_id = $1
+              AND kind = 'campaign'
+              AND resolution_state IN ('succeeded', 'reused')"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.source_agent_id, r.destination_ip.ip()))
+        .collect())
 }
 
 /// Inserts detail-pair rows for the `POST /detail` handler and flips

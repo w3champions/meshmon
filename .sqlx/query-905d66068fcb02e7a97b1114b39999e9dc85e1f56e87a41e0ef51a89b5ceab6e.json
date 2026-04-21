@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT DISTINCT source_agent_id, destination_ip\n                 FROM campaign_pairs\n                WHERE campaign_id = $1\n                  AND kind = 'campaign'\n                  AND resolution_state IN ('succeeded','reused')",
+  "query": "SELECT DISTINCT source_agent_id, destination_ip\n             FROM campaign_pairs\n            WHERE campaign_id = $1\n              AND kind = 'campaign'\n              AND resolution_state IN ('succeeded', 'reused')",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "acab299f108155a4f5c79ac566ae2f0da63bbfd15d15f95f5e2eeba042d202cf"
+  "hash": "905d66068fcb02e7a97b1114b39999e9dc85e1f56e87a41e0ef51a89b5ceab6e"
 }
