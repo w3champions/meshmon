@@ -34,12 +34,20 @@ import { useToastStore } from "@/stores/toast";
 
 const DEFAULT_SORT: PairTableSort = { col: "state", dir: "asc" };
 
+/**
+ * Request the backend's full pair cap. Without this the handler's default
+ * page size (500) kicks in and campaigns above 500 baseline pairs silently
+ * lose rows from the tab — the Pairs tab presents itself as the full
+ * baseline view so that truncation is user-visibly wrong.
+ */
+const PAIRS_TAB_LIMIT = 5000;
+
 export interface PairsTabProps {
   campaign: Campaign;
 }
 
 export function PairsTab({ campaign }: PairsTabProps) {
-  const pairsQuery = useCampaignPairs(campaign.id);
+  const pairsQuery = useCampaignPairs(campaign.id, { limit: PAIRS_TAB_LIMIT });
   const agentsQuery = useAgents();
   const forcePairMutation = useForcePair();
   const triggerDetailMutation = useTriggerDetail();

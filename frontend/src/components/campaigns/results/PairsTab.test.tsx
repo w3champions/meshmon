@@ -156,6 +156,20 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe("PairsTab — hook wiring", () => {
+  test("requests the full pair cap so large campaigns don't silently truncate", () => {
+    // Backend default is 500 rows; without an explicit `limit` the tab
+    // would quietly drop everything past 500 on larger campaigns. Pin
+    // the exact request so a future refactor can't silently regress.
+    setupMocks([]);
+    renderTab(makeCampaign({ state: "running" }));
+    expect(useCampaignPairs).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ limit: 5000 }),
+    );
+  });
+});
+
 describe("PairsTab — loading + error + empty", () => {
   test("renders the skeleton while pairs are loading", () => {
     setupMocks([], { isLoading: true });
