@@ -1322,11 +1322,12 @@ pub async fn measurements_for_campaign(
     .await?
     .ok_or(RepoError::NotFound(campaign_id))?;
 
-    // Baseline-only: the join already filters to `cp.kind='campaign'`,
-    // but we also pin `m.kind='campaign'` as a belt-and-braces invariant
-    // so a future writer path that wires a detail-kind measurement to a
-    // baseline pair (e.g. some reuse refactor) cannot silently leak into
-    // candidate scoring.
+    // Baseline-only: `cp.kind='campaign'` is the load-bearing filter. We
+    // deliberately do NOT filter `m.kind` because `resolve_reuse` can
+    // legitimately bind a `detail_ping`-kind measurement from the 24 h
+    // reuse window to a baseline pair — excluding those would undercount
+    // the baseline whenever an operator runs `/detail` before the next
+    // campaign covering the same (source, destination, protocol) tuple.
     let rows = sqlx::query!(
         r#"SELECT m.source_agent_id,
                   m.destination_ip,
@@ -1337,8 +1338,7 @@ pub async fn measurements_for_campaign(
              FROM measurements m
              JOIN campaign_pairs cp ON cp.measurement_id = m.id
             WHERE cp.campaign_id = $1
-              AND cp.kind = 'campaign'
-              AND m.kind = 'campaign'"#,
+              AND cp.kind = 'campaign'"#,
         campaign_id,
     )
     .fetch_all(pool)
@@ -1636,22 +1636,36 @@ pub async fn insert_detail_pairs(
         }
     }
 
-    let state_changed = match transition_state_in_tx(
-        &mut tx,
-        campaign_id,
-        &[CampaignState::Completed, CampaignState::Evaluated],
-        CampaignState::Running,
-        Some("started_at"),
-    )
-    .await
-    {
-        Ok(_) => true,
-        // Already `running` — the detail pairs still landed, we just did
-        // not need to flip state. `NotFound` here also passes through as
-        // a real error (no row for this id); the caller's RepoError
-        // mapping handles that.
-        Err(RepoError::IllegalTransition { .. }) => false,
-        Err(e) => return Err(e),
+    // Only attempt the state flip when we actually queued new work.
+    // A repeat `/detail` call where every requested row already exists
+    // (inserted == 0) must not restart a completed campaign — that would
+    // be a spurious state churn visible in the API + SSE stream.
+    let state_changed = if inserted == 0 {
+        false
+    } else {
+        match transition_state_in_tx(
+            &mut tx,
+            campaign_id,
+            &[CampaignState::Completed, CampaignState::Evaluated],
+            CampaignState::Running,
+            Some("started_at"),
+        )
+        .await
+        {
+            Ok(_) => true,
+            // Benign race: a concurrent writer already flipped the row to
+            // `running` (e.g. another `/detail` or `force_pair`). The
+            // detail pairs we inserted still land; we just don't need to
+            // flip state again.
+            Err(RepoError::IllegalTransition {
+                from: Some(CampaignState::Running),
+                ..
+            }) => false,
+            // Any other observed state (Draft, Stopped, or row absent) is
+            // a real precondition mismatch; propagate so the transaction
+            // rolls back rather than leaving orphan detail rows behind.
+            Err(e) => return Err(e),
+        }
     };
 
     tx.commit().await?;

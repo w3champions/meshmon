@@ -1376,6 +1376,60 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
 }
 
 #[tokio::test]
+async fn insert_detail_pairs_no_op_does_not_flip_state() {
+    // A repeat `/detail` call where every requested row already exists
+    // (inserted == 0) must NOT transition a completed campaign back to
+    // `running`. Re-flipping without new work causes spurious state
+    // churn visible in both the API response and the SSE stream.
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("det-noop-{}", uuid::Uuid::new_v4().simple());
+    let dst = IpAddr::from_str("198.51.100.233").unwrap();
+    let mut input = make_input("t-detail-noop");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    // Seed detail rows once (flips completed → running).
+    let (first_inserted, first_changed) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
+    assert_eq!(first_inserted, 2);
+    assert!(first_changed);
+
+    // Force back to completed so the second call sees a gateable state.
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    let (second_inserted, second_changed) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
+    assert_eq!(
+        second_inserted, 0,
+        "all requested pairs already exist — nothing to insert"
+    );
+    assert!(
+        !second_changed,
+        "no inserts → no state flip (spurious churn regression guard)"
+    );
+
+    let after = repo::get(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("campaign still present");
+    assert_eq!(
+        after.state,
+        CampaignState::Completed,
+        "campaign must remain completed when no detail rows are queued"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn apply_edit_preserves_detail_rows() {
     // `/edit remove_pairs` must only drop baseline (kind='campaign')
     // rows. The T5 UNIQUE key was widened to include `kind`, so a
@@ -1410,12 +1464,14 @@ async fn apply_edit_preserves_detail_rows() {
     let src = "ae-edit-a".to_string();
     let dst: IpAddr = "192.0.2.102".parse().unwrap();
 
-    // Inject detail_ping + detail_mtr on the same (src, dst) tuple.
+    // Force the campaign to `completed` first so `insert_detail_pairs`'
+    // state-transition gate accepts it. The insert flips state back to
+    // `running`; `apply_edit` needs `completed|stopped|evaluated`, so
+    // force-complete again after seeding.
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
     repo::insert_detail_pairs(&pool, campaign.id, &[(src.clone(), dst)])
         .await
         .unwrap();
-
-    // Move the campaign into `completed` so apply_edit is legal.
     common::mark_completed(&pool, &campaign.id.to_string()).await;
 
     repo::apply_edit(
@@ -1489,9 +1545,14 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
     let src = "ae-force-a".to_string();
     let dst: IpAddr = "192.0.2.112".parse().unwrap();
 
+    // Force `completed` first so `insert_detail_pairs` accepts the
+    // transition, then reset to `completed` after seeding so the
+    // subsequent `apply_edit` is legal.
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
     repo::insert_detail_pairs(&pool, campaign.id, &[(src.clone(), dst)])
         .await
         .unwrap();
+    common::mark_completed(&pool, &campaign.id.to_string()).await;
 
     // Manually mark the detail_mtr row as succeeded so force_measurement
     // would have reset it before the fix.
@@ -1503,9 +1564,6 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
     .execute(&pool)
     .await
     .unwrap();
-
-    // Move the campaign into `completed` so apply_edit is legal.
-    common::mark_completed(&pool, &campaign.id.to_string()).await;
 
     repo::apply_edit(
         &pool,

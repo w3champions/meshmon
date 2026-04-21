@@ -224,15 +224,18 @@ async fn reused_pair_surfaces_in_baseline() {
         .await;
     let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
 
-    // Seed three fresh measurements (the transit legs stay fresh —
-    // reuse is applied only to the A→B baseline leg). This mirrors the
-    // `apply_reuse` write path: resolution_state='reused' + measurement_id
-    // populated from a pre-existing measurement row.
+    // Seed the reused (A→B) measurement with `kind='detail_ping'` to
+    // exercise the realistic cross-kind reuse case: a prior `/detail`
+    // run left a high-resolution measurement for this tuple, and
+    // `resolve_reuse` (which does NOT filter `m.kind`) binds it to the
+    // new campaign's baseline pair. The evaluator must count it — the
+    // `cp.kind='campaign'` filter on `measurements_for_campaign` is the
+    // load-bearing invariant; the measurement's own kind is irrelevant.
     let m_ab: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
              (source_agent_id, destination_ip, protocol, probe_count, \
               latency_avg_ms, latency_stddev_ms, loss_pct, kind) \
-         VALUES ('eval-t5-a', '192.0.2.52'::inet, 'icmp', 10, 300.0, 20.0, 0.0, 'campaign') \
+         VALUES ('eval-t5-a', '192.0.2.52'::inet, 'icmp', 10, 300.0, 20.0, 0.0, 'detail_ping') \
          RETURNING id",
     )
     .fetch_one(&h.state.pool)
