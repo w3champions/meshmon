@@ -156,6 +156,9 @@ interface HookSetupOptions {
   refetch?: ReturnType<typeof vi.fn>;
   preview?: PreviewDispatchResponse;
   pairs?: CampaignPair[];
+  pairsIsLoading?: boolean;
+  pairsIsError?: boolean;
+  pairsRefetch?: ReturnType<typeof vi.fn>;
 }
 
 function setupHookMocks(opts: HookSetupOptions = {}) {
@@ -169,8 +172,9 @@ function setupHookMocks(opts: HookSetupOptions = {}) {
 
   vi.mocked(useCampaignPairs).mockReturnValue({
     data: opts.pairs,
-    isLoading: false,
-    isError: false,
+    isLoading: opts.pairsIsLoading ?? false,
+    isError: opts.pairsIsError ?? false,
+    refetch: opts.pairsRefetch ?? vi.fn(),
   } as unknown as ReturnType<typeof useCampaignPairs>);
 
   vi.mocked(usePreviewDispatchCount).mockReturnValue({
@@ -489,6 +493,63 @@ describe("CampaignDetail — Clone action", () => {
 
     const cloneBtn = await screen.findByRole("button", { name: /clone campaign/i });
     expect(cloneBtn).toBeDisabled();
+  });
+
+  test("Clone button is disabled on zero-pair terminal campaigns", async () => {
+    // A campaign that resolved to an empty pair list is not a useful
+    // Clone seed — no sources, no destinations to copy. The button
+    // stays disabled even though the query technically resolved,
+    // because `pairsLoaded` gates on a non-empty array.
+    setupHookMocks({ campaign: makeCampaign({ state: "completed" }), pairs: [] });
+    const user = userEvent.setup();
+    renderDetail();
+
+    const cloneBtn = await screen.findByRole("button", { name: /clone campaign/i });
+    expect(cloneBtn).toBeDisabled();
+
+    // Attempting to click a disabled button must not seed the composer.
+    await user.click(cloneBtn);
+    expect(useComposerSeedStore.getState().seed).toBeNull();
+  });
+
+  test("Clone button shows a loading label while pairs fetch", async () => {
+    // `pairsIsLoading: true` mimics the initial fetch state before any
+    // data arrives. The label should flip to "Clone (loading…)" to
+    // match the Start/Stop `isPending`-style idiom, and the button
+    // stays disabled until the data resolves.
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed" }),
+      pairsIsLoading: true,
+    });
+    renderDetail();
+
+    const cloneBtn = await screen.findByRole("button", { name: /clone campaign/i });
+    expect(cloneBtn).toBeDisabled();
+    expect(cloneBtn).toHaveTextContent(/loading/i);
+  });
+
+  test("Clone button exposes a retry affordance when pairs fail to load", async () => {
+    // When the pair fetch errors (network / 5xx), the operator needs
+    // visible feedback. The button flips to "Clone (retry)" and
+    // clicking it refetches rather than seeding the composer.
+    const pairsRefetch = vi.fn();
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed" }),
+      pairsIsError: true,
+      pairsRefetch,
+    });
+    const user = userEvent.setup();
+    renderDetail();
+
+    const cloneBtn = await screen.findByRole("button", { name: /clone campaign/i });
+    expect(cloneBtn).toBeEnabled();
+    expect(cloneBtn).toHaveTextContent(/retry/i);
+
+    await user.click(cloneBtn);
+    // Retry path wires to `refetch`, not the composer-seed handoff.
+    expect(pairsRefetch).toHaveBeenCalledTimes(1);
+    expect(useComposerSeedStore.getState().seed).toBeNull();
+    expect(navigate).not.toHaveBeenCalledWith({ to: "/campaigns/new" });
   });
 });
 

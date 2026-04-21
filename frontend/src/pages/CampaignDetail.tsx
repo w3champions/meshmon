@@ -254,11 +254,33 @@ export default function CampaignDetail() {
   // deduped source/destination sets, then navigate to `/campaigns/new`.
   // The composer consumes the seed exactly once on mount; a fresh load
   // of `/campaigns/new` without a prior Clone starts from defaults.
+  //
+  // `pairsLoaded` gates on a non-empty array — an empty list is not a
+  // useful seed (no sources, no destinations) so the button stays
+  // disabled even though the query technically resolved. The
+  // `handleClone` guard mirrors this so a concurrent re-render that
+  // flips `pairsData` back to empty can't slip a zero-pair seed
+  // through into the composer store.
   const pairsData = pairsQuery.data;
-  const pairsLoaded = Boolean(pairsData);
+  const pairsLoaded = Boolean(pairsData?.length);
   const cloneCampaign = campaignQuery.data ?? null;
+  // Derive the Clone button's label + click behavior from the pairs
+  // query state so the four reachable states (loading, error, empty,
+  // ready) each map to a distinct affordance. Mirrors the Start/Stop
+  // `isPending ? "…" : "…"` idiom used elsewhere in the action bar.
+  const cloneButtonState: "loading" | "error" | "ready" = pairsQuery.isLoading
+    ? "loading"
+    : pairsQuery.isError
+      ? "error"
+      : "ready";
+  const cloneLabel =
+    cloneButtonState === "loading"
+      ? "Clone (loading…)"
+      : cloneButtonState === "error"
+        ? "Clone (retry)"
+        : "Clone";
   const handleClone = useCallback((): void => {
-    if (!cloneCampaign || !pairsData) return;
+    if (!cloneCampaign || !pairsData?.length) return;
     if (pairsData.length >= CLONE_PAIR_CAP) {
       // Operator-visible warning — the backend caps `limit` at 5 000
       // pairs, so any campaign at or above the cap may have had its
@@ -437,11 +459,18 @@ export default function CampaignDetail() {
         {isTerminal ? (
           <Button
             variant="outline"
-            onClick={handleClone}
-            disabled={!pairsLoaded}
+            // "error" → click refetches; "ready" → click seeds +
+            // navigates; "loading" is disabled so no onClick path.
+            onClick={cloneButtonState === "error" ? () => pairsQuery.refetch() : handleClone}
+            // Disabled whenever the pair list can't seed the composer:
+            // still loading, failed to load, or resolved but empty.
+            disabled={cloneButtonState !== "error" && !pairsLoaded}
             aria-label="Clone campaign"
+            title={
+              cloneButtonState === "error" ? "Failed to load pairs — click to retry" : undefined
+            }
           >
-            Clone
+            {cloneLabel}
           </Button>
         ) : null}
         {state === "draft" || isTerminal ? (

@@ -301,7 +301,7 @@ pub struct PairListQuery {
     #[serde(default, deserialize_with = "deserialize_csv_states")]
     #[param(style = Form, explode = false)]
     pub state: Vec<PairResolutionState>,
-    /// Page size. Clamped to `1..=500` internally; default 500.
+    /// Page size. Clamped to `1..=5000` internally; default 500.
     #[serde(default = "default_pair_list_limit")]
     pub limit: i64,
 }
