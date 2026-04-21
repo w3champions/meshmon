@@ -4,6 +4,7 @@ import { useCampaignStream } from "@/api/hooks/campaign-stream";
 import {
   type Campaign,
   useCampaign,
+  useCampaignPairs,
   useDeleteCampaign,
   useEditCampaign,
   usePreviewDispatchCount,
@@ -12,7 +13,6 @@ import {
 } from "@/api/hooks/campaigns";
 import { DeleteCampaignDialog } from "@/components/campaigns/DeleteCampaignDialog";
 import { EditMetadataSheet } from "@/components/campaigns/EditMetadataSheet";
-import { EditPairsSheet } from "@/components/campaigns/EditPairsSheet";
 import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
 import { PairsTab } from "@/components/campaigns/results/PairsTab";
 import { RawTab } from "@/components/campaigns/results/RawTab";
@@ -28,12 +28,21 @@ import {
   type CampaignDetailTab,
   campaignDetailRoute,
 } from "@/router/index";
+import { useComposerSeedStore } from "@/stores/composer-seed";
 import { useToastStore } from "@/stores/toast";
 
 // ---------------------------------------------------------------------------
 // Static display metadata — kept at module scope so React doesn't reallocate
 // every render.
 // ---------------------------------------------------------------------------
+
+/**
+ * Upper bound on pairs the Clone action ferries into the composer seed.
+ * Matches the backend `GET /api/campaigns/:id/pairs` handler-side clamp
+ * (`crates/service/src/campaign/handlers.rs::pairs`). Beyond this cap
+ * the Clone toast warns the operator before handing off.
+ */
+const CLONE_PAIR_CAP = 5000;
 
 type PairState = "pending" | "dispatched" | "reused" | "succeeded" | "unreachable" | "skipped";
 
@@ -161,7 +170,9 @@ export default function CampaignDetail() {
   const stopMutation = useStopCampaign();
   // Restart posts an empty edit body; the server transitions the campaign
   // back to `running` without resetting pair state. Operators who want to
-  // re-run every pair reach for "Edit pairs" with force-measurement.
+  // re-run the whole campaign with tweaked knobs reach for Clone, which
+  // seeds the composer with the source/destination sets and starts a
+  // fresh draft.
   const editMutation = useEditCampaign();
   const deleteMutation = useDeleteCampaign();
   const { mutate: startCampaign } = startMutation;
@@ -169,8 +180,23 @@ export default function CampaignDetail() {
   const { mutate: editCampaign } = editMutation;
   const { mutate: deleteCampaign } = deleteMutation;
 
+  // Pull the full pair list for the Clone action — gated on the campaign
+  // loading into a terminal state. `useCampaignPairs` is disabled when
+  // `id` is undefined, so passing `undefined` for non-terminal campaigns
+  // keeps the query dormant without breaking the rules of hooks. `limit`
+  // matches the Clone cap exactly so the toast-warning branch fires
+  // precisely when the backend truncated.
+  const terminalState =
+    campaignQuery.data?.state === "completed" ||
+    campaignQuery.data?.state === "stopped" ||
+    campaignQuery.data?.state === "evaluated";
+  const pairsQuery = useCampaignPairs(terminalState ? id : undefined, {
+    limit: CLONE_PAIR_CAP,
+  });
+
+  const setComposerSeed = useComposerSeedStore((s) => s.setSeed);
+
   const [editMetadataOpen, setEditMetadataOpen] = useState<boolean>(false);
-  const [editPairsOpen, setEditPairsOpen] = useState<boolean>(false);
   const [deleteOpen, setDeleteOpen] = useState<boolean>(false);
 
   const handleStart = useCallback((): void => {
@@ -223,6 +249,50 @@ export default function CampaignDetail() {
       },
     );
   }, [editCampaign, id]);
+
+  // Clone — seed the composer from this terminal campaign's knobs +
+  // deduped source/destination sets, then navigate to `/campaigns/new`.
+  // The composer consumes the seed exactly once on mount; a fresh load
+  // of `/campaigns/new` without a prior Clone starts from defaults.
+  const pairsData = pairsQuery.data;
+  const pairsLoaded = Boolean(pairsData);
+  const cloneCampaign = campaignQuery.data ?? null;
+  const handleClone = useCallback((): void => {
+    if (!cloneCampaign || !pairsData) return;
+    if (pairsData.length >= CLONE_PAIR_CAP) {
+      // Operator-visible warning — the backend caps `limit` at 5 000
+      // pairs, so any campaign at or above the cap may have had its
+      // pair set silently truncated. Surface this BEFORE handing off
+      // to the composer so the operator can sanity-check the seed.
+      useToastStore.getState().pushToast({
+        kind: "error",
+        message: `This campaign has ${CLONE_PAIR_CAP.toLocaleString()}+ pairs; Clone truncated the seed. Review before starting.`,
+      });
+    }
+    const sourceSet = [...new Set(pairsData.map((p) => p.source_agent_id))];
+    const destSet = [...new Set(pairsData.map((p) => p.destination_ip))];
+    setComposerSeed({
+      knobs: {
+        title: `Copy of ${cloneCampaign.title}`,
+        notes: cloneCampaign.notes,
+        protocol: cloneCampaign.protocol,
+        probe_count: cloneCampaign.probe_count,
+        probe_count_detail: cloneCampaign.probe_count_detail,
+        timeout_ms: cloneCampaign.timeout_ms,
+        probe_stagger_ms: cloneCampaign.probe_stagger_ms,
+        loss_threshold_pct: cloneCampaign.loss_threshold_pct,
+        stddev_weight: cloneCampaign.stddev_weight,
+        evaluation_mode: cloneCampaign.evaluation_mode,
+        // Reset `force_measurement` — clones default to reuse-cache
+        // friendly so a tweak-and-rerun doesn't silently re-measure
+        // every pair. Operator opts in via the knob panel.
+        force_measurement: false,
+      },
+      sourceSet,
+      destSet,
+    });
+    void navigate({ to: "/campaigns/new" });
+  }, [cloneCampaign, pairsData, setComposerSeed, navigate]);
 
   const handleConfirmDelete = useCallback(
     (campaignId: string): void => {
@@ -365,8 +435,13 @@ export default function CampaignDetail() {
           Edit metadata
         </Button>
         {isTerminal ? (
-          <Button variant="outline" onClick={() => setEditPairsOpen(true)}>
-            Edit pairs
+          <Button
+            variant="outline"
+            onClick={handleClone}
+            disabled={!pairsLoaded}
+            aria-label="Clone campaign"
+          >
+            Clone
           </Button>
         ) : null}
         {state === "draft" || isTerminal ? (
@@ -486,7 +561,6 @@ export default function CampaignDetail() {
         open={editMetadataOpen}
         onOpenChange={setEditMetadataOpen}
       />
-      <EditPairsSheet campaign={campaign} open={editPairsOpen} onOpenChange={setEditPairsOpen} />
       <DeleteCampaignDialog
         campaign={campaign}
         open={deleteOpen}

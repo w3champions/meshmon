@@ -29,6 +29,7 @@ import { extractCampaignErrorCode } from "@/lib/campaign";
 import { type CampaignKnobs, DEFAULT_KNOBS, SIZE_WARNING_THRESHOLD } from "@/lib/campaign-config";
 import { destinationFilterToQuery } from "@/lib/catalogue-query";
 import type { Bbox } from "@/lib/geo";
+import { useComposerSeedStore } from "@/stores/composer-seed";
 import { useToastStore } from "@/stores/toast";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,24 @@ export default function CampaignComposer() {
   const [sourceSet, setSourceSet] = useState<Set<string>>(new Set());
   const [destSet, setDestSet] = useState<Set<string>>(new Set());
   const [knobs, setKnobs] = useState<CampaignKnobs>(DEFAULT_KNOBS);
+
+  // --- Composer-seed hand-off --------------------------------------------
+  // A Clone click on a terminal campaign stashes a fully-resolved knob
+  // snapshot + deduped source/destination sets into the transient
+  // `composer-seed` store and navigates here. We consume the seed exactly
+  // once on mount and hydrate local state from it. A plain open of
+  // `/campaigns/new` (no prior Clone) sees `null` and keeps defaults.
+  const consumeSeed = useComposerSeedStore((s) => s.consumeSeed);
+  useEffect(() => {
+    const seed = consumeSeed();
+    if (!seed) return;
+    setKnobs(seed.knobs);
+    setSourceSet(new Set(seed.sourceSet));
+    setDestSet(new Set(seed.destSet));
+    // `consumeSeed` is stable (Zustand selector), so React's rules-of-hooks
+    // lint passes with it in the dep array even though the effect is
+    // mount-only by design.
+  }, [consumeSeed]);
 
   // --- Map dialog state --------------------------------------------------
   const [mapOpenFor, setMapOpenFor] = useState<MapTarget>(null);
