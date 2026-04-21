@@ -550,12 +550,12 @@ pub async fn preview_dispatch_count(
 /// The stored `results` column is owned by this service (written by
 /// [`repo::write_evaluation`] as a serialised [`EvaluationResultsDto`]),
 /// so a deserialisation failure here signals data corruption from outside
-/// the normal write path. We expect it to never panic in production; tests
-/// exercise a well-formed payload.
-fn to_evaluation_dto(row: EvaluationRow) -> EvaluationDto {
-    let results: EvaluationResultsDto = serde_json::from_value(row.results)
-        .expect("campaign_evaluations.results JSONB shape is owned by this service");
-    EvaluationDto {
+/// the normal write path. Returns `Err` so the caller can map it to a
+/// `500 invalid_evaluation_payload` response instead of panicking a tokio
+/// worker.
+fn to_evaluation_dto(row: EvaluationRow) -> Result<EvaluationDto, serde_json::Error> {
+    let results: EvaluationResultsDto = serde_json::from_value(row.results)?;
+    Ok(EvaluationDto {
         campaign_id: row.campaign_id,
         evaluated_at: row.evaluated_at,
         loss_threshold_pct: row.loss_threshold_pct,
@@ -566,7 +566,20 @@ fn to_evaluation_dto(row: EvaluationRow) -> EvaluationDto {
         candidates_good: row.candidates_good,
         avg_improvement_ms: row.avg_improvement_ms,
         results,
-    }
+    })
+}
+
+fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Response {
+    tracing::error!(
+        %campaign_id,
+        error = %err,
+        "campaign_evaluations.results failed to deserialise"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "invalid_evaluation_payload" })),
+    )
+        .into_response()
 }
 
 /// `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
@@ -672,7 +685,10 @@ pub async fn evaluate(
         .campaign_broker
         .publish(CampaignStreamEvent::Evaluated { campaign_id: id });
 
-    (StatusCode::OK, Json(to_evaluation_dto(row))).into_response()
+    match to_evaluation_dto(row) {
+        Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),
+        Err(e) => invalid_evaluation_payload(id, e),
+    }
 }
 
 /// `GET /api/campaigns/{id}/evaluation` — read-through on the persisted
@@ -700,7 +716,10 @@ pub async fn get_evaluation(
     Path(id): Path<Uuid>,
 ) -> Response {
     match repo::read_evaluation(&state.pool, id).await {
-        Ok(Some(row)) => (StatusCode::OK, Json(to_evaluation_dto(row))).into_response(),
+        Ok(Some(row)) => match to_evaluation_dto(row) {
+            Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),
+            Err(e) => invalid_evaluation_payload(id, e),
+        },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "not_evaluated" })),
