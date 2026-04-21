@@ -1,6 +1,9 @@
 import {
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -307,36 +310,46 @@ export interface ForcePairVariables {
 /**
  * Filters for the campaign-scoped measurements feed (Raw tab).
  *
- * Cursor is a first-class filter field so each page is its own cache entry;
- * the consumer threads `next_cursor` back in to fetch the next page.
- * `measurement_id` supports the DrilldownDrawer's single-row MTR resolution.
+ * Cursor is intentionally absent — it's threaded through `useInfiniteQuery`'s
+ * `pageParam` so every page of a single filter permutation collapses onto
+ * one cache entry, and `fetchNextPage()` drives the scroll-append flow in
+ * the Raw tab's virtualized list. `measurement_id` supports the
+ * DrilldownDrawer's single-row MTR resolution.
  */
 export interface CampaignMeasurementsFilter {
   resolution_state?: PairResolutionState;
   protocol?: ProbeProtocol;
   kind?: MeasurementKind;
   measurement_id?: number;
-  cursor?: string;
   limit?: number;
 }
 
 /**
- * Fetch one page of the campaign's joined `campaign_pairs → measurements`
- * feed. The endpoint paginates via a keyset cursor in
- * `measured_at DESC NULLS LAST, cp.id DESC` order; callers drive pagination
- * by threading `next_cursor` back into the filter and calling the hook with
- * the new key. Disabled while `id` is undefined.
+ * Infinite-cursor fetch over the campaign's joined
+ * `campaign_pairs → measurements` feed. The endpoint paginates via a keyset
+ * cursor in `measured_at DESC NULLS LAST, cp.id DESC` order; pages are
+ * accumulated in a single cache entry keyed on `(id, filter)` (no cursor in
+ * the key), and the Raw tab calls `fetchNextPage()` as the virtualized list
+ * approaches the bottom. Disabled while `id` is undefined.
  */
 export function useCampaignMeasurements(
   id: string | undefined,
   filter: CampaignMeasurementsFilter,
-): UseQueryResult<CampaignMeasurementsPage, Error> {
-  return useQuery({
+): UseInfiniteQueryResult<InfiniteData<CampaignMeasurementsPage>, Error> {
+  return useInfiniteQuery<
+    CampaignMeasurementsPage,
+    Error,
+    InfiniteData<CampaignMeasurementsPage>,
+    readonly unknown[],
+    string | null
+  >({
     queryKey: id
       ? campaignMeasurementsKey(id, filter)
       : ["campaigns", "entry", "__disabled__", "measurements"],
     enabled: !!id,
-    queryFn: async (): Promise<CampaignMeasurementsPage> => {
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? null,
+    queryFn: async ({ pageParam }): Promise<CampaignMeasurementsPage> => {
       // queryFn only runs when enabled → id is defined.
       const campaignId = id as string;
       const { data, error } = await api.GET("/api/campaigns/{id}/measurements", {
@@ -349,7 +362,7 @@ export function useCampaignMeasurements(
             ...(filter.measurement_id !== undefined
               ? { measurement_id: filter.measurement_id }
               : {}),
-            ...(filter.cursor ? { cursor: filter.cursor } : {}),
+            ...(pageParam ? { cursor: pageParam } : {}),
             ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
           },
         },

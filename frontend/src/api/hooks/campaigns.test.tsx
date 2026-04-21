@@ -277,7 +277,7 @@ describe("useCampaignMeasurements", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  test("threads filter params through the query string", async () => {
+  test("threads filter params through the query string (first page, no cursor)", async () => {
     const page: CampaignMeasurementsPage = { entries: [], next_cursor: null };
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
@@ -289,12 +289,16 @@ describe("useCampaignMeasurements", () => {
           resolution_state: "succeeded",
           protocol: "icmp",
           kind: "campaign",
-          cursor: "abc",
           limit: 50,
         }),
       { wrapper: wrap() },
     );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // Infinite-query result shape: `data.pages` is the accumulator and
+    // `data.pageParams` tracks the cursor threaded into each page.
+    expect(result.current.data?.pages).toEqual([page]);
+    expect(result.current.data?.pageParams).toEqual([null]);
 
     const call = fetchSpy.mock.calls[0]?.[0];
     const url = call instanceof Request ? call.url : String(call);
@@ -302,8 +306,76 @@ describe("useCampaignMeasurements", () => {
     expect(url).toContain("resolution_state=succeeded");
     expect(url).toContain("protocol=icmp");
     expect(url).toContain("kind=campaign");
-    expect(url).toContain("cursor=abc");
     expect(url).toContain("limit=50");
+    // First page never sends a cursor — `initialPageParam` is null and the
+    // queryFn only serializes `cursor` when `pageParam` is a non-null string.
+    expect(url).not.toContain("cursor=");
+  });
+
+  test("fetchNextPage threads next_cursor back as the cursor query param", async () => {
+    const page1: CampaignMeasurementsPage = {
+      entries: [
+        {
+          pair_id: 1,
+          source_agent_id: "agent-a",
+          destination_ip: "10.0.0.1",
+          resolution_state: "succeeded",
+          pair_kind: "campaign",
+          protocol: "icmp",
+          measured_at: "2026-04-16T12:00:05Z",
+        },
+      ],
+      next_cursor: "cursor-1",
+    };
+    const page2: CampaignMeasurementsPage = {
+      entries: [
+        {
+          pair_id: 2,
+          source_agent_id: "agent-a",
+          destination_ip: "10.0.0.2",
+          resolution_state: "succeeded",
+          pair_kind: "campaign",
+          protocol: "icmp",
+          measured_at: "2026-04-16T12:00:15Z",
+        },
+      ],
+      next_cursor: null,
+    };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify(page1), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(page2), { status: 200 }));
+
+    const { result } = renderHook(() => useCampaignMeasurements(CAMPAIGN.id, {}), {
+      wrapper: wrap(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.hasNextPage).toBe(true);
+
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(2));
+    expect(result.current.data?.pages[1]).toEqual(page2);
+    // `pageParams` records the cursor threaded into each page — first page
+    // used `null` (initialPageParam), second page threaded `cursor-1`.
+    expect(result.current.data?.pageParams).toEqual([null, "cursor-1"]);
+    // Sequence terminates — the second page's null cursor means no more pages.
+    expect(result.current.hasNextPage).toBe(false);
+
+    // Second request must carry the first page's `next_cursor` in the
+    // query string; the first request must not.
+    const firstUrl = (() => {
+      const call = fetchSpy.mock.calls[0]?.[0];
+      return call instanceof Request ? call.url : String(call);
+    })();
+    const secondUrl = (() => {
+      const call = fetchSpy.mock.calls[1]?.[0];
+      return call instanceof Request ? call.url : String(call);
+    })();
+    expect(firstUrl).not.toContain("cursor=");
+    expect(secondUrl).toContain("cursor=cursor-1");
   });
 });
 
