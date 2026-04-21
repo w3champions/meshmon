@@ -635,6 +635,14 @@ pub async fn evaluate(
         Ok(i) => i,
         Err(e) => return repo_error("campaign::evaluate::inputs", e),
     };
+    // Snapshot the evaluator knobs from `inputs` (not `campaign`) so a
+    // concurrent `PATCH /campaigns/{id}` that lands between the two reads
+    // cannot desync the scored knobs from the persisted evaluation row.
+    // `campaign` stays in use only for its `state` gate above; it is no
+    // longer the source of knob values.
+    let loss_threshold_pct = inputs.loss_threshold_pct;
+    let stddev_weight = inputs.stddev_weight;
+    let evaluation_mode = inputs.mode;
     let outputs = match eval::evaluate(inputs) {
         Ok(o) => o,
         Err(EvalError::NoBaseline) => {
@@ -646,40 +654,23 @@ pub async fn evaluate(
         }
     };
 
+    // `write_evaluation` writes the evaluation row AND promotes
+    // `completed → evaluated` in the same transaction. A crash between
+    // the UPSERT and the state flip would otherwise leave the campaign
+    // stuck in `completed` with a written evaluation row (inconsistent).
     let row = match repo::write_evaluation(
         &state.pool,
         id,
         &outputs,
-        campaign.loss_threshold_pct,
-        campaign.stddev_weight,
-        campaign.evaluation_mode,
+        loss_threshold_pct,
+        stddev_weight,
+        evaluation_mode,
     )
     .await
     {
         Ok(r) => r,
         Err(e) => return repo_error("campaign::evaluate::write", e),
     };
-
-    // Best-effort: promote completed → evaluated. A concurrent writer
-    // may have transitioned the row already, which is fine — the
-    // evaluation row is still written and the SSE event still fires.
-    if matches!(campaign.state, CampaignState::Completed) {
-        if let Err(e) = repo::transition_state(
-            &state.pool,
-            id,
-            &[CampaignState::Completed],
-            CampaignState::Evaluated,
-            Some("evaluated_at"),
-        )
-        .await
-        {
-            tracing::debug!(
-                error = %e,
-                campaign_id = %id,
-                "campaign::evaluate: skipped completed→evaluated transition (likely raced)"
-            );
-        }
-    }
 
     state
         .campaign_broker
@@ -747,13 +738,14 @@ pub async fn get_evaluation(
 ///   destination_ip)` tuple from the request body.
 ///
 /// All scopes flow through [`repo::insert_detail_pairs`], which owns
-/// the transition back to `running` and emits
-/// `campaign_state_changed`. The handler additionally publishes
-/// `CampaignStreamEvent::StateChanged { running }` for the same campaign
-/// so clients subscribed to the broker see the transition even before
-/// the NOTIFY listener wakes up; duplicates are idempotent on the
-/// frontend (React Query's `invalidateQueries` is a no-op on repeated
-/// calls with the same key).
+/// the transition back to `running` and emits `campaign_state_changed`
+/// through the Postgres NOTIFY trigger. The handler additionally
+/// publishes `CampaignStreamEvent::StateChanged { running }` for the
+/// same campaign so clients subscribed to the broker see the
+/// transition even before the NOTIFY listener wakes up — but **only**
+/// when a real transition occurred (`state_changed=true`). A
+/// no-op call against an already-`running` campaign skips the
+/// broadcast to avoid spurious client refreshes.
 #[utoipa::path(
     post,
     path = "/api/campaigns/{id}/detail",
@@ -867,23 +859,43 @@ pub async fn detail(
             .into_response();
     }
 
-    let enqueued = match repo::insert_detail_pairs(&state.pool, id, &pairs).await {
-        Ok(n) => n,
+    let (enqueued, state_changed) = match repo::insert_detail_pairs(&state.pool, id, &pairs).await {
+        Ok(out) => out,
         Err(e) => return repo_error("campaign::detail::insert", e),
     };
 
-    state
-        .campaign_broker
-        .publish(CampaignStreamEvent::StateChanged {
-            campaign_id: id,
-            state: CampaignState::Running,
-        });
+    // Only publish the SSE state-change when an actual transition
+    // occurred. A campaign already in `running` (e.g. operator racing
+    // with the scheduler) keeps its prior state and does not emit a
+    // synthetic `StateChanged { running }` event.
+    if state_changed {
+        state
+            .campaign_broker
+            .publish(CampaignStreamEvent::StateChanged {
+                campaign_id: id,
+                state: CampaignState::Running,
+            });
+    }
+
+    // Post-call state: the canonical transition promoted
+    // Completed|Evaluated to Running when `state_changed`; otherwise the
+    // campaign stayed in its prior state (which, per the state gate at
+    // the top of this handler, is one of {Completed, Evaluated} —
+    // except for the race where a concurrent writer already flipped it
+    // to Running, in which case the prior read is stale). Report the
+    // prior-read state in the stable-case, which is accurate for every
+    // caller that was not racing another writer.
+    let campaign_state = if state_changed {
+        CampaignState::Running
+    } else {
+        campaign.state
+    };
 
     (
         StatusCode::OK,
         Json(DetailResponse {
             pairs_enqueued: enqueued,
-            campaign_state: CampaignState::Running,
+            campaign_state,
         }),
     )
         .into_response()

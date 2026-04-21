@@ -238,6 +238,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                                 let ty_rtt = ay_rtt + yb_rtt;
                                 let ty_stddev_pen = inputs.stddev_weight
                                     * (ay_stddev * ay_stddev + yb_stddev * yb_stddev).sqrt();
+                                // Tiebreaker: reject X when any Y ties X exactly (cf. spec §2.4).
                                 if transit_rtt + transit_penalty >= ty_rtt + ty_stddev_pen {
                                     beats_every_y = false;
                                     break;
@@ -317,7 +318,20 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
         b.composite_score
             .partial_cmp(&a.composite_score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.destination_ip.cmp(&b.destination_ip))
+            // Deterministic tiebreaker: parsed `IpAddr` ordering rather
+            // than lexicographic string compare. Lexicographic compare
+            // would rank `"10.0.0.2" < "9.9.9.9"`, which operator-facing
+            // tools render as surprising output; parsed-IP compare
+            // preserves numeric intuition. Fall back to string compare
+            // when either side fails to parse so the sort stays total.
+            .then_with(|| {
+                let a_ip = a.destination_ip.parse::<IpAddr>().ok();
+                let b_ip = b.destination_ip.parse::<IpAddr>().ok();
+                match (a_ip, b_ip) {
+                    (Some(a_ip), Some(b_ip)) => a_ip.cmp(&b_ip),
+                    _ => a.destination_ip.cmp(&b.destination_ip),
+                }
+            })
     });
 
     let candidates_total = candidate_rows.len() as i32;

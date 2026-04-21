@@ -1303,12 +1303,17 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
     .await
     .unwrap();
 
-    let inserted = repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
-        .await
-        .unwrap();
+    let (inserted, state_changed) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
     assert_eq!(
         inserted, 2,
         "one requested pair spawns detail_ping + detail_mtr"
+    );
+    assert!(
+        state_changed,
+        "completed → running transition must be reported"
     );
 
     let campaign_after = repo::get(&pool, row.id)
@@ -1320,13 +1325,15 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
         CampaignState::Running,
         "detail insert reopens the campaign"
     );
+    // Historical breadcrumbs are preserved (matching force_pair's
+    // convention): only the state and started_at get updated.
     assert!(
-        campaign_after.completed_at.is_none(),
-        "completed_at cleared on reopen"
+        campaign_after.completed_at.is_some(),
+        "completed_at preserved as historical breadcrumb on reopen"
     );
     assert!(
-        campaign_after.evaluated_at.is_none(),
-        "evaluated_at cleared on reopen"
+        campaign_after.evaluated_at.is_some(),
+        "evaluated_at preserved as historical breadcrumb on reopen"
     );
 
     // Verify both kinds landed against the same (source, destination).
@@ -1352,12 +1359,17 @@ async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
     );
 
     // Second call with the same pair: duplicates skip silently.
-    let inserted_again = repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
-        .await
-        .unwrap();
+    let (inserted_again, state_changed_again) =
+        repo::insert_detail_pairs(&pool, row.id, &[(agent.clone(), dst)])
+            .await
+            .unwrap();
     assert_eq!(
         inserted_again, 0,
         "duplicate detail pairs skip via ON CONFLICT DO NOTHING"
+    );
+    assert!(
+        !state_changed_again,
+        "second call finds campaign already running and reports no-op"
     );
 
     repo::delete(&pool, row.id).await.unwrap();

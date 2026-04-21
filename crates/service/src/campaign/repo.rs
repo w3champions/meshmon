@@ -1037,7 +1037,7 @@ pub async fn transition_state(
     Ok(row)
 }
 
-async fn transition_state_in_tx(
+pub(crate) async fn transition_state_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
     expected: &[CampaignState],
@@ -1322,6 +1322,11 @@ pub async fn measurements_for_campaign(
     .await?
     .ok_or(RepoError::NotFound(campaign_id))?;
 
+    // Baseline-only: the join already filters to `cp.kind='campaign'`,
+    // but we also pin `m.kind='campaign'` as a belt-and-braces invariant
+    // so a future writer path that wires a detail-kind measurement to a
+    // baseline pair (e.g. some reuse refactor) cannot silently leak into
+    // candidate scoring.
     let rows = sqlx::query!(
         r#"SELECT m.source_agent_id,
                   m.destination_ip,
@@ -1333,7 +1338,7 @@ pub async fn measurements_for_campaign(
              JOIN campaign_pairs cp ON cp.measurement_id = m.id
             WHERE cp.campaign_id = $1
               AND cp.kind = 'campaign'
-              AND m.kind IN ('campaign', 'detail_ping')"#,
+              AND m.kind = 'campaign'"#,
         campaign_id,
     )
     .fetch_all(pool)
@@ -1446,6 +1451,14 @@ pub struct EvaluationRow {
 /// the freshly persisted row. Uniqueness is on `campaign_id`, so a
 /// second call for the same campaign replaces the previous result and
 /// restamps `evaluated_at`.
+///
+/// The UPSERT and the `completed → evaluated` state promotion run in a
+/// single transaction. A crash between them would otherwise leave the
+/// campaign in `completed` with an evaluation row already written —
+/// bundling both writes makes the handler contract atomic. The state
+/// flip is a conditional UPDATE gated on `state='completed'`, so a
+/// concurrent writer that already advanced the row to `evaluated`
+/// simply no-ops here.
 pub async fn write_evaluation(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -1456,6 +1469,8 @@ pub async fn write_evaluation(
 ) -> Result<EvaluationRow, RepoError> {
     let results_json = serde_json::to_value(&outputs.results)
         .expect("EvaluationResultsDto is owned by this service and always serialises");
+
+    let mut tx = pool.begin().await?;
     let row = sqlx::query!(
         r#"INSERT INTO campaign_evaluations
               (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,
@@ -1486,8 +1501,21 @@ pub async fn write_evaluation(
         outputs.avg_improvement_ms,
         results_json,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    // Best-effort promotion of completed → evaluated. No-op when the row
+    // is already `evaluated` (re-evaluation path).
+    sqlx::query!(
+        r#"UPDATE measurement_campaigns
+              SET state = 'evaluated', evaluated_at = now()
+            WHERE id = $1 AND state = 'completed'"#,
+        campaign_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     Ok(EvaluationRow {
         id: row.id,
@@ -1560,10 +1588,13 @@ pub async fn settled_campaign_pairs(
 }
 
 /// Inserts detail-pair rows for the `POST /detail` handler and flips
-/// the campaign state back to `running` + clears completion/evaluation
-/// timestamps. Returns the number of rows **actually inserted** (not
-/// the requested count) — duplicates skip silently via `ON CONFLICT
-/// DO NOTHING`.
+/// the campaign state back to `running`. Returns `(inserted, state_changed)`:
+///
+/// - `inserted` — number of rows **actually inserted** (not requested);
+///   duplicates skip silently via `ON CONFLICT DO NOTHING`.
+/// - `state_changed` — `true` when the campaign moved into `running`
+///   from one of `{completed, evaluated}`; `false` when it was already
+///   `running`. Lets the handler suppress a redundant SSE broadcast.
 ///
 /// Each requested `(source, destination)` tuple produces TWO rows:
 /// one `kind='detail_ping'`, one `kind='detail_mtr'`. Dispatch (T45)
@@ -1572,11 +1603,17 @@ pub async fn settled_campaign_pairs(
 /// `force_measurement` flag. The widened 4-column UNIQUE constraint
 /// (`campaign_id, source_agent_id, destination_ip, kind`) makes each
 /// kind a distinct row under conflict resolution.
+///
+/// The state transition routes through [`transition_state_in_tx`] (the
+/// canonical Completed|Evaluated → Running flip, mirroring `force_pair`):
+/// it restamps `started_at` so the scheduler's rotation key advances,
+/// and leaves the historical `completed_at` / `evaluated_at`
+/// breadcrumbs intact.
 pub async fn insert_detail_pairs(
     pool: &PgPool,
     campaign_id: Uuid,
     pairs: &[(String, IpAddr)],
-) -> Result<i32, RepoError> {
+) -> Result<(i32, bool), RepoError> {
     let mut tx = pool.begin().await?;
     let mut inserted = 0i32;
     for (source_agent_id, destination_ip) in pairs {
@@ -1599,17 +1636,24 @@ pub async fn insert_detail_pairs(
         }
     }
 
-    sqlx::query(
-        r#"UPDATE measurement_campaigns
-              SET state = 'running',
-                  completed_at = NULL,
-                  evaluated_at = NULL
-            WHERE id = $1 AND state IN ('completed', 'evaluated')"#,
+    let state_changed = match transition_state_in_tx(
+        &mut tx,
+        campaign_id,
+        &[CampaignState::Completed, CampaignState::Evaluated],
+        CampaignState::Running,
+        Some("started_at"),
     )
-    .bind(campaign_id)
-    .execute(&mut *tx)
-    .await?;
+    .await
+    {
+        Ok(_) => true,
+        // Already `running` — the detail pairs still landed, we just did
+        // not need to flip state. `NotFound` here also passes through as
+        // a real error (no row for this id); the caller's RepoError
+        // mapping handles that.
+        Err(RepoError::IllegalTransition { .. }) => false,
+        Err(e) => return Err(e),
+    };
 
     tx.commit().await?;
-    Ok(inserted)
+    Ok((inserted, state_changed))
 }
