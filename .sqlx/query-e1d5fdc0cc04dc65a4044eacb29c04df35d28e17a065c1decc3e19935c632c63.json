@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.source_agent_id,\n                  m.destination_ip,\n                  m.latency_avg_ms,\n                  m.latency_stddev_ms,\n                  m.loss_pct,\n                  m.mtr_id\n             FROM measurements m\n             JOIN campaign_pairs cp ON cp.measurement_id = m.id\n            WHERE cp.campaign_id = $1\n              AND cp.kind = 'campaign'",
+  "query": "SELECT m.source_agent_id,\n                  m.destination_ip,\n                  m.latency_avg_ms,\n                  m.latency_stddev_ms,\n                  m.loss_pct,\n                  m.id AS measurement_id,\n                  m.mtr_id\n             FROM measurements m\n             JOIN campaign_pairs cp ON cp.measurement_id = m.id\n            WHERE cp.campaign_id = $1\n              AND cp.kind = 'campaign'",
   "describe": {
     "columns": [
       {
@@ -30,6 +30,11 @@
       },
       {
         "ordinal": 5,
+        "name": "measurement_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
         "name": "mtr_id",
         "type_info": "Int8"
       }
@@ -45,8 +50,9 @@
       true,
       true,
       false,
+      false,
       true
     ]
   },
-  "hash": "d0e16658ee7a635c35b2e70e47ced789a7e5b2ae4da6beca129c7bf1f5aac581"
+  "hash": "e1d5fdc0cc04dc65a4044eacb29c04df35d28e17a065c1decc3e19935c632c63"
 }

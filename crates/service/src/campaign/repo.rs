@@ -1378,6 +1378,7 @@ pub async fn measurements_for_campaign(
                   m.latency_avg_ms,
                   m.latency_stddev_ms,
                   m.loss_pct,
+                  m.id AS measurement_id,
                   m.mtr_id
              FROM measurements m
              JOIN campaign_pairs cp ON cp.measurement_id = m.id
@@ -1388,6 +1389,11 @@ pub async fn measurements_for_campaign(
     .fetch_all(pool)
     .await?;
 
+    // `mtr_measurement_id` is the DTO's documented FK to `measurements.id`
+    // (see `EvaluationPairDetailDto::mtr_measurement_id_ax` / `_xb`),
+    // populated only for legs whose backing measurement carries an MTR
+    // trace. Surfacing `m.mtr_id` (which FKs to `mtr_traces.id`) would
+    // have pointed clients at the wrong table entirely.
     let measurements: Vec<AttributedMeasurement> = rows
         .into_iter()
         .map(|r| AttributedMeasurement {
@@ -1396,7 +1402,7 @@ pub async fn measurements_for_campaign(
             latency_avg_ms: r.latency_avg_ms,
             latency_stddev_ms: r.latency_stddev_ms,
             loss_pct: r.loss_pct,
-            mtr_measurement_id: r.mtr_id,
+            mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
         })
         .collect();
 

@@ -7,7 +7,6 @@
 //! (snake_case `error` key) so the SPA's shared error-handling layer
 //! applies without extra branching.
 
-use super::broker::CampaignStreamEvent;
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
     DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
@@ -746,13 +745,13 @@ pub async fn get_evaluation(
 ///
 /// All scopes flow through [`repo::insert_detail_pairs`], which owns
 /// the transition back to `running` and emits `campaign_state_changed`
-/// through the Postgres NOTIFY trigger. The handler additionally
-/// publishes `CampaignStreamEvent::StateChanged { running }` for the
-/// same campaign so clients subscribed to the broker see the
-/// transition even before the NOTIFY listener wakes up — but **only**
-/// when a real transition occurred (`state_changed=true`). A
-/// no-op call against an already-`running` campaign skips the
-/// broadcast to avoid spurious client refreshes.
+/// through the Postgres NOTIFY trigger. The campaign SSE listener
+/// translates that NOTIFY into a broker broadcast for every
+/// subscriber (same-instance and peers) — this handler does not
+/// publish to the in-process broker directly, to avoid sending a
+/// duplicate `state_changed` frame on the request's own instance.
+/// No-op detail inserts (inserted == 0 or an already-`running` race)
+/// don't touch `state`, so the trigger stays silent correctly.
 #[utoipa::path(
     post,
     path = "/api/campaigns/{id}/detail",
@@ -905,22 +904,14 @@ pub async fn detail(
         Err(e) => return repo_error("campaign::detail::insert", e),
     };
 
-    // Publish the SSE state-change only when the actual state crossed
-    // from the pre-insert observation to something new. A concurrent
-    // writer that had already flipped to `running` leaves
-    // `post_state == Running == pre_state (if pre_state==Running was
-    // somehow reached)` — but the handler's gate only admits
-    // Completed|Evaluated, so any observed post_state != pre_state
-    // represents our transition or a race-winner's. Compare explicitly
-    // to avoid emitting a redundant frame.
-    if post_state != campaign.state {
-        state
-            .campaign_broker
-            .publish(CampaignStreamEvent::StateChanged {
-                campaign_id: id,
-                state: post_state,
-            });
-    }
+    // No in-process broker publish here. The `measurement_campaigns_notify`
+    // trigger fires `campaign_state_changed` inside the same transaction
+    // as the `Completed|Evaluated → Running` flip, and the campaign SSE
+    // listener fans that out to every subscriber (this instance and
+    // peers alike) — a direct publish would cause same-instance clients
+    // to receive a duplicate `state_changed` frame for one transition.
+    // No-flip paths (inserted==0 or already-running race) don't fire
+    // the trigger, so the listener stays silent correctly.
 
     (
         StatusCode::OK,
