@@ -184,8 +184,10 @@ export default function CampaignDetail() {
   // loading into a terminal state. `useCampaignPairs` is disabled when
   // `id` is undefined, so passing `undefined` for non-terminal campaigns
   // keeps the query dormant without breaking the rules of hooks. `limit`
-  // matches the Clone cap exactly so the toast-warning branch fires
-  // precisely when the backend truncated.
+  // matches the backend's own `list_pairs` cap so the seed carries every
+  // pair the handler is willing to return; truncation detection uses
+  // `pair_counts` against the received page length rather than the
+  // request limit.
   const terminalState =
     campaignQuery.data?.state === "completed" ||
     campaignQuery.data?.state === "stopped" ||
