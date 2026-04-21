@@ -451,8 +451,10 @@ pub async fn apply_edit(
     )
     .await?;
 
-    // TODO(T48): also dismiss any existing campaign_evaluations row for
-    // this campaign once that table exists.
+    // NOTE: `campaign_evaluations` rows intentionally persist across
+    // edit-delta re-runs. The operator presses Evaluate to refresh once
+    // the re-dispatched measurements settle — an auto-dismiss here
+    // would wipe the last-known analysis every time a pair is nudged.
 
     tx.commit().await?;
     Ok(row)

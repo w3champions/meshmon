@@ -752,7 +752,8 @@ pub async fn get_evaluation(
 /// `CampaignStreamEvent::StateChanged { running }` for the same campaign
 /// so clients subscribed to the broker see the transition even before
 /// the NOTIFY listener wakes up; duplicates are idempotent on the
-/// frontend (`StateChanged` invalidates a single React Query key).
+/// frontend (React Query's `invalidateQueries` is a no-op on repeated
+/// calls with the same key).
 #[utoipa::path(
     post,
     path = "/api/campaigns/{id}/detail",
