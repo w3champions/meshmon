@@ -11,8 +11,10 @@
  *   caller has picked a source.
  * - `useHistoryMeasurements({ source, destination, protocols, from, to })` →
  *   raw measurement rows for the chart and MTR drilldown. Disabled until the
- *   caller has both source + destination; the server caps results at 5 000
- *   rows.
+ *   caller has both source + destination. The server returns up to
+ *   `HISTORY_MEASUREMENTS_CAP + 1` rows as a truncation probe; the page
+ *   displays the first `HISTORY_MEASUREMENTS_CAP` and shows a cap notice when
+ *   the extra row arrives.
  */
 
 import { type UseQueryResult, useQuery } from "@tanstack/react-query";

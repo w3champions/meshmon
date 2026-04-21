@@ -40,6 +40,9 @@ treating the state as a rendering bug.
 
 ## Result cap
 
-`/api/history/measurements` caps responses at 5000 rows. When the page
-sees a response at the cap it surfaces a "showing most recent 5,000"
-status line so operators know to narrow the window.
+`/api/history/measurements` asks the database for up to 5001 rows as a
+truncation probe: a response at exactly 5000 means the full set fit
+inside the cap, while 5001 means the underlying set is larger and the
+view was clipped. The page displays the first 5000 and surfaces a
+"showing most recent 5,000" status line on the 5001 signal so
+operators know to narrow the window.
