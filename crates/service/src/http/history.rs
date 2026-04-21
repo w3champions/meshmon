@@ -243,17 +243,36 @@ pub struct HistoryMeasurementDto {
     pub mtr_captured_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn parse_protocols(raw: Option<&str>) -> Option<Vec<ProbeProtocol>> {
-    raw.map(|s| {
-        s.split(',')
-            .filter_map(|t| match t.trim() {
-                "icmp" => Some(ProbeProtocol::Icmp),
-                "tcp" => Some(ProbeProtocol::Tcp),
-                "udp" => Some(ProbeProtocol::Udp),
-                _ => None,
-            })
-            .collect()
-    })
+/// Parse the comma-separated `protocols=` query param into a typed
+/// filter.
+///
+/// Returns `Ok(None)` when the param is absent or resolves to zero
+/// non-empty tokens (no filter — all protocols match). Returns
+/// `Err(token)` on any unknown token so the handler can emit a 400
+/// instead of silently swallowing the filter and returning an empty
+/// list — the project's coding rule forbids silent error swallowing.
+fn parse_protocols(raw: Option<&str>) -> Result<Option<Vec<ProbeProtocol>>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+        match t {
+            "icmp" => out.push(ProbeProtocol::Icmp),
+            "tcp" => out.push(ProbeProtocol::Tcp),
+            "udp" => out.push(ProbeProtocol::Udp),
+            other => return Err(other.to_string()),
+        }
+    }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 /// `GET /api/history/measurements` — measurement rows (+ optional MTR
@@ -268,7 +287,7 @@ fn parse_protocols(raw: Option<&str>) -> Option<Vec<ProbeProtocol>> {
     params(HistoryMeasurementsQuery),
     responses(
         (status = 200, description = "Measurement list", body = Vec<HistoryMeasurementDto>),
-        (status = 400, description = "Malformed destination", body = ErrorEnvelope),
+        (status = 400, description = "Malformed destination or invalid protocol token", body = ErrorEnvelope),
         (status = 401, description = "No active session"),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
@@ -294,7 +313,18 @@ pub async fn measurements(
         }
     };
     let dest_net = IpNetwork::from(dest);
-    let protocols = parse_protocols(q.protocols.as_deref());
+    let protocols = match parse_protocols(q.protocols.as_deref()) {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorEnvelope {
+                    error: "invalid_protocols".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
 
     // Hard cap at 5 000 rows. A (source, destination) pair measured
     // every 5 min for 90 days produces ~ 25 000 rows — the cap is
