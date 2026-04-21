@@ -1,4 +1,4 @@
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
 import { useCampaignStream } from "@/api/hooks/campaign-stream";
 import {
@@ -13,12 +13,21 @@ import {
 import { DeleteCampaignDialog } from "@/components/campaigns/DeleteCampaignDialog";
 import { EditMetadataSheet } from "@/components/campaigns/EditMetadataSheet";
 import { EditPairsSheet } from "@/components/campaigns/EditPairsSheet";
+import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
+import { PairsTab } from "@/components/campaigns/results/PairsTab";
+import { RawTab } from "@/components/campaigns/results/RawTab";
+import { SettingsTab } from "@/components/campaigns/results/SettingsTab";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isIllegalStateTransition, stateBadgeVariant } from "@/lib/campaign";
-import { campaignDetailRoute } from "@/router/index";
+import {
+  type CampaignDetailSearch,
+  type CampaignDetailTab,
+  campaignDetailRoute,
+} from "@/router/index";
 import { useToastStore } from "@/stores/toast";
 
 // ---------------------------------------------------------------------------
@@ -122,6 +131,15 @@ function KnobRow({ label, value }: KnobRowProps) {
 export default function CampaignDetail() {
   const { id } = campaignDetailRoute.useParams();
   const navigate = useNavigate();
+  // `strict: false` keeps the hook usable under the component tests' ad-hoc
+  // router tree (where the registered route id differs from production).
+  // The `validateSearch` on `campaignDetailRoute` has already coerced the
+  // shape at the router boundary, so casting here is safe.
+  const search = useSearch({ strict: false }) as CampaignDetailSearch;
+  // `tab` is optional in the URL schema so `to: "/campaigns/$id"`
+  // navigations don't need to supply one; the page resolves `undefined`
+  // to the default landing tab here.
+  const tab: CampaignDetailTab = search.tab ?? "candidates";
 
   // Mount the SSE stream once. `pair_settled` and `state_changed` events
   // invalidate the per-campaign cache keys via the hook's fan-out, so the
@@ -408,15 +426,49 @@ export default function CampaignDetail() {
       </Card>
 
       {/* ---------------------------------------------------------------- */}
-      {/* T49 placeholder                                                  */}
+      {/* Results tabs                                                     */}
+      {/* Radix `TabsContent` keeps every panel in the DOM by default —     */}
+      {/* we gate the children on `tab` so only the active sub-component    */}
+      {/* mounts. That preserves "lazy tabs" (expensive per-tab queries     */}
+      {/* only fire once the operator opens the tab).                       */}
       {/* ---------------------------------------------------------------- */}
-      <Card className="flex flex-col gap-1 border-dashed p-4 text-sm text-muted-foreground">
-        <p className="font-medium text-foreground">Full pairs table — coming in T49</p>
-        <p>
-          The per-pair results browser lands in T49. This page is a thin shell — actions here keep
-          working across all campaign states.
-        </p>
-      </Card>
+      <Tabs
+        value={tab}
+        onValueChange={(next) => {
+          // `useNavigate` without a `to` infers the active route's search
+          // shape, but TanStack Router's generic inference here resolves to
+          // `never` under the component-test router harness. Cast to the
+          // narrow search-only shape so prod and the test harness both
+          // type-check. The router's `validateSearch` runs regardless.
+          const navigateSearch = navigate as unknown as (opts: {
+            search: CampaignDetailSearch;
+            replace: boolean;
+          }) => void;
+          navigateSearch({
+            search: { ...search, tab: next as CampaignDetailTab },
+            replace: true,
+          });
+        }}
+      >
+        <TabsList aria-label="Campaign results tabs">
+          <TabsTrigger value="candidates">Candidates</TabsTrigger>
+          <TabsTrigger value="pairs">Pairs</TabsTrigger>
+          <TabsTrigger value="raw">Raw measurements</TabsTrigger>
+          <TabsTrigger value="settings">Evaluation settings</TabsTrigger>
+        </TabsList>
+        <TabsContent value="candidates">
+          {tab === "candidates" ? <CandidatesTab campaign={campaign} /> : null}
+        </TabsContent>
+        <TabsContent value="pairs">
+          {tab === "pairs" ? <PairsTab campaign={campaign} /> : null}
+        </TabsContent>
+        <TabsContent value="raw">
+          {tab === "raw" ? <RawTab campaign={campaign} /> : null}
+        </TabsContent>
+        <TabsContent value="settings">
+          {tab === "settings" ? <SettingsTab campaign={campaign} /> : null}
+        </TabsContent>
+      </Tabs>
 
       {/* ---------------------------------------------------------------- */}
       {/* Sheets + dialogs                                                 */}

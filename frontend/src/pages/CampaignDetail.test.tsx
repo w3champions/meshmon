@@ -61,6 +61,31 @@ vi.mock("@/components/campaigns/EditPairsSheet", () => ({
     open && campaign ? <div data-testid={`pairs-sheet-${campaign.id}`} /> : null,
 }));
 
+// Replace each sub-tab with a marker component whose mount is observable in
+// the DOM. Lazy-mount discipline (Task 11) requires `TabsContent` to render
+// only the active tab's child; the stubs let us assert that exactly one
+// panel's marker is present at a time.
+vi.mock("@/components/campaigns/results/CandidatesTab", () => ({
+  CandidatesTab: ({ campaign }: { campaign: { id: string } }) => (
+    <div data-testid={`stub-candidates-${campaign.id}`} />
+  ),
+}));
+vi.mock("@/components/campaigns/results/PairsTab", () => ({
+  PairsTab: ({ campaign }: { campaign: { id: string } }) => (
+    <div data-testid={`stub-pairs-${campaign.id}`} />
+  ),
+}));
+vi.mock("@/components/campaigns/results/RawTab", () => ({
+  RawTab: ({ campaign }: { campaign: { id: string } }) => (
+    <div data-testid={`stub-raw-${campaign.id}`} />
+  ),
+}));
+vi.mock("@/components/campaigns/results/SettingsTab", () => ({
+  SettingsTab: ({ campaign }: { campaign: { id: string } }) => (
+    <div data-testid={`stub-settings-${campaign.id}`} />
+  ),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports AFTER mocks so vi.fn() stubs are in place.
 // ---------------------------------------------------------------------------
@@ -76,6 +101,7 @@ import {
   useStopCampaign,
 } from "@/api/hooks/campaigns";
 import CampaignDetail from "@/pages/CampaignDetail";
+import { campaignDetailSearchSchema } from "@/router/index";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -166,7 +192,12 @@ function setupHookMocks(opts: HookSetupOptions = {}) {
 // initial memory history entry.
 // ---------------------------------------------------------------------------
 
-function renderDetail() {
+interface RenderOptions {
+  /** Trailing query string (including the leading `?`) appended to the initial path. */
+  search?: string;
+}
+
+function renderDetail(opts: RenderOptions = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -176,6 +207,20 @@ function renderDetail() {
     getParentRoute: () => rootRoute,
     path: "/campaigns/$id",
     component: CampaignDetail,
+    // Mirror the production `validateSearch` so `?tab=…` is parsed and
+    // invalid values are coerced to `"candidates"` via `.catch({})`. Note:
+    // TanStack Router merges the validator's output onto the raw search,
+    // so we must explicitly set every known key on the return — returning
+    // `tab: undefined` deletes a stale `?tab=bogus` instead of merging.
+    validateSearch: (raw: Record<string, unknown>) => {
+      const parsed = campaignDetailSearchSchema.catch({}).parse(raw);
+      return {
+        tab: parsed.tab,
+        raw_state: parsed.raw_state,
+        raw_protocol: parsed.raw_protocol,
+        raw_kind: parsed.raw_kind,
+      };
+    },
   });
   const listRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -185,7 +230,9 @@ function renderDetail() {
 
   const router = createRouter({
     routeTree: rootRoute.addChildren([detailRoute, listRoute]),
-    history: createMemoryHistory({ initialEntries: [`/campaigns/${CAMPAIGN_ID}`] }),
+    history: createMemoryHistory({
+      initialEntries: [`/campaigns/${CAMPAIGN_ID}${opts.search ?? ""}`],
+    }),
   });
 
   const result = render(
@@ -379,6 +426,64 @@ describe("CampaignDetail — error state", () => {
     const retry = screen.getByRole("button", { name: /retry/i });
     await user.click(retry);
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CampaignDetail — tab shell", () => {
+  test("defaults to the Candidates tab when no ?tab param is present", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "completed" }) });
+    renderDetail();
+
+    // Lazy-mount discipline: only the active tab's sub-component is rendered.
+    expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-pairs-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-raw-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-settings-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+  });
+
+  test("renders only the Raw panel when the URL requests ?tab=raw", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    renderDetail({ search: "?tab=raw" });
+
+    // Raw tab active → raw stub is mounted, every other tab stub is absent.
+    expect(await screen.findByTestId(`stub-raw-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-candidates-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-pairs-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-settings-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+  });
+
+  test("falls back to Candidates when the URL requests an unknown tab", async () => {
+    // `.catch({})` on the router's validateSearch drops invalid enum values
+    // silently → the page defaults to "candidates".
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    renderDetail({ search: "?tab=bogus" });
+
+    expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-raw-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+  });
+
+  test("clicking the Settings trigger asks the router to persist ?tab=settings", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "completed" }) });
+    const user = userEvent.setup();
+    renderDetail();
+
+    await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`);
+    await user.click(screen.getByRole("tab", { name: /evaluation settings/i }));
+
+    // The page invokes `navigate({ search: { ...search, tab: "settings" }, replace: true })`
+    // so the router's `validateSearch` + the URL stay in lockstep. We can't
+    // observe the panel swap here because `useNavigate` is mocked at the
+    // module level; asserting the navigate payload is sufficient evidence
+    // that the tab shell is driving the URL as designed.
+    await waitFor(() => {
+      expect(navigate).toHaveBeenCalled();
+    });
+    const lastCall = navigate.mock.calls[navigate.mock.calls.length - 1]?.[0] as {
+      search?: { tab?: string };
+      replace?: boolean;
+    };
+    expect(lastCall?.search?.tab).toBe("settings");
+    expect(lastCall?.replace).toBe(true);
   });
 });
 

@@ -193,14 +193,62 @@ export const campaignNewRoute = createRoute({
   component: CampaignComposer,
 });
 
-// Thin detail shell for a single campaign. The per-pair results browser
-// lands in T49; this page currently renders the metadata card, knob
-// read-out, pair-state roll-up, dispatch preview, and the state-gated
-// action bar.
+// Campaign detail page. The page renders a four-tab shell
+// (Candidates/Pairs/Raw/Settings) below the header card and action bar.
+// `tab` drives the active panel; the Raw-tab filter params live on the same
+// schema so a tab switch preserves them instead of racing with a separate
+// declaration.
+// `tab` is declared as an optional enum (rather than `default(...)`) so
+// navigations that target `/campaigns/$id` without a search clause still
+// type-check — the router coerces `undefined → "candidates"` below via
+// `validateSearch`. `.catch` applied at that boundary bounces invalid
+// `?tab=…` values back to `"candidates"` without throwing.
+export const campaignDetailSearchSchema = z.object({
+  tab: z.enum(["candidates", "pairs", "raw", "settings"]).optional(),
+  raw_state: z
+    .enum(["pending", "dispatched", "reused", "succeeded", "unreachable", "skipped"])
+    .optional(),
+  raw_protocol: z.enum(["icmp", "tcp", "udp"]).optional(),
+  raw_kind: z.enum(["campaign", "detail_ping", "detail_mtr"]).optional(),
+});
+
+/**
+ * Campaign-detail search — every field is optional so callers that navigate
+ * to `/campaigns/$id` without a search clause still type-check. The page
+ * itself defaults `tab` to `"candidates"` when unset.
+ */
+export type CampaignDetailSearch = z.infer<typeof campaignDetailSearchSchema>;
+
+/** Enumeration of the active tab values; the page resolves `undefined` to `"candidates"`. */
+export type CampaignDetailTab = "candidates" | "pairs" | "raw" | "settings";
+
+/**
+ * Parse the raw URL-search bag. `.catch({})` drops invalid enum values
+ * silently so a stale `?tab=foo` bounces back to `"candidates"` without
+ * throwing at the router boundary.
+ *
+ * TanStack Router v1 merges the validator's output onto the raw search (it
+ * does NOT replace the source), so we must explicitly set every known key
+ * on the return — otherwise a URL-supplied `tab=bogus` would survive zod's
+ * rejection and resurface downstream. Returning `undefined` for unvalid
+ * values deletes the key cleanly.
+ */
+function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
+  const parsed = campaignDetailSearchSchema.catch({}).parse(search);
+  return {
+    tab: parsed.tab,
+    raw_state: parsed.raw_state,
+    raw_protocol: parsed.raw_protocol,
+    raw_kind: parsed.raw_kind,
+  };
+}
+
 export const campaignDetailRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/campaigns/$id",
   component: CampaignDetail,
+  validateSearch: (search: Record<string, unknown>): CampaignDetailSearch =>
+    parseCampaignDetailSearch(search),
 });
 
 const routeTree = rootRoute.addChildren([
