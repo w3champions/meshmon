@@ -60,8 +60,16 @@ export function RowActionMenu({ candidate, onForcePair, onTriggerPairDetail }: R
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => onForcePair(pair)}>Force re-measure pair</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onTriggerPairDetail(pair)}>
+        {/*
+         * `onSelect` (not `onClick`) — Radix's Menu primitive fires the
+         * former on both pointer clicks AND keyboard activation (Enter /
+         * Space). `onClick` binds the DOM event directly and misses the
+         * keyboard path that reaches the item via arrow-key focus.
+         */}
+        <DropdownMenuItem onSelect={() => onForcePair(pair)}>
+          Force re-measure pair
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onTriggerPairDetail(pair)}>
           Dispatch detail for this pair
         </DropdownMenuItem>
       </DropdownMenuContent>

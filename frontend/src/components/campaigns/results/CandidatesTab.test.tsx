@@ -352,6 +352,29 @@ describe("CandidatesTab — row actions", () => {
     });
   });
 
+  test("keyboard activation (Enter) on 'Force re-measure pair' fires the mutation", async () => {
+    // Radix `DropdownMenuItem` uses `onSelect` — not `onClick` — so the
+    // keyboard path (ArrowDown + Enter) activates the item. `onClick`
+    // binds the DOM event and misses the keyboard path; this test
+    // guards that regression.
+    setupMocks(makeEvaluation());
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    const trigger = screen.getByLabelText(/actions for 10\.0\.0\.1/i);
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    // Focus lands on the first menu item on open; Enter commits it.
+    await user.keyboard("{Enter}");
+
+    expect(forcePairStub.mutate).toHaveBeenCalledTimes(1);
+    const [vars] = forcePairStub.mutate.mock.calls[0];
+    expect(vars).toEqual({
+      id: CAMPAIGN_ID,
+      body: { source_agent_id: "agent-a", destination_ip: "10.0.0.1" },
+    });
+  });
+
   test("illegal_state_transition on force_pair surfaces a dedicated toast", async () => {
     setupMocks(makeEvaluation());
     const user = userEvent.setup();
