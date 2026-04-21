@@ -14,7 +14,7 @@ interface CampaignRowActionsProps {
   onStop: (id: string) => void;
   onRestart: (id: string) => void;
   onEditMetadata: (campaign: Campaign) => void;
-  onEditPairs: (campaign: Campaign) => void;
+  onClone: (campaign: Campaign) => void;
   onDelete: (campaign: Campaign) => void;
 }
 
@@ -24,11 +24,13 @@ interface CampaignRowActionsProps {
  *
  * - `draft`: Start, Edit metadata, Delete
  * - `running`: Stop, Edit metadata
- * - `completed` / `stopped` / `evaluated`: Restart, Edit metadata, Edit pairs, Delete
+ * - `completed` / `stopped` / `evaluated`: Restart, Edit metadata, Clone, Delete
  *
  * "Restart" calls `POST /api/campaigns/:id/edit` with an empty body — the
- * server re-enters `running` without touching pair state. Re-measuring every
- * pair uses "Edit pairs" with `force_measurement`.
+ * server re-enters `running` without touching pair state. Re-running the
+ * campaign with tweaked knobs uses Clone, which lives on the detail page
+ * (the seed needs the campaign's pair list, which this list view does
+ * not load per-row).
  */
 export function CampaignRowActions({
   campaign,
@@ -36,7 +38,7 @@ export function CampaignRowActions({
   onStop,
   onRestart,
   onEditMetadata,
-  onEditPairs,
+  onClone,
   onDelete,
 }: CampaignRowActionsProps) {
   const { state } = campaign;
@@ -60,7 +62,7 @@ export function CampaignRowActions({
         ) : null}
         <DropdownMenuItem onClick={() => onEditMetadata(campaign)}>Edit metadata</DropdownMenuItem>
         {isTerminal ? (
-          <DropdownMenuItem onClick={() => onEditPairs(campaign)}>Edit pairs</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onClone(campaign)}>Clone</DropdownMenuItem>
         ) : null}
         {state === "draft" || isTerminal ? (
           <DropdownMenuItem
