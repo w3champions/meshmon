@@ -3324,6 +3324,15 @@ export interface operations {
                     "application/json": components["schemas"]["CampaignMeasurementsPage"];
                 };
             };
+            /** @description Malformed cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description No active session */
             401: {
                 headers: {
@@ -3347,7 +3356,7 @@ export interface operations {
             query?: {
                 /** @description Comma-separated list of pair resolution states. */
                 state?: components["schemas"]["PairResolutionState"][];
-                /** @description Page size. Clamped to `1..=500` internally; default 500. */
+                /** @description Page size. Clamped to `1..=5000` internally; default 500. */
                 limit?: number;
             };
             header?: never;
