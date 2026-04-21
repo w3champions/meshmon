@@ -119,14 +119,24 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
         by_pair.insert((meas.source_agent_id.clone(), meas.destination_ip), meas);
     }
 
-    // Baselines: (A, B) where both A and B are agents and A→B measurement exists.
+    // Baselines: (A, B) where both A and B are agents, an A→B measurement
+    // exists, AND it carries a non-null `latency_avg_ms`. A row with no
+    // RTT (e.g. a 100 %-loss "success") cannot participate in scoring
+    // downstream (the inner loop short-circuits on `latency_avg_ms.is_none()`
+    // at line ~185), so counting it toward the baseline would:
+    //   * inflate `baseline_pair_count` past what the scorer can use, and
+    //   * suppress the `NoBaseline → 422` error when every observed
+    //     baseline is RTT-less.
     let mut baselines: Vec<(String, IpAddr, String)> = Vec::new();
     for a in &inputs.agents {
         for b in &inputs.agents {
             if a.agent_id == b.agent_id {
                 continue;
             }
-            if by_pair.contains_key(&(a.agent_id.clone(), b.ip)) {
+            if by_pair
+                .get(&(a.agent_id.clone(), b.ip))
+                .is_some_and(|m| m.latency_avg_ms.is_some())
+            {
                 baselines.push((a.agent_id.clone(), b.ip, b.agent_id.clone()));
             }
         }
@@ -430,6 +440,33 @@ mod tests {
             mode: EvaluationMode::Optimization,
         };
         let err = evaluate(i).unwrap_err();
+        assert!(matches!(err, EvalError::NoBaseline));
+    }
+
+    #[test]
+    fn rtt_less_baseline_does_not_count_toward_baseline_set() {
+        // An A→B measurement that exists but has `latency_avg_ms=None`
+        // (e.g. a 100 %-loss success) cannot be scored against — the
+        // inner loop skips it at the `Some(direct_rtt)` destructure.
+        // If the baseline-detection loop ignored that, `baseline_pair_count`
+        // would be inflated and the caller-visible `NoBaseline → 422`
+        // error would never fire on an all-loss campaign.
+        let i = EvaluationInputs {
+            measurements: vec![AttributedMeasurement {
+                source_agent_id: "a".into(),
+                destination_ip: ip("10.0.0.2"),
+                latency_avg_ms: None,
+                latency_stddev_ms: None,
+                loss_pct: 100.0,
+                mtr_measurement_id: None,
+            }],
+            agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            enrichment: Default::default(),
+            loss_threshold_pct: 2.0,
+            stddev_weight: 1.0,
+            mode: EvaluationMode::Optimization,
+        };
+        let err = evaluate(i).expect_err("RTT-less baseline must not register");
         assert!(matches!(err, EvalError::NoBaseline));
     }
 

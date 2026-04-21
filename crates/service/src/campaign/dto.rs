@@ -403,14 +403,19 @@ pub struct EvaluationCandidateDto {
     pub pairs_improved: i32,
     /// Number of baseline pairs this candidate was scored against.
     pub pairs_total_considered: i32,
-    /// Average improvement (ms) across considered pairs; negative means faster.
+    /// Average improvement (ms) across considered pairs. Defined as
+    /// `direct_rtt − transit_rtt − (transit_stddev_penalty − direct_stddev_penalty)`,
+    /// so a positive value means the transit candidate is faster than
+    /// the direct A→B baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_improvement_ms: Option<f32>,
     /// Average compound loss (percent) across transit triples that
     /// cleared the loss gate during scoring.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_loss_pct: Option<f32>,
-    /// Composite score; lower is better.
+    /// Composite score `(pairs_improved / baseline_pair_count) ×
+    /// avg_improvement_ms`; higher is better. Candidates are returned
+    /// in descending composite-score order.
     pub composite_score: f32,
     /// Per-pair scoring detail for this candidate.
     pub pair_details: Vec<EvaluationPairDetailDto>,
