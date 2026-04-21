@@ -427,10 +427,15 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
     input.destination_ips = vec![dst];
     let row = repo::create(&pool, input).await.unwrap();
 
-    // Seed a reusable measurement younger than 24 h.
+    // Seed a reusable measurement younger than 24 h. `resolve_reuse`
+    // now filters `m.latency_avg_ms IS NOT NULL` (see repo.rs comment)
+    // so RTT-less rows can never bind to a baseline pair; seed a
+    // populated RTT here to exercise the happy-path match.
     let measurement_id: i64 = sqlx::query_scalar(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
-         VALUES ($1, $2, 'icmp', 10, 0.0) RETURNING id",
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
     .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
@@ -1108,11 +1113,15 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     input.destination_ips = vec![dst_campaign, dst_detail];
     let row = repo::create(&pool, input).await.unwrap();
 
-    // Seed a reusable measurement younger than 24h for both destinations so
-    // the reuse window would otherwise match each pair.
+    // Seed a reusable measurement younger than 24h for both
+    // destinations, with `latency_avg_ms` populated — `resolve_reuse`
+    // now rejects RTT-less rows (see repo.rs comment), so the match
+    // would otherwise fail before the kind filter has anything to do.
     let m_campaign_id: i64 = sqlx::query_scalar(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
-         VALUES ($1, $2, 'icmp', 10, 0.0) RETURNING id",
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
     .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_campaign))
@@ -1120,8 +1129,10 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     .await
     .unwrap();
     let m_detail_id: i64 = sqlx::query_scalar(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
-         VALUES ($1, $2, 'icmp', 10, 0.0) RETURNING id",
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_pct) \
+         VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
     .bind(sqlx::types::ipnetwork::IpNetwork::from(dst_detail))
@@ -1206,6 +1217,77 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     repo::delete(&pool, row.id).await.unwrap();
     sqlx::query("DELETE FROM measurements WHERE id = ANY($1)")
         .bind(&[m_campaign_id, m_detail_id][..])
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn resolve_reuse_skips_rtt_null_measurements() {
+    // Reuse must reject measurement rows with `latency_avg_ms IS NULL`
+    // — the writer's MTR branch always produces such rows, and
+    // binding one to a baseline pair would leave the evaluator unable
+    // to score against it (falling back to `no_baseline_pairs` on
+    // low-probe campaigns).
+    use meshmon_service::campaign::model::PairRow;
+    use sqlx::types::ipnetwork::IpNetwork;
+    let pool = common::shared_migrated_pool().await;
+
+    let agent = format!("reuse-rtt-null-{}", uuid::Uuid::new_v4().simple());
+    let dst = IpAddr::from_str("198.51.100.240").unwrap();
+
+    let mut input = make_input("t-reuse-rtt-null");
+    input.source_agent_ids = vec![agent.clone()];
+    input.destination_ips = vec![dst];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Seed a measurement with `latency_avg_ms = NULL` (the shape the
+    // MTR writer produces today).
+    let m_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             loss_pct, kind) \
+         VALUES ($1, $2, 'icmp', 1, 0.0, 'detail_mtr') RETURNING id",
+    )
+    .bind(&agent)
+    .bind(IpNetwork::from(dst))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (pair_id, source_agent_id, dest_ip): (i64, String, IpNetwork) = sqlx::query_as(
+        "SELECT id, source_agent_id, destination_ip FROM campaign_pairs \
+          WHERE campaign_id = $1",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let pairs = vec![PairRow {
+        id: pair_id,
+        campaign_id: row.id,
+        source_agent_id,
+        destination_ip: dest_ip,
+        resolution_state: PairResolutionState::Pending,
+        measurement_id: None,
+        dispatched_at: None,
+        settled_at: None,
+        attempt_count: 0,
+        last_error: None,
+        kind: MeasurementKind::Campaign,
+    }];
+    let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
+        .await
+        .unwrap();
+    assert!(
+        decisions.is_empty(),
+        "RTT-null measurement must not bind: {decisions:?}"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE id = $1")
+        .bind(m_id)
         .execute(&pool)
         .await
         .unwrap();

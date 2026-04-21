@@ -859,6 +859,14 @@ pub async fn resolve_reuse(
                AND m.destination_ip = r.destination_ip_str::inet
                AND m.protocol = $4::probe_protocol
                AND m.measured_at > now() - interval '24 hours'
+               -- Reuse requires usable baseline data. `detail_mtr` rows
+               -- (and any future kind that omits latency) carry
+               -- `latency_avg_ms IS NULL` by design; binding one to a
+               -- baseline pair would leave the evaluator unable to
+               -- score against it (see `eval::evaluate`'s inner
+               -- `Some(direct_rtt)` gate) and could falsely trigger
+               -- `no_baseline_pairs` on low-probe campaigns.
+               AND m.latency_avg_ms IS NOT NULL
              ORDER BY r.source_agent_id, r.destination_ip_str,
                       m.probe_count DESC, m.measured_at DESC
         )

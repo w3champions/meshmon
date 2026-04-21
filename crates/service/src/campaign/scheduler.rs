@@ -347,6 +347,17 @@ impl Scheduler {
                 MeasurementKind::DetailPing => camp.probe_count_detail,
                 MeasurementKind::DetailMtr => 1,
             };
+            // Detail dispatches MUST bypass any agent-side cache to
+            // produce the promised high-fidelity probes — an operator
+            // hitting `/detail` on a campaign created with the default
+            // `force_measurement=false` would otherwise get
+            // agent-cached results back. Kind-based override here
+            // keeps the campaign's own `force_measurement` knob
+            // exclusively about baseline dispatch.
+            let force_measurement = match p.kind {
+                MeasurementKind::Campaign => camp.force_measurement,
+                MeasurementKind::DetailPing | MeasurementKind::DetailMtr => true,
+            };
             by_kind.entry(p.kind).or_default().push(PendingPair {
                 pair_id: p.id,
                 campaign_id,
@@ -355,7 +366,7 @@ impl Scheduler {
                 probe_count,
                 timeout_ms: camp.timeout_ms,
                 probe_stagger_ms: camp.probe_stagger_ms,
-                force_measurement: camp.force_measurement,
+                force_measurement,
                 protocol: camp.protocol,
                 kind: p.kind,
             });
