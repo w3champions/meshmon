@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import {
   CAMPAIGN_PREVIEW_KEY,
   CAMPAIGNS_LIST_KEY,
+  campaignEvaluationKey,
   campaignKey,
   campaignPairsKey,
   campaignPreviewKey,
@@ -12,12 +13,12 @@ import type { components } from "@/api/schema.gen";
 /**
  * Campaign stream event shapes.
  *
- * The generated `components["schemas"]["CampaignStreamEvent"]` covers the two
- * domain-level variants (`state_changed`, `pair_settled`) emitted via the typed
- * broker. The SSE handler ALSO emits a synthetic `{"kind":"lag","missed":N}`
- * frame when the broadcast buffer overflows — that shape bypasses the
- * utoipa-derived enum, so we augment it locally rather than forking the
- * generated schema.
+ * The generated `components["schemas"]["CampaignStreamEvent"]` covers the
+ * domain-level variants (`state_changed`, `pair_settled`, `evaluated`) emitted
+ * via the typed broker. The SSE handler ALSO emits a synthetic
+ * `{"kind":"lag","missed":N}` frame when the broadcast buffer overflows — that
+ * shape bypasses the utoipa-derived enum, so we augment it locally rather than
+ * forking the generated schema.
  */
 type CampaignStreamBase = components["schemas"]["CampaignStreamEvent"];
 type LagFrame = { kind: "lag"; missed: number };
@@ -34,7 +35,9 @@ function nextBackoff(current: number): number {
 function isCampaignStreamEvent(value: unknown): value is CampaignStream {
   if (typeof value !== "object" || value === null) return false;
   const kind = (value as { kind?: unknown }).kind;
-  return kind === "state_changed" || kind === "pair_settled" || kind === "lag";
+  return (
+    kind === "state_changed" || kind === "pair_settled" || kind === "evaluated" || kind === "lag"
+  );
 }
 
 function applyEvent(queryClient: QueryClient, event: CampaignStream): void {
@@ -56,6 +59,17 @@ function applyEvent(queryClient: QueryClient, event: CampaignStream): void {
       queryClient.invalidateQueries({ queryKey: campaignKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: campaignPairsKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(event.campaign_id) });
+      return;
+    }
+    case "evaluated": {
+      // Evaluator rewrote the `campaign_evaluations` row and transitioned the
+      // campaign into the `evaluated` state. Invalidate the evaluation read
+      // (key may have no subscriber until the eval hook ships in T49 — safe
+      // no-op in that case), the campaign shell (state / evaluated_at move),
+      // and the list (sort order depends on evaluated_at).
+      queryClient.invalidateQueries({ queryKey: campaignEvaluationKey(event.campaign_id) });
+      queryClient.invalidateQueries({ queryKey: campaignKey(event.campaign_id) });
+      queryClient.invalidateQueries({ queryKey: CAMPAIGNS_LIST_KEY });
       return;
     }
     case "lag": {

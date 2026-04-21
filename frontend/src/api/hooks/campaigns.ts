@@ -40,6 +40,16 @@ export function campaignPreviewKey(id: string) {
   return ["campaigns", "preview", id] as const;
 }
 
+/**
+ * Query key for a campaign's evaluation read. The GET `/evaluation` read hook
+ * is wired in a later task (T49); the key is exported here so the SSE stream
+ * can invalidate it when the broker emits an `evaluated` frame — the invalidate
+ * is a no-op until a consumer subscribes.
+ */
+export function campaignEvaluationKey(id: string) {
+  return ["campaigns", "entry", id, "evaluation"] as const;
+}
+
 /** Polling cadence for the filtered campaign list. */
 const CAMPAIGNS_LIST_REFETCH_MS = 15_000;
 
