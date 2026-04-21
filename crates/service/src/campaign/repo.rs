@@ -1003,13 +1003,19 @@ pub async fn metrics_snapshot(pool: &PgPool) -> Result<MetricsSnapshot, RepoErro
     .fetch_all(pool)
     .await?;
 
+    // Baseline-only: `reuse_ratio` reports dispatch-efficiency for
+    // campaign-kind pairs. `/detail` rows dispatch with
+    // `force_measurement=true` and can never `reuse`, so including
+    // them would pull the metric toward zero whenever detail traffic
+    // runs — an artefact of operator action, not a real reuse regression.
     let reuse_ratio: Option<f64> = sqlx::query_scalar(
         "SELECT CASE WHEN COUNT(*) = 0 THEN NULL \
                 ELSE COUNT(*) FILTER (WHERE resolution_state='reused')::float8 \
                      / COUNT(*)::float8 \
               END \
            FROM campaign_pairs \
-          WHERE resolution_state IN ('reused','succeeded','unreachable','skipped')",
+          WHERE kind = 'campaign' \
+            AND resolution_state IN ('reused','succeeded','unreachable','skipped')",
     )
     .fetch_one(pool)
     .await?;

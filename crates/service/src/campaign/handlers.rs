@@ -196,6 +196,10 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         Err(e) => return repo_error("campaign::get", e),
     };
 
+    // Baseline-only: `pair_counts` tracks the campaign's own dispatch
+    // lifecycle for operators. `/detail`-triggered rows have their own
+    // state and must not inflate counters like `pending` when the
+    // campaign itself is otherwise settled.
     let counts: Vec<(PairResolutionState, i64)> = match sqlx::query_as::<
         _,
         (PairResolutionState, i64),
@@ -203,6 +207,7 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         "SELECT resolution_state, COUNT(*) \
                FROM campaign_pairs \
               WHERE campaign_id = $1 \
+                AND kind = 'campaign' \
               GROUP BY 1",
     )
     .bind(id)
