@@ -58,3 +58,71 @@ async fn history_sources_returns_distinct_agents_with_measurements() {
         "agents without measurements must be excluded; ids = {ids:?}"
     );
 }
+
+#[tokio::test]
+async fn history_destinations_filters_by_source_and_partial_match() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    query!(
+        r#"INSERT INTO agents
+             (id, display_name, ip, tcp_probe_port, udp_probe_port)
+           VALUES
+             ('hist-d', 'Agent D', '10.0.1.1'::inet, 3555, 3552)
+           ON CONFLICT (id) DO NOTHING"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    query!(
+        r#"INSERT INTO measurements
+             (source_agent_id, destination_ip, protocol, probe_count,
+              measured_at, loss_pct, kind)
+           VALUES
+             ('hist-d', '203.0.113.11'::inet, 'icmp', 10, now(), 0.0, 'campaign'),
+             ('hist-d', '203.0.113.12'::inet, 'icmp', 10, now(), 0.0, 'campaign'),
+             ('hist-d', '198.51.100.9'::inet, 'tcp',  10, now(), 0.0, 'campaign')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Full list for the source.
+    let body: Value = h.get_json("/api/history/destinations?source=hist-d").await;
+    let rows = body.as_array().unwrap();
+    let ips: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["destination_ip"].as_str())
+        .collect();
+    assert!(
+        ips.contains(&"203.0.113.11"),
+        "full list missing 203.0.113.11; ips = {ips:?}"
+    );
+    assert!(
+        ips.contains(&"203.0.113.12"),
+        "full list missing 203.0.113.12; ips = {ips:?}"
+    );
+    assert!(
+        ips.contains(&"198.51.100.9"),
+        "full list missing 198.51.100.9; ips = {ips:?}"
+    );
+
+    // Partial-match narrowing.
+    let body: Value = h
+        .get_json("/api/history/destinations?source=hist-d&q=198")
+        .await;
+    let rows = body.as_array().unwrap();
+    let ips: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["destination_ip"].as_str())
+        .collect();
+    assert!(
+        ips.contains(&"198.51.100.9"),
+        "filtered list missing 198.51.100.9; ips = {ips:?}"
+    );
+    assert!(
+        !ips.contains(&"203.0.113.11"),
+        "filtered list unexpectedly contains 203.0.113.11; ips = {ips:?}"
+    );
+}
