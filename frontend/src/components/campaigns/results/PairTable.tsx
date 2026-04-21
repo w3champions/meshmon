@@ -12,11 +12,7 @@
 
 import { useMemo, useState } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
-import type {
-  CampaignPair,
-  PairResolutionState,
-  ProbeProtocol,
-} from "@/api/hooks/campaigns";
+import type { CampaignPair, PairResolutionState, ProbeProtocol } from "@/api/hooks/campaigns";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -352,7 +348,9 @@ function LastErrorCell({ error }: LastErrorCellProps) {
  * so a plain `useState` keeps the tab shell simple and leaves room for a
  * `pair_*` URL prefix later without breaking the API.
  */
-export function usePairTableSort(initial: PairTableSort): [PairTableSort, (next: PairTableSort) => void] {
+export function usePairTableSort(
+  initial: PairTableSort,
+): [PairTableSort, (next: PairTableSort) => void] {
   const [sort, setSort] = useState<PairTableSort>(initial);
   return [sort, setSort];
 }

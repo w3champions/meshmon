@@ -5,11 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { Toaster, toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
-import type {
-  Campaign,
-  CampaignMeasurement,
-  CampaignState,
-} from "@/api/hooks/campaigns";
+import type { Campaign, CampaignMeasurement, CampaignState } from "@/api/hooks/campaigns";
 
 // ---------------------------------------------------------------------------
 // Module mocks

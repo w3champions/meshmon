@@ -1,13 +1,11 @@
 /**
  * Candidates tab — the default landing panel on `/campaigns/:id`.
  *
- * Composes the Task 13 `CandidateTable` (summary KPIs + sortable table),
- * the Task 14 `DrilldownDrawer` (right-side sheet with per-pair MTR), and
- * per-row actions (force pair, dispatch detail for a pair). The tab-level
- * overflow menu (Detail: all / Detail: good candidates / Re-evaluate) is
- * wired in Task 18 (Batch 5) via a dedicated `OverflowMenu` component —
- * a placeholder is rendered here so the Batch 5 drop-in has a clean mount
- * point.
+ * Composes the `CandidateTable` (summary KPIs + sortable table), the
+ * `DrilldownDrawer` (right-side sheet with per-pair MTR), per-row actions
+ * (force pair, dispatch detail for a pair), and the tab-level
+ * `OverflowMenu` (Detail: all / Detail: good candidates / Re-evaluate,
+ * with the cost-preview dialog wired in for the Detail scopes).
  */
 
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -18,7 +16,6 @@ import { useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
 import {
   RowActionMenu,
   type RowActionPair,
-  TabOverflowPlaceholder,
   UnqualifiedReasons,
 } from "@/components/campaigns/results/CandidatesTabParts";
 import {
@@ -28,6 +25,7 @@ import {
   type SortDirection,
 } from "@/components/campaigns/results/CandidateTable";
 import { DrilldownDrawer } from "@/components/campaigns/results/DrilldownDrawer";
+import { OverflowMenu } from "@/components/campaigns/results/OverflowMenu";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -270,10 +268,13 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
 
   return (
     <section data-testid="candidates-tab" className="flex flex-col gap-4">
-      {/* Tab-level overflow menu mount point. The real dropdown lands in
-          Task 18 (Batch 5) alongside the DetailCostPreview dialog. */}
+      {/* Tab-level overflow menu — Detail: all / Detail: good candidates /
+          Re-evaluate. Good-candidates is gated strictly on
+          `campaign.state === "evaluated"`; see OverflowMenu's docstring for
+          why a stale evaluation on a completed campaign must NOT re-enable
+          the action. */}
       <div className="flex justify-end">
-        <TabOverflowPlaceholder campaign={campaign} />
+        <OverflowMenu campaign={campaign} evaluation={evaluation} />
       </div>
 
       <CandidateTable

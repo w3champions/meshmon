@@ -12,11 +12,7 @@
  * column on the row reflects the measurement's kind, not the pair's.
  */
 
-import type {
-  MeasurementKind,
-  PairResolutionState,
-  ProbeProtocol,
-} from "@/api/hooks/campaigns";
+import type { MeasurementKind, PairResolutionState, ProbeProtocol } from "@/api/hooks/campaigns";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -105,6 +101,10 @@ function ChipGroup<T extends string>({ legend, values, active, onSelect }: ChipG
   return (
     <fieldset className="flex flex-col gap-1">
       <legend className="text-xs uppercase tracking-wide text-muted-foreground">{legend}</legend>
+      {/* biome-ignore lint/a11y/useSemanticElements: inner <fieldset> already
+          provides the group semantics at the legend level; role="group" here
+          tags the chip row as a compound control for AT without introducing
+          a second <fieldset> that would re-announce the legend. */}
       <div className="flex flex-wrap gap-1" role="group" aria-label={legend}>
         <Chip
           label="All"

@@ -10,14 +10,14 @@
  */
 
 import { useCallback, useMemo } from "react";
-import { useAgents } from "@/api/hooks/agents";
 import type { AgentSummary } from "@/api/hooks/agents";
+import { useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import { useCampaignPairs, useForcePair } from "@/api/hooks/campaigns";
 import { useTriggerDetail } from "@/api/hooks/evaluation";
 import {
-  PairTable,
   type PairRowAction,
+  PairTable,
   type PairTableSort,
   usePairTableSort,
 } from "@/components/campaigns/results/PairTable";

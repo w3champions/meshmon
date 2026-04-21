@@ -27,20 +27,13 @@ import type {
   ProbeProtocol,
 } from "@/api/hooks/campaigns";
 import { useCampaignMeasurements, useForcePair } from "@/api/hooks/campaigns";
+import { RawFilterBar, type RawFilterSelection } from "@/components/campaigns/results/RawFilterBar";
 import { RouteTopology } from "@/components/RouteTopology";
-import {
-  RawFilterBar,
-  type RawFilterSelection,
-} from "@/components/campaigns/results/RawFilterBar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  extractCampaignErrorCode,
-  isIllegalStateTransition,
-  isMissingPair,
-} from "@/lib/campaign";
+import { extractCampaignErrorCode, isIllegalStateTransition, isMissingPair } from "@/lib/campaign";
 import { formatRelativeAgo } from "@/lib/time-format";
 import { cn } from "@/lib/utils";
 import type { CampaignDetailSearch } from "@/router/index";
@@ -106,9 +99,9 @@ export function RawTab({ campaign }: RawTabProps) {
         search: {
           ...search,
           raw_state:
-            "resolution_state" in delta ? delta.resolution_state ?? undefined : search.raw_state,
-          raw_protocol: "protocol" in delta ? delta.protocol ?? undefined : search.raw_protocol,
-          raw_kind: "kind" in delta ? delta.kind ?? undefined : search.raw_kind,
+            "resolution_state" in delta ? (delta.resolution_state ?? undefined) : search.raw_state,
+          raw_protocol: "protocol" in delta ? (delta.protocol ?? undefined) : search.raw_protocol,
+          raw_kind: "kind" in delta ? (delta.kind ?? undefined) : search.raw_kind,
         },
         replace: true,
       });
@@ -240,7 +233,10 @@ export function RawTab({ campaign }: RawTabProps) {
           No measurements match the current filters.
         </Card>
       ) : (
+        // biome-ignore lint/a11y/useSemanticElements: virtualized row/grid rendering requires CSS grid on every row; switching to <table> forces `table-layout: fixed` which breaks the `fr` tracks — same rationale as CatalogueTable.
         <div className="rounded-md border" role="table" aria-label="Raw measurements">
+          {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale above. */}
+          {/* biome-ignore lint/a11y/useFocusableInteractive: role="row" is a grouping role in the ARIA table pattern — not an interactive control. */}
           <div
             role="row"
             className="grid w-full border-b bg-muted/30 px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground"
@@ -325,6 +321,8 @@ interface HeaderCellProps {
 function HeaderCell(props: HeaderCellProps) {
   const { children, className, ...rest } = props;
   return (
+    // biome-ignore lint/a11y/useSemanticElements: CSS grid row needs div children; see role="table" rationale.
+    // biome-ignore lint/a11y/useFocusableInteractive: role="columnheader" is a non-interactive structural role.
     <div role="columnheader" className={cn("px-2", className)} {...rest}>
       {children}
     </div>
@@ -363,6 +361,8 @@ function MeasurementRow({
     : "—";
 
   return (
+    // biome-ignore lint/a11y/useSemanticElements: virtualized row uses CSS grid; see role="table" rationale.
+    // biome-ignore lint/a11y/useFocusableInteractive: role="row" is a grouping role, not interactive.
     <div
       role="row"
       data-index={index}
@@ -434,14 +434,9 @@ function MeasurementRow({
   );
 }
 
-function Cell({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+function Cell({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
+    // biome-ignore lint/a11y/useSemanticElements: CSS grid cells must be divs; see role="table" rationale.
     <div role="cell" className={cn("overflow-hidden px-2", className)} style={{ minWidth: 0 }}>
       {children}
     </div>
@@ -465,13 +460,7 @@ function ProtocolBadge({ protocol }: { protocol: ProbeProtocol }) {
   );
 }
 
-function KindBadge({
-  kind,
-  state,
-}: {
-  kind: MeasurementKind;
-  state: PairResolutionState;
-}) {
+function KindBadge({ kind, state }: { kind: MeasurementKind; state: PairResolutionState }) {
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-xs">{kind}</span>

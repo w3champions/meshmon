@@ -406,7 +406,9 @@ export function useCampaignPairs(
   filter: CampaignPairsFilter = {},
 ): UseQueryResult<CampaignPair[], Error> {
   return useQuery({
-    queryKey: id ? [...campaignPairsKey(id), filter] : ["campaigns", "entry", "__disabled__", "pairs"],
+    queryKey: id
+      ? [...campaignPairsKey(id), filter]
+      : ["campaigns", "entry", "__disabled__", "pairs"],
     enabled: !!id,
     refetchInterval: CAMPAIGN_PAIRS_REFETCH_MS,
     queryFn: async (): Promise<CampaignPair[]> => {
