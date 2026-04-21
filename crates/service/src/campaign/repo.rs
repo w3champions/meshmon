@@ -501,6 +501,13 @@ pub async fn force_pair(
         _ => Some("started_at"),
     };
 
+    // Scope to `kind='campaign'`: after the T5 widening the 4-column
+    // UNIQUE key can legitimately hold `campaign + detail_ping +
+    // detail_mtr` rows on the same tuple, so an unfiltered UPDATE would
+    // RETURN multiple rows (sqlx's `fetch_optional` treats that as an
+    // error) and would also silently reset the detail rows — `/detail`
+    // runs their own lifecycle. Force-pair is a baseline-only operator
+    // action; detail rows can be re-triggered via `/detail` instead.
     let dst_net = IpNetwork::from(destination_ip);
     let matched = sqlx::query_scalar!(
         "UPDATE campaign_pairs
@@ -513,6 +520,7 @@ pub async fn force_pair(
           WHERE campaign_id = $1
             AND source_agent_id = $2
             AND destination_ip = $3
+            AND kind = 'campaign'
          RETURNING id",
         id,
         source_agent_id,

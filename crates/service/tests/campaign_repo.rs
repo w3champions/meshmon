@@ -731,6 +731,80 @@ async fn force_pair_preserves_started_at_on_running_campaign() {
 }
 
 #[tokio::test]
+async fn force_pair_targets_baseline_only_when_detail_rows_coexist() {
+    // After the T5 widening, the 4-col UNIQUE key lets campaign +
+    // detail_ping + detail_mtr rows coexist on the same (agent, ip)
+    // tuple. `force_pair` must scope to `kind='campaign'` — otherwise
+    // sqlx's `fetch_optional` on `RETURNING id` sees >1 rows and errors
+    // out, and the detail rows get silently reset.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-force-detail-coexist"))
+        .await
+        .unwrap();
+    let agent = "agent-a".to_string();
+    let dst = IpAddr::from_str("198.51.100.1").unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+    sqlx::query(
+        "UPDATE campaign_pairs SET resolution_state='succeeded', settled_at=now() \
+         WHERE campaign_id = $1",
+    )
+    .bind(row.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    repo::maybe_complete(&pool, row.id).await.unwrap();
+
+    // Seed a detail_mtr row on the same tuple, in `succeeded` state —
+    // force_pair must leave this alone.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, settled_at, kind) \
+         VALUES ($1::uuid, $2, $3, 'succeeded', now(), 'detail_mtr')",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .execute(&pool)
+    .await
+    .expect("seed detail_mtr row");
+
+    let forced = repo::force_pair(&pool, row.id, &agent, dst).await.unwrap();
+    assert_eq!(forced.state, CampaignState::Running);
+
+    let baseline_state: String = sqlx::query_scalar(
+        "SELECT resolution_state::text FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = $2 \
+           AND destination_ip = $3 AND kind = 'campaign'",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(baseline_state, "pending", "baseline row was reset");
+
+    let detail_state: String = sqlx::query_scalar(
+        "SELECT resolution_state::text FROM campaign_pairs \
+         WHERE campaign_id = $1 AND source_agent_id = $2 \
+           AND destination_ip = $3 AND kind = 'detail_mtr'",
+    )
+    .bind(row.id)
+    .bind(&agent)
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(dst))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        detail_state, "succeeded",
+        "detail_mtr row must not be reset by force_pair"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn skip_pending_for_inactive_sources_targets_offline_agents_only() {
     // A campaign targeting (agent-a, agent-b). Feed the sweep only
     // agent-a as active — agent-b's pairs must flip to skipped with
