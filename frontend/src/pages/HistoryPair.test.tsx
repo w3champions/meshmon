@@ -9,6 +9,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import "@/test/cytoscape-mock";
@@ -173,5 +174,104 @@ describe("HistoryPair", () => {
     // The option without catalogue metadata surfaces the raw IP plus the
     // "no metadata" tag instead of a formatted display name.
     expect(await screen.findByText(/— no metadata/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyboard-accessible popover pickers (WAI-ARIA filterable-listbox pattern).
+// Virtual focus stays on the filter `<Input>`; `ArrowUp/Down` move the
+// `aria-activedescendant` across options, `Enter` commits the focused one.
+// ---------------------------------------------------------------------------
+describe("HistoryPair keyboard-accessible pickers", () => {
+  test("ArrowDown on an open source picker moves aria-activedescendant across options", async () => {
+    installFetchMock({});
+    renderHistoryPair("/history/pair");
+
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole("combobox", { name: /source picker/i });
+    await user.click(trigger);
+
+    const filter = await screen.findByRole("searchbox", { name: /filter sources/i });
+    // Initial state: no option focused so active-descendant is empty.
+    expect(filter.getAttribute("aria-activedescendant")).toBeFalsy();
+
+    // Wait for the options to render before keying; the async source list
+    // only resolves after the mocked fetch completes.
+    await screen.findByRole("option", { name: /Agent A/i });
+
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(filter.getAttribute("aria-activedescendant")).toBe("source-opt-agent-a"),
+    );
+
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(filter.getAttribute("aria-activedescendant")).toBe("source-opt-agent-b"),
+    );
+  });
+
+  test("Enter on the source picker selects the focused option and closes the popover", async () => {
+    installFetchMock({});
+    renderHistoryPair("/history/pair");
+
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole("combobox", { name: /source picker/i });
+    await user.click(trigger);
+
+    await screen.findByRole("option", { name: /Agent A/i });
+
+    // Arrow down onto the first option, then commit with Enter. The URL
+    // picks up `?source=agent-a` and the trigger relabels to "Agent A".
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(trigger).toHaveTextContent(/Agent A/i));
+    // Popover closes on select — filter input no longer in the DOM.
+    await waitFor(() =>
+      expect(screen.queryByRole("searchbox", { name: /filter sources/i })).toBeNull(),
+    );
+  });
+
+  test("typing into the source filter resets the focused index", async () => {
+    installFetchMock({});
+    renderHistoryPair("/history/pair");
+
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole("combobox", { name: /source picker/i });
+    await user.click(trigger);
+
+    await screen.findByRole("option", { name: /Agent A/i });
+    const filter = await screen.findByRole("searchbox", { name: /filter sources/i });
+
+    // Move focus onto the first option.
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(filter.getAttribute("aria-activedescendant")).toBe("source-opt-agent-a"),
+    );
+
+    // A new keystroke refreshes the query which resets focus to -1.
+    await user.type(filter, "a");
+    await waitFor(() => expect(filter.getAttribute("aria-activedescendant")).toBeFalsy());
+  });
+
+  test("ArrowDown on an open destination picker moves aria-activedescendant across options", async () => {
+    installFetchMock({});
+    renderHistoryPair("/history/pair?source=agent-a");
+
+    const user = userEvent.setup();
+    const destTrigger = await screen.findByRole("combobox", { name: /destination picker/i });
+    await user.click(destTrigger);
+
+    const destFilter = await screen.findByRole("searchbox", { name: /filter destinations/i });
+    await screen.findByRole("option", { name: /router-1/i });
+
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(destFilter.getAttribute("aria-activedescendant")).toBe("dest-opt-10.0.0.1"),
+    );
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(destFilter.getAttribute("aria-activedescendant")).toBe("dest-opt-10.0.0.2"),
+    );
   });
 });

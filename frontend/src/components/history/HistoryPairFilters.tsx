@@ -15,6 +15,15 @@ import { cn } from "@/lib/utils";
 
 export type HistoryRange = "24h" | "7d" | "30d" | "90d" | "custom";
 
+// Keep the tuple in lockstep with the `HistoryRange` union. `satisfies readonly
+// HistoryRange[]` forces a build break if a range variant ever exists without a
+// key here, which in turn keeps `isHistoryRange` exhaustive.
+const RANGE_KEYS = ["24h", "7d", "30d", "90d", "custom"] as const satisfies readonly HistoryRange[];
+
+function isHistoryRange(v: string): v is HistoryRange {
+  return (RANGE_KEYS as readonly string[]).includes(v);
+}
+
 const RANGE_LABELS: Record<HistoryRange, string> = {
   "24h": "24h",
   "7d": "7d",
@@ -107,7 +116,11 @@ export function HistoryPairFilters({ value, onChange }: HistoryPairFiltersProps)
           value={value.range}
           onValueChange={(next) => {
             if (!next) return;
-            const range = next as HistoryRange;
+            // Narrow the raw toggle value before trusting it — a future
+            // `ToggleGroupItem` added outside the `HistoryRange` union would
+            // otherwise slip through and break the router schema later.
+            if (!isHistoryRange(next)) return;
+            const range = next;
             if (range === "custom") {
               // Seed a 24h window when switching to custom without bounds so
               // the zod schema (which requires from+to for custom) accepts.
@@ -165,6 +178,12 @@ interface SourcePickerProps {
 function SourcePicker({ sources, loading, selected, fallbackId, onSelect }: SourcePickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  // `focusedIndex` drives keyboard navigation via `aria-activedescendant`.
+  // `-1` means "no option focused" — the filter input has the real DOM focus
+  // throughout (WAI-ARIA filterable-listbox pattern); option focus is
+  // virtual, signalled only by the active-descendant relationship + a
+  // matching visible style on the row.
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -175,7 +194,43 @@ function SourcePicker({ sources, loading, selected, fallbackId, onSelect }: Sour
     );
   }, [sources, query]);
 
+  // Reset virtual focus when the popover closes; keep it clamped inside the
+  // current options length so the highlight never points past the end after
+  // the list shrinks. Query-driven resets live on the input's `onChange` so
+  // the effect deps stay honest.
+  useEffect(() => {
+    if (!open) setFocusedIndex(-1);
+  }, [open]);
+  useEffect(() => {
+    setFocusedIndex((prev) => (prev >= filtered.length ? filtered.length - 1 : prev));
+  }, [filtered.length]);
+
   const label = selected ? selected.display_name : fallbackId ? fallbackId : "Pick a source";
+  const focusedOption = focusedIndex >= 0 ? filtered[focusedIndex] : undefined;
+  const focusedId = focusedOption ? `source-opt-${focusedOption.source_agent_id}` : undefined;
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (filtered.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setFocusedIndex((prev) => (prev + 1) % filtered.length);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setFocusedIndex((prev) => (prev <= 0 ? filtered.length - 1 : prev - 1));
+      return;
+    }
+    if (e.key === "Enter") {
+      if (focusedIndex < 0) return;
+      e.preventDefault();
+      const picked = filtered[focusedIndex];
+      if (!picked) return;
+      onSelect(picked.source_agent_id);
+      setOpen(false);
+      setQuery("");
+    }
+  };
 
   return (
     <div className="flex flex-col gap-1">
@@ -201,8 +256,16 @@ function SourcePicker({ sources, loading, selected, fallbackId, onSelect }: Sour
             type="search"
             placeholder="Search sources…"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              // Reset virtual focus whenever the filter query changes; the
+              // new `filtered` list may not line up with the prior index.
+              setFocusedIndex(-1);
+            }}
+            onKeyDown={handleKeyDown}
             aria-label="Filter sources"
+            aria-controls="source-listbox"
+            aria-activedescendant={focusedId}
             className="mb-2"
             autoFocus
           />
@@ -211,15 +274,28 @@ function SourcePicker({ sources, loading, selected, fallbackId, onSelect }: Sour
           ) : filtered.length === 0 ? (
             <p className="px-2 py-1 text-sm text-muted-foreground">No sources match.</p>
           ) : (
-            <div role="listbox" aria-label="Sources" className="max-h-72 overflow-y-auto">
-              {filtered.map((s) => {
+            <div
+              id="source-listbox"
+              role="listbox"
+              aria-label="Sources"
+              className="max-h-72 overflow-y-auto"
+            >
+              {filtered.map((s, idx) => {
                 const isSel = s.source_agent_id === selected?.source_agent_id;
+                const isFocused = idx === focusedIndex;
                 return (
                   <button
                     key={s.source_agent_id}
+                    id={`source-opt-${s.source_agent_id}`}
                     type="button"
                     role="option"
                     aria-selected={isSel}
+                    data-focused={isFocused ? "true" : undefined}
+                    // `tabIndex={-1}` because virtual focus stays on the
+                    // filter input; clicking still works, but the option
+                    // is never a tab stop.
+                    tabIndex={-1}
+                    onMouseEnter={() => setFocusedIndex(idx)}
                     onClick={() => {
                       onSelect(s.source_agent_id);
                       setOpen(false);
@@ -228,6 +304,10 @@ function SourcePicker({ sources, loading, selected, fallbackId, onSelect }: Sour
                     className={cn(
                       "flex w-full flex-col items-start gap-0.5 rounded px-2 py-1 text-left text-sm hover:bg-accent",
                       isSel && "bg-accent",
+                      // `ring` ties the visible highlight to the
+                      // `aria-activedescendant` value so sighted keyboard
+                      // users see what the a11y tree announces.
+                      isFocused && "bg-accent ring-1 ring-ring",
                     )}
                   >
                     <span className="font-medium">{s.display_name}</span>
@@ -258,6 +338,9 @@ interface DestinationPickerProps {
 function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  // See `SourcePicker` for the keyboard-navigation contract; the same
+  // filterable-listbox pattern applies here.
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1);
 
   // Debounce the query so we don't thrash the backend as the operator types.
   // Destination fetch is gated on source + includes the `q` param so the
@@ -265,9 +348,20 @@ function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerPr
   const debouncedQuery = useDebounced(query, 200);
   const destinations = useHistoryDestinations(source, debouncedQuery.trim() || undefined);
 
+  const options = useMemo(() => destinations.data ?? [], [destinations.data]);
+
+  // See `SourcePicker` — query-driven resets live on the input's `onChange`,
+  // popover-close resets in this effect.
+  useEffect(() => {
+    if (!open) setFocusedIndex(-1);
+  }, [open]);
+  useEffect(() => {
+    setFocusedIndex((prev) => (prev >= options.length ? options.length - 1 : prev));
+  }, [options.length]);
+
   const selected = useMemo(
-    () => (destinations.data ?? []).find((d) => d.destination_ip === selectedId),
-    [destinations.data, selectedId],
+    () => options.find((d) => d.destination_ip === selectedId),
+    [options, selectedId],
   );
 
   const disabled = !source;
@@ -279,6 +373,32 @@ function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerPr
       : disabled
         ? "Pick a source first"
         : "Pick a destination";
+
+  const focusedOption = focusedIndex >= 0 ? options[focusedIndex] : undefined;
+  const focusedId = focusedOption ? `dest-opt-${focusedOption.destination_ip}` : undefined;
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (options.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setFocusedIndex((prev) => (prev + 1) % options.length);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setFocusedIndex((prev) => (prev <= 0 ? options.length - 1 : prev - 1));
+      return;
+    }
+    if (e.key === "Enter") {
+      if (focusedIndex < 0) return;
+      e.preventDefault();
+      const picked = options[focusedIndex];
+      if (!picked) return;
+      onSelect(picked.destination_ip);
+      setOpen(false);
+      setQuery("");
+    }
+  };
 
   return (
     <div className="flex flex-col gap-1">
@@ -311,8 +431,17 @@ function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerPr
             type="search"
             placeholder="Search destinations…"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              // Reset virtual focus whenever the filter query changes; the
+              // debounced fetch will refresh `options` shortly, and any
+              // preserved index would point into the stale list.
+              setFocusedIndex(-1);
+            }}
+            onKeyDown={handleKeyDown}
             aria-label="Filter destinations"
+            aria-controls="dest-listbox"
+            aria-activedescendant={focusedId}
             className="mb-2"
             autoFocus
           />
@@ -320,15 +449,22 @@ function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerPr
             <p className="px-2 py-1 text-sm text-muted-foreground">Loading…</p>
           ) : destinations.isError ? (
             <p className="px-2 py-1 text-sm text-destructive">Failed to load destinations.</p>
-          ) : (destinations.data ?? []).length === 0 ? (
+          ) : options.length === 0 ? (
             <p className="px-2 py-1 text-sm text-muted-foreground">No destinations match.</p>
           ) : (
-            <div role="listbox" aria-label="Destinations" className="max-h-72 overflow-y-auto">
-              {(destinations.data ?? []).map((d) => (
+            <div
+              id="dest-listbox"
+              role="listbox"
+              aria-label="Destinations"
+              className="max-h-72 overflow-y-auto"
+            >
+              {options.map((d, idx) => (
                 <DestinationOption
                   key={d.destination_ip}
                   destination={d}
                   selected={d.destination_ip === selectedId}
+                  focused={idx === focusedIndex}
+                  onMouseEnter={() => setFocusedIndex(idx)}
                   onClick={() => {
                     onSelect(d.destination_ip);
                     setOpen(false);
@@ -347,10 +483,18 @@ function DestinationPicker({ source, selectedId, onSelect }: DestinationPickerPr
 interface DestinationOptionProps {
   destination: HistoryDestination;
   selected: boolean;
+  focused: boolean;
   onClick(): void;
+  onMouseEnter(): void;
 }
 
-function DestinationOption({ destination, selected, onClick }: DestinationOptionProps) {
+function DestinationOption({
+  destination,
+  selected,
+  focused,
+  onClick,
+  onMouseEnter,
+}: DestinationOptionProps) {
   // T42 null tolerance — when the catalogue row has been deleted, the
   // backend leaves `display_name` as the raw IP and every geo/ASN field
   // stays null. Render "raw IP — no metadata" rather than treating it as
@@ -363,13 +507,20 @@ function DestinationOption({ destination, selected, onClick }: DestinationOption
 
   return (
     <button
+      id={`dest-opt-${destination.destination_ip}`}
       type="button"
       role="option"
       aria-selected={selected}
+      data-focused={focused ? "true" : undefined}
+      // `tabIndex={-1}` because virtual focus stays on the filter input; see
+      // `SourcePicker` for the full pattern.
+      tabIndex={-1}
+      onMouseEnter={onMouseEnter}
       onClick={onClick}
       className={cn(
         "flex w-full flex-col items-start gap-0.5 rounded px-2 py-1 text-left text-sm hover:bg-accent",
         selected && "bg-accent",
+        focused && "bg-accent ring-1 ring-ring",
       )}
     >
       <span className="font-medium">

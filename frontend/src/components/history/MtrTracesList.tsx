@@ -31,9 +31,14 @@ export function MtrTracesList({ measurements, className }: MtrTracesListProps) {
       )
       .slice()
       .sort((a, b) => {
+        // Parse to epoch ms rather than `localeCompare` so an offset-
+        // carrying timestamp (e.g. `+02:00`) still sorts by real wall
+        // time — OpenAPI describes these fields as ISO-8601 but doesn't
+        // force the UTC `Z` suffix, so string compare isn't safe across
+        // mixed offsets.
         const aKey = a.mtr_captured_at ?? a.measured_at;
         const bKey = b.mtr_captured_at ?? b.measured_at;
-        return bKey.localeCompare(aKey);
+        return new Date(bKey).getTime() - new Date(aKey).getTime();
       });
   }, [measurements]);
 

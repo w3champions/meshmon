@@ -1,6 +1,5 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useMemo } from "react";
-import type { ProbeProtocol } from "@/api/hooks/campaigns";
 import { useHistoryMeasurements } from "@/api/hooks/history";
 import {
   HistoryPairFilters,
@@ -10,18 +9,10 @@ import {
 import { MtrTracesList } from "@/components/history/MtrTracesList";
 import { PairChart } from "@/components/history/PairChart";
 import { Skeleton } from "@/components/ui/skeleton";
+import { type HistoryPairSearch, historyPairRoute } from "@/router/index";
 
 /** Result cap enforced by `/api/history/measurements`. */
 export const HISTORY_MEASUREMENTS_CAP = 5000;
-
-interface HistoryPairSearch {
-  source?: string;
-  destination?: string;
-  protocol?: ProbeProtocol[];
-  range: HistoryRange;
-  from?: string;
-  to?: string;
-}
 
 /**
  * `/history/pair` — latency/loss + MTR history for one (source, destination)
@@ -33,8 +24,13 @@ interface HistoryPairSearch {
  * measurements window plus an `<MtrTracesList>` for the MTR drilldown.
  */
 export default function HistoryPair() {
+  // `strict: false` keeps the hook usable under the component tests' ad-hoc
+  // router tree (`HistoryPair.test.tsx` mounts the page under a throwaway
+  // route whose id differs from production's `historyPairRoute.id`). The
+  // router's `validateSearch` has already coerced the shape at the router
+  // boundary via `historyPairSearchSchema`, so casting here is safe.
   const search = useSearch({ strict: false }) as HistoryPairSearch;
-  const navigate = useNavigate();
+  const navigate = useNavigate({ from: historyPairRoute.fullPath });
 
   const filtersValue = useMemo<HistoryPairFiltersValue>(
     () => ({
@@ -67,24 +63,21 @@ export default function HistoryPair() {
   const measurements = useHistoryMeasurements(measurementsFilter);
 
   const handleFiltersChange = (next: HistoryPairFiltersValue): void => {
-    (
-      navigate as unknown as (opts: {
-        to: string;
-        search: HistoryPairSearch;
-        replace: boolean;
-      }) => void
-    )({
-      to: "/history/pair",
-      search: {
-        source: next.source,
-        destination: next.destination,
-        protocol: next.protocols.length > 0 ? [...next.protocols] : undefined,
-        range: next.range,
-        from: next.from,
-        to: next.to,
-      },
-      replace: true,
-    });
+    const nextSearch: HistoryPairSearch = {
+      source: next.source,
+      destination: next.destination,
+      protocol: next.protocols.length > 0 ? [...next.protocols] : undefined,
+      range: next.range,
+      from: next.from,
+      to: next.to,
+    };
+    // `useNavigate({ from: historyPairRoute.fullPath })` above narrows
+    // `to` + `search` to this route's schema, so no casts are needed
+    // when the component mounts under the production router. The
+    // component-test harness in `HistoryPair.test.tsx` registers a
+    // throwaway route at the same `/history/pair` path, which satisfies
+    // the router-inferred `to` check at runtime.
+    navigate({ to: "/history/pair", search: nextSearch, replace: true });
   };
 
   const rowCount = measurements.data?.length ?? 0;
