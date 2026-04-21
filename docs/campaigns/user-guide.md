@@ -326,35 +326,75 @@ per-protocol, and not per-campaign. The only way to bypass reuse is
 to set `force_measurement = true` on the campaign (either at create
 time or via an edit delta); that flag skips the lookup entirely.
 
-## Evaluation
+## Reading results
 
-### Reading results
+Open the campaign in `/campaigns/:id`. The page splits into four tabs;
+the active tab rides in the URL as `?tab=` so refreshes and shared
+links survive.
 
-Open the campaign in `/campaigns/:id`. The **Candidates** tab (default)
-ranks destinations by
+| Tab | What it answers |
+|---|---|
+| **Candidates** (default) | Which destinations improve direct paths? |
+| **Pairs** | What happened to each baseline pair? |
+| **Raw** | Every measurement attributed to the campaign, including in-flight detail work. |
+| **Settings** | What knobs did the evaluator use? Re-evaluate here. |
+
+### Candidates tab
+
+A KPI strip at the top shows baseline pair count, qualifying
+candidates, and average improvement. The candidate table below ranks
+destinations by
 `composite_score = (pairs_improved / baseline_pair_count) × avg_improvement_ms`.
 Each row shows: rank, name, IP, city, ASN + network operator,
-improved/total pairs, average improvement, loss chip (green < 0.5%,
-yellow below threshold, red above), and a composite bar. Click a row
-to see the per-pair breakdown: direct vs transit RTT, loss, and any
-MTR trace IDs linked to hop visualisations.
+improved/total pairs, average improvement, and a loss chip (green
+< 0.5%, yellow below threshold, red above). Columns are sortable by
+clicking the header (round-tripped through the URL as `?cand_sort=…&cand_dir=…`);
+the default is `composite_score desc`. Click a row to open the
+drilldown drawer: per-pair direct-vs-transit RTT with green/red
+improvement deltas (positive means transit is faster than direct), loss
+per leg, and an inline `RouteTopology` view for any MTR trace linked to
+the triple.
 
 Mesh-member candidates (destinations that are themselves meshmon
 agents) render with a "mesh member — no acquisition needed" badge.
 They're useful context in `diversity` mode and automatically filter
 out of `optimization` results.
 
-### Running Evaluate
+Row actions on each candidate:
 
-Evaluate is manual. Finish a campaign, press **Evaluate**, and the
-scoring runs against every measurement attributed to the campaign.
-The result is a single row in `campaign_evaluations`, overwritten on
-every re-evaluate — no history, no audit trail.
+- **Force remeasure** — reset every pair belonging to the candidate to
+  `pending` and re-run bypassing the reuse cache.
+- **Detail this candidate** — dispatch detail measurements across the
+  candidate's qualifying triples (the cost-preview dialog confirms
+  before firing).
 
-Re-evaluating is free: no measurements re-dispatch. Tweak
-`loss_threshold_pct`, `stddev_weight`, or `evaluation_mode` in the
-Evaluation-settings tab and press Re-evaluate to re-score existing
-data against the new settings.
+### Pairs tab
+
+One row per baseline pair. Columns: source agent, destination,
+resolution state, attempts, last error, last measurement timestamp.
+The row-action menu offers **Force remeasure** and **Detail pair**. The
+tab is the right place to chase a single misbehaving leg without the
+candidate-ranking context.
+
+### Raw tab
+
+Every measurement row the service has attributed to the campaign,
+including pending and dispatched pairs that have not settled yet.
+Virtualised so long lists stay responsive. Filter chips at the top
+narrow by `resolution_state`, protocol, and kind
+(`campaign` / `detail_ping` / `detail_mtr`); chip selections round-trip
+through the URL. Each row links to the historic pair view
+(`/history/pair`) pre-filtered to the same `(source, destination)` so
+the operator can compare campaign samples against the broader history.
+
+### Settings tab
+
+Shows the three evaluator knobs (`loss_threshold_pct`, `stddev_weight`,
+`evaluation_mode`) along with a **Re-evaluate** button. Only `completed`
+and `evaluated` states enable Re-evaluate; it's hidden on `draft`,
+`running`, and `stopped` campaigns. Re-evaluating is free: it re-scores
+existing measurements against the new settings without dispatching
+anything.
 
 ### Switching modes
 
@@ -364,20 +404,80 @@ useful for redundancy planning. Use **Optimization** (default) when
 you want only destinations that beat every alternative the mesh
 already has — useful for "should we acquire this server?"
 
-### Detail scopes
+## Detail measurements
 
-Detail measurements re-run a pair with one MTR trace + 250-probe
-latency. Three scopes:
+Detail measurements re-run one or more pairs with one MTR trace plus
+a 250-probe latency burst, so an operator can chase down a promising
+candidate or an ambiguous result without re-running the whole
+campaign. The overflow menu on the campaign page exposes three scopes:
 
-- **Detail this candidate** (row action) — re-measure every
-  qualifying `A → X` and `X → B` for a single candidate.
-- **Detail: good candidates only** (page overflow menu) — re-measure
-  every qualifying triple in the latest evaluation.
-- **Detail: all pairs** (page overflow menu) — re-measure every pair
-  that ran in the original campaign.
+| Scope | Selection | Approximate enqueue |
+|---|---|---|
+| **Detail: all pairs** | every `campaign`-kind pair in a settled state (`succeeded` / `reused`); `pending` / `dispatched` / `skipped` / `unreachable` are excluded | `2 × (settled pair count)` |
+| **Detail: good candidates only** | every qualifying `(A, X, B)` triple from the latest evaluation | `4 × (qualifying-triple count)`, de-duplicated |
+| **Detail this pair** (row action) | one explicit `(source, destination)` | `2` |
 
-Detail data refines but does not invalidate the evaluation. The
-operator presses Evaluate again to fold the new data in.
+**Detail: good candidates only** is gated strictly on
+`state === "evaluated"`. A stale evaluation on a `completed` campaign
+does not unlock the action — press **Evaluate** first.
+
+### Cost preview
+
+Each scope opens a confirmation dialog with the scope label, the
+affected pair count, and the expected `pairs_enqueued` total. Cancel
+backs out without touching the backend; confirm fires the dispatch and
+surfaces a toast on success or failure
+(`no_pairs_selected`, `no_evaluation`, `illegal_state_transition`
+funnel to operator-friendly messages rather than raw codes).
+
+Detail dispatch flips the campaign to `running` while the sweep is
+in-flight; it returns to `completed` (or `evaluated`, if a prior
+evaluation exists) once every detail pair settles. Detail rows never
+feed the next evaluation — they refine the operator's view of a pair
+without moving the baseline. Press **Evaluate** again to fold fresh
+measurements into the candidate scoring.
+
+## Running Evaluate
+
+Evaluate is manual. Finish a campaign, press **Evaluate**, and the
+scoring runs against every measurement attributed to the campaign.
+The result is a single row in `campaign_evaluations`, overwritten on
+every re-evaluate — no history, no audit trail.
+
+## History
+
+`/history/pair` renders latency, loss, and MTR traces for any
+`(source, destination)` pair with at least one measurement, independent
+of campaigns. Use it to answer "how has this route behaved over the
+past week?" without having to find the right campaign first.
+
+### Picker flow
+
+Two popover pickers anchor the top of the page: **Source** (every agent
+that has produced at least one measurement) and **Destination** (every
+IP that source has reached). Both are filterable; destinations whose
+catalogue row has been deleted render as `"<ip> — no metadata"`. The
+page URL is the source of truth — picker clicks update
+`?source=…&destination=…` in place, so shared links round-trip exactly.
+
+### Time range
+
+The range selector offers `24h`, `7d`, `30d`, `90d`, and **custom** (a
+date-time pair). The latency chart overlays one line per protocol
+present in the result set, plus a translucent min/max band; the loss
+panel below shares the same X axis. Hovering a data point pins the
+tooltip with per-protocol averages and loss.
+
+The service caps `/api/history/measurements` at 5 000 rows. When a
+query hits the cap, the page shows a "showing most recent 5 000"
+notice so the operator knows to narrow the window.
+
+### MTR traces
+
+Below the chart, every MTR-kind measurement in the window shows as a
+collapsible row. Expanding a row renders the trace in
+`RouteTopology`; rows are ordered newest-first so the current
+behaviour is at the top.
 
 ## Composer workflow
 
@@ -452,14 +552,32 @@ exact `total / reusable / fresh` triple. When `fresh` exceeds
 `crates/service/src/config.rs` (default 1000), a confirmation dialog
 gates **Start**.
 
-### Stop and edit
+### Stop
 
 A running campaign can be stopped mid-run — pending pairs flip to
 `skipped` server-side and the writer finishes draining any in-flight
-dispatches. From terminal states (`completed`, `stopped`, or
-`evaluated`), operators can delta-edit the pair set (add/remove IPs
-with an optional "force re-measurement" toggle), update metadata, or
-delete the campaign outright.
+dispatches. From terminal states operators can update metadata, clone
+the campaign (next section), or delete it outright.
+
+## Restart and Clone
+
+Two actions take a finished campaign somewhere new. Both are offered
+on the action bar of any terminal campaign (`completed`, `stopped`, or
+`evaluated`).
+
+| Action | What it does |
+|---|---|
+| **Restart** | Re-runs the exact same pair set against the same knobs. Existing terminal pairs carry over; only pairs that still need work dispatch. Toggle the sticky `force_measurement` flag first when a full re-measurement is wanted. |
+| **Clone** | Seeds a fresh draft at `/campaigns/new` with this campaign's sources, destinations, and knobs. Edit anything before pressing Start — the clone has no effect on the original campaign. |
+
+Clone is the tool for "run this again with tweaks". The composer
+mounts pre-populated and the source / destination pickers and the
+knob panel are available for edits. The clone's title defaults to
+`"Copy of <original>"`; `force_measurement` resets to `false` so a
+tweak-and-rerun does not silently re-probe every pair. The backend
+caps the pair walk at 5 000 pairs — if the source campaign is larger,
+Clone surfaces a warning toast and the operator reviews the seed before
+launching.
 
 ## See also
 

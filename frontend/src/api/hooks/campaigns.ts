@@ -1,6 +1,9 @@
 import {
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -18,6 +21,10 @@ export type CampaignState = components["schemas"]["CampaignState"];
 export type EvaluationMode = components["schemas"]["EvaluationMode"];
 export type ProbeProtocol = components["schemas"]["ProbeProtocol"];
 export type PairResolutionState = components["schemas"]["PairResolutionState"];
+export type MeasurementKind = components["schemas"]["MeasurementKind"];
+export type CampaignMeasurement = components["schemas"]["CampaignMeasurementDto"];
+export type CampaignMeasurementsPage = components["schemas"]["CampaignMeasurementsPage"];
+export type CampaignPair = components["schemas"]["PairDto"];
 
 /**
  * Query shape for `GET /api/campaigns`. Sourced directly from the generated
@@ -48,6 +55,26 @@ export function campaignPreviewKey(id: string) {
  */
 export function campaignEvaluationKey(id: string) {
   return ["campaigns", "entry", id, "evaluation"] as const;
+}
+
+/**
+ * Prefix key covering every cached `/measurements` page for a campaign
+ * (regardless of filter). Used by the SSE `pair_settled` handler and by
+ * `useTriggerDetail`'s `onSuccess` so in-flight detail rows surface live on
+ * the Raw tab.
+ */
+export function campaignMeasurementsPrefixKey(id: string) {
+  return ["campaigns", "entry", id, "measurements"] as const;
+}
+
+/**
+ * Narrow variant of {@link campaignMeasurementsPrefixKey} that also keys on
+ * the active filter set. Each filter permutation is a separate cache entry so
+ * the Raw tab can switch facets without stomping a sibling view; prefix
+ * invalidation from SSE / detail-trigger sweeps them all at once.
+ */
+export function campaignMeasurementsKey(id: string, filter: CampaignMeasurementsFilter) {
+  return ["campaigns", "entry", id, "measurements", filter] as const;
 }
 
 /** Polling cadence for the filtered campaign list. */
@@ -234,7 +261,8 @@ export interface EditCampaignVariables {
  * Apply an edit delta to a finished campaign. The server re-enters `running`
  * on success, which can both add/remove pairs and (with `force_measurement`)
  * reset the whole campaign — invalidate the preview key so the dispatch
- * estimate refreshes immediately.
+ * estimate refreshes immediately, and the measurements prefix so the Raw tab
+ * drops any rows that belonged to now-removed pairs or a force-reset sweep.
  */
 export function useEditCampaign(): UseMutationResult<Campaign, Error, EditCampaignVariables> {
   const queryClient = useQueryClient();
@@ -252,6 +280,10 @@ export function useEditCampaign(): UseMutationResult<Campaign, Error, EditCampai
       queryClient.setQueryData(campaignKey(id), data);
       queryClient.invalidateQueries({ queryKey: CAMPAIGNS_LIST_KEY });
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(id) });
+      // Prefix invalidation so every filter variant of the Raw tab refetches —
+      // an edit that removes pairs or sets `force_measurement` can mutate the
+      // measurement set without emitting a matching SSE `pair_settled`.
+      queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
     },
   });
 }
@@ -282,9 +314,128 @@ export interface ForcePairVariables {
 }
 
 /**
+ * Filters for the campaign-scoped measurements feed (Raw tab).
+ *
+ * Cursor is intentionally absent — it's threaded through `useInfiniteQuery`'s
+ * `pageParam` so every page of a single filter permutation collapses onto
+ * one cache entry, and `fetchNextPage()` drives the scroll-append flow in
+ * the Raw tab's virtualized list. `measurement_id` supports the
+ * DrilldownDrawer's single-row MTR resolution.
+ */
+export interface CampaignMeasurementsFilter {
+  resolution_state?: PairResolutionState;
+  protocol?: ProbeProtocol;
+  kind?: MeasurementKind;
+  measurement_id?: number;
+  limit?: number;
+}
+
+/**
+ * Infinite-cursor fetch over the campaign's joined
+ * `campaign_pairs → measurements` feed. The endpoint paginates via a keyset
+ * cursor in `measured_at DESC NULLS LAST, cp.id DESC` order; pages are
+ * accumulated in a single cache entry keyed on `(id, filter)` (no cursor in
+ * the key), and the Raw tab calls `fetchNextPage()` as the virtualized list
+ * approaches the bottom. Disabled while `id` is undefined.
+ */
+export function useCampaignMeasurements(
+  id: string | undefined,
+  filter: CampaignMeasurementsFilter,
+): UseInfiniteQueryResult<InfiniteData<CampaignMeasurementsPage>, Error> {
+  return useInfiniteQuery<
+    CampaignMeasurementsPage,
+    Error,
+    InfiniteData<CampaignMeasurementsPage>,
+    readonly unknown[],
+    string | null
+  >({
+    queryKey: id
+      ? campaignMeasurementsKey(id, filter)
+      : ["campaigns", "entry", "__disabled__", "measurements"],
+    enabled: !!id,
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? null,
+    queryFn: async ({ pageParam }): Promise<CampaignMeasurementsPage> => {
+      // queryFn only runs when enabled → id is defined.
+      const campaignId = id as string;
+      const { data, error } = await api.GET("/api/campaigns/{id}/measurements", {
+        params: {
+          path: { id: campaignId },
+          query: {
+            ...(filter.resolution_state ? { resolution_state: filter.resolution_state } : {}),
+            ...(filter.protocol ? { protocol: filter.protocol } : {}),
+            ...(filter.kind ? { kind: filter.kind } : {}),
+            ...(filter.measurement_id !== undefined
+              ? { measurement_id: filter.measurement_id }
+              : {}),
+            ...(pageParam ? { cursor: pageParam } : {}),
+            ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch campaign measurements", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data as CampaignMeasurementsPage;
+    },
+  });
+}
+
+/**
+ * Filter shape for `GET /api/campaigns/{id}/pairs`. Empty `state` expands
+ * server-side to "every resolution state"; the endpoint is limit-paginated
+ * only (no cursor), so callers render the full response in one shot.
+ */
+export interface CampaignPairsFilter {
+  state?: PairResolutionState[];
+  limit?: number;
+}
+
+/**
+ * Fetch the campaign's full pair list. The endpoint is limit-paginated —
+ * no cursor — so callers materialise the entire (bounded) response in one
+ * query. The scheduler bumps `pair_counts` on every `campaign_pair_settled`
+ * NOTIFY, which invalidates the campaign shell key; the SSE stream does
+ * NOT touch `campaignPairsKey` today, so `refetchInterval: 15s` keeps the
+ * Pairs tab eventually-consistent without a dedicated stream subscription.
+ * A force-pair or detail-trigger mutation invalidates this key eagerly.
+ */
+const CAMPAIGN_PAIRS_REFETCH_MS = 15_000;
+
+export function useCampaignPairs(
+  id: string | undefined,
+  filter: CampaignPairsFilter = {},
+): UseQueryResult<CampaignPair[], Error> {
+  return useQuery({
+    queryKey: id
+      ? [...campaignPairsKey(id), filter]
+      : ["campaigns", "entry", "__disabled__", "pairs"],
+    enabled: !!id,
+    refetchInterval: CAMPAIGN_PAIRS_REFETCH_MS,
+    queryFn: async (): Promise<CampaignPair[]> => {
+      // queryFn only runs when enabled → id is defined.
+      const campaignId = id as string;
+      const { data, error } = await api.GET("/api/campaigns/{id}/pairs", {
+        params: {
+          path: { id: campaignId },
+          query: {
+            ...(filter.state && filter.state.length > 0 ? { state: filter.state } : {}),
+            ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch campaign pairs", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data as CampaignPair[];
+    },
+  });
+}
+
+/**
  * Force-reset a single pair and re-enter `running`. The campaign shell, the
  * paginated pair list, and the dispatch preview all shift — invalidate
- * all three.
+ * all three. Also invalidate the measurements prefix: when the force-pair
+ * outcome reuses an existing measurement the writer does not emit a
+ * `pair_settled` frame, so the Raw tab would otherwise stay stale.
  */
 export function useForcePair(): UseMutationResult<Campaign, Error, ForcePairVariables> {
   const queryClient = useQueryClient();
@@ -302,6 +453,7 @@ export function useForcePair(): UseMutationResult<Campaign, Error, ForcePairVari
       queryClient.setQueryData(campaignKey(id), data);
       queryClient.invalidateQueries({ queryKey: campaignPairsKey(id) });
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(id) });
+      queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
     },
   });
 }

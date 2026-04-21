@@ -15,7 +15,6 @@ import {
 import { CampaignRowActions } from "@/components/campaigns/CampaignRowActions";
 import { DeleteCampaignDialog } from "@/components/campaigns/DeleteCampaignDialog";
 import { EditMetadataSheet } from "@/components/campaigns/EditMetadataSheet";
-import { EditPairsSheet } from "@/components/campaigns/EditPairsSheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -239,7 +238,6 @@ export default function Campaigns() {
   const { mutate: deleteCampaign } = deleteMutation;
 
   const [editMetadataTarget, setEditMetadataTarget] = useState<Campaign | null>(null);
-  const [editPairsTarget, setEditPairsTarget] = useState<Campaign | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null);
 
   const handleStart = useCallback(
@@ -311,9 +309,16 @@ export default function Campaigns() {
   const handleEditMetadata = useCallback((campaign: Campaign): void => {
     setEditMetadataTarget(campaign);
   }, []);
-  const handleEditPairs = useCallback((campaign: Campaign): void => {
-    setEditPairsTarget(campaign);
-  }, []);
+  // Clone lives on the detail page — it needs the campaign's full pair
+  // list to seed the composer, which this list view does not load. The
+  // row-action navigates to the detail page where the Clone button is
+  // the primary terminal-state affordance.
+  const handleClone = useCallback(
+    (campaign: Campaign): void => {
+      void navigate({ to: "/campaigns/$id", params: { id: campaign.id } });
+    },
+    [navigate],
+  );
   const handleDelete = useCallback((campaign: Campaign): void => {
     setDeleteTarget(campaign);
   }, []);
@@ -539,7 +544,7 @@ export default function Campaigns() {
                     onStop={handleStop}
                     onRestart={handleRestart}
                     onEditMetadata={handleEditMetadata}
-                    onEditPairs={handleEditPairs}
+                    onClone={handleClone}
                     onDelete={handleDelete}
                   />
                 </TableCell>
@@ -554,13 +559,6 @@ export default function Campaigns() {
         open={editMetadataTarget !== null}
         onOpenChange={(next) => {
           if (!next) setEditMetadataTarget(null);
-        }}
-      />
-      <EditPairsSheet
-        campaign={editPairsTarget}
-        open={editPairsTarget !== null}
-        onOpenChange={(next) => {
-          if (!next) setEditPairsTarget(null);
         }}
       />
       <DeleteCampaignDialog

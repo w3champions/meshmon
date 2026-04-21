@@ -5,6 +5,7 @@ import {
   CAMPAIGNS_LIST_KEY,
   campaignEvaluationKey,
   campaignKey,
+  campaignMeasurementsPrefixKey,
   campaignPairsKey,
   campaignPreviewKey,
 } from "@/api/hooks/campaigns";
@@ -55,10 +56,15 @@ function applyEvent(queryClient: QueryClient, event: CampaignStream): void {
       // A pair transitioned to a terminal state. `pair_counts` on the campaign
       // shell shifts, the paginated pair list changes membership, and the
       // preview dispatch counts move as resolved pairs exit the `fresh`
-      // bucket. Don't touch the list key — the shell shape stays put.
+      // bucket. The Raw tab's `/measurements` feed also gains a new row, so
+      // invalidate the prefix so every cached filter variant refetches. Don't
+      // touch the list key — the shell shape stays put.
       queryClient.invalidateQueries({ queryKey: campaignKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: campaignPairsKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(event.campaign_id) });
+      queryClient.invalidateQueries({
+        queryKey: campaignMeasurementsPrefixKey(event.campaign_id),
+      });
       return;
     }
     case "evaluated": {

@@ -366,6 +366,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/campaigns/{id}/measurements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}/measurements` — joined campaign+measurements
+         *     feed for the Results browser's Raw tab. Paginated via a keyset
+         *     cursor; rows are ordered `measured_at DESC NULLS LAST, cp.id DESC`,
+         *     so settled rows lead each page and pending/dispatched pairs (no
+         *     `measured_at`) trail at the bottom of the first page. Pending rows
+         *     are not reachable via keyset pagination — see
+         *     [`fetch_campaign_measurements`] for the v1 contract.
+         */
+        get: operations["campaign_measurements"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/campaigns/{id}/pairs": {
         parameters: {
             query?: never;
@@ -680,6 +705,66 @@ export interface paths {
          *     row would otherwise never be retried).
          */
         post: operations["reenrich_one"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/history/destinations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/history/destinations` — every destination reachable from
+         *     `source`, optionally narrowed by partial match on IP or display
+         *     name (case-insensitive).
+         */
+        get: operations["history_destinations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/history/measurements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/history/measurements` — measurement rows (+ optional MTR
+         *     hops) for a (source, destination) range. Hard-capped at 5 000 rows
+         *     so a pathologically long history can't blow a browser tab; the
+         *     frontend surfaces the cap explicitly.
+         */
+        get: operations["history_measurements"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/history/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/history/sources` — agents with at least one measurement. */
+        get: operations["history_sources"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1039,6 +1124,81 @@ export interface components {
             timeout_ms: number;
             /** @description Operator-facing title. */
             title: string;
+        };
+        /**
+         * @description One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.
+         *
+         *     Every field but `pair_id`, `source_agent_id`, `destination_ip`,
+         *     `resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`
+         *     row with `pending` or `dispatched` state has no joined `measurements`
+         *     row yet, but the Raw tab still renders it so operators can monitor
+         *     in-flight detail work.
+         *
+         *     `mtr_hops` is inlined rather than referenced by id so the
+         *     DrilldownDrawer can render MTR directly from this endpoint — there
+         *     is no separate `GET /api/measurements/:id` in the service. The
+         *     `Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding
+         *     JSONB; serde renders it as a bare JSON array on the wire.
+         */
+        CampaignMeasurementDto: {
+            /** @description Destination IP as a host string. */
+            destination_ip: string;
+            /**
+             * Format: float
+             * @description Average round-trip latency in ms (nullable).
+             */
+            latency_avg_ms?: number | null;
+            /**
+             * Format: float
+             * @description Observed loss percentage ([0, 100]) (nullable).
+             */
+            loss_pct?: number | null;
+            /**
+             * Format: date-time
+             * @description When the measurement was produced (null when pending/dispatched).
+             */
+            measured_at?: string | null;
+            /**
+             * Format: int64
+             * @description Populated when the pair has a joined `measurements` row.
+             */
+            measurement_id?: number | null;
+            /**
+             * @description Inline MTR hops — populated iff `mtr_id` resolves to an
+             *     `mtr_traces` row.
+             */
+            mtr_hops?: components["schemas"]["HopJson"][] | null;
+            /**
+             * Format: int64
+             * @description `measurements.mtr_id` FK — reference to `mtr_traces.id`.
+             */
+            mtr_id?: number | null;
+            /**
+             * Format: int64
+             * @description `campaign_pairs.id`.
+             */
+            pair_id: number;
+            /**
+             * @description Kind of work the pair represents
+             *     (`campaign`, `detail_ping`, `detail_mtr`).
+             */
+            pair_kind: components["schemas"]["MeasurementKind"];
+            protocol?: null | components["schemas"]["ProbeProtocol"];
+            /** @description Current lifecycle of the pair. */
+            resolution_state: components["schemas"]["PairResolutionState"];
+            /** @description Source agent id from the pair envelope. */
+            source_agent_id: string;
+        };
+        /** @description One page of the Raw-tab's joined campaign+measurements feed. */
+        CampaignMeasurementsPage: {
+            /** @description Entries in `(measured_at DESC NULLS LAST, pair_id DESC)` order. */
+            entries: components["schemas"]["CampaignMeasurementDto"][];
+            /**
+             * @description Opaque cursor for the next page, or `null` when this is the
+             *     final page. Only populated when the final row has a non-null
+             *     `measured_at` (pending rows cannot be resumed via keyset).
+             */
+            next_cursor?: string | null;
         };
         /**
          * @description Lifecycle state of a measurement campaign. Mirrors the
@@ -1554,6 +1714,112 @@ export interface components {
             /** @description Destination IP of the pair to force. */
             destination_ip: string;
             /** @description Source agent id of the pair to force. */
+            source_agent_id: string;
+        };
+        /**
+         * @description One destination reachable from a given source.
+         *
+         *     `display_name` falls back to `host(destination_ip)` when no catalogue
+         *     row exists (either never enriched or later deleted). The frontend
+         *     renders this as "raw IP — no metadata", a supported state rather than
+         *     a rendering bug — `city`, `country_code`, and `asn` all stay NULL.
+         */
+        HistoryDestinationDto: {
+            /**
+             * Format: int32
+             * @description Catalogue ASN (nullable). Postgres `INTEGER` → `i32`.
+             */
+            asn?: number | null;
+            /** @description Catalogue city (nullable). */
+            city?: string | null;
+            /** @description Catalogue country code (nullable). */
+            country_code?: string | null;
+            /** @description Raw destination IP as a host string. */
+            destination_ip: string;
+            /** @description Catalogue-derived label when known, else the IP string. */
+            display_name: string;
+            /** @description Whether the destination IP is itself a mesh-agent IP. */
+            is_mesh_member: boolean;
+        };
+        /**
+         * @description One joined `measurements` + optional `mtr_traces` row for the
+         *     `/history/pair` page.
+         *
+         *     `mtr_hops` decodes the `mtr_traces.hops` JSONB column into the typed
+         *     `Vec<HopJson>` wire shape. sqlx requires the `Json<_>` wrapper for
+         *     JSONB columns in `query_as!`; the wire JSON stays flat thanks to
+         *     `sqlx::types::Json`'s transparent serde impl.
+         */
+        HistoryMeasurementDto: {
+            /** @description Destination IP as a host string. */
+            destination_ip: string;
+            /**
+             * Format: int64
+             * @description `measurements.id`.
+             */
+            id: number;
+            /** @description Measurement kind (`campaign`, `detail_ping`, `detail_mtr`). */
+            kind: components["schemas"]["MeasurementKind"];
+            /**
+             * Format: float
+             * @description Average round-trip latency in ms.
+             */
+            latency_avg_ms?: number | null;
+            /**
+             * Format: float
+             * @description Maximum round-trip latency in ms.
+             */
+            latency_max_ms?: number | null;
+            /**
+             * Format: float
+             * @description Minimum round-trip latency in ms.
+             */
+            latency_min_ms?: number | null;
+            /**
+             * Format: float
+             * @description 95th-percentile round-trip latency in ms.
+             */
+            latency_p95_ms?: number | null;
+            /**
+             * Format: float
+             * @description Latency standard deviation in ms.
+             */
+            latency_stddev_ms?: number | null;
+            /**
+             * Format: float
+             * @description Observed loss percentage ([0, 100]).
+             */
+            loss_pct: number;
+            /**
+             * Format: date-time
+             * @description When the row was produced (UTC).
+             */
+            measured_at: string;
+            /**
+             * Format: date-time
+             * @description When the associated `mtr_traces` row was captured.
+             */
+            mtr_captured_at?: string | null;
+            /** @description MTR hop array; populated when the measurement has an `mtr_id`. */
+            mtr_hops?: components["schemas"]["HopJson"][] | null;
+            /**
+             * Format: int32
+             * @description Number of probes in the sample.
+             */
+            probe_count: number;
+            /** @description Protocol the probe used. */
+            protocol: components["schemas"]["ProbeProtocol"];
+            /** @description Source agent id that produced the row. */
+            source_agent_id: string;
+        };
+        /** @description One entry in the `/api/history/sources` list. */
+        HistorySourceDto: {
+            /**
+             * @description Display name from `agents_with_catalogue` — the catalogue-derived
+             *     name when set, else the agent's own `display_name`, else the id.
+             */
+            display_name: string;
+            /** @description Agent id. */
             source_agent_id: string;
         };
         /** @description JSON representation of an observed IP at a hop. */
@@ -3014,6 +3280,68 @@ export interface operations {
             };
         };
     };
+    campaign_measurements: {
+        parameters: {
+            query?: {
+                /** @description Narrow to a single `campaign_pairs.resolution_state`. */
+                resolution_state?: null | components["schemas"]["PairResolutionState"];
+                /**
+                 * @description Narrow to a single `measurements.protocol`. Pending/dispatched
+                 *     pairs (no joined measurement) stay visible under this filter so
+                 *     operators can monitor in-flight detail work.
+                 */
+                protocol?: null | components["schemas"]["ProbeProtocol"];
+                /**
+                 * @description Narrow to a single `campaign_pairs.kind` (`campaign`,
+                 *     `detail_ping`, `detail_mtr`).
+                 */
+                kind?: null | components["schemas"]["MeasurementKind"];
+                /** @description Keyset cursor — base64(JSON) `{t, i}` pair from the previous page. */
+                cursor?: string | null;
+                /**
+                 * @description Resolve a single (pair, measurement) row by measurement id —
+                 *     used by the DrilldownDrawer for MTR lookup.
+                 */
+                measurement_id?: number | null;
+                /** @description Page size. Defaults to 200, clamped to `[1, 1000]`. */
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Measurement page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignMeasurementsPage"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     pairs: {
         parameters: {
             query?: {
@@ -3760,6 +4088,139 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    history_destinations: {
+        parameters: {
+            query: {
+                /** @description Source agent id — required. */
+                source: string;
+                /** @description Partial match on `destination_ip` or catalogue `display_name`. */
+                q?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Destination list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryDestinationDto"][];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    history_measurements: {
+        parameters: {
+            query: {
+                /** @description Source agent id. */
+                source: string;
+                /** @description Destination IP (v4 or v6 host string). */
+                destination: string;
+                /** @description Comma-separated list: `icmp,tcp,udp`. Empty/absent = all protocols. */
+                protocols?: string | null;
+                /** @description RFC 3339 lower bound (inclusive). */
+                from?: string | null;
+                /** @description RFC 3339 upper bound (inclusive). */
+                to?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Measurement list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryMeasurementDto"][];
+                };
+            };
+            /** @description Malformed destination or invalid protocol token */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    history_sources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Source list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistorySourceDto"][];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Internal error */
             500: {

@@ -1,9 +1,10 @@
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
 import { useCampaignStream } from "@/api/hooks/campaign-stream";
 import {
   type Campaign,
   useCampaign,
+  useCampaignPairs,
   useDeleteCampaign,
   useEditCampaign,
   usePreviewDispatchCount,
@@ -12,19 +13,36 @@ import {
 } from "@/api/hooks/campaigns";
 import { DeleteCampaignDialog } from "@/components/campaigns/DeleteCampaignDialog";
 import { EditMetadataSheet } from "@/components/campaigns/EditMetadataSheet";
-import { EditPairsSheet } from "@/components/campaigns/EditPairsSheet";
+import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
+import { PairsTab } from "@/components/campaigns/results/PairsTab";
+import { RawTab } from "@/components/campaigns/results/RawTab";
+import { SettingsTab } from "@/components/campaigns/results/SettingsTab";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isIllegalStateTransition, stateBadgeVariant } from "@/lib/campaign";
-import { campaignDetailRoute } from "@/router/index";
+import {
+  type CampaignDetailSearch,
+  type CampaignDetailTab,
+  campaignDetailRoute,
+} from "@/router/index";
+import { useComposerSeedStore } from "@/stores/composer-seed";
 import { useToastStore } from "@/stores/toast";
 
 // ---------------------------------------------------------------------------
 // Static display metadata — kept at module scope so React doesn't reallocate
 // every render.
 // ---------------------------------------------------------------------------
+
+/**
+ * Upper bound on pairs the Clone action ferries into the composer seed.
+ * Matches the backend `GET /api/campaigns/:id/pairs` handler-side clamp
+ * (`crates/service/src/campaign/handlers.rs::pairs`). Beyond this cap
+ * the Clone toast warns the operator before handing off.
+ */
+const CLONE_PAIR_CAP = 5000;
 
 type PairState = "pending" | "dispatched" | "reused" | "succeeded" | "unreachable" | "skipped";
 
@@ -122,6 +140,18 @@ function KnobRow({ label, value }: KnobRowProps) {
 export default function CampaignDetail() {
   const { id } = campaignDetailRoute.useParams();
   const navigate = useNavigate();
+  // `strict: false` keeps the hook usable under the component tests' ad-hoc
+  // router tree (where the registered route id differs from production).
+  // The `validateSearch` on `campaignDetailRoute` has already coerced the
+  // shape at the router boundary, so casting here is safe.
+  const search = useSearch({ strict: false }) as CampaignDetailSearch;
+  // `tab` is `.optional()` on the URL schema so navigations to
+  // `/campaigns/$id` without a search clause still type-check, but the
+  // router's validator (`parseCampaignDetailSearch`) always fills
+  // `tab = "candidates"` when absent and catches invalid values. The
+  // `?? "candidates"` here is a type-level narrowing backstop — at runtime
+  // `search.tab` is guaranteed populated by the validator.
+  const tab: CampaignDetailTab = search.tab ?? "candidates";
 
   // Mount the SSE stream once. `pair_settled` and `state_changed` events
   // invalidate the per-campaign cache keys via the hook's fan-out, so the
@@ -140,7 +170,9 @@ export default function CampaignDetail() {
   const stopMutation = useStopCampaign();
   // Restart posts an empty edit body; the server transitions the campaign
   // back to `running` without resetting pair state. Operators who want to
-  // re-run every pair reach for "Edit pairs" with force-measurement.
+  // re-run the whole campaign with tweaked knobs reach for Clone, which
+  // seeds the composer with the source/destination sets and starts a
+  // fresh draft.
   const editMutation = useEditCampaign();
   const deleteMutation = useDeleteCampaign();
   const { mutate: startCampaign } = startMutation;
@@ -148,8 +180,25 @@ export default function CampaignDetail() {
   const { mutate: editCampaign } = editMutation;
   const { mutate: deleteCampaign } = deleteMutation;
 
+  // Pull the full pair list for the Clone action — gated on the campaign
+  // loading into a terminal state. `useCampaignPairs` is disabled when
+  // `id` is undefined, so passing `undefined` for non-terminal campaigns
+  // keeps the query dormant without breaking the rules of hooks. `limit`
+  // matches the backend's own `list_pairs` cap so the seed carries every
+  // pair the handler is willing to return; truncation detection uses
+  // `pair_counts` against the received page length rather than the
+  // request limit.
+  const terminalState =
+    campaignQuery.data?.state === "completed" ||
+    campaignQuery.data?.state === "stopped" ||
+    campaignQuery.data?.state === "evaluated";
+  const pairsQuery = useCampaignPairs(terminalState ? id : undefined, {
+    limit: CLONE_PAIR_CAP,
+  });
+
+  const setComposerSeed = useComposerSeedStore((s) => s.setSeed);
+
   const [editMetadataOpen, setEditMetadataOpen] = useState<boolean>(false);
-  const [editPairsOpen, setEditPairsOpen] = useState<boolean>(false);
   const [deleteOpen, setDeleteOpen] = useState<boolean>(false);
 
   const handleStart = useCallback((): void => {
@@ -202,6 +251,77 @@ export default function CampaignDetail() {
       },
     );
   }, [editCampaign, id]);
+
+  // Clone — seed the composer from this terminal campaign's knobs +
+  // deduped source/destination sets, then navigate to `/campaigns/new`.
+  // The composer consumes the seed exactly once on mount; a fresh load
+  // of `/campaigns/new` without a prior Clone starts from defaults.
+  //
+  // `pairsLoaded` gates on a non-empty array — an empty list is not a
+  // useful seed (no sources, no destinations) so the button stays
+  // disabled even though the query technically resolved. The
+  // `handleClone` guard mirrors this so a concurrent re-render that
+  // flips `pairsData` back to empty can't slip a zero-pair seed
+  // through into the composer store.
+  const pairsData = pairsQuery.data;
+  const pairsLoaded = Boolean(pairsData?.length);
+  const cloneCampaign = campaignQuery.data ?? null;
+  // Derive the Clone button's label + click behavior from the pairs
+  // query state so the four reachable states (loading, error, empty,
+  // ready) each map to a distinct affordance. Mirrors the Start/Stop
+  // `isPending ? "…" : "…"` idiom used elsewhere in the action bar.
+  const cloneButtonState: "loading" | "error" | "ready" = pairsQuery.isLoading
+    ? "loading"
+    : pairsQuery.isError
+      ? "error"
+      : "ready";
+  const cloneLabel =
+    cloneButtonState === "loading"
+      ? "Clone (loading…)"
+      : cloneButtonState === "error"
+        ? "Clone (retry)"
+        : "Clone";
+  const handleClone = useCallback((): void => {
+    if (!cloneCampaign || !pairsData?.length) return;
+    // `pair_counts` is the authoritative total of baseline
+    // (`kind='campaign'`) pairs — same filter the `list_pairs` handler
+    // applies — so comparing it against the received page length
+    // detects truncation without the `>= CAP` heuristic's false
+    // positive at exactly `CAP`. List-view responses don't populate
+    // `pair_counts` (see the OpenAPI schema); the single-row
+    // `GET /api/campaigns/:id` this page uses always does.
+    const totalBaselinePairs =
+      cloneCampaign.pair_counts?.reduce((sum, [, n]) => sum + n, 0) ?? pairsData.length;
+    if (totalBaselinePairs > pairsData.length) {
+      useToastStore.getState().pushToast({
+        kind: "error",
+        message: `This campaign has ${totalBaselinePairs.toLocaleString()} pairs; Clone truncated the seed to the first ${pairsData.length.toLocaleString()}. Review before starting.`,
+      });
+    }
+    const sourceSet = [...new Set(pairsData.map((p) => p.source_agent_id))];
+    const destSet = [...new Set(pairsData.map((p) => p.destination_ip))];
+    setComposerSeed({
+      knobs: {
+        title: `Copy of ${cloneCampaign.title}`,
+        notes: cloneCampaign.notes,
+        protocol: cloneCampaign.protocol,
+        probe_count: cloneCampaign.probe_count,
+        probe_count_detail: cloneCampaign.probe_count_detail,
+        timeout_ms: cloneCampaign.timeout_ms,
+        probe_stagger_ms: cloneCampaign.probe_stagger_ms,
+        loss_threshold_pct: cloneCampaign.loss_threshold_pct,
+        stddev_weight: cloneCampaign.stddev_weight,
+        evaluation_mode: cloneCampaign.evaluation_mode,
+        // Reset `force_measurement` — clones default to reuse-cache
+        // friendly so a tweak-and-rerun doesn't silently re-measure
+        // every pair. Operator opts in via the knob panel.
+        force_measurement: false,
+      },
+      sourceSet,
+      destSet,
+    });
+    void navigate({ to: "/campaigns/new" });
+  }, [cloneCampaign, pairsData, setComposerSeed, navigate]);
 
   const handleConfirmDelete = useCallback(
     (campaignId: string): void => {
@@ -344,8 +464,20 @@ export default function CampaignDetail() {
           Edit metadata
         </Button>
         {isTerminal ? (
-          <Button variant="outline" onClick={() => setEditPairsOpen(true)}>
-            Edit pairs
+          <Button
+            variant="outline"
+            // "error" → click refetches; "ready" → click seeds +
+            // navigates; "loading" is disabled so no onClick path.
+            onClick={cloneButtonState === "error" ? () => pairsQuery.refetch() : handleClone}
+            // Disabled whenever the pair list can't seed the composer:
+            // still loading, failed to load, or resolved but empty.
+            disabled={cloneButtonState !== "error" && !pairsLoaded}
+            aria-label="Clone campaign"
+            title={
+              cloneButtonState === "error" ? "Failed to load pairs — click to retry" : undefined
+            }
+          >
+            {cloneLabel}
           </Button>
         ) : null}
         {state === "draft" || isTerminal ? (
@@ -408,15 +540,54 @@ export default function CampaignDetail() {
       </Card>
 
       {/* ---------------------------------------------------------------- */}
-      {/* T49 placeholder                                                  */}
+      {/* Results tabs                                                     */}
+      {/* Radix `TabsContent` keeps every panel in the DOM by default —     */}
+      {/* we gate the children on `tab` so only the active sub-component    */}
+      {/* mounts. That preserves "lazy tabs" (expensive per-tab queries     */}
+      {/* only fire once the operator opens the tab).                       */}
       {/* ---------------------------------------------------------------- */}
-      <Card className="flex flex-col gap-1 border-dashed p-4 text-sm text-muted-foreground">
-        <p className="font-medium text-foreground">Full pairs table — coming in T49</p>
-        <p>
-          The per-pair results browser lands in T49. This page is a thin shell — actions here keep
-          working across all campaign states.
-        </p>
-      </Card>
+      <Tabs
+        value={tab}
+        // Spreading `search` preserves `raw_*` filter params across tab
+        // switches by design — the operator keeps their filter selection
+        // when navigating between Raw and other tabs. If they open Raw,
+        // apply a `raw_state=pending` filter, then visit Settings, the
+        // filter survives the round-trip back.
+        onValueChange={(next) => {
+          // `useNavigate` without a `to` infers the active route's search
+          // shape, but TanStack Router's generic inference here resolves to
+          // `never` under the component-test router harness. Cast to the
+          // narrow search-only shape so prod and the test harness both
+          // type-check. The router's `validateSearch` runs regardless.
+          const navigateSearch = navigate as unknown as (opts: {
+            search: CampaignDetailSearch;
+            replace: boolean;
+          }) => void;
+          navigateSearch({
+            search: { ...search, tab: next as CampaignDetailTab },
+            replace: true,
+          });
+        }}
+      >
+        <TabsList aria-label="Campaign results tabs">
+          <TabsTrigger value="candidates">Candidates</TabsTrigger>
+          <TabsTrigger value="pairs">Pairs</TabsTrigger>
+          <TabsTrigger value="raw">Raw measurements</TabsTrigger>
+          <TabsTrigger value="settings">Evaluation settings</TabsTrigger>
+        </TabsList>
+        <TabsContent value="candidates">
+          {tab === "candidates" ? <CandidatesTab campaign={campaign} /> : null}
+        </TabsContent>
+        <TabsContent value="pairs">
+          {tab === "pairs" ? <PairsTab campaign={campaign} /> : null}
+        </TabsContent>
+        <TabsContent value="raw">
+          {tab === "raw" ? <RawTab campaign={campaign} /> : null}
+        </TabsContent>
+        <TabsContent value="settings">
+          {tab === "settings" ? <SettingsTab campaign={campaign} /> : null}
+        </TabsContent>
+      </Tabs>
 
       {/* ---------------------------------------------------------------- */}
       {/* Sheets + dialogs                                                 */}
@@ -426,7 +597,6 @@ export default function CampaignDetail() {
         open={editMetadataOpen}
         onOpenChange={setEditMetadataOpen}
       />
-      <EditPairsSheet campaign={campaign} open={editPairsOpen} onOpenChange={setEditPairsOpen} />
       <DeleteCampaignDialog
         campaign={campaign}
         open={deleteOpen}

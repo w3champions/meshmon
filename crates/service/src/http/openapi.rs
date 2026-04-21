@@ -93,6 +93,11 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::http::alerts_proxy::AlertSummary,
         crate::http::auth::LoginRequest,
         crate::http::auth::LoginResponse,
+        crate::http::history::CampaignMeasurementDto,
+        crate::http::history::CampaignMeasurementsPage,
+        crate::http::history::HistoryDestinationDto,
+        crate::http::history::HistoryMeasurementDto,
+        crate::http::history::HistorySourceDto,
         crate::http::metrics_proxy::InstantQuery,
         crate::http::metrics_proxy::RangeQuery,
         crate::http::path_overview::LatestByProtocol,
@@ -204,6 +209,15 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         // campaign routes keeps the readability convention consistent
         // with the catalogue block above.
         .routes(utoipa_axum::routes!(crate::campaign::sse::campaign_stream))
+        // History discovery surfaces backing the `/history/pair` page
+        // (spec 04 §6) plus the campaign Raw-tab's measurements feed
+        // (T49 addition — joined campaign_pairs + measurements + mtr_traces).
+        .routes(utoipa_axum::routes!(crate::http::history::sources))
+        .routes(utoipa_axum::routes!(crate::http::history::destinations))
+        .routes(utoipa_axum::routes!(crate::http::history::measurements))
+        .routes(utoipa_axum::routes!(
+            crate::http::history::campaign_measurements
+        ))
 }
 
 /// Build the full OpenAPI document, including every `#[utoipa::path]`

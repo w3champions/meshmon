@@ -16,11 +16,11 @@ CampaignComposer (page at /campaigns/new)
 
 CampaignDetail (page at /campaigns/$id)
   ├── EditMetadataSheet    — title / notes / evaluator knobs PATCH
-  ├── EditPairsSheet       — add/remove pairs + optional force-measurement re-run
+  ├── Clone button         — terminal-state re-run: seeds composer-seed store then navigates to /campaigns/new
   └── DeleteCampaignDialog — idempotent DELETE with confirm
 
 Campaigns (page at /campaigns)
-  └── CampaignRowActions   — per-row Start / Stop / Delete menu
+  └── CampaignRowActions   — per-row Start / Stop / Restart / Clone / Delete menu
 ```
 
 Every panel is self-contained — the parent page owns selection state,

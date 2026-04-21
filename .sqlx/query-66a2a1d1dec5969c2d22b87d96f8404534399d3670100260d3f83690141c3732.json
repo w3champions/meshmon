@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT awc.agent_id AS \"source_agent_id!\",\n               COALESCE(NULLIF(awc.catalogue_display_name, ''),\n                        NULLIF(awc.agent_display_name, ''),\n                        awc.agent_id) AS \"display_name!\"\n          FROM agents_with_catalogue awc\n         WHERE EXISTS (SELECT 1 FROM measurements m WHERE m.source_agent_id = awc.agent_id)\n         ORDER BY 2 ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_agent_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "66a2a1d1dec5969c2d22b87d96f8404534399d3670100260d3f83690141c3732"
+}

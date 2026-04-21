@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO measurements\n             (source_agent_id, destination_ip, protocol, probe_count,\n              measured_at, loss_pct, kind)\n           VALUES\n             ('hist-d', '203.0.113.11'::inet, 'icmp', 10, now(), 0.0, 'campaign'),\n             ('hist-d', '203.0.113.12'::inet, 'icmp', 10, now(), 0.0, 'campaign'),\n             ('hist-d', '198.51.100.9'::inet, 'tcp',  10, now(), 0.0, 'campaign')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6e99677c7bf4562346e3c799fa4347be12d0f7573864a40ecfab8b7527ed4e97"
+}

@@ -285,7 +285,7 @@ describe("Campaigns page — URL-backed filters", () => {
 });
 
 describe("Campaigns page — state-gated row actions", () => {
-  test("draft row shows Start; running row shows Stop; completed row shows Edit pairs", async () => {
+  test("draft row shows Start; running row shows Stop; completed row shows Clone", async () => {
     setupHookMocks({
       data: [DRAFT_CAMPAIGN, RUNNING_CAMPAIGN, COMPLETED_CAMPAIGN],
     });
@@ -314,15 +314,37 @@ describe("Campaigns page — state-gated row actions", () => {
     expect(screen.getByRole("menuitem", { name: /edit metadata/i })).toBeInTheDocument();
     await user.keyboard("{Escape}");
 
-    // Completed → Edit pairs + Restart visible, Start/Stop both absent.
+    // Completed → Clone + Restart visible, Start/Stop both absent. The
+    // row-level Clone navigates to the detail page; the detail Clone
+    // button is where the pair list loads and the composer seed lands.
     const completedTrigger = screen.getByRole("button", {
       name: `Actions for ${COMPLETED_CAMPAIGN.title}`,
     });
     await user.click(completedTrigger);
-    expect(await screen.findByRole("menuitem", { name: /edit pairs/i })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: /^clone$/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /^restart$/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /^start$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /^stop$/i })).not.toBeInTheDocument();
+  });
+
+  test("Clone on a completed row navigates to the detail page", async () => {
+    setupHookMocks({ data: [COMPLETED_CAMPAIGN] });
+    const user = userEvent.setup();
+    const { router } = renderCampaigns();
+
+    const trigger = await screen.findByRole("button", {
+      name: `Actions for ${COMPLETED_CAMPAIGN.title}`,
+    });
+    await user.click(trigger);
+    const cloneItem = await screen.findByRole("menuitem", { name: /^clone$/i });
+    await user.click(cloneItem);
+
+    // Row-level Clone defers to the detail page's Clone button, which
+    // has the campaign's pair list loaded and can populate the composer
+    // seed correctly.
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/campaigns/${COMPLETED_CAMPAIGN.id}`);
+    });
   });
 
   test("Restart on a completed row fires useEditCampaign with an empty body", async () => {

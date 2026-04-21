@@ -87,7 +87,9 @@ import {
   useCatalogueListInfinite,
   useCatalogueMap,
 } from "@/api/hooks/catalogue";
+import { DEFAULT_KNOBS } from "@/lib/campaign-config";
 import CampaignComposer from "@/pages/CampaignComposer";
+import { useComposerSeedStore } from "@/stores/composer-seed";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -313,6 +315,9 @@ beforeEach(() => {
   createStub.mutate.mockReset();
   startStub.mutate.mockReset();
   deleteStub.mutate.mockReset();
+  // Reset the composer-seed store between tests — a leaked seed from a
+  // Clone-path test would hydrate subsequent composer mounts.
+  useComposerSeedStore.setState({ seed: null });
   // Default `delete.mutate` — invoke `onSettled` so Back-after-create
   // proceeds through to navigation in tests.
   deleteStub.mutate.mockImplementation((_id: string, handlers?: { onSettled?: () => void }) => {
@@ -800,5 +805,76 @@ describe("CampaignComposer — exhaustive walk guards", () => {
       }),
     );
     expect(fetchNextPage).not.toHaveBeenCalled();
+  });
+});
+
+describe("CampaignComposer — composer-seed consume on mount", () => {
+  test("hydrates title, knobs, source/destination sets from a staged seed", async () => {
+    // Stage a seed BEFORE mounting the composer — the mount effect
+    // consumes it synchronously.
+    useComposerSeedStore.getState().setSeed({
+      knobs: {
+        ...DEFAULT_KNOBS,
+        title: "Copy of alpha",
+        notes: "cloned notes",
+        probe_count: 42,
+        protocol: "tcp",
+      },
+      sourceSet: ["a1", "a2"],
+      destSet: ["10.1.1.1", "10.1.1.2"],
+    });
+
+    setupHooks({
+      preview: { fresh: 10, reusable: 0, total: 10 } as PreviewDispatchResponse,
+    });
+    renderComposer();
+
+    // Title hydrates from the seed — the input reads the cloned value.
+    const titleInput = (await screen.findByLabelText(/^title$/i)) as HTMLInputElement;
+    await waitFor(() => {
+      expect(titleInput.value).toBe("Copy of alpha");
+    });
+
+    // Seed is cleared after consume — a second mount would render defaults.
+    expect(useComposerSeedStore.getState().seed).toBeNull();
+  });
+
+  test("no seed staged → composer keeps default state", async () => {
+    setupHooks();
+    renderComposer();
+
+    const titleInput = (await screen.findByLabelText(/^title$/i)) as HTMLInputElement;
+    // Default title is empty — no hydration happened.
+    expect(titleInput.value).toBe("");
+  });
+
+  test("seed drives source_agent_ids and destination_ips in the create payload", async () => {
+    useComposerSeedStore.getState().setSeed({
+      knobs: { ...DEFAULT_KNOBS, title: "Seeded campaign" },
+      sourceSet: ["agent-seed-1"],
+      destSet: ["192.168.99.1", "192.168.99.2"],
+    });
+
+    setupHooks({
+      preview: { fresh: 2, reusable: 0, total: 2 } as PreviewDispatchResponse,
+    });
+    const user = userEvent.setup();
+    renderComposer();
+
+    // Wait for the hydration effect to land before clicking Start —
+    // otherwise the click races the consume() and the payload is empty.
+    const titleInput = (await screen.findByLabelText(/^title$/i)) as HTMLInputElement;
+    await waitFor(() => {
+      expect(titleInput.value).toBe("Seeded campaign");
+    });
+
+    const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
+    await user.click(startButton);
+
+    await waitFor(() => expect(createStub.mutate).toHaveBeenCalled());
+    const body = createStub.mutate.mock.calls[0]?.[0];
+    expect(body.source_agent_ids).toEqual(["agent-seed-1"]);
+    expect(body.destination_ips).toEqual(expect.arrayContaining(["192.168.99.1", "192.168.99.2"]));
+    expect(body.destination_ips).toHaveLength(2);
   });
 });

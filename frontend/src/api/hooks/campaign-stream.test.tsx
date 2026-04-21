@@ -7,7 +7,9 @@ import { useCampaignStream } from "@/api/hooks/campaign-stream";
 import {
   CAMPAIGN_PREVIEW_KEY,
   CAMPAIGNS_LIST_KEY,
+  campaignEvaluationKey,
   campaignKey,
+  campaignMeasurementsPrefixKey,
   campaignPairsKey,
   campaignPreviewKey,
 } from "@/api/hooks/campaigns";
@@ -88,11 +90,18 @@ describe("useCampaignStream", () => {
     expect(qc.getQueryState(campaignPreviewKey(CAMPAIGN_ID))?.isInvalidated).toBe(true);
   });
 
-  test("invalidates entry, pairs, and preview on `pair_settled`", () => {
+  test("invalidates entry, pairs, preview, and measurements prefix on `pair_settled`", () => {
     const qc = makeQueryClient();
     qc.setQueryData(campaignKey(CAMPAIGN_ID), {});
     qc.setQueryData(campaignPairsKey(CAMPAIGN_ID), []);
     qc.setQueryData(campaignPreviewKey(CAMPAIGN_ID), {});
+    // Prime a measurements cache entry with an arbitrary filter so we can
+    // verify the prefix sweep reaches it.
+    const measurementsFilterKey = [
+      ...campaignMeasurementsPrefixKey(CAMPAIGN_ID),
+      { protocol: "icmp" },
+    ];
+    qc.setQueryData(measurementsFilterKey, { entries: [] });
 
     renderHook(() => useCampaignStream(), { wrapper: wrapWith(qc) });
     act(() => {
@@ -105,6 +114,26 @@ describe("useCampaignStream", () => {
     expect(qc.getQueryState(campaignKey(CAMPAIGN_ID))?.isInvalidated).toBe(true);
     expect(qc.getQueryState(campaignPairsKey(CAMPAIGN_ID))?.isInvalidated).toBe(true);
     expect(qc.getQueryState(campaignPreviewKey(CAMPAIGN_ID))?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(measurementsFilterKey)?.isInvalidated).toBe(true);
+  });
+
+  test("invalidates evaluation, entry, and list on `evaluated`", () => {
+    const qc = makeQueryClient();
+    qc.setQueryData([...CAMPAIGNS_LIST_KEY, {}], []);
+    qc.setQueryData(campaignKey(CAMPAIGN_ID), {});
+    qc.setQueryData(campaignEvaluationKey(CAMPAIGN_ID), {});
+
+    renderHook(() => useCampaignStream(), { wrapper: wrapWith(qc) });
+    act(() => {
+      MockEventSource.instances[0]?.emit({
+        kind: "evaluated",
+        campaign_id: CAMPAIGN_ID,
+      });
+    });
+
+    expect(qc.getQueryState(campaignEvaluationKey(CAMPAIGN_ID))?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(campaignKey(CAMPAIGN_ID))?.isInvalidated).toBe(true);
+    expect(qc.getQueryState([...CAMPAIGNS_LIST_KEY, {}])?.isInvalidated).toBe(true);
   });
 
   test("invalidates list + all previews on `lag` and emits a warning", () => {

@@ -5,10 +5,14 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   CAMPAIGNS_LIST_KEY,
   type Campaign,
+  type CampaignMeasurementsPage,
   campaignKey,
+  campaignMeasurementsKey,
+  campaignMeasurementsPrefixKey,
   campaignPairsKey,
   campaignPreviewKey,
   useCampaign,
+  useCampaignMeasurements,
   useCampaignsList,
   useCreateCampaign,
   useDeleteCampaign,
@@ -235,11 +239,17 @@ describe("useStopCampaign", () => {
 });
 
 describe("useEditCampaign", () => {
-  test("POSTs the edit body unchanged and invalidates the three keys", async () => {
+  test("POSTs the edit body unchanged and invalidates list + preview + measurements prefix", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify(CAMPAIGN), { status: 200 }));
     const qc = makeQueryClient();
+    // Prime a filtered measurements entry so we can verify the prefix
+    // invalidation flips it to `isInvalidated`.
+    const measurementsFilterKey = campaignMeasurementsKey(CAMPAIGN.id, {
+      resolution_state: "succeeded",
+    });
+    qc.setQueryData(measurementsFilterKey, { pages: [], pageParams: [] });
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
     const { result } = renderHook(() => useEditCampaign(), { wrapper: wrapWith(qc) });
@@ -262,15 +272,135 @@ describe("useEditCampaign", () => {
     const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
     expect(invalidatedKeys).toContainEqual(CAMPAIGNS_LIST_KEY);
     expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN.id));
+    expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN.id));
+    // Prefix invalidation sweeps every filter variant — the primed entry
+    // should flip to invalidated even though it was keyed by a filter.
+    expect(qc.getQueryState(measurementsFilterKey)?.isInvalidated).toBe(true);
+  });
+});
+
+describe("useCampaignMeasurements", () => {
+  test("is disabled when id is undefined (no network call)", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const { result } = renderHook(() => useCampaignMeasurements(undefined, {}), {
+      wrapper: wrap(),
+    });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("threads filter params through the query string (first page, no cursor)", async () => {
+    const page: CampaignMeasurementsPage = { entries: [], next_cursor: null };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify(page), { status: 200 }));
+
+    const { result } = renderHook(
+      () =>
+        useCampaignMeasurements(CAMPAIGN.id, {
+          resolution_state: "succeeded",
+          protocol: "icmp",
+          kind: "campaign",
+          limit: 50,
+        }),
+      { wrapper: wrap() },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // Infinite-query result shape: `data.pages` is the accumulator and
+    // `data.pageParams` tracks the cursor threaded into each page.
+    expect(result.current.data?.pages).toEqual([page]);
+    expect(result.current.data?.pageParams).toEqual([null]);
+
+    const call = fetchSpy.mock.calls[0]?.[0];
+    const url = call instanceof Request ? call.url : String(call);
+    expect(url).toContain(`/api/campaigns/${CAMPAIGN.id}/measurements`);
+    expect(url).toContain("resolution_state=succeeded");
+    expect(url).toContain("protocol=icmp");
+    expect(url).toContain("kind=campaign");
+    expect(url).toContain("limit=50");
+    // First page never sends a cursor — `initialPageParam` is null and the
+    // queryFn only serializes `cursor` when `pageParam` is a non-null string.
+    expect(url).not.toContain("cursor=");
+  });
+
+  test("fetchNextPage threads next_cursor back as the cursor query param", async () => {
+    const page1: CampaignMeasurementsPage = {
+      entries: [
+        {
+          pair_id: 1,
+          source_agent_id: "agent-a",
+          destination_ip: "10.0.0.1",
+          resolution_state: "succeeded",
+          pair_kind: "campaign",
+          protocol: "icmp",
+          measured_at: "2026-04-16T12:00:05Z",
+        },
+      ],
+      next_cursor: "cursor-1",
+    };
+    const page2: CampaignMeasurementsPage = {
+      entries: [
+        {
+          pair_id: 2,
+          source_agent_id: "agent-a",
+          destination_ip: "10.0.0.2",
+          resolution_state: "succeeded",
+          pair_kind: "campaign",
+          protocol: "icmp",
+          measured_at: "2026-04-16T12:00:15Z",
+        },
+      ],
+      next_cursor: null,
+    };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify(page1), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(page2), { status: 200 }));
+
+    const { result } = renderHook(() => useCampaignMeasurements(CAMPAIGN.id, {}), {
+      wrapper: wrap(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.hasNextPage).toBe(true);
+
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(2));
+    expect(result.current.data?.pages[1]).toEqual(page2);
+    // `pageParams` records the cursor threaded into each page — first page
+    // used `null` (initialPageParam), second page threaded `cursor-1`.
+    expect(result.current.data?.pageParams).toEqual([null, "cursor-1"]);
+    // Sequence terminates — the second page's null cursor means no more pages.
+    expect(result.current.hasNextPage).toBe(false);
+
+    // Second request must carry the first page's `next_cursor` in the
+    // query string; the first request must not.
+    const firstUrl = (() => {
+      const call = fetchSpy.mock.calls[0]?.[0];
+      return call instanceof Request ? call.url : String(call);
+    })();
+    const secondUrl = (() => {
+      const call = fetchSpy.mock.calls[1]?.[0];
+      return call instanceof Request ? call.url : String(call);
+    })();
+    expect(firstUrl).not.toContain("cursor=");
+    expect(secondUrl).toContain("cursor=cursor-1");
   });
 });
 
 describe("useForcePair", () => {
-  test("seeds the entry cache and invalidates pairs + preview on success", async () => {
+  test("seeds the entry cache and invalidates pairs + preview + measurements prefix on success", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify(CAMPAIGN), { status: 200 }),
     );
     const qc = makeQueryClient();
+    // Prime a filtered measurements entry so the prefix invalidation can be
+    // observed as `isInvalidated` on a real cache entry.
+    const measurementsFilterKey = campaignMeasurementsKey(CAMPAIGN.id, { protocol: "icmp" });
+    qc.setQueryData(measurementsFilterKey, { pages: [], pageParams: [] });
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
     const { result } = renderHook(() => useForcePair(), { wrapper: wrapWith(qc) });
@@ -294,5 +424,9 @@ describe("useForcePair", () => {
     expect(invalidatedKeys).not.toContainEqual(campaignKey(CAMPAIGN.id));
     expect(invalidatedKeys).toContainEqual(campaignPairsKey(CAMPAIGN.id));
     expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN.id));
+    expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN.id));
+    // A force-pair outcome that reuses an existing measurement does not emit
+    // a `pair_settled` SSE frame — the Raw tab relies on this invalidation.
+    expect(qc.getQueryState(measurementsFilterKey)?.isInvalidated).toBe(true);
   });
 });

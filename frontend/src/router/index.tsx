@@ -17,6 +17,7 @@ import CampaignComposer from "@/pages/CampaignComposer";
 import CampaignDetail from "@/pages/CampaignDetail";
 import Campaigns from "@/pages/Campaigns";
 import Catalogue from "@/pages/Catalogue";
+import HistoryPair from "@/pages/HistoryPair";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/NotFound";
 import Overview from "@/pages/Overview";
@@ -193,14 +194,173 @@ export const campaignNewRoute = createRoute({
   component: CampaignComposer,
 });
 
-// Thin detail shell for a single campaign. The per-pair results browser
-// lands in T49; this page currently renders the metadata card, knob
-// read-out, pair-state roll-up, dispatch preview, and the state-gated
-// action bar.
+// Campaign detail page. The page renders a four-tab shell
+// (Candidates/Pairs/Raw/Settings) below the header card and action bar.
+// `tab` drives the active panel; the Raw-tab filter params live on the same
+// schema so a tab switch preserves them instead of racing with a separate
+// declaration.
+//
+// Per-field `.catch` is used on every enum so an invalid value on ONE field
+// falls back to that field's default without dropping sibling fields. A
+// whole-object `.catch({})` would reset every field when any field is
+// invalid — e.g. `?tab=bogus&raw_state=pending` would lose `raw_state`
+// along with the bad `tab`. Per-field resilience keeps valid neighbours
+// intact. Every field is also `.optional()` at the TYPE level so callers
+// that navigate to `/campaigns/$id` without a search clause still type-
+// check (TanStack Router gates `search` required/optional on whether the
+// inferred type has any required keys).
+export const campaignDetailSearchSchema = z.object({
+  tab: z.enum(["candidates", "pairs", "raw", "settings"]).catch("candidates").optional(),
+  raw_state: z
+    .enum(["pending", "dispatched", "reused", "succeeded", "unreachable", "skipped"])
+    .catch(() => undefined as never)
+    .optional(),
+  raw_protocol: z
+    .enum(["icmp", "tcp", "udp"])
+    .catch(() => undefined as never)
+    .optional(),
+  raw_kind: z
+    .enum(["campaign", "detail_ping", "detail_mtr"])
+    .catch(() => undefined as never)
+    .optional(),
+  // Candidates-tab sort column + direction. Namespaced (`cand_`) so a
+  // future Pairs-tab sort can use its own prefix without stepping on
+  // this value. Application default when both fields are absent:
+  // `composite_score` / `desc` (resolved in `CandidatesTab`'s
+  // `DEFAULT_SORT`). Per-field `.catch(() => undefined)` means a stale
+  // shared URL with an unknown enum value (e.g. `?cand_sort=rank` from
+  // an earlier build where `rank` was a separate key) falls back to the
+  // application default instead of throwing.
+  cand_sort: z
+    .enum([
+      "display_name",
+      "destination_ip",
+      "city",
+      "asn",
+      "pairs_improved",
+      "avg_improvement_ms",
+      "avg_loss_pct",
+      "composite_score",
+    ])
+    .catch(() => undefined as never)
+    .optional(),
+  cand_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
+});
+
+/**
+ * Campaign-detail search — every field is `.optional()` so navigations
+ * that omit `?tab=…` still type-check. `parseCampaignDetailSearch` fills
+ * `tab` to `"candidates"` when absent, so the page always sees a concrete
+ * tab value without needing a page-side `??` fallback.
+ */
+export type CampaignDetailSearch = z.infer<typeof campaignDetailSearchSchema>;
+
+/** Enumeration of the active tab values; the parser fills `undefined` with `"candidates"`. */
+export type CampaignDetailTab = "candidates" | "pairs" | "raw" | "settings";
+
+/**
+ * Safe default when the WHOLE search object is malformed (e.g. the router
+ * hands us something that isn't a plain object). Per-field resilience is
+ * handled inside `campaignDetailSearchSchema` via `.catch(...)` — this
+ * fallback only fires when the root-level parse throws.
+ */
+const CAMPAIGN_DETAIL_SEARCH_DEFAULT: CampaignDetailSearch = { tab: "candidates" };
+
+/**
+ * Parse the raw URL-search bag. Per-field `.catch` inside the schema drops
+ * invalid enum values silently; the outer `.safeParse` guard only fires if
+ * the whole object is malformed. We then fill `tab` with `"candidates"`
+ * when absent (the schema keeps it `.optional()` at the type level so nav
+ * callers don't have to supply `search: { tab: … }` on every `Link`).
+ *
+ * TanStack Router v1 merges the validator's output onto the raw search (it
+ * does NOT replace the source), so we explicitly set every known key on
+ * the return — otherwise a URL-supplied `tab=bogus` would survive zod's
+ * rejection and resurface downstream. Explicit `undefined` deletes the
+ * key cleanly.
+ */
+function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
+  const result = campaignDetailSearchSchema.safeParse(search);
+  const parsed = result.success ? result.data : CAMPAIGN_DETAIL_SEARCH_DEFAULT;
+  return {
+    tab: parsed.tab ?? "candidates",
+    raw_state: parsed.raw_state,
+    raw_protocol: parsed.raw_protocol,
+    raw_kind: parsed.raw_kind,
+    cand_sort: parsed.cand_sort,
+    cand_dir: parsed.cand_dir,
+  };
+}
+
 export const campaignDetailRoute = createRoute({
   getParentRoute: () => authRoute,
   path: "/campaigns/$id",
   component: CampaignDetail,
+  validateSearch: (search: Record<string, unknown>): CampaignDetailSearch =>
+    parseCampaignDetailSearch(search),
+});
+
+// ---------------------------------------------------------------------------
+// /history/pair — latency/loss + MTR history for one (source, destination).
+// URL is the source of truth for the picker state; Batch 5's Raw-tab drilldown
+// links here with `?source=…&destination=…` and expects the page to preseed
+// both pickers and kick off the measurements fetch on first render.
+// ---------------------------------------------------------------------------
+export const historyPairSearchSchema = z
+  .object({
+    source: z.string().optional(),
+    destination: z.string().optional(),
+    // Per-field `.catch(undefined)` lets a bad shared URL (e.g.
+    // `?protocol=foo` or `?from=garbage`) degrade silently instead of
+    // failing validation. The only failure mode left is the `.refine`
+    // below, which the route-level `parseHistoryPairSearch` swallows.
+    protocol: z
+      .array(z.enum(["icmp", "tcp", "udp"]))
+      .optional()
+      .catch(undefined),
+    range: z.enum(["24h", "7d", "30d", "90d", "custom"]).catch("30d").default("30d"),
+    from: z.string().datetime().optional().catch(undefined),
+    to: z.string().datetime().optional().catch(undefined),
+  })
+  .refine((s) => s.range !== "custom" || (s.from && s.to), {
+    message: "custom range requires from and to",
+  });
+
+export type HistoryPairSearch = z.infer<typeof historyPairSearchSchema>;
+
+const HISTORY_PAIR_DEFAULT: HistoryPairSearch = { range: "30d" };
+
+/**
+ * Route-level resilience for `/history/pair`. Per-field `.catch(undefined)`
+ * already absorbs malformed enum/datetime values; this wrapper only needs
+ * to cover the `range=custom` refine (e.g. a shared URL clipped of its
+ * `from`/`to` bounds). On that one failure mode we drop the range back to
+ * the default so navigation still resolves instead of throwing and
+ * locking the operator out of the page.
+ */
+export function parseHistoryPairSearch(search: unknown): HistoryPairSearch {
+  const result = historyPairSearchSchema.safeParse(search);
+  if (result.success) return result.data;
+  const raw: Record<string, unknown> =
+    typeof search === "object" && search !== null ? (search as Record<string, unknown>) : {};
+  const retry = historyPairSearchSchema.safeParse({
+    ...raw,
+    range: undefined,
+    from: undefined,
+    to: undefined,
+  });
+  return retry.success ? retry.data : HISTORY_PAIR_DEFAULT;
+}
+
+export const historyPairRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: "/history/pair",
+  component: HistoryPair,
+  validateSearch: (search: Record<string, unknown>): HistoryPairSearch =>
+    parseHistoryPairSearch(search),
 });
 
 const routeTree = rootRoute.addChildren([
@@ -217,6 +377,7 @@ const routeTree = rootRoute.addChildren([
     campaignsRoute,
     campaignNewRoute,
     campaignDetailRoute,
+    historyPairRoute,
   ]),
 ]);
 

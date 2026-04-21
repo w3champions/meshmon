@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n          host(m.destination_ip)                           AS \"destination_ip!\",\n          COALESCE(c.display_name, host(m.destination_ip)) AS \"display_name!\",\n          c.city,\n          c.country_code,\n          c.asn,\n          EXISTS (SELECT 1 FROM agents a WHERE a.ip = m.destination_ip)\n                                                            AS \"is_mesh_member!\"\n        FROM (\n          SELECT DISTINCT destination_ip\n            FROM measurements\n           WHERE source_agent_id = $1\n        ) m\n        LEFT JOIN ip_catalogue c ON c.ip = m.destination_ip\n        WHERE $2::text IS NULL\n           OR LOWER(host(m.destination_ip)) LIKE $2\n           OR (c.display_name IS NOT NULL AND LOWER(c.display_name) LIKE $2)\n        ORDER BY 2 ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "destination_ip!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "country_code",
+        "type_info": "Bpchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "asn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_mesh_member!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "6c234f45762046985d2500a04ba2fe05b003dda7a4849d51360c2f5d547cf2f1"
+}

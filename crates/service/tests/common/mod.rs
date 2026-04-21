@@ -982,6 +982,102 @@ pub async fn mark_completed(pool: &PgPool, campaign_id: &str) {
     .unwrap_or_else(|e| panic!("mark_completed({campaign_id}) failed: {e}"));
 }
 
+/// Create a minimal agent + `measurement_campaigns` row for the Raw-tab
+/// integration tests. Returns the campaign UUID. The agent id is reused
+/// as the agent's display name and its IP is synthesised from the
+/// 10.10.10.0/24 range (disjoint from `seed_measurements`).
+pub async fn seed_minimal_campaign_for_measurements(pool: &PgPool, agent_id: &str) -> Uuid {
+    let campaign_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+         VALUES ($1, $1, '10.10.10.1'::inet, 3555, 3552) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_minimal_campaign_for_measurements agent ({agent_id}): {e}"));
+    sqlx::query(
+        "INSERT INTO measurement_campaigns (id, title, protocol, state, created_at) \
+         VALUES ($1, 'seed', 'icmp', 'completed', now())",
+    )
+    .bind(campaign_id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| {
+        panic!("seed_minimal_campaign_for_measurements campaign ({campaign_id}): {e}")
+    });
+    campaign_id
+}
+
+/// Insert a measurement + matching settled campaign_pair row for the
+/// Raw-tab integration tests. Returns `(pair_id, measurement_id)`.
+///
+/// Uses explicit casts on the ENUM params (`$3::measurement_kind`) so
+/// the runtime-checked `sqlx::query` form still binds correctly.
+pub async fn seed_settled_pair(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    source: &str,
+    dest: &str,
+    kind: &str,
+) -> (i64, i64) {
+    let measurement_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+             (source_agent_id, destination_ip, protocol, probe_count, \
+              measured_at, latency_avg_ms, loss_pct, kind) \
+         VALUES ($1, $2::inet, 'icmp', 10, now(), 25.0, 0.0, $3::measurement_kind) \
+         RETURNING id",
+    )
+    .bind(source)
+    .bind(dest)
+    .bind(kind)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_settled_pair measurement ({source} -> {dest}, {kind}): {e}"));
+    let pair_id: i64 = sqlx::query_scalar(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, resolution_state, \
+              kind, measurement_id, settled_at) \
+         VALUES ($1, $2, $3::inet, 'succeeded', $4::measurement_kind, $5, now()) \
+         RETURNING id",
+    )
+    .bind(campaign_id)
+    .bind(source)
+    .bind(dest)
+    .bind(kind)
+    .bind(measurement_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_settled_pair pair ({source} -> {dest}, {kind}): {e}"));
+    (pair_id, measurement_id)
+}
+
+/// Insert a dispatched campaign_pair with no joined measurement — models
+/// an in-flight detail run for the Raw-tab LEFT-JOIN coverage.
+pub async fn seed_pending_pair(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    source: &str,
+    dest: &str,
+    kind: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, resolution_state, \
+              kind, dispatched_at) \
+         VALUES ($1, $2, $3::inet, 'dispatched', $4::measurement_kind, now()) \
+         RETURNING id",
+    )
+    .bind(campaign_id)
+    .bind(source)
+    .bind(dest)
+    .bind(kind)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_pending_pair pair ({source} -> {dest}, {kind}): {e}"))
+}
+
 /// Response-body byte ceiling for `HttpHarness` helpers. 4 MiB is
 /// enough for every catalogue response the integration tests send and
 /// receive today; larger payloads should build requests by hand so the
