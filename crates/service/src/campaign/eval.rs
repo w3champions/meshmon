@@ -466,13 +466,19 @@ mod tests {
 
     #[test]
     fn optimization_filters_out_when_existing_mesh_y_already_better() {
+        // Four agents: a, b, y (mesh), plus third-party 203.0.113.7 = X.
+        // Baseline A→B = 318ms.
+        // Transit via X: A→X(120) + B→X(121) = 241ms (beats direct).
+        // Transit via Y (mesh): A→Y(100) + Y→B(80) = 180ms (beats X).
+        // Under optimization mode, X must NOT qualify because Y is
+        // already a better transit.
         let inputs = EvaluationInputs {
             measurements: vec![
-                m("a", "10.0.0.2", 318.0, 24.0, 0.0),
-                m("a", "203.0.113.7", 120.0, 8.0, 0.0),
-                m("a", "10.0.0.3", 100.0, 5.0, 0.0),
-                m("y", "10.0.0.2", 130.0, 5.0, 0.0),
-                m("b-observer", "203.0.113.7", 121.0, 8.0, 0.0),
+                m("a", "10.0.0.2", 318.0, 24.0, 0.0),   // A→B baseline
+                m("a", "203.0.113.7", 120.0, 8.0, 0.0), // A→X
+                m("b", "203.0.113.7", 121.0, 8.0, 0.0), // B→X (symmetry-approx X→B)
+                m("a", "10.0.0.3", 100.0, 5.0, 0.0),    // A→Y
+                m("y", "10.0.0.2", 80.0, 5.0, 0.0),     // Y→B
             ],
             agents: vec![
                 agent("a", "10.0.0.1"),
@@ -485,14 +491,26 @@ mod tests {
             mode: EvaluationMode::Optimization,
         };
         let out = evaluate(inputs).unwrap();
-        let cand = out
+        let x_cand = out
             .results
             .candidates
             .iter()
-            .find(|c| c.destination_ip == "203.0.113.7");
+            .find(|c| c.destination_ip == "203.0.113.7")
+            .expect("X must appear as a candidate (triple is fully measured)");
+        // X's pair_details entry for (A,B) must be present (triple is
+        // fully measured) but qualifies=false because Y beats X.
+        let ab_detail = x_cand
+            .pair_details
+            .iter()
+            .find(|p| p.source_agent_id == "a" && p.destination_agent_id == "b")
+            .expect("(A,B) pair_details entry present — triple fully measured");
         assert!(
-            cand.is_none() || cand.unwrap().pairs_improved == 0,
-            "X should not qualify when Y already provides a better transit"
+            !ab_detail.qualifies,
+            "optimization predicate must reject X when Y provides a better transit"
+        );
+        assert_eq!(
+            x_cand.pairs_improved, 0,
+            "X must not be counted as an improvement under optimization mode"
         );
     }
 
