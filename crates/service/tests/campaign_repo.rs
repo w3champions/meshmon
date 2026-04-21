@@ -8,7 +8,7 @@
 mod common;
 
 use meshmon_service::campaign::model::{
-    CampaignState, EvaluationMode, PairResolutionState, ProbeProtocol,
+    CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, ProbeProtocol,
 };
 use meshmon_service::campaign::repo::{self, CreateInput, EditInput, RepoError};
 use std::net::IpAddr;
@@ -300,6 +300,45 @@ async fn list_pairs_filters_by_state_and_limit() {
 
     let capped = repo::list_pairs(&pool, row.id, &[], 2).await.unwrap();
     assert_eq!(capped.len(), 2, "limit honoured");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn list_pairs_excludes_detail_rows() {
+    // `GET /api/campaigns/:id/pairs` is baseline-only. Without this
+    // filter, `/detail`-triggered rows would surface as duplicate-
+    // looking entries on the same `(source, destination)` tuple
+    // because `PairDto` does not expose `kind`.
+    let pool = common::shared_migrated_pool().await;
+    let row = repo::create(&pool, make_input("t-list-pairs-detail"))
+        .await
+        .unwrap();
+
+    // Seed a detail_mtr row sharing a tuple with one of the baseline
+    // pairs `make_input` inserted.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, kind) \
+         VALUES ($1::uuid, 'agent-a', '198.51.100.1'::inet, \
+                 'pending', 'detail_mtr')",
+    )
+    .bind(row.id)
+    .execute(&pool)
+    .await
+    .expect("seed detail_mtr row");
+
+    let pairs = repo::list_pairs(&pool, row.id, &[], 100).await.unwrap();
+    assert_eq!(
+        pairs.len(),
+        4,
+        "only baseline rows returned; detail_mtr excluded"
+    );
+    assert!(
+        pairs.iter().all(|p| p.kind == MeasurementKind::Campaign),
+        "every row must carry kind=Campaign"
+    );
 
     repo::delete(&pool, row.id).await.unwrap();
 }

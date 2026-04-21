@@ -549,8 +549,16 @@ pub async fn force_pair(
     Ok(row)
 }
 
-/// List pairs for a campaign, optionally filtered to a specific set of
-/// resolution states. Results ordered by id, capped at `min(limit, 5000)`.
+/// List baseline (`kind='campaign'`) pairs for a campaign, optionally
+/// filtered to a specific set of resolution states. Results ordered by
+/// id, capped at `min(limit, 5000)`.
+///
+/// Detail rows (`kind ∈ {detail_ping, detail_mtr}`) are excluded
+/// structurally — they have their own lifecycle and are surfaced via
+/// `/detail`-scoped endpoints, not the generic campaign pair list.
+/// Without this filter, `PairDto` consumers (which don't surface `kind`)
+/// would see duplicate-looking rows on the same `(source, destination)`
+/// tuple once an operator has triggered `/detail`.
 pub async fn list_pairs(
     pool: &PgPool,
     id: Uuid,
@@ -567,6 +575,7 @@ pub async fn list_pairs(
                kind AS "kind: MeasurementKind"
           FROM campaign_pairs
          WHERE campaign_id = $1
+           AND kind = 'campaign'
            AND (cardinality($2::pair_resolution_state[]) = 0
                 OR resolution_state = ANY($2::pair_resolution_state[]))
          ORDER BY id
@@ -601,7 +610,8 @@ pub async fn preview_dispatch_count_for_campaign(
 ) -> Result<PreviewCounts, RepoError> {
     if force_measurement {
         let total: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) AS \"total!\" FROM campaign_pairs WHERE campaign_id = $1",
+            "SELECT COUNT(*) AS \"total!\" FROM campaign_pairs \
+              WHERE campaign_id = $1 AND kind = 'campaign'",
             id
         )
         .fetch_one(pool)
@@ -612,12 +622,16 @@ pub async fn preview_dispatch_count_for_campaign(
             fresh: total,
         });
     }
+    // Baseline-only: the preview reports how many campaign-kind pairs
+    // would dispatch on start/edit. Detail rows are independently
+    // triggered via `/detail` and must not inflate the preview.
     let row = sqlx::query!(
         r#"
         WITH pairs AS (
             SELECT source_agent_id, destination_ip
               FROM campaign_pairs
              WHERE campaign_id = $1
+               AND kind = 'campaign'
         ),
         reusable AS (
             SELECT DISTINCT ON (p.source_agent_id, p.destination_ip)
@@ -1010,6 +1024,17 @@ pub async fn metrics_snapshot(pool: &PgPool) -> Result<MetricsSnapshot, RepoErro
 /// Atomically flip a `running` campaign to `completed` iff no pair
 /// remains in `pending` or `dispatched`. Returns `true` if the flip
 /// happened. Safe to call repeatedly.
+///
+/// The `NOT EXISTS` guard is intentionally kind-agnostic — detail rows
+/// (kind ∈ {detail_ping, detail_mtr}) block completion just like
+/// baseline pairs. Rationale: `insert_detail_pairs` transitions the
+/// campaign back to `running` when detail work lands, and the
+/// scheduler only ticks `running` campaigns; if the guard excluded
+/// detail rows, `maybe_complete` would flip the campaign back to
+/// `completed` between ticks and the scheduler would stop picking up
+/// pending detail pairs. Keeping detail rows in the guard is what
+/// makes the "campaign re-enters running until all detail drains"
+/// contract work with the current single-scheduler-state model.
 pub async fn maybe_complete(pool: &PgPool, campaign_id: Uuid) -> Result<bool, RepoError> {
     let updated = sqlx::query_scalar!(
         "UPDATE measurement_campaigns
