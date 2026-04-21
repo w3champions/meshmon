@@ -52,15 +52,19 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("useEvaluation", () => {
   test("returns null on 404 (campaign not evaluated)", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: "not_evaluated" }), { status: 404 }),
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ error: "not_evaluated" }), { status: 404 }));
 
     const { result } = renderHook(() => useEvaluation(CAMPAIGN_ID), {
       wrapper: wrap(),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toBeNull();
+
+    const request = fetchSpy.mock.calls[0]?.[0] as Request;
+    expect(request.method).toBe("GET");
+    expect(request.url).toMatch(new RegExp(`/api/campaigns/${CAMPAIGN_ID}/evaluation$`));
   });
 
   test("is disabled when id is undefined", () => {
@@ -71,23 +75,27 @@ describe("useEvaluation", () => {
   });
 
   test("returns the evaluation row on 200", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(EVALUATION), { status: 200 }),
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify(EVALUATION), { status: 200 }));
 
     const { result } = renderHook(() => useEvaluation(CAMPAIGN_ID), {
       wrapper: wrap(),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual(EVALUATION);
+
+    const request = fetchSpy.mock.calls[0]?.[0] as Request;
+    expect(request.method).toBe("GET");
+    expect(request.url).toMatch(new RegExp(`/api/campaigns/${CAMPAIGN_ID}/evaluation$`));
   });
 });
 
 describe("useEvaluateCampaign", () => {
   test("seeds the evaluation cache from the response and invalidates the shell", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(EVALUATION), { status: 200 }),
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify(EVALUATION), { status: 200 }));
     const qc = makeQueryClient();
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
@@ -98,6 +106,10 @@ describe("useEvaluateCampaign", () => {
       result.current.mutate(CAMPAIGN_ID);
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const request = fetchSpy.mock.calls[0]?.[0] as Request;
+    expect(request.method).toBe("POST");
+    expect(request.url).toMatch(new RegExp(`/api/campaigns/${CAMPAIGN_ID}/evaluate$`));
 
     // Cache was seeded directly — no refetch round-trip. A subsequent
     // `invalidate` would be visible as a second call, but none should fire.
@@ -110,23 +122,25 @@ describe("useEvaluateCampaign", () => {
 
 describe("useTriggerDetail", () => {
   test("invalidates pairs, preview, and the measurements prefix", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({ campaign_state: "running", pairs_enqueued: 4 }),
-        { status: 200 },
-      ),
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ campaign_state: "running", pairs_enqueued: 4 }), {
+        status: 200,
+      }),
     );
     const qc = makeQueryClient();
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
     const { result } = renderHook(() => useTriggerDetail(), { wrapper: wrapWith(qc) });
+    const body = { scope: "good_candidates" as const };
     await act(async () => {
-      result.current.mutate({
-        id: CAMPAIGN_ID,
-        body: { scope: "good_candidates" },
-      });
+      result.current.mutate({ id: CAMPAIGN_ID, body });
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const request = fetchSpy.mock.calls[0]?.[0] as Request;
+    expect(request.method).toBe("POST");
+    expect(request.url).toMatch(new RegExp(`/api/campaigns/${CAMPAIGN_ID}/detail$`));
+    expect(await request.json()).toEqual(body);
 
     const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
     expect(invalidatedKeys).toContainEqual(campaignKey(CAMPAIGN_ID));

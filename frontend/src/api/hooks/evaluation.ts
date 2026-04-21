@@ -37,21 +37,16 @@ export type DetailScope = components["schemas"]["DetailScope"];
  * distinguish "never evaluated" from "still loading" without inspecting the
  * query error.
  */
-export function useEvaluation(
-  id: string | undefined,
-): UseQueryResult<Evaluation | null, Error> {
+export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation | null, Error> {
   return useQuery({
-    queryKey: id
-      ? campaignEvaluationKey(id)
-      : ["campaigns", "entry", "__disabled__", "evaluation"],
+    queryKey: id ? campaignEvaluationKey(id) : ["campaigns", "entry", "__disabled__", "evaluation"],
     enabled: !!id,
     queryFn: async (): Promise<Evaluation | null> => {
       // queryFn only runs when enabled → id is defined.
       const campaignId = id as string;
-      const { data, error, response } = await api.GET(
-        "/api/campaigns/{id}/evaluation",
-        { params: { path: { id: campaignId } } },
-      );
+      const { data, error, response } = await api.GET("/api/campaigns/{id}/evaluation", {
+        params: { path: { id: campaignId } },
+      });
       if (response?.status === 404) return null;
       if (error) throw new Error("failed to fetch evaluation", { cause: error });
       if (!data) throw new Error("empty response");
@@ -71,10 +66,9 @@ export function useEvaluateCampaign(): UseMutationResult<Evaluation, Error, stri
   const queryClient = useQueryClient();
   return useMutation<Evaluation, Error, string>({
     mutationFn: async (id): Promise<Evaluation> => {
-      const { data, error } = await api.POST(
-        "/api/campaigns/{id}/evaluate",
-        { params: { path: { id } } },
-      );
+      const { data, error } = await api.POST("/api/campaigns/{id}/evaluate", {
+        params: { path: { id } },
+      });
       if (error) throw new Error("failed to evaluate", { cause: error });
       if (!data) throw new Error("empty response");
       return data as Evaluation;
