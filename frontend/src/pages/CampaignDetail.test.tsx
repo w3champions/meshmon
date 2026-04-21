@@ -428,8 +428,8 @@ describe("CampaignDetail — Clone action", () => {
     const cloneBtn = await screen.findByRole("button", { name: /clone campaign/i });
     await user.click(cloneBtn);
 
-    const seed = useComposerSeedStore.getState().seed;
-    expect(seed).not.toBeNull();
+    const seed = useComposerSeedStore.getState().seed?.value;
+    expect(seed).toBeDefined();
     // Dedupe invariant: 3 pair rows collapse to 2 sources and 2 destinations.
     expect(seed?.sourceSet).toEqual(expect.arrayContaining(["agent-a", "agent-b"]));
     expect(seed?.sourceSet).toHaveLength(2);
@@ -458,10 +458,11 @@ describe("CampaignDetail — Clone action", () => {
     expect(screen.queryByRole("button", { name: /clone campaign/i })).not.toBeInTheDocument();
   });
 
-  test("Clone toasts a warning when the pair list hits the 5000 cap", async () => {
-    // Synthetic 5 000-row pair list. Using small `% 50` cycles keeps
-    // dedup dense so the source/destination sets don't explode — the
-    // test only cares about the cap-warning toast, not the seed shape.
+  test("Clone toasts a warning when pair_counts exceeds the received page length", async () => {
+    // Truncation detection uses the authoritative `pair_counts` total
+    // from the campaign row vs. the received page length, so a campaign
+    // reporting 6 000 baseline pairs but returning only 5 000 via
+    // `list_pairs` (clamped at the server) is the true truncation case.
     const pairs = Array.from({ length: 5000 }, (_, i) =>
       makePair({
         id: i + 1,
@@ -469,7 +470,13 @@ describe("CampaignDetail — Clone action", () => {
         destination_ip: `10.${Math.floor(i / 256)}.${(i % 256) + 1}.1`,
       }),
     );
-    setupHookMocks({ campaign: makeCampaign({ state: "completed" }), pairs });
+    setupHookMocks({
+      campaign: makeCampaign({
+        state: "completed",
+        pair_counts: [["succeeded", 6_000]],
+      }),
+      pairs,
+    });
 
     const user = userEvent.setup();
     renderDetail();
@@ -480,9 +487,41 @@ describe("CampaignDetail — Clone action", () => {
     expect(pushToast).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "error",
-        message: expect.stringMatching(/5,?000\+\s+pairs.*truncated/i),
+        message: expect.stringMatching(/6,?000\s+pairs.*truncated.*5,?000/i),
       }),
     );
+  });
+
+  test("Clone does NOT toast when exactly-5000-pair campaigns have no remainder", async () => {
+    // The old `>= CAP` heuristic fired a scary toast even when
+    // `pair_counts` proved no truncation had occurred. With the
+    // authoritative-count comparison, an exactly-cap-sized campaign
+    // seeds cleanly.
+    const pairs = Array.from({ length: 5000 }, (_, i) =>
+      makePair({
+        id: i + 1,
+        source_agent_id: `agent-${i % 50}`,
+        destination_ip: `10.${Math.floor(i / 256)}.${(i % 256) + 1}.1`,
+      }),
+    );
+    setupHookMocks({
+      campaign: makeCampaign({
+        state: "completed",
+        pair_counts: [["succeeded", 5_000]],
+      }),
+      pairs,
+    });
+
+    const user = userEvent.setup();
+    renderDetail();
+
+    const cloneBtn = await screen.findByRole("button", { name: /clone campaign/i });
+    await user.click(cloneBtn);
+
+    const truncationToasts = pushToast.mock.calls.filter(([arg]) =>
+      /truncated/i.test(String((arg as { message?: string }).message ?? "")),
+    );
+    expect(truncationToasts).toHaveLength(0);
   });
 
   test("Clone button is disabled until pairs have loaded", async () => {

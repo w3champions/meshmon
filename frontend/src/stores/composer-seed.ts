@@ -13,13 +13,28 @@ export interface ComposerSeed {
   destSet: string[];
 }
 
+/**
+ * TTL after which a staged seed is considered stale and dropped. If the
+ * operator clicks Clone but never lands on `/campaigns/new` (navigation
+ * cancelled, browser back, tab switch), the seed would otherwise persist
+ * for the rest of the SPA's lifetime and hydrate a future unrelated
+ * composer visit.
+ */
+export const COMPOSER_SEED_TTL_MS = 30_000;
+
+interface StagedSeed {
+  value: ComposerSeed;
+  stagedAt: number;
+}
+
 interface ComposerSeedStore {
-  seed: ComposerSeed | null;
+  seed: StagedSeed | null;
   /** Stash a seed for the composer's next mount. */
   setSeed: (seed: ComposerSeed) => void;
   /**
    * Read the current seed and clear it in the same tick. Returns `null`
-   * when no seed is staged so a plain composer mount renders defaults.
+   * when no seed is staged OR when the staged seed has outlived
+   * `COMPOSER_SEED_TTL_MS`, so a plain composer mount renders defaults.
    */
   consumeSeed: () => ComposerSeed | null;
 }
@@ -30,10 +45,12 @@ interface ComposerSeedStore {
  */
 export const useComposerSeedStore = create<ComposerSeedStore>((set, get) => ({
   seed: null,
-  setSeed: (seed) => set({ seed }),
+  setSeed: (seed) => set({ seed: { value: seed, stagedAt: Date.now() } }),
   consumeSeed: () => {
     const current = get().seed;
-    if (current !== null) set({ seed: null });
-    return current;
+    if (current === null) return null;
+    set({ seed: null });
+    if (Date.now() - current.stagedAt > COMPOSER_SEED_TTL_MS) return null;
+    return current.value;
   },
 }));

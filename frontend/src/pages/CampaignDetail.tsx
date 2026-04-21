@@ -281,14 +281,19 @@ export default function CampaignDetail() {
         : "Clone";
   const handleClone = useCallback((): void => {
     if (!cloneCampaign || !pairsData?.length) return;
-    if (pairsData.length >= CLONE_PAIR_CAP) {
-      // Operator-visible warning — the backend caps `limit` at 5 000
-      // pairs, so any campaign at or above the cap may have had its
-      // pair set silently truncated. Surface this BEFORE handing off
-      // to the composer so the operator can sanity-check the seed.
+    // `pair_counts` is the authoritative total of baseline
+    // (`kind='campaign'`) pairs — same filter the `list_pairs` handler
+    // applies — so comparing it against the received page length
+    // detects truncation without the `>= CAP` heuristic's false
+    // positive at exactly `CAP`. List-view responses don't populate
+    // `pair_counts` (see the OpenAPI schema); the single-row
+    // `GET /api/campaigns/:id` this page uses always does.
+    const totalBaselinePairs =
+      cloneCampaign.pair_counts?.reduce((sum, [, n]) => sum + n, 0) ?? pairsData.length;
+    if (totalBaselinePairs > pairsData.length) {
       useToastStore.getState().pushToast({
         kind: "error",
-        message: `This campaign has ${CLONE_PAIR_CAP.toLocaleString()}+ pairs; Clone truncated the seed. Review before starting.`,
+        message: `This campaign has ${totalBaselinePairs.toLocaleString()} pairs; Clone truncated the seed to the first ${pairsData.length.toLocaleString()}. Review before starting.`,
       });
     }
     const sourceSet = [...new Set(pairsData.map((p) => p.source_agent_id))];
