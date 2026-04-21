@@ -207,15 +207,17 @@ function renderDetail(opts: RenderOptions = {}) {
     getParentRoute: () => rootRoute,
     path: "/campaigns/$id",
     component: CampaignDetail,
-    // Mirror the production `validateSearch` so `?tab=…` is parsed and
-    // invalid values are coerced to `"candidates"` via `.catch({})`. Note:
+    // Mirror the production `validateSearch` so `?tab=…` is parsed with
+    // the per-field `.catch` behaviour: an invalid value on one field
+    // bounces to that field's default without dropping its valid siblings.
     // TanStack Router merges the validator's output onto the raw search,
-    // so we must explicitly set every known key on the return — returning
-    // `tab: undefined` deletes a stale `?tab=bogus` instead of merging.
+    // so we explicitly set every known key on the return — explicit
+    // `undefined` deletes stale keys instead of leaving them on the URL.
     validateSearch: (raw: Record<string, unknown>) => {
-      const parsed = campaignDetailSearchSchema.catch({}).parse(raw);
+      const result = campaignDetailSearchSchema.safeParse(raw);
+      const parsed = result.success ? result.data : { tab: "candidates" as const };
       return {
-        tab: parsed.tab,
+        tab: parsed.tab ?? ("candidates" as const),
         raw_state: parsed.raw_state,
         raw_protocol: parsed.raw_protocol,
         raw_kind: parsed.raw_kind,
@@ -453,13 +455,50 @@ describe("CampaignDetail — tab shell", () => {
   });
 
   test("falls back to Candidates when the URL requests an unknown tab", async () => {
-    // `.catch({})` on the router's validateSearch drops invalid enum values
-    // silently → the page defaults to "candidates".
+    // Per-field `.catch` on the schema's `tab` enum bounces invalid values
+    // to the default `"candidates"` — the schema default now lives on the
+    // field itself (rather than a whole-object `.catch({})`).
     setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
     renderDetail({ search: "?tab=bogus" });
 
     expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
     expect(screen.queryByTestId(`stub-raw-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+  });
+
+  test("preserves a valid raw_state when tab is invalid (per-field catch)", async () => {
+    // Regression for the whole-object `.catch({})` bug: previously an
+    // invalid `tab=bogus` would reset the ENTIRE search object, dropping
+    // the valid `raw_state=pending` along with the bad tab. Per-field
+    // `.catch` on the schema keeps `raw_state` intact and only bounces
+    // `tab` back to `"candidates"`.
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    const { router } = renderDetail({ search: "?tab=bogus&raw_state=pending" });
+
+    // The page mounts Candidates (tab fell back), but `raw_state` survives
+    // on the router's parsed search bag.
+    expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    const routerSearch = router.state.location.search as {
+      tab?: string;
+      raw_state?: string;
+    };
+    expect(routerSearch.tab).toBe("candidates");
+    expect(routerSearch.raw_state).toBe("pending");
+  });
+
+  test("invalid raw_protocol falls back to undefined without dropping tab=raw", async () => {
+    // Mirror of the bug above for the `raw_protocol` field — `?tab=raw`
+    // must stay intact while `raw_protocol=banana` is silently dropped by
+    // the per-field `.catch`.
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    const { router } = renderDetail({ search: "?tab=raw&raw_protocol=banana" });
+
+    expect(await screen.findByTestId(`stub-raw-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    const routerSearch = router.state.location.search as {
+      tab?: string;
+      raw_protocol?: string;
+    };
+    expect(routerSearch.tab).toBe("raw");
+    expect(routerSearch.raw_protocol).toBeUndefined();
   });
 
   test("clicking the Settings trigger asks the router to persist ?tab=settings", async () => {

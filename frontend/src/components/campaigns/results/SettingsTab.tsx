@@ -183,22 +183,24 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
         </div>
 
         <div className="space-y-1">
-          <Label>Evaluation mode</Label>
+          <Label id="settings-evaluation-mode-label">Evaluation mode</Label>
           <ToggleGroup
             type="single"
             value={form.evaluation_mode}
             onValueChange={handleMode}
             variant="outline"
-            aria-label="Evaluation mode"
+            aria-labelledby="settings-evaluation-mode-label"
             aria-describedby="settings-evaluation-mode-hint"
             disabled={!isEligible || isPending}
           >
-            <ToggleGroupItem value="diversity" aria-label="diversity">
-              Diversity
-            </ToggleGroupItem>
-            <ToggleGroupItem value="optimization" aria-label="optimization">
-              Optimization
-            </ToggleGroupItem>
+            {/*
+             * No `aria-label` on the items — Radix derives the accessible
+             * name from the visible child text when none is set, so the
+             * announced labels match the visible "Diversity" / "Optimization"
+             * copy exactly.
+             */}
+            <ToggleGroupItem value="diversity">Diversity</ToggleGroupItem>
+            <ToggleGroupItem value="optimization">Optimization</ToggleGroupItem>
           </ToggleGroup>
           <p id="settings-evaluation-mode-hint" className="text-xs text-muted-foreground">
             {form.evaluation_mode === "diversity" ? DIVERSITY_HINT : OPTIMIZATION_HINT}

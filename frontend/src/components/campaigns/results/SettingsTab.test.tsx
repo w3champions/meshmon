@@ -192,6 +192,22 @@ describe("SettingsTab — eligibility gate", () => {
     renderTab(makeCampaign({ state: "evaluated" }));
     expect(screen.getByRole("button", { name: /re-evaluate/i })).not.toBeDisabled();
   });
+
+  test("draft state disables re-evaluate button", () => {
+    renderTab(makeCampaign({ state: "draft" }));
+
+    const submit = screen.getByRole("button", { name: /re-evaluate/i });
+    expect(submit).toBeDisabled();
+    expect(screen.getByLabelText(/loss threshold/i)).toBeDisabled();
+  });
+
+  test("stopped state disables re-evaluate button", () => {
+    renderTab(makeCampaign({ state: "stopped" }));
+
+    const submit = screen.getByRole("button", { name: /re-evaluate/i });
+    expect(submit).toBeDisabled();
+    expect(screen.getByLabelText(/loss threshold/i)).toBeDisabled();
+  });
 });
 
 describe("SettingsTab — submit flow", () => {
@@ -233,6 +249,14 @@ describe("SettingsTab — submit flow", () => {
     expect(evaluateStub.mutate).toHaveBeenCalledTimes(1);
     const [evaluateVars] = evaluateStub.mutate.mock.calls[0];
     expect(evaluateVars).toBe(CAMPAIGN_ID);
+
+    // Ordering contract: PATCH must run BEFORE POST /evaluate, because
+    // /evaluate has no request body and reads the knobs off the campaign
+    // row. Compare the vitest-tracked invocation order numbers so a future
+    // refactor can't accidentally flip the call sequence without failing.
+    const patchOrder = patchStub.mutate.mock.invocationCallOrder[0];
+    const evaluateOrder = evaluateStub.mutate.mock.invocationCallOrder[0];
+    expect(patchOrder).toBeLessThan(evaluateOrder);
   });
 
   test("surfaces a no_baseline_pairs toast when the evaluator rejects the request", async () => {
@@ -282,5 +306,75 @@ describe("SettingsTab — submit flow", () => {
     });
     // Evaluate is never called when patch fails.
     expect(evaluateStub.mutate).not.toHaveBeenCalled();
+  });
+
+  test("happy path — both mutations succeed, no error toast fires", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    // Wire patch to resolve synchronously with a plausible payload, then
+    // evaluate to succeed with its own Evaluation DTO. Together this
+    // exercises the end-to-end re-evaluate flow.
+    patchStub.mutate.mockImplementation(
+      (
+        _vars: unknown,
+        opts?: {
+          onSuccess?: (result: unknown) => void;
+          onError?: (err: Error) => void;
+        },
+      ) => {
+        opts?.onSuccess?.({
+          id: CAMPAIGN_ID,
+          loss_threshold_pct: 4.5,
+          stddev_weight: 1,
+          evaluation_mode: "diversity",
+        });
+      },
+    );
+    evaluateStub.mutate.mockImplementation(
+      (
+        _id: string,
+        opts?: {
+          onSuccess?: (result: unknown) => void;
+          onError?: (err: Error) => void;
+        },
+      ) => {
+        opts?.onSuccess?.({
+          id: "eval-2",
+          campaign_id: CAMPAIGN_ID,
+          evaluated_at: "2026-04-21T10:00:00Z",
+          loss_threshold_pct: 4.5,
+          stddev_weight: 1,
+          evaluation_mode: "diversity",
+          baseline_pair_count: 3,
+          candidates_total: 5,
+          candidates_good: 2,
+          avg_improvement_ms: 14,
+          results: { candidates: [], unqualified_reasons: {} },
+        });
+      },
+    );
+
+    // Adjust the form to match the wired mutation payloads (makes the
+    // assertion below meaningful — the inputs reflect what got submitted
+    // and echoed back).
+    const loss = screen.getByLabelText(/loss threshold/i) as HTMLInputElement;
+    fireEvent.change(loss, { target: { value: "4.5" } });
+    await user.click(screen.getByRole("radio", { name: /diversity/i }));
+
+    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
+
+    // Both mutations ran.
+    expect(patchStub.mutate).toHaveBeenCalledTimes(1);
+    expect(evaluateStub.mutate).toHaveBeenCalledTimes(1);
+
+    // No error copy anywhere — the failure-path toasts never fire.
+    expect(screen.queryByText(/failed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/refresh and retry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no baseline measurements/i)).not.toBeInTheDocument();
+
+    // Form values reflect the submitted knobs.
+    expect((screen.getByLabelText(/loss threshold/i) as HTMLInputElement).value).toBe("4.5");
+    expect(screen.getByRole("radio", { name: /diversity/i })).toHaveAttribute("data-state", "on");
   });
 });

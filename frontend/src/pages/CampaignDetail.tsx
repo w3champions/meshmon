@@ -136,9 +136,12 @@ export default function CampaignDetail() {
   // The `validateSearch` on `campaignDetailRoute` has already coerced the
   // shape at the router boundary, so casting here is safe.
   const search = useSearch({ strict: false }) as CampaignDetailSearch;
-  // `tab` is optional in the URL schema so `to: "/campaigns/$id"`
-  // navigations don't need to supply one; the page resolves `undefined`
-  // to the default landing tab here.
+  // `tab` is `.optional()` on the URL schema so navigations to
+  // `/campaigns/$id` without a search clause still type-check, but the
+  // router's validator (`parseCampaignDetailSearch`) always fills
+  // `tab = "candidates"` when absent and catches invalid values. The
+  // `?? "candidates"` here is a type-level narrowing backstop — at runtime
+  // `search.tab` is guaranteed populated by the validator.
   const tab: CampaignDetailTab = search.tab ?? "candidates";
 
   // Mount the SSE stream once. `pair_settled` and `state_changed` events
@@ -434,6 +437,11 @@ export default function CampaignDetail() {
       {/* ---------------------------------------------------------------- */}
       <Tabs
         value={tab}
+        // Spreading `search` preserves `raw_*` filter params across tab
+        // switches by design — the operator keeps their filter selection
+        // when navigating between Raw and other tabs. If they open Raw,
+        // apply a `raw_state=pending` filter, then visit Settings, the
+        // filter survives the round-trip back.
         onValueChange={(next) => {
           // `useNavigate` without a `to` infers the active route's search
           // shape, but TanStack Router's generic inference here resolves to

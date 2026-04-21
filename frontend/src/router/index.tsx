@@ -198,45 +198,69 @@ export const campaignNewRoute = createRoute({
 // `tab` drives the active panel; the Raw-tab filter params live on the same
 // schema so a tab switch preserves them instead of racing with a separate
 // declaration.
-// `tab` is declared as an optional enum (rather than `default(...)`) so
-// navigations that target `/campaigns/$id` without a search clause still
-// type-check — the router coerces `undefined → "candidates"` below via
-// `validateSearch`. `.catch` applied at that boundary bounces invalid
-// `?tab=…` values back to `"candidates"` without throwing.
+//
+// Per-field `.catch` is used on every enum so an invalid value on ONE field
+// falls back to that field's default without dropping sibling fields. A
+// whole-object `.catch({})` would reset every field when any field is
+// invalid — e.g. `?tab=bogus&raw_state=pending` would lose `raw_state`
+// along with the bad `tab`. Per-field resilience keeps valid neighbours
+// intact. Every field is also `.optional()` at the TYPE level so callers
+// that navigate to `/campaigns/$id` without a search clause still type-
+// check (TanStack Router gates `search` required/optional on whether the
+// inferred type has any required keys).
 export const campaignDetailSearchSchema = z.object({
-  tab: z.enum(["candidates", "pairs", "raw", "settings"]).optional(),
+  tab: z.enum(["candidates", "pairs", "raw", "settings"]).catch("candidates").optional(),
   raw_state: z
     .enum(["pending", "dispatched", "reused", "succeeded", "unreachable", "skipped"])
+    .catch(() => undefined as never)
     .optional(),
-  raw_protocol: z.enum(["icmp", "tcp", "udp"]).optional(),
-  raw_kind: z.enum(["campaign", "detail_ping", "detail_mtr"]).optional(),
+  raw_protocol: z
+    .enum(["icmp", "tcp", "udp"])
+    .catch(() => undefined as never)
+    .optional(),
+  raw_kind: z
+    .enum(["campaign", "detail_ping", "detail_mtr"])
+    .catch(() => undefined as never)
+    .optional(),
 });
 
 /**
- * Campaign-detail search — every field is optional so callers that navigate
- * to `/campaigns/$id` without a search clause still type-check. The page
- * itself defaults `tab` to `"candidates"` when unset.
+ * Campaign-detail search — every field is `.optional()` so navigations
+ * that omit `?tab=…` still type-check. `parseCampaignDetailSearch` fills
+ * `tab` to `"candidates"` when absent, so the page always sees a concrete
+ * tab value without needing a page-side `??` fallback.
  */
 export type CampaignDetailSearch = z.infer<typeof campaignDetailSearchSchema>;
 
-/** Enumeration of the active tab values; the page resolves `undefined` to `"candidates"`. */
+/** Enumeration of the active tab values; the parser fills `undefined` with `"candidates"`. */
 export type CampaignDetailTab = "candidates" | "pairs" | "raw" | "settings";
 
 /**
- * Parse the raw URL-search bag. `.catch({})` drops invalid enum values
- * silently so a stale `?tab=foo` bounces back to `"candidates"` without
- * throwing at the router boundary.
+ * Safe default when the WHOLE search object is malformed (e.g. the router
+ * hands us something that isn't a plain object). Per-field resilience is
+ * handled inside `campaignDetailSearchSchema` via `.catch(...)` — this
+ * fallback only fires when the root-level parse throws.
+ */
+const CAMPAIGN_DETAIL_SEARCH_DEFAULT: CampaignDetailSearch = { tab: "candidates" };
+
+/**
+ * Parse the raw URL-search bag. Per-field `.catch` inside the schema drops
+ * invalid enum values silently; the outer `.safeParse` guard only fires if
+ * the whole object is malformed. We then fill `tab` with `"candidates"`
+ * when absent (the schema keeps it `.optional()` at the type level so nav
+ * callers don't have to supply `search: { tab: … }` on every `Link`).
  *
  * TanStack Router v1 merges the validator's output onto the raw search (it
- * does NOT replace the source), so we must explicitly set every known key
- * on the return — otherwise a URL-supplied `tab=bogus` would survive zod's
- * rejection and resurface downstream. Returning `undefined` for unvalid
- * values deletes the key cleanly.
+ * does NOT replace the source), so we explicitly set every known key on
+ * the return — otherwise a URL-supplied `tab=bogus` would survive zod's
+ * rejection and resurface downstream. Explicit `undefined` deletes the
+ * key cleanly.
  */
 function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
-  const parsed = campaignDetailSearchSchema.catch({}).parse(search);
+  const result = campaignDetailSearchSchema.safeParse(search);
+  const parsed = result.success ? result.data : CAMPAIGN_DETAIL_SEARCH_DEFAULT;
   return {
-    tab: parsed.tab,
+    tab: parsed.tab ?? "candidates",
     raw_state: parsed.raw_state,
     raw_protocol: parsed.raw_protocol,
     raw_kind: parsed.raw_kind,
