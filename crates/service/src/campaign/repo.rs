@@ -1496,13 +1496,15 @@ pub struct EvaluationRow {
 /// second call for the same campaign replaces the previous result and
 /// restamps `evaluated_at`.
 ///
-/// The UPSERT and the `completed → evaluated` state promotion run in a
-/// single transaction. A crash between them would otherwise leave the
-/// campaign in `completed` with an evaluation row already written —
-/// bundling both writes makes the handler contract atomic. The state
-/// flip is a conditional UPDATE gated on `state='completed'`, so a
-/// concurrent writer that already advanced the row to `evaluated`
-/// simply no-ops here.
+/// The state gate, UPSERT, and `completed → evaluated` promotion all
+/// run inside one transaction. A `SELECT ... FOR UPDATE` on the
+/// campaign row at the top holds a row-level lock until commit, so a
+/// concurrent `/detail` call cannot flip the row to `running` between
+/// the handler's initial state check and our persistence step — an
+/// illegal-transition race that would otherwise let `/evaluate` write
+/// a fresh evaluation against a now-running campaign. If the locked
+/// state is not `completed` or `evaluated`, returns
+/// `RepoError::IllegalTransition` so the handler maps to HTTP 409.
 pub async fn write_evaluation(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -1515,6 +1517,34 @@ pub async fn write_evaluation(
         .expect("EvaluationResultsDto is owned by this service and always serialises");
 
     let mut tx = pool.begin().await?;
+
+    // Lock the campaign row and recheck state. The handler's gate is
+    // advisory only — without the lock, a concurrent `/detail` flip
+    // to `running` between read and write would still let us persist.
+    let locked_state: Option<CampaignState> = sqlx::query_scalar!(
+        r#"SELECT state AS "state: CampaignState"
+             FROM measurement_campaigns
+            WHERE id = $1
+              FOR UPDATE"#,
+        campaign_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let locked_state = match locked_state {
+        Some(s) => s,
+        None => return Err(RepoError::NotFound(campaign_id)),
+    };
+    if !matches!(
+        locked_state,
+        CampaignState::Completed | CampaignState::Evaluated
+    ) {
+        return Err(RepoError::IllegalTransition {
+            campaign_id,
+            from: Some(locked_state),
+            expected: vec![CampaignState::Completed, CampaignState::Evaluated],
+        });
+    }
+
     let row = sqlx::query!(
         r#"INSERT INTO campaign_evaluations
               (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,

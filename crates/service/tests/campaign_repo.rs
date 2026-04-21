@@ -1332,6 +1332,10 @@ async fn write_then_read_evaluation_round_trip() {
     let pool = common::shared_migrated_pool().await;
 
     let row = repo::create(&pool, make_input("t-eval-rt")).await.unwrap();
+    // `write_evaluation` now locks the row and rechecks state inside
+    // its transaction — drafts are rejected. Force completed so the
+    // persistence path opens.
+    common::mark_completed(&pool, &row.id.to_string()).await;
 
     let first = EvaluationOutputs {
         baseline_pair_count: 3,
@@ -1413,6 +1417,67 @@ async fn write_then_read_evaluation_round_trip() {
             .await
             .unwrap();
     assert_eq!(count, 1, "UPSERT collapses into a single row per campaign");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn write_evaluation_rejects_running_campaign() {
+    // Race guard: `write_evaluation` must recheck state under the row
+    // lock. If a concurrent `/detail` flipped the campaign to `running`
+    // between the handler's initial gate and our UPSERT, persistence
+    // must abort with IllegalTransition rather than silently writing a
+    // fresh evaluation against a now-running campaign.
+    use meshmon_service::campaign::dto::EvaluationResultsDto;
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+    let pool = common::shared_migrated_pool().await;
+
+    let row = repo::create(&pool, make_input("t-eval-gate"))
+        .await
+        .unwrap();
+    repo::start(&pool, row.id).await.unwrap();
+    // Campaign is now in `running`.
+
+    let outputs = EvaluationOutputs {
+        baseline_pair_count: 0,
+        candidates_total: 0,
+        candidates_good: 0,
+        avg_improvement_ms: None,
+        results: EvaluationResultsDto {
+            candidates: Vec::new(),
+            unqualified_reasons: Default::default(),
+        },
+    };
+
+    let err = repo::write_evaluation(
+        &pool,
+        row.id,
+        &outputs,
+        1.0,
+        1.0,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .expect_err("write_evaluation must reject running state");
+    match err {
+        RepoError::IllegalTransition { from, .. } => {
+            assert_eq!(
+                from,
+                Some(CampaignState::Running),
+                "from-state must reflect the observed running lock"
+            );
+        }
+        other => panic!("expected IllegalTransition, got {other:?}"),
+    }
+
+    // No evaluation row should have been written either.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "nothing persisted on the reject path");
 
     repo::delete(&pool, row.id).await.unwrap();
 }
@@ -1752,6 +1817,9 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
     let row = repo::create(&pool, make_input("t-eval-cascade"))
         .await
         .unwrap();
+    // `write_evaluation` locks the row and rechecks state — force
+    // completed so the persistence path opens.
+    common::mark_completed(&pool, &row.id.to_string()).await;
 
     let outputs = EvaluationOutputs {
         baseline_pair_count: 1,
