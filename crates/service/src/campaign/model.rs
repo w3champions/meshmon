@@ -130,7 +130,7 @@ pub enum EvaluationMode {
 
 /// Kind of measurement row stored in `measurements`. `campaign` is the
 /// default; T44 never writes anything else (T45/T48 do).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "measurement_kind", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum MeasurementKind {
@@ -227,6 +227,11 @@ pub struct PairRow {
     pub attempt_count: i16,
     /// Last error observed on this pair, if any.
     pub last_error: Option<String>,
+    /// Measurement discriminator: `Campaign` for baseline pairs,
+    /// `DetailPing` / `DetailMtr` for operator-initiated detail runs.
+    /// Drives the dispatcher's `MeasurementKind` selection and the
+    /// scheduler's kind-specific `probe_count` override.
+    pub kind: MeasurementKind,
 }
 
 #[cfg(test)]

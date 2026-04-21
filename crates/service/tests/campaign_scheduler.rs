@@ -8,9 +8,11 @@
 mod common;
 
 use meshmon_service::campaign::dispatch::{
-    DirectSettleDispatcher, DispatchOutcome, PairDispatcher,
+    DirectSettleDispatcher, DispatchOutcome, PairDispatcher, PendingPair,
 };
-use meshmon_service::campaign::model::{CampaignState, PairResolutionState, ProbeProtocol};
+use meshmon_service::campaign::model::{
+    CampaignState, MeasurementKind, PairResolutionState, ProbeProtocol,
+};
 use meshmon_service::campaign::repo::{self, CreateInput};
 use meshmon_service::campaign::scheduler::Scheduler;
 use meshmon_service::registry::AgentRegistry;
@@ -18,6 +20,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// Seed one or more agent rows directly. The scheduler reads through the
@@ -470,5 +473,176 @@ async fn scheduler_reverts_rejected_pairs_to_pending() {
 
     cancel.cancel();
     handle.await.unwrap();
+    db.close().await;
+}
+
+/// Records every `(agent_id, kind, probe_count, pair_ids)` batch the
+/// scheduler hands in, and settles each pair synchronously so the tick
+/// loop makes progress without dispatcher retries polluting the record.
+#[derive(Default, Clone)]
+struct RecordingDispatcher {
+    calls: Arc<Mutex<Vec<RecordedCall>>>,
+    pool: Option<sqlx::PgPool>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct RecordedCall {
+    agent_id: String,
+    kind: MeasurementKind,
+    probe_count: i16,
+    pair_ids: Vec<i64>,
+}
+
+#[async_trait::async_trait]
+impl PairDispatcher for RecordingDispatcher {
+    async fn dispatch(&self, agent_id: &str, batch: Vec<PendingPair>) -> DispatchOutcome {
+        let head = batch[0].clone();
+        let pair_ids: Vec<i64> = batch.iter().map(|p| p.pair_id).collect();
+        self.calls.lock().await.push(RecordedCall {
+            agent_id: agent_id.to_string(),
+            kind: head.kind,
+            probe_count: head.probe_count,
+            pair_ids: pair_ids.clone(),
+        });
+        if let Some(pool) = &self.pool {
+            for p in &batch {
+                sqlx::query!(
+                    "UPDATE campaign_pairs \
+                        SET resolution_state='succeeded', settled_at=now() \
+                      WHERE id=$1",
+                    p.pair_id
+                )
+                .execute(pool)
+                .await
+                .expect("record dispatcher settle");
+            }
+        }
+        DispatchOutcome {
+            dispatched: batch.len(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Guards the P1 fix: heterogeneous `campaign_pairs.kind` in a single
+/// `(campaign, agent)` claim must be split into one dispatch call per
+/// kind, each carrying the kind-specific `probe_count`.
+#[tokio::test]
+async fn scheduler_splits_batches_by_kind_with_kind_specific_probe_count() {
+    let db = common::own_container().await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+    seed_agents(&db.pool, &["agent-kind"]).await;
+
+    // Baseline campaign with a distinct detail probe count so the test
+    // can verify the override plumbs through end-to-end.
+    let input = CreateInput {
+        title: "kind-split".into(),
+        notes: String::new(),
+        protocol: ProbeProtocol::Icmp,
+        source_agent_ids: vec!["agent-kind".into()],
+        destination_ips: vec![IpAddr::from_str("198.51.100.77").unwrap()],
+        force_measurement: true, // skip reuse so the baseline pair dispatches every time
+        probe_count: Some(12),
+        probe_count_detail: Some(240),
+        timeout_ms: None,
+        probe_stagger_ms: None,
+        loss_threshold_pct: None,
+        stddev_weight: None,
+        evaluation_mode: None,
+        created_by: None,
+    };
+    let row = repo::create(&db.pool, input).await.unwrap();
+    repo::start(&db.pool, row.id).await.unwrap();
+
+    // Inject one extra detail_mtr pair against the same (source, destination)
+    // so the claim batch is heterogeneous in `kind`.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+            (campaign_id, source_agent_id, destination_ip, resolution_state, kind) \
+          VALUES ($1, $2, $3, 'pending', 'detail_mtr'::measurement_kind)",
+    )
+    .bind(row.id)
+    .bind("agent-kind")
+    .bind(sqlx::types::ipnetwork::IpNetwork::from(
+        IpAddr::from_str("198.51.100.77").unwrap(),
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let registry = Arc::new(AgentRegistry::new(
+        db.pool.clone(),
+        Duration::from_secs(60),
+        Duration::from_secs(300),
+    ));
+    registry.initial_load().await.unwrap();
+
+    let dispatcher = Arc::new(RecordingDispatcher {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        pool: Some(db.pool.clone()),
+    });
+    let scheduler = Scheduler::new(
+        db.pool.clone(),
+        registry,
+        dispatcher.clone(),
+        /*tick_ms=*/ 100,
+        /*chunk_size=*/ 32,
+        /*max_pair_attempts=*/ 3,
+        /*target_active_window=*/ Duration::from_secs(300),
+    );
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(scheduler.run(cancel.clone()));
+
+    // Poll until we see at least two dispatch calls (one per kind) with
+    // the pair settled for the campaign.
+    let mut saw_campaign = None;
+    let mut saw_detail_mtr = None;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let calls = dispatcher.calls.lock().await.clone();
+        for c in calls {
+            match c.kind {
+                MeasurementKind::Campaign if saw_campaign.is_none() => saw_campaign = Some(c),
+                MeasurementKind::DetailMtr if saw_detail_mtr.is_none() => saw_detail_mtr = Some(c),
+                _ => {}
+            }
+        }
+        if saw_campaign.is_some() && saw_detail_mtr.is_some() {
+            break;
+        }
+    }
+    cancel.cancel();
+    handle.await.unwrap();
+
+    let camp_call = saw_campaign.expect("scheduler never dispatched the campaign baseline pair");
+    let mtr_call = saw_detail_mtr.expect("scheduler never dispatched the detail_mtr pair");
+
+    assert_eq!(camp_call.kind, MeasurementKind::Campaign);
+    assert_eq!(
+        camp_call.probe_count, 12,
+        "campaign batch probe_count must match campaigns.probe_count"
+    );
+    assert_eq!(
+        camp_call.pair_ids.len(),
+        1,
+        "campaign kind batch must carry exactly the baseline pair"
+    );
+
+    assert_eq!(mtr_call.kind, MeasurementKind::DetailMtr);
+    assert_eq!(
+        mtr_call.probe_count, 1,
+        "detail_mtr batch probe_count must be 1 per MTR spec"
+    );
+    assert_eq!(
+        mtr_call.pair_ids.len(),
+        1,
+        "detail_mtr kind batch must carry exactly the detail pair"
+    );
+    assert_ne!(
+        camp_call.pair_ids, mtr_call.pair_ids,
+        "kind split must produce disjoint dispatch calls"
+    );
+
     db.close().await;
 }

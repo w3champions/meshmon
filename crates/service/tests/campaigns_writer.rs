@@ -17,7 +17,7 @@ use meshmon_protocol::{
     MeasurementSummary, MtrTraceResult,
 };
 use meshmon_service::campaign::dispatch::PendingPair;
-use meshmon_service::campaign::model::ProbeProtocol;
+use meshmon_service::campaign::model::{MeasurementKind, ProbeProtocol};
 use meshmon_service::campaign::repo::{self, CreateInput};
 use meshmon_service::campaign::writer::{SettleOutcome, SettleWriter};
 use sqlx::PgPool;
@@ -81,6 +81,7 @@ fn mk_pair(campaign_id: uuid::Uuid, pair_id: i64, dest: IpAddr) -> PendingPair {
         probe_stagger_ms: 100,
         force_measurement: false,
         protocol: ProbeProtocol::Icmp,
+        kind: MeasurementKind::Campaign,
     }
 }
 

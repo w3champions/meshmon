@@ -11,9 +11,9 @@
 //! can drive the loop with stub implementations (see `dispatch.rs`). T45
 //! plugs in the real RPC dispatcher.
 
-use super::dispatch::{PairDispatcher, PendingPair};
+use super::dispatch::{DispatchOutcome, PairDispatcher, PendingPair};
 use super::events::{NOTIFY_CHANNEL, PAIR_SETTLED_CHANNEL};
-use super::model::{CampaignState, PairResolutionState};
+use super::model::{CampaignState, MeasurementKind, PairResolutionState};
 use super::repo::{self, RepoError};
 use crate::metrics;
 use crate::registry::AgentRegistry;
@@ -295,7 +295,10 @@ impl Scheduler {
             return Ok(false);
         }
 
-        // Reuse lookup (skipped entirely when campaign.force_measurement).
+        // Reuse lookup. Two structural bypasses:
+        //   - `force_measurement` short-circuits at the scheduler level.
+        //   - `resolve_reuse` itself filters `cp.kind='campaign'`, so
+        //     detail rows never match. No extra kind-gate needed here.
         if !camp.force_measurement {
             let decisions = repo::resolve_reuse(&self.pool, &batch, camp.protocol).await?;
             if !decisions.is_empty() {
@@ -324,28 +327,56 @@ impl Scheduler {
         // non-pending pair including `dispatched`), or a process
         // restart followed by adding a `dispatched`-TTL sweeper. Tick
         // panics are logged, so the failure is observable.
-        let allowed: Vec<PendingPair> = batch
-            .into_iter()
-            .map(|p| {
-                let dest = match p.destination_ip {
-                    sqlx::types::ipnetwork::IpNetwork::V4(n) => std::net::IpAddr::V4(n.ip()),
-                    sqlx::types::ipnetwork::IpNetwork::V6(n) => std::net::IpAddr::V6(n.ip()),
-                };
-                PendingPair {
-                    pair_id: p.id,
-                    campaign_id,
-                    source_agent_id: p.source_agent_id,
-                    destination_ip: dest,
-                    probe_count: camp.probe_count,
-                    timeout_ms: camp.timeout_ms,
-                    probe_stagger_ms: camp.probe_stagger_ms,
-                    force_measurement: camp.force_measurement,
-                    protocol: camp.protocol,
-                }
-            })
-            .collect();
 
-        let outcome = self.dispatcher.dispatch(agent_id, allowed).await;
+        // Group the batch by kind. `rpc_dispatcher::build_request` reads
+        // the wire `MeasurementKind` and `probe_count` from the head
+        // pair, so each call must be homogeneous. The scheduler picks
+        // kind-specific `probe_count` here:
+        //   - Campaign    → campaigns.probe_count (baseline cadence)
+        //   - DetailPing  → campaigns.probe_count_detail (high-fidelity)
+        //   - DetailMtr   → 1 (MTR spec: single round)
+        let mut by_kind: std::collections::HashMap<MeasurementKind, Vec<PendingPair>> =
+            std::collections::HashMap::new();
+        for p in batch {
+            let dest = match p.destination_ip {
+                sqlx::types::ipnetwork::IpNetwork::V4(n) => std::net::IpAddr::V4(n.ip()),
+                sqlx::types::ipnetwork::IpNetwork::V6(n) => std::net::IpAddr::V6(n.ip()),
+            };
+            let probe_count = match p.kind {
+                MeasurementKind::Campaign => camp.probe_count,
+                MeasurementKind::DetailPing => camp.probe_count_detail,
+                MeasurementKind::DetailMtr => 1,
+            };
+            by_kind.entry(p.kind).or_default().push(PendingPair {
+                pair_id: p.id,
+                campaign_id,
+                source_agent_id: p.source_agent_id,
+                destination_ip: dest,
+                probe_count,
+                timeout_ms: camp.timeout_ms,
+                probe_stagger_ms: camp.probe_stagger_ms,
+                force_measurement: camp.force_measurement,
+                protocol: camp.protocol,
+                kind: p.kind,
+            });
+        }
+
+        // Issue one dispatch per kind group, aggregating outcomes so the
+        // existing revert/rate-limit bookkeeping runs exactly once for
+        // the whole tick batch.
+        let mut aggregate = DispatchOutcome::default();
+        for (_kind, group) in by_kind {
+            if group.is_empty() {
+                continue;
+            }
+            let outcome = self.dispatcher.dispatch(agent_id, group).await;
+            aggregate.dispatched += outcome.dispatched;
+            aggregate.rejected_ids.extend(outcome.rejected_ids);
+            aggregate.rate_limited_ids.extend(outcome.rate_limited_ids);
+            if aggregate.skipped_reason.is_none() {
+                aggregate.skipped_reason = outcome.skipped_reason;
+            }
+        }
 
         // Both revert branches gate on `resolution_state = 'dispatched'`
         // — the same predicate the writer uses. Without it, an operator
@@ -360,7 +391,7 @@ impl Scheduler {
         // budget. Without this, a high-traffic destination would exhaust
         // its per-pair attempt budget after `max_pair_attempts`
         // consecutive rate-limited ticks and get expired.
-        if !outcome.rate_limited_ids.is_empty() {
+        if !aggregate.rate_limited_ids.is_empty() {
             sqlx::query!(
                 "UPDATE campaign_pairs
                     SET resolution_state = 'pending',
@@ -368,14 +399,14 @@ impl Scheduler {
                         attempt_count    = GREATEST(0, attempt_count - 1)
                   WHERE id = ANY($1::bigint[])
                     AND resolution_state = 'dispatched'",
-                &outcome.rate_limited_ids as &[i64],
+                &aggregate.rate_limited_ids as &[i64],
             )
             .execute(&self.pool)
             .await
             .map_err(RepoError::from)?;
         }
 
-        if !outcome.rejected_ids.is_empty() {
+        if !aggregate.rejected_ids.is_empty() {
             // Dispatcher refused these — revert to `pending` so a
             // subsequent tick can retry. `take_pending_batch` already
             // bumped `attempt_count`, so the retry budget counts down
@@ -387,15 +418,15 @@ impl Scheduler {
                         dispatched_at    = NULL
                   WHERE id = ANY($1::bigint[])
                     AND resolution_state = 'dispatched'",
-                &outcome.rejected_ids as &[i64],
+                &aggregate.rejected_ids as &[i64],
             )
             .execute(&self.pool)
             .await
             .map_err(RepoError::from)?;
             debug!(
                 agent_id,
-                rejected = outcome.rejected_ids.len(),
-                reason = outcome.skipped_reason.as_deref().unwrap_or(""),
+                rejected = aggregate.rejected_ids.len(),
+                reason = aggregate.skipped_reason.as_deref().unwrap_or(""),
                 "scheduler: dispatcher rejected pairs"
             );
         }

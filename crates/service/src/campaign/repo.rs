@@ -7,7 +7,8 @@
 //! into HTTP 409 without a second SELECT.
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, PairResolutionState, PairRow, ProbeProtocol,
+    CampaignRow, CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, PairRow,
+    ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{types::ipnetwork::IpNetwork, PgPool, Postgres, Transaction};
@@ -554,7 +555,8 @@ pub async fn list_pairs(
         r#"
         SELECT id, campaign_id, source_agent_id, destination_ip,
                resolution_state AS "resolution_state: PairResolutionState",
-               measurement_id, dispatched_at, settled_at, attempt_count, last_error
+               measurement_id, dispatched_at, settled_at, attempt_count, last_error,
+               kind AS "kind: MeasurementKind"
           FROM campaign_pairs
          WHERE campaign_id = $1
            AND (cardinality($2::pair_resolution_state[]) = 0
@@ -787,7 +789,8 @@ pub async fn take_pending_batch(
                    campaign_pairs.dispatched_at,
                    campaign_pairs.settled_at,
                    campaign_pairs.attempt_count,
-                   campaign_pairs.last_error
+                   campaign_pairs.last_error,
+                   campaign_pairs.kind AS "kind: MeasurementKind"
         "#,
         campaign_id,
         source_agent_id,
@@ -1274,6 +1277,7 @@ struct PairRowRaw {
     settled_at: Option<DateTime<Utc>>,
     attempt_count: i16,
     last_error: Option<String>,
+    kind: MeasurementKind,
 }
 
 impl From<PairRowRaw> for PairRow {
@@ -1289,6 +1293,7 @@ impl From<PairRowRaw> for PairRow {
             settled_at: r.settled_at,
             attempt_count: r.attempt_count,
             last_error: r.last_error,
+            kind: r.kind,
         }
     }
 }

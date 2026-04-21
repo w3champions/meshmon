@@ -1,6 +1,6 @@
 //! Dispatcher trait + test stubs. Production RPC dispatch is T45.
 
-use super::model::PairResolutionState;
+use super::model::{MeasurementKind, PairResolutionState};
 use async_trait::async_trait;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -13,6 +13,11 @@ use uuid::Uuid;
 /// dispatcher does not need to re-query the database; the scheduler is
 /// responsible for populating it from a [`PairRow`] plus the owning
 /// campaign's configuration.
+///
+/// The scheduler groups batches by [`PendingPair::kind`] before handing
+/// them to the dispatcher; each batch is therefore homogeneous in `kind`
+/// and the dispatcher reads the wire `MeasurementKind` (Latency vs MTR)
+/// from the head pair's `kind`.
 #[derive(Debug, Clone)]
 pub struct PendingPair {
     /// `campaign_pairs.id` of the row being dispatched.
@@ -33,6 +38,10 @@ pub struct PendingPair {
     pub force_measurement: bool,
     /// Probe protocol inherited from the campaign.
     pub protocol: super::model::ProbeProtocol,
+    /// Measurement kind (campaign / detail_ping / detail_mtr). Drives
+    /// the wire `MeasurementKind` the dispatcher asks the agent for —
+    /// `DetailMtr` maps to `Mtr`, everything else to `Latency`.
+    pub kind: MeasurementKind,
 }
 
 /// Outcome of a single [`PairDispatcher::dispatch`] call.
@@ -140,6 +149,7 @@ mod tests {
                     probe_stagger_ms: 100,
                     force_measurement: false,
                     protocol: super::super::model::ProbeProtocol::Icmp,
+                    kind: MeasurementKind::Campaign,
                 }],
             )
             .await;

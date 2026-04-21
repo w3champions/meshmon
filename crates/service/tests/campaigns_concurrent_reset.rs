@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use meshmon_protocol::pb::measurement_result::Outcome;
 use meshmon_protocol::{MeasurementResult, MeasurementSummary};
 use meshmon_service::campaign::dispatch::{DispatchOutcome, PairDispatcher, PendingPair};
-use meshmon_service::campaign::model::ProbeProtocol;
+use meshmon_service::campaign::model::{MeasurementKind, ProbeProtocol};
 use meshmon_service::campaign::repo::{self, CreateInput, EditInput};
 use meshmon_service::campaign::scheduler::Scheduler;
 use meshmon_service::campaign::writer::{SettleOutcome, SettleWriter};
@@ -129,6 +129,7 @@ async fn late_settle_is_dropped_when_pair_was_reset() {
         probe_stagger_ms: 100,
         force_measurement: true,
         protocol: ProbeProtocol::Icmp,
+        kind: MeasurementKind::Campaign,
     };
     let result = MeasurementResult {
         pair_id: pair_id as u64,
