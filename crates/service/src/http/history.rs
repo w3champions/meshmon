@@ -466,8 +466,11 @@ pub struct CampaignMeasurementsPage {
 
 /// `GET /api/campaigns/{id}/measurements` — joined campaign+measurements
 /// feed for the Results browser's Raw tab. Paginated via a keyset
-/// cursor; the first page returns the most recent settled rows
-/// interleaved with any pending/dispatched pairs.
+/// cursor; rows are ordered `measured_at DESC NULLS LAST, cp.id DESC`,
+/// so settled rows lead each page and pending/dispatched pairs (no
+/// `measured_at`) trail at the bottom of the first page. Pending rows
+/// are not reachable via keyset pagination — see
+/// [`fetch_campaign_measurements`] for the v1 contract.
 #[utoipa::path(
     get,
     path = "/api/campaigns/{id}/measurements",
