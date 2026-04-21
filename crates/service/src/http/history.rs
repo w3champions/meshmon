@@ -49,7 +49,7 @@ fn internal_error(scope: &str, err: sqlx::Error) -> Response {
 // --- sources -----------------------------------------------------------
 
 /// One entry in the `/api/history/sources` list.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HistorySourceDto {
     /// Agent id.
     pub source_agent_id: String,
@@ -115,7 +115,7 @@ pub struct HistoryDestinationsQuery {
 /// row exists (either never enriched or later deleted). The frontend
 /// renders this as "raw IP — no metadata", a supported state rather than
 /// a rendering bug — `city`, `country_code`, and `asn` all stay NULL.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HistoryDestinationDto {
     /// Raw destination IP as a host string.
     pub destination_ip: String,
