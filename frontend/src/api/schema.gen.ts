@@ -253,13 +253,13 @@ export interface paths {
          *
          *     All scopes flow through [`repo::insert_detail_pairs`], which owns
          *     the transition back to `running` and emits `campaign_state_changed`
-         *     through the Postgres NOTIFY trigger. The handler additionally
-         *     publishes `CampaignStreamEvent::StateChanged { running }` for the
-         *     same campaign so clients subscribed to the broker see the
-         *     transition even before the NOTIFY listener wakes up — but **only**
-         *     when a real transition occurred (`state_changed=true`). A
-         *     no-op call against an already-`running` campaign skips the
-         *     broadcast to avoid spurious client refreshes.
+         *     through the Postgres NOTIFY trigger. The campaign SSE listener
+         *     translates that NOTIFY into a broker broadcast for every
+         *     subscriber (same-instance and peers) — this handler does not
+         *     publish to the in-process broker directly, to avoid sending a
+         *     duplicate `state_changed` frame on the request's own instance.
+         *     No-op detail inserts (inserted == 0 or an already-`running` race)
+         *     don't touch `state`, so the trigger stays silent correctly.
          */
         post: operations["detail"];
         delete?: never;
