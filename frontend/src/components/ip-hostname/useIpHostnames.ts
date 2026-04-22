@@ -18,6 +18,31 @@ import {
  * one, the same `Map` instance comes back out, so downstream `useMemo`
  * consumers see stable identity across provider updates that only affect
  * IPs we don't track.
+ *
+ * ### Call-site requirement: stable `ips` identity
+ *
+ * The signature-based memo only pays off when `ips` keeps a stable
+ * reference across renders. A new `["10.0.0.1", ...]` literal on every
+ * render defeats the inner `useMemo([ips])` that sorts + dedupes the
+ * set, which in turn rebuilds the signature and the result map even when
+ * nothing meaningful changed. Hoist the array to module scope (for
+ * fixed sets) or wrap it in `useMemo` at the call site.
+ *
+ * Small sets (< ~50 IPs) are cheap enough that a per-render rebuild is
+ * not a performance concern in practice — the stability guidance matters
+ * mainly for virtualised tables with hundreds of rows or for consumers
+ * that key `useMemo` / `useEffect` deps off the returned map identity.
+ *
+ * @example
+ * ```tsx
+ * function AgentTable({ rows }: { rows: readonly AgentRow[] }) {
+ *   // Stable IP list across renders so the hook's signature cache hits.
+ *   const ips = useMemo(() => rows.map((r) => r.ip), [rows]);
+ *   const hostnames = useIpHostnames(ips);
+ *   // `hostnames` identity is stable until a tracked IP resolves.
+ *   return <VirtualList rows={rows} hostnames={hostnames} />;
+ * }
+ * ```
  */
 export function useIpHostnames(
   ips: readonly string[],

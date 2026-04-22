@@ -1,5 +1,5 @@
 import { act, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { IpHostname } from "@/components/ip-hostname/IpHostname";
 import {
@@ -47,6 +47,12 @@ afterEach(() => {
  * Convenience wrapper that seeds the provider map before rendering the
  * child tree. Used by render-site tests that want a specific hostname
  * already resolved on first paint.
+ *
+ * The seed fires inside a mount-only `useEffect` rather than the render
+ * body — React 19 strict mode double-invokes render, and mutating
+ * provider state during render is a rule violation regardless of strict
+ * mode. RTL's `render()` flushes effects synchronously before returning,
+ * so the seeded value is observable by the first assertion.
  */
 function Seeder({
   seed,
@@ -56,8 +62,12 @@ function Seeder({
   children: ReactNode;
 }) {
   const { seedFromResponse } = useIpHostnameContext();
-  // Seed once synchronously inside the render so the first paint picks it up.
-  if (seed.length > 0) seedFromResponse(seed);
+  // Mount-only seed from a fixture constant; re-running on seed /
+  // seedFromResponse changes would double-seed for no benefit in tests.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
   return <>{children}</>;
 }
 
