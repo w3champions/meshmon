@@ -6,6 +6,8 @@
 //! session that caused them.
 mod backend;
 mod ip_canon;
+mod repo;
 
 pub use backend::{HickoryBackend, LookupOutcome, ResolverBackend};
 pub use ip_canon::canonicalize;
+pub use repo::{hostnames_for, record_negative, record_positive};
