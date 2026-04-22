@@ -771,6 +771,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/hostnames/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SSE stream of `hostname_resolved` events scoped to this session. */
+        get: operations["hostname_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/hostnames/{ip}/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Force a re-resolution of a single IP, bypassing cache freshness. */
+        post: operations["hostname_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/metrics/query": {
         parameters: {
             query?: never;
@@ -1882,6 +1916,23 @@ export interface components {
              * @description Standard deviation of RTT to this hop, in microseconds.
              */
             stddev_rtt_micros: number;
+        };
+        /**
+         * @description Wire payload for the `hostname_resolved` SSE event.
+         *
+         *     `IpAddr` has no built-in `ToSchema` impl under utoipa 5, so we annotate
+         *     the field with `schema(value_type = String)`. Serde still uses the
+         *     default `IpAddr` display serializer, which matches the shape the
+         *     frontend expects (e.g. `"192.0.2.1"` / `"2001:db8::1"`).
+         */
+        HostnameEvent: {
+            /**
+             * @description Resolved hostname, or `None` when the lookup confirmed no PTR
+             *     record exists.
+             */
+            hostname?: string | null;
+            /** @description Canonicalized IP the lookup applies to. */
+            ip: string;
         };
         /** @description Query parameters for `GET /api/metrics/query` (instant query). */
         InstantQuery: {
@@ -4268,6 +4319,73 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
+            };
+        };
+    };
+    hostname_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE stream of hostname resolutions for this session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    hostname_refresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description IPv4 or IPv6 literal to re-resolve */
+                ip: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Enqueued; event will arrive on the session's stream */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid IP literal */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Session exceeded 60 refresh calls / minute */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
