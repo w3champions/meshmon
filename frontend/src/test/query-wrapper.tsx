@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 export function renderWithQuery(ui: ReactElement) {
   const client = new QueryClient({
@@ -17,7 +18,11 @@ export function renderWithQuery(ui: ReactElement) {
       mutations: { retry: false },
     },
   });
-  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={client}>
+      <IpHostnameProvider>{ui}</IpHostnameProvider>
+    </QueryClientProvider>,
+  );
 }
 
 export function renderWithProviders(ui: ReactElement, initialPath = "/") {
@@ -81,7 +86,9 @@ export function renderWithProviders(ui: ReactElement, initialPath = "/") {
 
   return render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }

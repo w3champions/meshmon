@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { type ReactNode, useEffect } from "react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import {
   useDeleteCatalogueEntry,
@@ -10,6 +10,8 @@ import {
   useReenrichOne,
 } from "@/api/hooks/catalogue";
 import { EntryDrawer } from "@/components/catalogue/EntryDrawer";
+import { IpHostnameProvider } from "@/components/ip-hostname";
+import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
 
 vi.mock("@/api/hooks/catalogue", () => ({
   usePatchCatalogueEntry: vi.fn(),
@@ -55,10 +57,60 @@ function makeMutation(): Mutation {
   return { mutate: vi.fn(), isPending: false };
 }
 
-function wrap() {
+/**
+ * Minimal EventSource stub. The `IpHostnameProvider` opens the SSE stream on
+ * mount; jsdom has no native implementation. These tests don't exercise the
+ * stream (the refresh button posts; the SSE event delivery is provider-local
+ * and already covered by `IpHostnameProvider.test.tsx`).
+ */
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  listeners: Record<string, Array<(event: { data: string }) => void>> = {};
+
+  constructor(public url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name] ?? [];
+    list.push(handler);
+    this.listeners[name] = list;
+  }
+  removeEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name];
+    if (!list) return;
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  }
+  close(): void {}
+}
+
+/**
+ * Mount-only seed helper. Primes the provider map before first paint so the
+ * hostname row renders `ip (hostname)` instead of a bare IP.
+ */
+function Seeder({
+  seed,
+  children,
+}: {
+  seed: Array<{ ip: string; hostname?: string | null }>;
+  children: ReactNode;
+}) {
+  const { seedFromResponse } = useIpHostnameContext();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+function wrap(seed: Array<{ ip: string; hostname?: string | null }> = []) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>
+        <Seeder seed={seed}>{children}</Seeder>
+      </IpHostnameProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -103,6 +155,13 @@ beforeEach(() => {
   vi.mocked(useDeleteCatalogueEntry).mockReturnValue(
     deleteMutation as unknown as ReturnType<typeof useDeleteCatalogueEntry>,
   );
+  MockEventSource.instances = [];
+  vi.stubGlobal("EventSource", MockEventSource);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("EntryDrawer", () => {
@@ -301,5 +360,79 @@ describe("EntryDrawer", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog).toBeInTheDocument();
     expect(screen.getByText("Edit catalogue entry")).toBeInTheDocument();
+  });
+
+  // -----------------------------------------------------------------------
+  // Hostname refresh button
+  // -----------------------------------------------------------------------
+
+  describe("hostname refresh", () => {
+    test("renders the resolved hostname from the provider seed", () => {
+      render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, {
+        wrapper: wrap([{ ip: ENTRY.ip, hostname: "alpha.example.com" }]),
+      });
+      expect(screen.getByText("(alpha.example.com)")).toBeInTheDocument();
+    });
+
+    test("clicking Refresh hostname POSTs to /api/hostnames/:ip/refresh and disables optimistically", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 202 }));
+
+      const user = userEvent.setup();
+      render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+
+      const button = screen.getByRole("button", { name: /refresh hostname/i });
+      expect(button).not.toBeDisabled();
+
+      await user.click(button);
+
+      // Optimistic disable — the handler fires `setPending(true)` before
+      // awaiting the POST.
+      expect(button).toBeDisabled();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchSpy.mock.calls[0] ?? [];
+      expect(url).toBe(`/api/hostnames/${ENTRY.ip}/refresh`);
+      expect(init?.method).toBe("POST");
+
+      // After the 2 s cooldown the button re-enables. waitFor defaults to a
+      // 1 s interval cap on retries, well inside the 5 s Vitest test budget
+      // once the real timer fires.
+      await waitFor(
+        () => {
+          expect(button).not.toBeDisabled();
+        },
+        { timeout: 3000 },
+      );
+    });
+
+    test("failed refresh toasts and the button re-enables after the cooldown", async () => {
+      const { toast } = await import("sonner");
+      const errorSpy = vi.spyOn(toast, "error").mockReturnValue("toast-id");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 429 }));
+
+      const user = userEvent.setup();
+      render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+
+      const button = screen.getByRole("button", { name: /refresh hostname/i });
+      await user.click(button);
+
+      // The rejected fetch resolves the handler's catch block — wait until
+      // toast.error has been called so the assertion is deterministic.
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalled();
+      });
+      const firstArg = errorSpy.mock.calls[0]?.[0];
+      expect(String(firstArg)).toMatch(/refresh hostname|HTTP 429/i);
+
+      // Button stays disabled until the cooldown elapses, even on failure.
+      expect(button).toBeDisabled();
+      await waitFor(
+        () => {
+          expect(button).not.toBeDisabled();
+        },
+        { timeout: 3000 },
+      );
+    });
   });
 });

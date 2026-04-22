@@ -10,6 +10,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronsUpDown, ChevronUp, RefreshCw, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogueEntry, CatalogueSortBy, CatalogueSortDir } from "@/api/hooks/catalogue";
+import { IpHostname } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -69,7 +70,7 @@ const DEFAULT_VISIBLE: string[] = [
 ];
 
 /** All optional (hideable) columns — off by default. */
-const OPTIONAL_COLUMNS: string[] = ["location", "website", "notes"];
+const OPTIONAL_COLUMNS: string[] = ["location", "website", "notes", "hostname"];
 
 /**
  * Map from UI column id to backend `SortBy`. Only columns whose id differs
@@ -121,6 +122,7 @@ const COLUMN_TRACKS: Record<string, string> = {
   location: "100px",
   website: "minmax(120px, 1fr)",
   notes: "minmax(100px, 1.5fr)",
+  hostname: "minmax(180px, 1.5fr)",
   actions: "70px",
 };
 
@@ -443,6 +445,20 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
       cell: ({ row }) => (
         <span className="block truncate" title={row.original.notes ?? undefined}>
           {row.original.notes ?? "—"}
+        </span>
+      ),
+    },
+    {
+      id: "hostname",
+      header: "Hostname",
+      // Sort deliberately omitted — the backend has no hostname sort key in
+      // this batch; hostname is joined in at response time (see T53b §5).
+      // Reads from the shared `<IpHostnameProvider>` map; the seed-on-response
+      // hook primes the map from the list query so the cell resolves without
+      // flicker once the provider has a positive hit.
+      cell: ({ row }) => (
+        <span className="block truncate">
+          <IpHostname ip={row.original.ip} />
         </span>
       ),
     },
