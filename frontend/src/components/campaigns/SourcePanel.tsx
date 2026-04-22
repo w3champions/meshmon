@@ -91,9 +91,9 @@ function matchesFilter(agent: AgentSummary, filter: FilterValue): boolean {
   }
 
   // The remaining facets (country / asn / network / city) live on the
-  // catalogue-joined `AgentSummary` fields. Wiring facet predicates into
-  // this matcher is a larger scope than the T53b UI landing and is left
-  // to a follow-up.
+  // catalogue-joined `AgentSummary` fields. Full facet-predicate wiring
+  // into this matcher is a larger scope deferred to a follow-up; this
+  // landing covers the render-side joins for the current UI.
 
   return true;
 }
@@ -401,9 +401,7 @@ export function SourcePanel({
                       role="cell"
                       className={cn(
                         "truncate px-3",
-                        agent.country_code == null && agent.country_name == null
-                          ? "text-muted-foreground"
-                          : "",
+                        agent.country_code == null && "text-muted-foreground",
                       )}
                     >
                       {country}
