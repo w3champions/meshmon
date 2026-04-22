@@ -329,6 +329,7 @@ one supervisor task per target.
 | `MESHMON_UDP_PROBE_PORT` | yes | Port the UDP echo listener binds (dual-stack on `[::]`, serves both IPv4 and IPv6 peers). Must be open on the host and reachable from peers. |
 | `MESHMON_ICMP_TARGET_CONCURRENCY` | no (default `32`) | Global cap on concurrent per-target ICMP/traceroute rounds. Lower if raw-socket / thread use is too high. |
 | `MESHMON_CAMPAIGN_MAX_CONCURRENCY` | no (cluster default wins) | Per-agent cap on concurrent `RunMeasurementBatch` RPCs. Advertised to the service on Register so both sides enforce the same value; zero is rejected. Unset means "follow the cluster-wide `[campaigns] default_agent_concurrency`". |
+| `MESHMON_AGENT_LOG_FORMAT` | no (default `json`) | Tracing output format: `json` (structured, prod default) or `compact` (human-readable, dev). Mirrors the service's `[logging] format` values. |
 | `RUST_LOG` | no | Tracing filter (default: `meshmon_agent=info,warn`) |
 
 The agent needs raw-socket access for ICMP/traceroute probes. In Docker,
