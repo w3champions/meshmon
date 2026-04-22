@@ -89,23 +89,22 @@ cleanup() {
         wait "$SERVICE_PID" 2>/dev/null || true
     fi
     if [[ "${KEEP_INFRA:-0}" != "1" ]]; then
-        # Default: tear containers down but preserve named volumes so
-        # meshmon-db (catalogue, measurements, agent registrations,
-        # campaigns) survives reboots. The agents compose carries no
-        # state worth wiping (config bind-mounted, logs are stdout) so
-        # the same `down`-without-`-v` rule applies. Set
-        # MESHMON_DEV_RESET_DB=1 for a full wipe.
+        # Preserve named volumes by default; set MESHMON_DEV_RESET_DB=1 for a full wipe.
         local down_args=()
+        local agents_suffix=" (volumes preserved)"
+        local infra_suffix=" (volumes preserved; set MESHMON_DEV_RESET_DB=1 to wipe)"
         if [[ "${MESHMON_DEV_RESET_DB:-0}" == "1" ]]; then
             down_args=(-v)
+            agents_suffix=""
+            infra_suffix=""
             echo "[dev.sh] cleanup: MESHMON_DEV_RESET_DB=1 — tearing down with -v (named volumes will be deleted)" >&2
         fi
         if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
-            echo "[dev.sh] cleanup: docker compose down dev agents" >&2
+            echo "[dev.sh] cleanup: docker compose down dev agents${agents_suffix}" >&2
             (cd "$DEPLOY_DIR" && docker compose \
                 -f docker-compose.agents-dev.yml down "${down_args[@]}") || true
         fi
-        echo "[dev.sh] cleanup: docker compose down infra (postgres / VM / grafana / alertmanager / vmalert)" >&2
+        echo "[dev.sh] cleanup: docker compose down infra (postgres / VM / grafana / alertmanager / vmalert)${infra_suffix}" >&2
         (cd "$DEPLOY_DIR" && docker compose \
             -f docker-compose.yml -f docker-compose.dev.yml down "${down_args[@]}") || true
         echo "[dev.sh] cleanup: removing throwaway $DEPLOY_DIR/.env and meshmon.toml" >&2
