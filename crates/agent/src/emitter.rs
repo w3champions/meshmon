@@ -49,7 +49,7 @@ use meshmon_protocol::{
 };
 
 use crate::api::ServiceApi;
-use crate::route::RouteSnapshotEnvelope;
+use crate::route::{PathSummarySource, RouteSnapshotEnvelope};
 use crate::state::ProtoHealth;
 use crate::stats::Summary;
 
@@ -698,7 +698,7 @@ fn build_route_snapshot_request(
     env: RouteSnapshotEnvelope,
 ) -> RouteSnapshotRequest {
     let observed_at_micros = env.snapshot.observed_at_micros_i64();
-    let path_summary = build_path_summary(&env.snapshot.hops);
+    let path_summary = build_path_summary(env.path_summary, env.snapshot.hops.len());
     let protocol = env.snapshot.protocol as i32;
     let hops = env.snapshot.hops.iter().map(hop_to_proto).collect();
     RouteSnapshotRequest {
@@ -711,27 +711,35 @@ fn build_route_snapshot_request(
     }
 }
 
-/// Derive a `PathSummary` from the hops of a `RouteSnapshot`.
+/// Build the wire `PathSummary` for a route snapshot.
 ///
-/// Path-level metrics reflect the **destination hop only** — the last hop in
-/// `hops`, which the route-tracker truncate-at-target logic guarantees carries
-/// the destination IP. Per-hop loss/RTT for intermediate hops is preserved in
-/// the snapshot's `hops[]` array; aggregating across all hops would conflate
-/// silent ICMP-rate-limiting routers (always 100 % loss) with end-to-end loss.
+/// `loss_pct` and `avg_rtt_micros` come from the supervisor's elected
+/// `primary_protocol` `RollingStats` (carried on the envelope as
+/// [`PathSummarySource`]). When the primary is `None` (cold start before
+/// the sample-floor is met, or every protocol is unhealthy), loss is
+/// emitted as `1.0` so the matrix renders the path as unreachable.
 ///
-/// - `hop_count` is the vector length (preserved as a topology marker).
-/// - `avg_rtt_micros` is `hops.last().avg_rtt_micros`, or `0` if `hops` is empty.
-/// - `loss_pct` is `hops.last().loss_pct`, or `0.0` if `hops` is empty.
-fn build_path_summary(hops: &[crate::route::HopSummary]) -> PathSummaryProto {
-    let hop_count = hops.len() as u32;
-    let (avg_rtt_micros, loss_pct) = match hops.last() {
-        Some(dest) => (dest.avg_rtt_micros, dest.loss_pct),
-        None => (0, 0.0),
+/// `hop_count` is the topology depth recorded by the route tracker.
+/// Trippy destination-hop accounting (`hops.last()`) is intentionally NOT
+/// the source for `loss_pct` / `avg_rtt_micros`: trippy's 60 s window
+/// with 500 ms grace inflates phantom loss whenever the destination's
+/// reply lands past the grace deadline (common on healthy LANs at low
+/// pps), and conflates with end-to-end loss the silent
+/// ICMP-rate-limited intermediate routers that contribute 100 % loss
+/// per-hop. Per-hop loss / RTT for the topology drilldown stays in
+/// `hops[]`.
+fn build_path_summary(source: PathSummarySource, hop_count: usize) -> PathSummaryProto {
+    let (avg_rtt_micros, loss_pct) = match source.primary_protocol {
+        Some(_) => (source.avg_rtt_micros, source.loss_pct.clamp(0.0, 1.0)),
+        // Unhealthy / not-yet-elected → encode as 100 % loss so the
+        // matrix renders red. The `.clamp` above keeps a misbehaving
+        // primary stats source within the wire validator's [0, 1] band.
+        None => (0, 1.0),
     };
     PathSummaryProto {
         avg_rtt_micros,
         loss_pct,
-        hop_count,
+        hop_count: hop_count as u32,
     }
 }
 
@@ -1342,96 +1350,74 @@ mod tests {
     }
 
     #[test]
-    fn build_path_summary_empty_hops_is_zero() {
-        let s = build_path_summary(&[]);
-        assert_eq!(s.hop_count, 0);
-        assert_eq!(s.avg_rtt_micros, 0);
-        assert_eq!(s.loss_pct, 0.0);
-    }
+    fn build_path_summary_uses_primary_stats_not_destination_hop() {
+        use crate::route::PathSummarySource;
 
-    #[test]
-    fn build_path_summary_uses_destination_hop_only() {
-        use crate::route::HopSummary as AgentHop;
+        // Primary RollingStats reports a healthy ICMP path (0% loss, 30 ms
+        // RTT). The 100 % destination-hop loss that trippy might report
+        // here is intentionally not part of the wire `path_summary` —
+        // hop-loss stays in `hops[]` for the topology drilldown.
+        let source = PathSummarySource {
+            primary_protocol: Some(Protocol::Icmp),
+            loss_pct: 0.0,
+            avg_rtt_micros: 30_000,
+        };
 
-        // Three hops: silent intermediate (1.0 loss), responsive intermediate (0.10 loss),
-        // destination hop (0.0 loss, 226 ms RTT). Path-level loss MUST be the destination's
-        // 0.0 — silent intermediate hops do not influence end-to-end stats.
-        let hops = vec![
-            AgentHop {
-                position: 1,
-                observed_ips: vec![],
-                avg_rtt_micros: 0,
-                stddev_rtt_micros: 0,
-                loss_pct: 1.0, // silent router (does not reply to TTL-exceeded)
-            },
-            AgentHop {
-                position: 2,
-                observed_ips: vec![],
-                avg_rtt_micros: 50_000,
-                stddev_rtt_micros: 100,
-                loss_pct: 0.10,
-            },
-            AgentHop {
-                position: 3,
-                observed_ips: vec![],
-                avg_rtt_micros: 226_000,
-                stddev_rtt_micros: 200,
-                loss_pct: 0.0,
-            },
-        ];
-
-        let s = build_path_summary(&hops);
+        let s = build_path_summary(source, /* hop_count_input = */ 3);
         assert_eq!(s.hop_count, 3);
-        assert_eq!(s.avg_rtt_micros, 226_000);
+        assert_eq!(s.avg_rtt_micros, 30_000);
         assert!((s.loss_pct - 0.0).abs() < 1e-9, "got {}", s.loss_pct);
     }
 
     #[test]
-    fn build_path_summary_destination_hop_with_loss() {
-        use crate::route::HopSummary as AgentHop;
+    fn build_path_summary_follows_elected_protocol_when_tcp_is_primary() {
+        use crate::route::PathSummarySource;
 
-        // Destination hop has 30% loss and 226ms successful-RTT — both are reported.
-        let hops = vec![
-            AgentHop {
-                position: 1,
-                observed_ips: vec![],
-                avg_rtt_micros: 0,
-                stddev_rtt_micros: 0,
-                loss_pct: 1.0,
-            },
-            AgentHop {
-                position: 2,
-                observed_ips: vec![],
-                avg_rtt_micros: 226_000,
-                stddev_rtt_micros: 200,
-                loss_pct: 0.30,
-            },
-        ];
+        // Same scenario, primary swung to TCP. The matrix value must
+        // follow the elected protocol — there's no preferred-protocol
+        // hard-coding in the encoder.
+        let source = PathSummarySource {
+            primary_protocol: Some(Protocol::Tcp),
+            loss_pct: 0.0,
+            avg_rtt_micros: 12_500,
+        };
 
-        let s = build_path_summary(&hops);
-        assert_eq!(s.hop_count, 2);
-        assert_eq!(s.avg_rtt_micros, 226_000);
-        assert!((s.loss_pct - 0.30).abs() < 1e-9);
+        let s = build_path_summary(source, 1);
+        assert_eq!(s.hop_count, 1);
+        assert_eq!(s.avg_rtt_micros, 12_500);
+        assert!((s.loss_pct - 0.0).abs() < 1e-9);
     }
 
     #[test]
-    fn build_path_summary_single_hop_is_destination_hop() {
-        use crate::route::HopSummary as AgentHop;
+    fn build_path_summary_unelected_primary_renders_unreachable() {
+        use crate::route::PathSummarySource;
 
-        // Single-hop path (target on same LAN segment): hops.last() == hops[0].
-        // hop_count must be 1; both fields must come from the only hop.
-        let hops = vec![AgentHop {
-            position: 1,
-            observed_ips: vec![],
-            avg_rtt_micros: 1_500,
-            stddev_rtt_micros: 50,
-            loss_pct: 0.05,
-        }];
+        // No primary elected (cold start before sample-floor met, or
+        // every protocol unhealthy). Encoder must emit `loss_pct = 1.0`
+        // so the matrix renders red rather than a misleading 0%.
+        let s = build_path_summary(PathSummarySource::unhealthy(), 0);
+        assert_eq!(s.hop_count, 0);
+        assert_eq!(s.avg_rtt_micros, 0);
+        assert!((s.loss_pct - 1.0).abs() < 1e-9, "got {}", s.loss_pct);
+    }
 
-        let s = build_path_summary(&hops);
-        assert_eq!(s.hop_count, 1);
-        assert_eq!(s.avg_rtt_micros, 1_500);
-        assert!((s.loss_pct - 0.05).abs() < 1e-9);
+    #[test]
+    fn build_path_summary_clamps_misbehaving_loss_pct_into_wire_band() {
+        use crate::route::PathSummarySource;
+
+        // A misbehaving primary stats source could in principle hand the
+        // encoder a loss_pct outside [0, 1]. The wire validator rejects
+        // that, so the encoder clamps defensively rather than fail the
+        // whole snapshot push.
+        let s = build_path_summary(
+            PathSummarySource {
+                primary_protocol: Some(Protocol::Icmp),
+                loss_pct: 1.7,
+                avg_rtt_micros: 1_000,
+            },
+            1,
+        );
+        assert!((s.loss_pct - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1472,7 +1458,7 @@ mod tests {
 
     #[test]
     fn build_route_snapshot_request_stamps_source_and_target() {
-        use crate::route::{RouteSnapshot, RouteSnapshotEnvelope};
+        use crate::route::{PathSummarySource, RouteSnapshot, RouteSnapshotEnvelope};
         let snap = RouteSnapshot {
             protocol: Protocol::Icmp,
             observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -1481,6 +1467,8 @@ mod tests {
         let env = RouteSnapshotEnvelope {
             target_id: "t".into(),
             snapshot: snap,
+            // No primary elected → emitter encodes 100% loss.
+            path_summary: PathSummarySource::unhealthy(),
         };
         let req = build_route_snapshot_request("src", env);
         assert_eq!(req.source_id, "src");
@@ -1491,12 +1479,14 @@ mod tests {
         let ps = req.path_summary.unwrap();
         assert_eq!(ps.hop_count, 0);
         assert_eq!(ps.avg_rtt_micros, 0);
-        assert_eq!(ps.loss_pct, 0.0);
+        assert!((ps.loss_pct - 1.0).abs() < 1e-9);
     }
 
     #[tokio::test(start_paused = true)]
     async fn primary_loop_pushes_snapshots_immediately_with_path_summary() {
-        use crate::route::{HopSummary as AgentHop, RouteSnapshot, RouteSnapshotEnvelope};
+        use crate::route::{
+            HopSummary as AgentHop, PathSummarySource, RouteSnapshot, RouteSnapshotEnvelope,
+        };
         let api = Arc::new(RecordingApi::default());
         let identity = EmitterIdentity {
             source_id: "src".into(),
@@ -1522,6 +1512,11 @@ mod tests {
         stx.send(RouteSnapshotEnvelope {
             target_id: "t1".into(),
             snapshot: snap,
+            path_summary: PathSummarySource {
+                primary_protocol: Some(Protocol::Tcp),
+                loss_pct: 0.0,
+                avg_rtt_micros: 2_000,
+            },
         })
         .await
         .unwrap();
@@ -1543,6 +1538,7 @@ mod tests {
         let ps = req.path_summary.as_ref().expect("PathSummary stamped");
         assert_eq!(ps.hop_count, 1);
         assert_eq!(ps.avg_rtt_micros, 2_000);
+        assert!((ps.loss_pct - 0.0).abs() < 1e-9);
     }
 
     /// ServiceApi that fails the first N `push_metrics` calls with
@@ -1881,7 +1877,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_drains_pending_snapshots_within_5s() {
-        use crate::route::{RouteSnapshot, RouteSnapshotEnvelope};
+        use crate::route::{PathSummarySource, RouteSnapshot, RouteSnapshotEnvelope};
 
         let api = Arc::new(RecordingApi::default());
         let identity = EmitterIdentity {
@@ -1909,6 +1905,7 @@ mod tests {
                     observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i),
                     hops: vec![],
                 },
+                path_summary: PathSummarySource::unhealthy(),
             };
             stx.send(envelope).await.unwrap();
         }
@@ -2001,7 +1998,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_respects_5s_deadline_when_snapshots_stream_forever() {
-        use crate::route::{RouteSnapshot, RouteSnapshotEnvelope};
+        use crate::route::{PathSummarySource, RouteSnapshot, RouteSnapshotEnvelope};
 
         let api = Arc::new(RecordingApi::default());
         let identity = EmitterIdentity {
@@ -2029,6 +2026,7 @@ mod tests {
                     observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i),
                     hops: vec![],
                 },
+                path_summary: PathSummarySource::unhealthy(),
             });
         }
 

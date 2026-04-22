@@ -59,7 +59,7 @@ use crate::probing::udp::UdpProberPool;
 use crate::probing::{
     icmp, tcp, IcmpClientPool, ProbeObservation, ProbeOutcome, ProbeRate, TrippyRate,
 };
-use crate::route::{RouteSnapshotEnvelope, RouteTracker};
+use crate::route::{PathSummarySource, RouteSnapshotEnvelope, RouteTracker};
 use crate::state::{PathHealthState, ProtoHealth, StateChange, TargetStateMachine};
 use crate::stats::{FastSummary, RollingStats};
 use meshmon_protocol::{Protocol, Target};
@@ -581,9 +581,30 @@ async fn run(
                         route_tracker.diff_against(&snap, &thresholds).is_some()
                     };
                     if should_emit {
+                        // Sample the elected primary's RollingStats for the
+                        // wire `PathSummary`. Trippy hop accounting stays
+                        // in `snap.hops` for the topology view; end-to-end
+                        // loss / RTT must come from the per-protocol
+                        // pinger so the matrix agrees with
+                        // `meshmon_path_failure_rate`. See the doc comment
+                        // on `PathSummarySource`.
+                        let primary = {
+                            match last_state.try_lock() {
+                                Ok(g) => g.primary,
+                                // last_state contention here is benign:
+                                // an in-flight eval tick is updating the
+                                // same field. Fall back to "no primary"
+                                // so the matrix shows red until the next
+                                // snapshot tick (60 s away). Far better
+                                // than blocking the snapshot pipeline.
+                                Err(_) => None,
+                            }
+                        };
+                        let path_summary = compute_primary_summary(&stats, primary).await;
                         let envelope = RouteSnapshotEnvelope {
                             target_id: target.id.clone(),
                             snapshot: snap.clone(),
+                            path_summary,
                         };
                         match snapshot_tx.try_send(envelope) {
                             Ok(()) => {
@@ -732,6 +753,58 @@ async fn run(
 
 /// Resize per-protocol windows based on which protocol is currently primary.
 /// Primary gets the primary window; all others get the diversity window.
+/// Read the elected primary protocol's `RollingStats` and project them
+/// onto the [`PathSummarySource`] shape carried on the snapshot envelope.
+///
+/// `primary == None` (cold start before sample-floor; every protocol
+/// unhealthy) returns [`PathSummarySource::unhealthy`] so the emitter
+/// encodes 100 % loss.
+///
+/// Stats lock contention degrades gracefully to `unhealthy` rather than
+/// blocking the snapshot tick. The next snapshot tick (60 s away)
+/// re-samples; a single contended tick that flips the matrix to red is
+/// far less harmful than stalling the whole pipeline behind a stats lock.
+async fn compute_primary_summary(
+    stats: &StatsArray,
+    primary: Option<Protocol>,
+) -> PathSummarySource {
+    let Some(proto) = primary else {
+        return PathSummarySource::unhealthy();
+    };
+    let Some(idx) = protocol_index(proto) else {
+        return PathSummarySource::unhealthy();
+    };
+
+    let summary = match stats[idx].try_lock() {
+        Ok(g) => {
+            // Don't purge here — purges run on the 10 s eval tick and
+            // mutate counters; a snapshot read should be observation
+            // only. A worst-case 60 s of un-purged samples is still
+            // bounded by the rolling window itself.
+            g.summary_fast()
+        }
+        Err(_) => return PathSummarySource::unhealthy(),
+    };
+
+    if summary.sample_count == 0 {
+        // Path is "elected primary" but has no in-window samples — treat
+        // as unhealthy on the wire so the matrix renders red rather than
+        // a misleading 0% loss with 0 µs RTT.
+        return PathSummarySource::unhealthy();
+    }
+
+    PathSummarySource {
+        primary_protocol: Some(proto),
+        loss_pct: summary.failure_rate,
+        // mean_rtt_micros is None when no successful samples; render as 0
+        // (consistent with the per-hop "0 µs == no RTT data" convention).
+        avg_rtt_micros: summary
+            .mean_rtt_micros
+            .map(|v| v.round().clamp(0.0, u32::MAX as f64) as u32)
+            .unwrap_or(0),
+    }
+}
+
 async fn resize_windows(stats: &StatsArray, primary: Option<Protocol>, config: &ProbeConfig) {
     let primary_window = Duration::from_secs(config.primary_window_sec as u64);
     let diversity_window = Duration::from_secs(config.diversity_window_sec as u64);
@@ -2238,5 +2311,117 @@ mod tests {
         )
         .collect::<Vec<_>>();
         assert_eq!(all_some.len(), 3, "all three protocols should emit");
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_primary_summary regression tests
+    //
+    // Pin the supervisor → emitter contract for `path_summary`: the wire
+    // shape is sourced from the elected primary protocol's RollingStats,
+    // not from trippy's destination-hop accounting. The dev-cluster bug
+    // these tests guard against is "phantom 40% loss between healthy
+    // LAN agents" — see CLAUDE.md `path_summary` paragraph.
+    // -----------------------------------------------------------------------
+
+    use crate::stats::RollingStats;
+
+    fn empty_stats_array() -> StatsArray {
+        [
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+            Mutex::new(RollingStats::new(Duration::from_secs(60))),
+        ]
+    }
+
+    fn fill_stats(stats: &Mutex<RollingStats>, samples: &[Option<u32>]) {
+        let mut g = stats.try_lock().expect("uncontended in test");
+        let now = tokio::time::Instant::now();
+        for rtt in samples {
+            let obs = match rtt {
+                Some(r) => ProbeObservation {
+                    protocol: Protocol::Icmp,
+                    target_id: "x".into(),
+                    outcome: ProbeOutcome::Success { rtt_micros: *r },
+                    hops: None,
+                    observed_at: now,
+                },
+                None => ProbeObservation {
+                    protocol: Protocol::Icmp,
+                    target_id: "x".into(),
+                    outcome: ProbeOutcome::Timeout,
+                    hops: None,
+                    observed_at: now,
+                },
+            };
+            g.insert(&obs, now);
+        }
+    }
+
+    #[tokio::test]
+    async fn compute_primary_summary_uses_icmp_when_icmp_is_primary() {
+        let stats = empty_stats_array();
+        // 10 ICMP successes at 1 ms — the matrix should report 0% loss
+        // and ~1000 µs RTT regardless of what the trippy destination hop
+        // would report on the same path.
+        fill_stats(&stats[0], &[Some(1_000); 10]);
+        // TCP is noisy: 5 timeouts. The primary is ICMP, so the matrix
+        // must NOT pick this up.
+        fill_stats(&stats[1], &[None; 5]);
+
+        let s = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
+        assert_eq!(s.primary_protocol, Some(Protocol::Icmp));
+        assert!((s.loss_pct - 0.0).abs() < 1e-9, "got {}", s.loss_pct);
+        assert_eq!(s.avg_rtt_micros, 1_000);
+    }
+
+    #[tokio::test]
+    async fn compute_primary_summary_follows_primary_swing_to_tcp() {
+        let stats = empty_stats_array();
+        // ICMP rate-limited (no samples). TCP is the elected primary.
+        fill_stats(&stats[1], &[Some(2_500); 8]);
+
+        let s = compute_primary_summary(&stats, Some(Protocol::Tcp)).await;
+        assert_eq!(s.primary_protocol, Some(Protocol::Tcp));
+        assert!((s.loss_pct - 0.0).abs() < 1e-9);
+        assert_eq!(s.avg_rtt_micros, 2_500);
+    }
+
+    #[tokio::test]
+    async fn compute_primary_summary_no_primary_renders_unhealthy() {
+        let stats = empty_stats_array();
+        // Even with samples sitting in ICMP, "no elected primary" means
+        // the path machine has no signal it trusts → matrix red.
+        fill_stats(&stats[0], &[Some(1_000); 5]);
+
+        let s = compute_primary_summary(&stats, None).await;
+        assert_eq!(s.primary_protocol, None);
+        assert!((s.loss_pct - 1.0).abs() < 1e-9, "got {}", s.loss_pct);
+        assert_eq!(s.avg_rtt_micros, 0);
+    }
+
+    #[tokio::test]
+    async fn compute_primary_summary_empty_window_renders_unhealthy() {
+        let stats = empty_stats_array();
+        // ICMP elected primary but no in-window samples (cold start, or
+        // a genuine outage that drained the window). Render red rather
+        // than 0% loss / 0 µs RTT.
+        let s = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
+        assert_eq!(s.primary_protocol, None);
+        assert!((s.loss_pct - 1.0).abs() < 1e-9);
+        assert_eq!(s.avg_rtt_micros, 0);
+    }
+
+    #[tokio::test]
+    async fn compute_primary_summary_partial_loss_passes_through() {
+        let stats = empty_stats_array();
+        // 7 successes + 3 timeouts → 30% loss, 5 ms mean RTT.
+        let mut samples: Vec<Option<u32>> = vec![Some(5_000); 7];
+        samples.extend(std::iter::repeat_n(None, 3));
+        fill_stats(&stats[0], &samples);
+
+        let s = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
+        assert_eq!(s.primary_protocol, Some(Protocol::Icmp));
+        assert!((s.loss_pct - 0.3).abs() < 1e-9, "got {}", s.loss_pct);
+        assert_eq!(s.avg_rtt_micros, 5_000);
     }
 }

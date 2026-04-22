@@ -552,10 +552,58 @@ impl RouteTracker {
 /// Envelope pushed onto the supervisor → emitter channel. Stamps
 /// `target_id` so the emitter can construct a [`RouteSnapshotRequest`]
 /// without having to look up supervisors by target.
+///
+/// `path_summary` carries the **end-to-end** loss / RTT for the
+/// `RouteSnapshotRequest.path_summary` wire field. It is sourced from the
+/// elected primary protocol's `RollingStats`, not from the trippy
+/// destination hop, so the matrix view agrees with the alerts pipeline
+/// (`meshmon_path_failure_rate`). The supervisor populates this at
+/// snapshot-tick time from `last_state.primary` + the matching
+/// per-protocol `RollingStats`. When the primary is `None` (path is
+/// unhealthy / not yet elected), the emitter encodes loss as `1.0` to
+/// surface the unreachable state in the matrix.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteSnapshotEnvelope {
     pub target_id: String,
     pub snapshot: RouteSnapshot,
+    pub path_summary: PathSummarySource,
+}
+
+/// End-to-end path summary inputs sourced from the elected primary
+/// protocol's [`crate::stats::RollingStats`]. Carried on the envelope so
+/// the emitter encodes the wire `PathSummary` without having to reach
+/// back into supervisor state.
+///
+/// Trippy destination-hop accounting (`hops.last()`) is intentionally
+/// **not** used here — its 60 s window with 500 ms grace inflates phantom
+/// loss on healthy LANs whenever the destination's reply lands past the
+/// grace deadline. The dedicated per-protocol pinger's rolling stats are
+/// the authoritative end-to-end signal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathSummarySource {
+    /// The protocol the supervisor's `TargetStateMachine` elected as
+    /// primary on the most recent eval tick, or `None` when no protocol
+    /// has met the sample-floor yet (cold start) or all protocols are
+    /// unhealthy. `None` makes the emitter encode `loss_pct = 1.0`.
+    pub primary_protocol: Option<Protocol>,
+    /// Loss fraction from the elected protocol's rolling stats, in
+    /// `[0.0, 1.0]`. Ignored when `primary_protocol` is `None`.
+    pub loss_pct: f64,
+    /// Mean RTT from the elected protocol's rolling stats, in
+    /// microseconds. `0` when no successful samples in the window.
+    pub avg_rtt_micros: u32,
+}
+
+impl PathSummarySource {
+    /// Builder for the unhealthy / unelected case — encoded as 100% loss
+    /// on the wire so the matrix renders red.
+    pub fn unhealthy() -> Self {
+        Self {
+            primary_protocol: None,
+            loss_pct: 1.0,
+            avg_rtt_micros: 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
