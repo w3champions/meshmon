@@ -12,10 +12,10 @@
 //! | `preview_dispatch_count_returns_total_reusable…` | `agent-h2` | `198.51.100.210`           |
 //! | `pairs_endpoint_filters_by_state`                | `agent-h3` | `198.51.100.220, .221`     |
 //!
-//! The campaign scheduler is not spawned in the test harness (its
-//! cancel token stays at `None` on the `AppState`), so draft and
-//! running campaigns never tick forward on their own — every
-//! transition in these tests is explicitly driven by an HTTP call.
+//! The campaign scheduler is not spawned in the test harness, so
+//! `AppState.campaign_cancel` is a no-op token; lifecycle transitions
+//! are driven explicitly by HTTP calls and draft / running campaigns
+//! never tick forward on their own.
 
 mod common;
 

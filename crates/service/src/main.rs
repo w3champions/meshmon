@@ -298,12 +298,12 @@ async fn run() -> anyhow::Result<()> {
     );
     info!("campaign SSE listener spawned");
 
-    // Campaign scheduler: single tokio task, driven by a dedicated cancel
-    // token so it can be shut down AFTER the HTTP drain completes (in-flight
-    // handlers may still publish NOTIFY wake-ups until they finish). The
-    // `RpcDispatcher` routes batches over the per-agent yamux tunnels
-    // owned by `state.tunnel_manager`.
-    let campaign_cancel = CancellationToken::new();
+    // Campaign scheduler: single tokio task, driven by the cancel token
+    // owned by `AppState` so the shutdown drain (further down) can
+    // cancel via the same handle. Cancelled AFTER the HTTP drain so
+    // in-flight handlers can still publish NOTIFY wake-ups until they
+    // finish. The `RpcDispatcher` routes batches over the per-agent
+    // yamux tunnels owned by `state.tunnel_manager`.
     let campaign_scheduler_handle = {
         let writer = meshmon_service::campaign::writer::SettleWriter::new(pool.clone());
         let dispatcher: Arc<dyn meshmon_service::campaign::dispatch::PairDispatcher> = Arc::new(
@@ -335,16 +335,11 @@ async fn run() -> anyhow::Result<()> {
             std::cmp::min(initial_config.campaigns.max_pair_attempts, i16::MAX as u16) as i16,
             registry_active_window,
         );
-        let handle = tokio::spawn(scheduler.run(campaign_cancel.clone()));
+        let handle = tokio::spawn(scheduler.run(state.campaign_cancel.clone()));
         info!("campaign scheduler spawned (RpcDispatcher)");
         handle
     };
 
-    let state = {
-        let mut s = state;
-        s.campaign_cancel = campaign_cancel.clone();
-        s
-    };
     state.mark_ready();
 
     // Spawn the enrichment runner. The runner terminates when the last
@@ -521,7 +516,7 @@ async fn run() -> anyhow::Result<()> {
     // responses. The scheduler's `run` loop observes the cancel token on
     // every select arm and exits promptly; the `timeout` is a backstop
     // for a stuck Postgres query, not the expected path.
-    campaign_cancel.cancel();
+    state.campaign_cancel.cancel();
     match tokio::time::timeout(deadline, campaign_scheduler_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => warn!(error = %e, "campaign scheduler task ended abnormally"),
