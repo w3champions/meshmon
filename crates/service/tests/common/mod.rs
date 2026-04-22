@@ -1936,3 +1936,83 @@ impl Stream for SseStream {
         }
     }
 }
+
+// -------- hostname test helpers --------
+
+use meshmon_service::hostname::{LookupOutcome, ResolverBackend};
+
+/// Programmable backend for hostname-resolver tests.
+///
+/// Each IP can map to a fixed `LookupOutcome` with an optional
+/// per-call sleep. Unseeded IPs default to `NegativeNxDomain`.
+#[derive(Default)]
+pub struct StubHostnameBackend {
+    routes: Mutex<std::collections::HashMap<IpAddr, (LookupOutcome, Option<Duration>)>>,
+    calls: Mutex<std::collections::HashMap<IpAddr, usize>>,
+}
+
+impl StubHostnameBackend {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set(&self, ip: IpAddr, outcome: LookupOutcome) {
+        self.routes.lock().unwrap().insert(ip, (outcome, None));
+    }
+
+    pub fn set_with_delay(&self, ip: IpAddr, outcome: LookupOutcome, delay: Duration) {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(ip, (outcome, Some(delay)));
+    }
+
+    pub fn call_count(&self, ip: IpAddr) -> usize {
+        self.calls.lock().unwrap().get(&ip).copied().unwrap_or(0)
+    }
+}
+
+#[async_trait]
+impl ResolverBackend for StubHostnameBackend {
+    async fn reverse_lookup(&self, ip: IpAddr) -> LookupOutcome {
+        let entry = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&ip)
+            .cloned()
+            .unwrap_or((LookupOutcome::NegativeNxDomain, None));
+        *self.calls.lock().unwrap().entry(ip).or_insert(0) += 1;
+        if let Some(d) = entry.1 {
+            tokio::time::sleep(d).await;
+        }
+        entry.0
+    }
+}
+
+/// `StubHostnameBackend` returning a panic via the backend impl.
+/// Used in Task 11 to prove panic containment.
+pub struct PanicHostnameBackend {
+    pub panic_on_first_call: std::sync::atomic::AtomicBool,
+}
+
+impl PanicHostnameBackend {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            panic_on_first_call: std::sync::atomic::AtomicBool::new(true),
+        })
+    }
+}
+
+#[async_trait]
+impl ResolverBackend for PanicHostnameBackend {
+    async fn reverse_lookup(&self, _ip: IpAddr) -> LookupOutcome {
+        if self
+            .panic_on_first_call
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("synthetic panic for containment test");
+        }
+        LookupOutcome::Positive("recovered.example.com".into())
+    }
+}
