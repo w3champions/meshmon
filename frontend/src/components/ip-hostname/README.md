@@ -18,8 +18,8 @@ goes through this module — no bespoke rendering, no ad-hoc streams.
 
 ## Usage rules
 
-These are conventions — enforced by code review today, with an ESLint
-rule planned for the T53c consolidation.
+These are conventions — enforced by code review today; an ESLint rule
+may follow if the conventions drift.
 
 1. **Only this module reads the `hostname` DTO field.** Render sites do
    not touch `.hostname` on catalogue entries, agents, path DTOs, etc.
