@@ -43,7 +43,7 @@ async fn insert_writes_row_with_jsonb_hops() {
     for id in [&src, &tgt] {
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
-             VALUES ($1, 'X', '10.0.0.1', 3555, 3552)",
+             VALUES ($1, 'X', '10.0.0.1', 8002, 8005)",
         )
         .bind(id)
         .execute(&pool)
@@ -80,7 +80,7 @@ async fn insert_rejects_out_of_range_observed_at() {
     for id in [&src, &tgt] {
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
-             VALUES ($1, 'X', '10.0.0.1', 3555, 3552)",
+             VALUES ($1, 'X', '10.0.0.1', 8002, 8005)",
         )
         .bind(id)
         .execute(&pool)

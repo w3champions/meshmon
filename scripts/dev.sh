@@ -2,11 +2,16 @@
 # scripts/dev.sh — developer workflow for meshmon.
 #
 # Brings up the bundled infra (Postgres + VM + Grafana + AM + vmalert)
-# via deploy/docker-compose.dev.yml, seeds a handful of agents and
-# route snapshots, writes a throwaway meshmon.toml pointing at the
-# exposed ports, starts `cargo run -p meshmon-service` in the
-# background, and runs the Vite dev server in the foreground. Ctrl-C
-# tears everything down.
+# via deploy/docker-compose.dev.yml, writes a throwaway meshmon.toml
+# pointing at the exposed ports, starts `cargo run -p meshmon-service`
+# in the background, and spawns 3 dev agents (docker-compose.agents-dev.yml)
+# on a bridge network so the campaigns UI and multi-agent mesh flows are
+# exercisable end-to-end. Finally runs the Vite dev server in the
+# foreground. Ctrl-C tears everything down.
+#
+# Set MESHMON_DEV_SKIP_AGENTS=1 to skip the 3-agent overlay (useful when
+# iterating on frontend-only changes — saves the first-run Dockerfile.agent
+# build).
 #
 # Not for production. For the full stack (including the service
 # container built from Dockerfile.service), run the production compose:
@@ -34,6 +39,10 @@ cleanup() {
         wait "$SERVICE_PID" 2>/dev/null || true
     fi
     if [[ "${KEEP_INFRA:-0}" != "1" ]]; then
+        if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
+            (cd "$DEPLOY_DIR" && docker compose \
+                -f docker-compose.agents-dev.yml down -v) || true
+        fi
         (cd "$DEPLOY_DIR" && docker compose \
             -f docker-compose.yml -f docker-compose.dev.yml down -v) || true
         rm -f "$DEPLOY_DIR/.env" "$DEPLOY_DIR/meshmon.toml"
@@ -66,6 +75,9 @@ MESHMON_UDP_PROBE_SECRET=$UDP_PROBE_SECRET
 MESHMON_DISCORD_WEBHOOK=
 MESHMON_DISCORD_WEBHOOK_CRITICAL=
 MESHMON_DISCORD_WEBHOOK_INFO=
+# Consumed by docker-compose.agents-dev.yml so the dev agents can reach
+# the host-side meshmon-service via host.docker.internal.
+MESHMON_DEV_SERVICE_PORT=$SERVICE_PORT
 EOF
 
 # Write a throwaway meshmon.toml from scratch (do NOT copy from
@@ -127,23 +139,6 @@ echo "[dev.sh] applying migrations"
 DATABASE_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable" \
     sqlx migrate run --source crates/service/migrations >/dev/null
 
-echo "[dev.sh] seeding agents + route snapshots"
-docker exec -e PGPASSWORD="$PG_PASSWORD" meshmon-db \
-    psql -U meshmon -d meshmon -c "$(cat <<'SQL'
-INSERT INTO agents (id, display_name, location, ip, last_seen_at, agent_version, tcp_probe_port, udp_probe_port)
-VALUES
-    ('dev-a', 'Dev A', 'Local', '10.0.0.1', now(), 'dev', 3555, 3552),
-    ('dev-b', 'Dev B', 'Local', '10.0.0.2', now(), 'dev', 3555, 3552)
-ON CONFLICT (id) DO UPDATE SET last_seen_at = now();
-SQL
-)"
-
-echo "[dev.sh] seeding synthetic metric series into VM"
-curl -s -X POST "http://127.0.0.1:8428/api/v1/import/prometheus" --data-binary @- <<'EOF'
-meshmon_path_rtt_avg_micros{source="dev-a",target="dev-b",protocol="icmp"} 12000
-meshmon_path_failure_rate{source="dev-a",target="dev-b",protocol="icmp"} 0.01
-EOF
-
 echo "[dev.sh] starting meshmon-service on :$SERVICE_PORT"
 export MESHMON_CONFIG="$DEPLOY_DIR/meshmon.toml"
 export MESHMON_AGENT_TOKEN="$AGENT_TOKEN"
@@ -169,6 +164,32 @@ cargo run -p meshmon-service &
 SERVICE_PID=$!
 
 echo "[dev.sh] service PID $SERVICE_PID; login as admin / $ADMIN_PASSWORD"
+
+# Wait for the service to come up before firing up the dev agents —
+# agents hit /healthz-adjacent gRPC on first boot and would burn through
+# their retry budget if the service hasn't opened the port yet.
+echo "[dev.sh] waiting for meshmon-service /healthz"
+service_ready=0
+for _ in $(seq 1 60); do
+    if curl -sfo /dev/null "http://127.0.0.1:$SERVICE_PORT/healthz"; then
+        service_ready=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$service_ready" != "1" ]]; then
+    echo "[dev.sh] WARNING: /healthz did not return 200 within 60s; continuing" >&2
+fi
+
+if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
+    echo "[dev.sh] starting 3 dev agents on bridge 172.31.0.0/24 (first run builds Dockerfile.agent — slow)"
+    (cd "$DEPLOY_DIR" && docker compose \
+        -f docker-compose.agents-dev.yml up -d --build)
+    echo "[dev.sh] 3 dev agents registering from 172.31.0.11/12/13 (Frankfurt, São Paulo, Singapore)"
+else
+    echo "[dev.sh] MESHMON_DEV_SKIP_AGENTS=1 — skipping dev agents"
+fi
+
 echo "[dev.sh] starting Vite dev server (Ctrl-C tears down everything)"
 cd frontend
 npm install

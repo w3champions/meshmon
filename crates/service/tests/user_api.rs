@@ -131,7 +131,7 @@ async fn agent_detail_returns_registry_snapshot_fields() {
     // LEFT JOIN in `registry::refresh_once` picks it up by matching `ip`.
     sqlx::query(
         "INSERT INTO agents (id, display_name, location, ip, tcp_probe_port, udp_probe_port, agent_version)
-         VALUES ('brazil-north', 'Fortaleza', 'BR', '170.80.110.90', 3555, 3552, 'v0.1.0')",
+         VALUES ('brazil-north', 'Fortaleza', 'BR', '170.80.110.90', 8002, 8005, 'v0.1.0')",
     )
     .execute(&pool)
     .await
@@ -225,7 +225,7 @@ async fn seed_two_snapshots(pool: &sqlx::PgPool, src: &str, tgt: &str, protocol:
     for id in [src, tgt] {
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
-             VALUES ($1, $1, '10.0.0.1', 3555, 3552) ON CONFLICT (id) DO NOTHING",
+             VALUES ($1, $1, '10.0.0.1', 8002, 8005) ON CONFLICT (id) DO NOTHING",
         )
         .bind(id)
         .execute(pool)

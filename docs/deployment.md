@@ -136,8 +136,8 @@ Desktop's host-network emulation on macOS/Windows is incomplete.
 
 The agent opens an outbound gRPC stream to the service. **No inbound
 ports required on agent hosts** beyond the peer-to-peer probe ports
-(`MESHMON_TCP_PROBE_PORT`, default 3555/TCP; `MESHMON_UDP_PROBE_PORT`,
-default 3552/UDP), which must be reachable on `AGENT_IP` from every
+(`MESHMON_TCP_PROBE_PORT`, default 8002/TCP; `MESHMON_UDP_PROBE_PORT`,
+default 8005/UDP), which must be reachable on `AGENT_IP` from every
 other agent.
 
 For bare-metal (no Docker) deployments, or the full env-var table, see
@@ -193,9 +193,12 @@ use `scripts/dev.sh`. It:
 
 1. Brings up the infra stack via the dev overlay
    (`deploy/docker-compose.dev.yml`) — infra only, no meshmon-service.
-2. Seeds a handful of agents and synthetic metrics.
-3. Starts `cargo run -p meshmon-service` in the background against the
+2. Starts `cargo run -p meshmon-service` in the background against the
    infra.
+3. Spawns 3 dev agents on a bridge network
+   (`deploy/docker-compose.agents-dev.yml`) so the multi-agent mesh and
+   campaigns UI are exercisable end-to-end. Set `MESHMON_DEV_SKIP_AGENTS=1`
+   to skip.
 4. Runs `npm run dev` in `frontend/` in the foreground with HMR.
 
 Ctrl-C tears everything down. See `scripts/dev.sh` for env-var

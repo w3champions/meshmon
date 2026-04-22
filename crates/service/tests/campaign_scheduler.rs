@@ -34,7 +34,7 @@ async fn seed_agents(pool: &sqlx::PgPool, ids: &[&str]) {
         );
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
-             VALUES ($1, $2, $3, 3555, 3552, now())",
+             VALUES ($1, $2, $3, 8002, 8005, now())",
         )
         .bind(id)
         .bind(format!("Test Agent {i}"))

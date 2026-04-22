@@ -90,7 +90,7 @@
 //!     let mut tx = pool.begin().await.unwrap();
 //!     sqlx::query("INSERT INTO agents (id, display_name, ip, \
 //!                                      tcp_probe_port, udp_probe_port) \
-//!                  VALUES ('a', 'Agent A', '10.0.0.1', 3555, 3552)")
+//!                  VALUES ('a', 'Agent A', '10.0.0.1', 8002, 8005)")
 //!         .execute(&mut *tx).await.unwrap();
 //!     // ... more work on &mut *tx ...
 //!     tx.rollback().await.unwrap();
@@ -890,7 +890,7 @@ pub fn login_req(
 pub async fn insert_agent(pool: &PgPool, id: &str) {
     sqlx::query(
         "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
-         VALUES ($1, $1, '10.0.0.1', 3555, 3552) ON CONFLICT (id) DO NOTHING",
+         VALUES ($1, $1, '10.0.0.1', 8002, 8005) ON CONFLICT (id) DO NOTHING",
     )
     .bind(id)
     .execute(pool)
@@ -905,7 +905,7 @@ pub async fn insert_agent_with_ip(pool: &PgPool, id: &str, ip: std::net::IpAddr)
     let ip_net = sqlx::types::ipnetwork::IpNetwork::from(ip);
     sqlx::query(
         "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
-         VALUES ($1, $1, $2, 3555, 3552) ON CONFLICT (id) DO NOTHING",
+         VALUES ($1, $1, $2, 8002, 8005) ON CONFLICT (id) DO NOTHING",
     )
     .bind(id)
     .bind(ip_net)
@@ -990,7 +990,7 @@ pub async fn seed_minimal_campaign_for_measurements(pool: &PgPool, agent_id: &st
     let campaign_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
-         VALUES ($1, $1, '10.10.10.1'::inet, 3555, 3552) \
+         VALUES ($1, $1, '10.10.10.1'::inet, 8002, 8005) \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(agent_id)

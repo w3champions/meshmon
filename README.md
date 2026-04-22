@@ -193,15 +193,20 @@ The service binds on `service.listen_addr` (default `0.0.0.0:8080`). Useful endp
 ### One-command dev loop
 
 `scripts/dev.sh` brings up the bundled infra (Postgres + VictoriaMetrics
-+ Grafana + Alertmanager + vmalert) via the dev compose overlay, seeds a
-couple of agents and route snapshots, starts `cargo run -p meshmon-service`
-in the background, and runs the Vite dev server in the foreground
++ Grafana + Alertmanager + vmalert) via the dev compose overlay, starts
+`cargo run -p meshmon-service` in the background, spawns 3 dev agents on
+a bridge network (so the multi-agent mesh and campaigns UI are
+exercisable end-to-end), and runs the Vite dev server in the foreground
 (HMR, `/api` proxied to the service). Ctrl-C tears everything down.
 
 ```bash
 ./scripts/dev.sh
 # Open http://127.0.0.1:5173/  —  login: admin / smoketest
 ```
+
+Set `MESHMON_DEV_SKIP_AGENTS=1` to skip the 3-agent overlay (useful when
+iterating on frontend-only changes; avoids the first-run Dockerfile.agent
+build).
 
 Intended for local UI iteration only — for the full production stack
 (including the service container from `docker/Dockerfile.service`), see
@@ -337,8 +342,8 @@ services:
       - NET_RAW
       - NET_ADMIN
     ports:
-      - "3555:3555/tcp"   # MESHMON_TCP_PROBE_PORT
-      - "3552:3552/udp"   # MESHMON_UDP_PROBE_PORT
+      - "8002:8002/tcp"   # MESHMON_TCP_PROBE_PORT
+      - "8005:8005/udp"   # MESHMON_UDP_PROBE_PORT
 ```
 
 On bare metal, either run as root or set `CAP_NET_RAW,CAP_NET_ADMIN` on
@@ -353,8 +358,8 @@ export AGENT_LOCATION="Local"
 export AGENT_IP=127.0.0.1
 export AGENT_LAT=0.0
 export AGENT_LON=0.0
-export MESHMON_TCP_PROBE_PORT=3555
-export MESHMON_UDP_PROBE_PORT=3552
+export MESHMON_TCP_PROBE_PORT=8002
+export MESHMON_UDP_PROBE_PORT=8005
 
 cargo run -p meshmon-agent
 ```

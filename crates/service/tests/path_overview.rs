@@ -55,7 +55,7 @@ async fn insert_agent_detailed(
 ) {
     sqlx::query(
         "INSERT INTO agents (id, display_name, location, ip, tcp_probe_port, udp_probe_port, agent_version) \
-         VALUES ($1, $2, $3, $4::inet, 3555, 3552, 'v0.1.0') \
+         VALUES ($1, $2, $3, $4::inet, 8002, 8005, 'v0.1.0') \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(id)

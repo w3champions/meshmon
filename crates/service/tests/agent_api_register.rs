@@ -16,8 +16,8 @@ fn sample(id: &str, ip4: [u8; 4]) -> RegisterRequest {
         lat: 52.52,
         lon: 13.405,
         agent_version: "0.1.0".into(),
-        tcp_probe_port: 3555,
-        udp_probe_port: 3552,
+        tcp_probe_port: 8002,
+        udp_probe_port: 8005,
         campaign_max_concurrency: None,
     }
 }
