@@ -108,8 +108,8 @@ impl AgentApi for MockAgentApiServer {
                 location: "Test".to_string(),
                 lat: 1.0,
                 lon: 2.0,
-                tcp_probe_port: 3555,
-                udp_probe_port: 3552,
+                tcp_probe_port: 8002,
+                udp_probe_port: 8005,
             },
             Target {
                 id: "peer-b".to_string(),
@@ -118,8 +118,8 @@ impl AgentApi for MockAgentApiServer {
                 location: "Test".to_string(),
                 lat: 3.0,
                 lon: 4.0,
-                tcp_probe_port: 3555,
-                udp_probe_port: 3552,
+                tcp_probe_port: 8002,
+                udp_probe_port: 8005,
             },
         ];
         Ok(Response::new(TargetsResponse { targets }))

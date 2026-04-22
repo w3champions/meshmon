@@ -22,7 +22,7 @@ async fn touch_writes_last_seen() {
 
     sqlx::query(
         "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
-         VALUES ($1, 'A', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
+         VALUES ($1, 'A', '10.0.0.1', 8002, 8005, NOW() - INTERVAL '1 hour')",
     )
     .bind(&agent_id)
     .execute(&db.pool)
@@ -69,7 +69,7 @@ async fn second_touch_within_debounce_skips_db_write() {
 
     sqlx::query(
         "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
-         VALUES ($1, 'A', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
+         VALUES ($1, 'A', '10.0.0.1', 8002, 8005, NOW() - INTERVAL '1 hour')",
     )
     .bind(&agent_id)
     .execute(&db.pool)

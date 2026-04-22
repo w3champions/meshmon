@@ -119,8 +119,8 @@ async fn metrics_exposes_registered_agent_info_and_last_seen() {
             ip: vec![10, 99, 0, 1].into(),
             lat: 0.0,
             lon: 0.0,
-            tcp_probe_port: 3555,
-            udp_probe_port: 3552,
+            tcp_probe_port: 8002,
+            udp_probe_port: 8005,
             agent_version: "0.42.0".into(),
             campaign_max_concurrency: None,
         })

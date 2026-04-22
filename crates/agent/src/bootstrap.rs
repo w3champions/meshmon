@@ -832,8 +832,8 @@ mod tests {
             location: "Test".to_string(),
             lat: 0.0,
             lon: 0.0,
-            tcp_probe_port: 3555,
-            udp_probe_port: 3552,
+            tcp_probe_port: 8002,
+            udp_probe_port: 8005,
         }
     }
 
@@ -1262,8 +1262,8 @@ mod tests {
             location: "Test".to_string(),
             lat: 0.0,
             lon: 0.0,
-            tcp_probe_port: 3555,
-            udp_probe_port: 3552,
+            tcp_probe_port: 8002,
+            udp_probe_port: 8005,
         };
 
         publish_allowlist(&tx, &[target]);

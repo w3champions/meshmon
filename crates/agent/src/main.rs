@@ -1,7 +1,7 @@
 // crates/agent/src/main.rs
 //! meshmon-agent binary entry point.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use meshmon_agent::api::GrpcServiceApi;
 use meshmon_agent::bootstrap::AgentRuntime;
 use meshmon_agent::config::AgentEnv;
@@ -23,16 +23,37 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    // Tracing subscriber: structured JSON on stdout, configurable via
-    // RUST_LOG (default: info for meshmon crates, warn for everything else).
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "meshmon_agent=info,warn".parse().expect("valid filter")),
-        )
-        .json()
-        .with_target(true)
-        .init();
+    // Tracing subscriber. Defaults to structured JSON on stdout for
+    // production log aggregation; set MESHMON_AGENT_LOG_FORMAT=compact
+    // for human-readable dev output. Filter is configurable via
+    // RUST_LOG (default: info for meshmon crates, warn for everything
+    // else).
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "meshmon_agent=info,warn".parse().expect("valid filter"));
+    let log_format = match std::env::var("MESHMON_AGENT_LOG_FORMAT") {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => "json".to_string(),
+        Err(e) => return Err(e).context("reading MESHMON_AGENT_LOG_FORMAT"),
+    };
+    match log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .json()
+                .with_target(true)
+                .init();
+        }
+        "compact" => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_target(true)
+                .compact()
+                .init();
+        }
+        other => {
+            anyhow::bail!("MESHMON_AGENT_LOG_FORMAT: `{other}` is not one of json|compact");
+        }
+    }
 
     // Parse env vars — fail fast if any are missing.
     let env = AgentEnv::from_env()?;

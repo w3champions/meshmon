@@ -1,0 +1,111 @@
+# Dev-only overlay: 3 local meshmon agents on a user-defined bridge.
+#
+# Spawned by scripts/dev.sh alongside the infra stack in
+# docker-compose.yml + docker-compose.dev.yml. Unlike the production
+# docker-compose.agent.yml (which uses `network_mode: host` and requires
+# Linux), this overlay puts all three agents on an isolated bridge so
+# they can coexist on Docker Desktop, OrbStack, or Linux without probe
+# port collisions. Agents probe each other within the bridge subnet via
+# the AGENT_IP values below, and reach the host-side meshmon-service
+# through `host.docker.internal`.
+#
+# This file is NOT wired into the production compose. Never run it in
+# production — it has no TLS, no registry pinning, and uses a fake
+# geographic layout purely for exercising the campaigns UI end-to-end.
+#
+# Opt out with MESHMON_DEV_SKIP_AGENTS=1 in the shell that invokes
+# scripts/dev.sh.
+
+services:
+  meshmon-dev-agent-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.agent
+    container_name: meshmon-dev-agent-1
+    restart: "no"
+    cap_add:
+      - NET_RAW    # ICMP + trippy raw sockets
+      - NET_ADMIN  # trippy fd control
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - MESHMON_SERVICE_URL=http://host.docker.internal:${MESHMON_DEV_SERVICE_PORT}
+      - MESHMON_AGENT_TOKEN=${MESHMON_AGENT_TOKEN}
+      - AGENT_ID=dev-agent-1
+      - AGENT_DISPLAY_NAME=Dev Agent 1 (Frankfurt)
+      - AGENT_LOCATION=Frankfurt, Germany
+      - AGENT_IP=172.31.0.11
+      - AGENT_LAT=50.1109
+      - AGENT_LON=8.6821
+      - MESHMON_TCP_PROBE_PORT=8002
+      - MESHMON_UDP_PROBE_PORT=8005
+      - RUST_LOG=meshmon_agent=debug,info
+      - MESHMON_AGENT_LOG_FORMAT=compact
+    networks:
+      meshmon-dev-agents:
+        ipv4_address: 172.31.0.11
+
+  meshmon-dev-agent-2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.agent
+    container_name: meshmon-dev-agent-2
+    restart: "no"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - MESHMON_SERVICE_URL=http://host.docker.internal:${MESHMON_DEV_SERVICE_PORT}
+      - MESHMON_AGENT_TOKEN=${MESHMON_AGENT_TOKEN}
+      - AGENT_ID=dev-agent-2
+      - AGENT_DISPLAY_NAME=Dev Agent 2 (São Paulo)
+      - AGENT_LOCATION=São Paulo, Brazil
+      - AGENT_IP=172.31.0.12
+      - AGENT_LAT=-23.5505
+      - AGENT_LON=-46.6333
+      - MESHMON_TCP_PROBE_PORT=8002
+      - MESHMON_UDP_PROBE_PORT=8005
+      - RUST_LOG=meshmon_agent=debug,info
+      - MESHMON_AGENT_LOG_FORMAT=compact
+    networks:
+      meshmon-dev-agents:
+        ipv4_address: 172.31.0.12
+
+  meshmon-dev-agent-3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.agent
+    container_name: meshmon-dev-agent-3
+    restart: "no"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - MESHMON_SERVICE_URL=http://host.docker.internal:${MESHMON_DEV_SERVICE_PORT}
+      - MESHMON_AGENT_TOKEN=${MESHMON_AGENT_TOKEN}
+      - AGENT_ID=dev-agent-3
+      - AGENT_DISPLAY_NAME=Dev Agent 3 (Singapore)
+      - AGENT_LOCATION=Singapore
+      - AGENT_IP=172.31.0.13
+      - AGENT_LAT=1.3521
+      - AGENT_LON=103.8198
+      - MESHMON_TCP_PROBE_PORT=8002
+      - MESHMON_UDP_PROBE_PORT=8005
+      - RUST_LOG=meshmon_agent=debug,info
+      - MESHMON_AGENT_LOG_FORMAT=compact
+    networks:
+      meshmon-dev-agents:
+        ipv4_address: 172.31.0.13
+
+networks:
+  meshmon-dev-agents:
+    driver: bridge
+    ipam:
+      config:
+        # 172.31.0.0/24 sits just above Docker's default auto-allocation pool
+        # (which starts at 172.17.x). Adjust if your VPN claims 172.31.x.
+        - subnet: 172.31.0.0/24

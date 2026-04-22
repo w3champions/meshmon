@@ -90,7 +90,7 @@ async fn full_pipeline_metrics_and_snapshot() {
     for id in [&src, &tgt] {
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
-                     VALUES ($1, 'X', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
+                     VALUES ($1, 'X', '10.0.0.1', 8002, 8005, NOW() - INTERVAL '1 hour')",
         )
         .bind(id)
         .execute(&pool)
@@ -211,7 +211,7 @@ async fn shutdown_drain_inserts_snapshot_and_emits_route_changes_counter() {
     for id in [&src, &tgt] {
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
-                     VALUES ($1, 'X', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
+                     VALUES ($1, 'X', '10.0.0.1', 8002, 8005, NOW() - INTERVAL '1 hour')",
         )
         .bind(id)
         .execute(&pool)
@@ -314,7 +314,7 @@ async fn shutdown_waits_for_slow_snapshot_inserts() {
     for id in [&src, &tgt] {
         sqlx::query(
             "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port, last_seen_at) \
-                     VALUES ($1, 'X', '10.0.0.1', 3555, 3552, NOW() - INTERVAL '1 hour')",
+                     VALUES ($1, 'X', '10.0.0.1', 8002, 8005, NOW() - INTERVAL '1 hour')",
         )
         .bind(id)
         .execute(&pool)

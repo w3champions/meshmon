@@ -456,8 +456,8 @@ mod tests {
             ("AGENT_IP", "170.80.110.90"),
             ("AGENT_LAT", "-3.7172"),
             ("AGENT_LON", "-38.5433"),
-            ("MESHMON_TCP_PROBE_PORT", "3555"),
-            ("MESHMON_UDP_PROBE_PORT", "3552"),
+            ("MESHMON_TCP_PROBE_PORT", "8002"),
+            ("MESHMON_UDP_PROBE_PORT", "8005"),
         ];
         for (k, v) in &vars {
             env::set_var(k, v);
@@ -566,11 +566,11 @@ mod tests {
     #[test]
     fn parses_probe_ports() {
         with_valid_env(|| {
-            env::set_var("MESHMON_TCP_PROBE_PORT", "3555");
-            env::set_var("MESHMON_UDP_PROBE_PORT", "3552");
+            env::set_var("MESHMON_TCP_PROBE_PORT", "8002");
+            env::set_var("MESHMON_UDP_PROBE_PORT", "8005");
             let env = AgentEnv::from_env().expect("valid");
-            assert_eq!(env.tcp_probe_port, 3555);
-            assert_eq!(env.udp_probe_port, 3552);
+            assert_eq!(env.tcp_probe_port, 8002);
+            assert_eq!(env.udp_probe_port, 8005);
             assert_eq!(env.icmp_target_concurrency, 32);
         });
     }
@@ -579,7 +579,7 @@ mod tests {
     fn rejects_zero_tcp_probe_port() {
         with_valid_env(|| {
             env::set_var("MESHMON_TCP_PROBE_PORT", "0");
-            env::set_var("MESHMON_UDP_PROBE_PORT", "3552");
+            env::set_var("MESHMON_UDP_PROBE_PORT", "8005");
             let err = AgentEnv::from_env().unwrap_err();
             assert!(err.to_string().contains("MESHMON_TCP_PROBE_PORT"), "{err}");
         });
@@ -597,8 +597,8 @@ mod tests {
     #[test]
     fn icmp_target_concurrency_override() {
         with_valid_env(|| {
-            env::set_var("MESHMON_TCP_PROBE_PORT", "3555");
-            env::set_var("MESHMON_UDP_PROBE_PORT", "3552");
+            env::set_var("MESHMON_TCP_PROBE_PORT", "8002");
+            env::set_var("MESHMON_UDP_PROBE_PORT", "8005");
             env::set_var("MESHMON_ICMP_TARGET_CONCURRENCY", "8");
             let env = AgentEnv::from_env().unwrap();
             assert_eq!(env.icmp_target_concurrency, 8);

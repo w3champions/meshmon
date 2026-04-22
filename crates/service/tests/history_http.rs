@@ -23,9 +23,9 @@ async fn history_sources_returns_distinct_agents_with_measurements() {
         r#"INSERT INTO agents
              (id, display_name, ip, tcp_probe_port, udp_probe_port)
            VALUES
-             ('hist-a', 'Agent A', '10.0.0.1'::inet, 3555, 3552),
-             ('hist-b', 'Agent B', '10.0.0.2'::inet, 3555, 3552),
-             ('hist-c', 'Agent C', '10.0.0.3'::inet, 3555, 3552)
+             ('hist-a', 'Agent A', '10.0.0.1'::inet, 8002, 8005),
+             ('hist-b', 'Agent B', '10.0.0.2'::inet, 8002, 8005),
+             ('hist-c', 'Agent C', '10.0.0.3'::inet, 8002, 8005)
            ON CONFLICT (id) DO NOTHING"#,
     )
     .execute(pool)
@@ -69,7 +69,7 @@ async fn history_destinations_filters_by_source_and_partial_match() {
         r#"INSERT INTO agents
              (id, display_name, ip, tcp_probe_port, udp_probe_port)
            VALUES
-             ('hist-d', 'Agent D', '10.0.1.1'::inet, 3555, 3552)
+             ('hist-d', 'Agent D', '10.0.1.1'::inet, 8002, 8005)
            ON CONFLICT (id) DO NOTHING"#,
     )
     .execute(pool)
@@ -137,7 +137,7 @@ async fn history_measurements_returns_joined_rows_in_range() {
         r#"INSERT INTO agents
              (id, display_name, ip, tcp_probe_port, udp_probe_port)
            VALUES
-             ('hist-e', 'Agent E', '10.0.2.1'::inet, 3555, 3552)
+             ('hist-e', 'Agent E', '10.0.2.1'::inet, 8002, 8005)
            ON CONFLICT (id) DO NOTHING"#,
     )
     .execute(pool)
