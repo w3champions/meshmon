@@ -4,6 +4,8 @@
 //! `catalogue::events::CatalogueBroker`'s broadcast shape because every
 //! session's requests trigger lookups whose events must flow only to the
 //! session that caused them.
+mod backend;
 mod ip_canon;
 
+pub use backend::{HickoryBackend, LookupOutcome, ResolverBackend};
 pub use ip_canon::canonicalize;
