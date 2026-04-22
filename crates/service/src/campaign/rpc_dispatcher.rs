@@ -234,16 +234,11 @@ impl RpcDispatcher {
             ProbeProtocol::Tcp => Protocol::Tcp,
             ProbeProtocol::Udp => Protocol::Udp,
         };
-        // `destination_port = 0` is correct for the ICMP path shipped
-        // in T45 (ICMP has no port). TCP/UDP campaigns will need the
-        // per-target destination port populated here — that's T46
-        // scope (it lands together with the real trippy-backed prober
-        // and the `PendingPair::destination_port` field). Until then,
-        // the `[campaigns] enabled = false` default plus the agent's
-        // port-ignoring `StubProber` keep the hardcoded zero from
-        // causing production harm. A TCP/UDP campaign created today
-        // would only probe port 0 once T46 flips both gates AND fails
-        // to populate the port — which the T46 plan explicitly covers.
+        // `destination_port = 0` is correct for ICMP (no port). TCP/UDP
+        // campaigns will need the per-target destination port populated
+        // here once `PendingPair` carries it; the agent's
+        // `OneshotProber` builder matrix uses the port for those
+        // protocols.
         let targets = allowed
             .iter()
             .take(self.max_batch_size as usize)

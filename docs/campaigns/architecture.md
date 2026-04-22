@@ -987,11 +987,6 @@ surface: `{ "error": "invalid_destination_ip" | "invalid_protocols" |
 
 ```toml
 [campaigns]
-# Spawn the background scheduler. Default `true` — the agent ships a
-# trippy-backed `OneshotProber` that returns real measurements. Set
-# `false` to keep the HTTP CRUD and preview endpoints online while
-# disabling dispatch (e.g. during an incident or infra migration).
-enabled = true
 # Composer confirm-dialog threshold on expected dispatch count.
 # Advisory only — no hard cap.
 size_warning_threshold = 1000

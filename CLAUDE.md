@@ -164,16 +164,14 @@ Key patterns:
 - Boot-time constraint: `[enrichment.ipgeolocation] enabled = true`
   requires `acknowledged_tos = true`. The config loader aborts
   startup otherwise.
-- Campaign scheduler is a single tokio task, gated on `[campaigns]
-  enabled` (default `false` until a real prober ships; the agent's
-  current `StubProber` would persist synthetic measurements otherwise).
-  It subscribes to two Postgres NOTIFY
-  channels — `campaign_state_changed` (lifecycle changes from the
-  `measurement_campaigns_notify` trigger) and `campaign_pair_settled`
-  (writer-side fan-out) — plus a periodic tick (default 500 ms), and
-  issues fair-RR batches across active campaigns to a pluggable
-  `PairDispatcher`. Both channel names are load-bearing contracts —
-  keep trigger / writer / listener constants in lockstep on rename.
+- Campaign scheduler is a single tokio task. It subscribes to two
+  Postgres NOTIFY channels — `campaign_state_changed` (lifecycle
+  changes from the `measurement_campaigns_notify` trigger) and
+  `campaign_pair_settled` (writer-side fan-out) — plus a periodic tick
+  (default 500 ms), and issues fair-RR batches across active campaigns
+  to a pluggable `PairDispatcher`. Both channel names are load-bearing
+  contracts — keep trigger / writer / listener constants in lockstep
+  on rename.
 - Campaign dispatch runs through `AgentCommand.RunMeasurementBatch`
   over the reverse tunnel. `RpcDispatcher` owns a per-agent semaphore
   (sized from `agents.campaign_max_concurrency` with a cluster-wide
