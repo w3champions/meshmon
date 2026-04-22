@@ -108,6 +108,38 @@ async fn hostnames_for_canonicalizes_ipv4_mapped_v6() {
 }
 
 #[tokio::test]
+async fn hostnames_for_keys_returned_map_by_caller_input_shape() {
+    // Regression test: a caller that stores `::ffff:a.b.c.d` in its own
+    // data structures must be able to look the same key up in the
+    // returned map. The DB stores the canonical IPv4 form; the map must
+    // translate back to whatever shape the caller passed in.
+    let pool = common::shared_migrated_pool().await.clone();
+    let mut tx = pool.begin().await.unwrap();
+    let plain: IpAddr = "203.0.113.41".parse().unwrap();
+    let mapped: IpAddr = "::ffff:203.0.113.41".parse().unwrap();
+
+    meshmon_service::hostname::record_positive(&mut *tx, plain, "reverse.example.com")
+        .await
+        .unwrap();
+
+    let map = meshmon_service::hostname::hostnames_for(&mut *tx, &[mapped, plain])
+        .await
+        .unwrap();
+    assert_eq!(
+        map.get(&mapped).cloned(),
+        Some(Some("reverse.example.com".into())),
+        "mapped-v6 input must appear under its own key in the returned map"
+    );
+    assert_eq!(
+        map.get(&plain).cloned(),
+        Some(Some("reverse.example.com".into())),
+        "plain-v4 input sharing the same canonical row must also appear"
+    );
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn hostnames_for_supports_ipv6() {
     let pool = common::shared_migrated_pool().await.clone();
     let mut tx = pool.begin().await.unwrap();

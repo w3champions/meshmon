@@ -18,7 +18,13 @@ use crate::hostname::canonicalize;
 
 /// Look up the most-recent non-expired hostname for each requested IP.
 ///
-/// Returned map semantics:
+/// Returned map semantics — keys mirror the **caller's input shape**
+/// (not the DB's canonical form), so `map.get(&requested_ip)` works
+/// regardless of whether the caller passed an IPv4-mapped IPv6 address
+/// or a plain IPv4 address. If the caller passes multiple inputs that
+/// canonicalize to the same DB row, every input appears in the returned
+/// map pointing at the same value.
+///
 /// - `Some(Some(hostname))` — positive hit.
 /// - `Some(None)` — negative hit (confirmed NXDOMAIN in cache).
 /// - key absent — cold cache: caller should enqueue a lookup.
@@ -48,7 +54,16 @@ where
     .fetch_all(executor)
     .await?;
 
-    Ok(rows.into_iter().collect())
+    let by_canonical: HashMap<IpAddr, Option<String>> = rows.into_iter().collect();
+    Ok(ips
+        .iter()
+        .filter_map(|ip| {
+            by_canonical
+                .get(&canonicalize(*ip))
+                .cloned()
+                .map(|value| (*ip, value))
+        })
+        .collect())
 }
 
 /// Insert a positive hit: `(ip, hostname)`.
