@@ -88,9 +88,7 @@ async fn sse_events_do_not_leak_between_sessions() {
     let cookie_a = harness.cookie.clone();
     // Session B: a second login under a different client IP so
     // tower_sessions issues a distinct session id.
-    let cookie_b = harness
-        .login_additional_session("203.0.113.201")
-        .await;
+    let cookie_b = harness.login_additional_session("203.0.113.201").await;
 
     let base_url = harness.base_url();
 
@@ -124,7 +122,9 @@ async fn sse_events_do_not_leak_between_sessions() {
     // spurious fanout. The lookup has already completed for A, so any
     // leak would land immediately.
     assert!(
-        timeout(Duration::from_millis(500), sse_b.next()).await.is_err(),
+        timeout(Duration::from_millis(500), sse_b.next())
+            .await
+            .is_err(),
         "session B must not receive events scoped to session A",
     );
 }
