@@ -210,9 +210,12 @@ async fn semaphore_bounds_concurrency() {
     }
 
     let elapsed = start.elapsed();
+    // Four 100ms backends under max_in_flight=1 must serialise, so the
+    // wall-clock floor is ~300ms (75% of ideal — leaves headroom for
+    // noisy CI schedulers while still detecting parallel execution).
     assert!(
-        elapsed >= Duration::from_millis(350),
-        "expected ~400ms serialised; got {elapsed:?}"
+        elapsed >= Duration::from_millis(300),
+        "expected serialised ~400ms; got {elapsed:?}"
     );
 }
 

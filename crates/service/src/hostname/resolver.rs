@@ -58,7 +58,7 @@ impl Resolver {
         }
     }
 
-    /// Broadcaster the resolver emits events on. Callers use this to
+    /// The broadcaster the resolver emits events on. Callers use this to
     /// register sessions and subscribe to events.
     pub fn broadcaster(&self) -> &HostnameBroadcaster {
         &self.inner.broadcaster
@@ -95,10 +95,14 @@ impl Resolver {
         }
     }
 
-    /// Force-refresh an IP. Identical flow to `enqueue`; freshness is
-    /// enforced by the reader's 90-day filter. If a lookup is already
-    /// in flight for `ip` the refresh joins that future (the new row
-    /// supersedes any stale one via `DISTINCT ON` at read time).
+    /// Request a fresh lookup for `ip`. Functionally identical to
+    /// [`Self::enqueue`]: if a lookup is already in flight, this
+    /// joins it rather than forcing a duplicate backend call; if a
+    /// cached row already exists, a new row will be written when the
+    /// lookup completes and the reader's `DISTINCT ON` picks the
+    /// newer one. It does not bypass single-flight or pre-empt an
+    /// already-cached value — callers who want absolute freshness
+    /// should combine this with a UI-level cache bust.
     pub async fn force_refresh(&self, ip: IpAddr, session: SessionId) {
         self.enqueue(ip, session).await
     }
@@ -107,10 +111,20 @@ impl Resolver {
 async fn run_lookup(inner: Arc<Inner>, ip: IpAddr) {
     let permit = inner.semaphore.clone().acquire_owned().await;
     let outcome = match permit {
-        Ok(_permit) => {
+        Ok(permit) => {
+            // SAFETY for AssertUnwindSafe: the backend future does not
+            // borrow `inner.pending`, so a panic during `reverse_lookup`
+            // cannot poison the pending mutex. `inner.backend` lives
+            // behind an `Arc`; a panic here leaves the `Arc` intact for
+            // subsequent calls. The pending record for `ip` is removed
+            // unconditionally below regardless of outcome.
             let result = AssertUnwindSafe(inner.backend.reverse_lookup(ip))
                 .catch_unwind()
                 .await;
+            // Hold the permit across the await above — drop it only
+            // after the backend resolves, so the semaphore caps
+            // concurrent in-flight lookups.
+            drop(permit);
             match result {
                 Ok(o) => o,
                 Err(_) => {
