@@ -132,6 +132,18 @@ refresh that errors keeps the previous snapshot in place, emits
 tick. Ingestion source validation therefore continues to accept known
 agents during brief DB outages.
 
+## Hostname resolution
+
+The service owns an authoritative IP → hostname cache at
+`crates/service/src/hostname/`, backed by a TimescaleDB hypertable
+with a 90-day retention policy. Reverse-DNS lookups run through
+`hickory-resolver` with single-flight dedup and panic containment;
+completion events fan out over `/api/hostnames/stream` scoped to
+the session that caused the lookup. Handlers returning
+IP-carrying DTOs consume the cache via `hostname::hostnames_for`
+and enqueue cold misses through `AppState::hostname_resolver`. See
+`src/hostname/README.md` for the full contract.
+
 ## Agent API (gRPC)
 
 The service exposes a tonic gRPC endpoint named `meshmon.AgentApi`. It shares
