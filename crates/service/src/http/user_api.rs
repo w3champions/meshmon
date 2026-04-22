@@ -10,6 +10,7 @@
 //! unauthenticated callers receive 401 from the middleware before the
 //! handler runs.
 
+use crate::catalogue::dto::ErrorEnvelope;
 use crate::hostname::{hostnames_for, session_id_from_auth, SessionId};
 use crate::http::auth::AuthSession;
 use crate::ingestion::json_shapes::{HopJson, PathSummaryJson};
@@ -192,7 +193,7 @@ fn db_error(context: &'static str, err: sqlx::Error) -> Response {
     responses(
         (status = 200, description = "List of all registered agents", body = Vec<AgentSummary>),
         (status = 401, description = "No active session"),
-        (status = 500, description = "Internal error"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
 pub async fn list_agents(State(state): State<AppState>, auth_session: AuthSession) -> Response {
@@ -222,7 +223,7 @@ pub async fn list_agents(State(state): State<AppState>, auth_session: AuthSessio
         (status = 200, description = "Agent detail", body = AgentSummary),
         (status = 401, description = "No active session"),
         (status = 404, description = "Agent not found"),
-        (status = 500, description = "Internal error"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
 pub async fn get_agent(
