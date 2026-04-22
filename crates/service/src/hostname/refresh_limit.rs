@@ -24,6 +24,9 @@ struct RefreshBucket {
 }
 
 impl HostnameRefreshLimiter {
+    /// Construct a limiter with the given cap and sliding window. Wraps
+    /// the new limiter in an `Arc` so it can be shared between handlers
+    /// and the sweeper task without additional wrapping at call sites.
     pub fn new(max_per_window: u32, window: Duration) -> Arc<Self> {
         Arc::new(Self {
             buckets: DashMap::new(),
@@ -68,7 +71,9 @@ impl HostnameRefreshLimiter {
         self.buckets.retain(|_, b| b.window_started > cutoff);
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    /// Testing hook: count currently-live buckets. Useful for asserting
+    /// that [`Self::sweep`] evicts idle sessions.
+    #[cfg(test)]
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }

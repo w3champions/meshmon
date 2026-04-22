@@ -18,6 +18,7 @@ use utoipa::ToSchema;
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// Wrap any stable string identifier as a session key.
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
@@ -31,11 +32,15 @@ impl SessionId {
 /// frontend expects (e.g. `"192.0.2.1"` / `"2001:db8::1"`).
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HostnameEvent {
+    /// Canonicalized IP the lookup applies to.
     #[schema(value_type = String)]
     pub ip: IpAddr,
+    /// Resolved hostname, or `None` when the lookup confirmed no PTR
+    /// record exists.
     pub hostname: Option<String>,
 }
 
+/// Session-scoped broker for `hostname_resolved` SSE events.
 #[derive(Clone, Default)]
 pub struct HostnameBroadcaster {
     inner: Arc<Inner>,
@@ -47,6 +52,7 @@ struct Inner {
 }
 
 impl HostnameBroadcaster {
+    /// Construct an empty broker with no registered sessions.
     pub fn new() -> Self {
         Self::default()
     }
@@ -81,12 +87,14 @@ impl HostnameBroadcaster {
     }
 
     /// Testing hook: count currently-registered sessions.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn session_count(&self) -> usize {
         self.inner.sessions.len()
     }
 }
 
+/// RAII handle returned by [`HostnameBroadcaster::register`]. Dropping it
+/// removes the session's channel from the registry.
 pub struct SessionHandle {
     session: SessionId,
     inner: Arc<Inner>,
@@ -121,7 +129,7 @@ mod tests {
         let (_handle_b, mut rx_b) = broker.register(session_b.clone(), 8);
 
         let event = sample_event();
-        broker.fanout(&[session_a.clone()], event.clone());
+        broker.fanout(std::slice::from_ref(&session_a), event.clone());
 
         let got = timeout(Duration::from_millis(50), rx_a.recv())
             .await
@@ -159,7 +167,7 @@ mod tests {
         let (_handle, mut rx) = broker.register(session.clone(), 1);
 
         for _ in 0..5 {
-            broker.fanout(&[session.clone()], sample_event());
+            broker.fanout(std::slice::from_ref(&session), sample_event());
         }
 
         // Only the first event fits; the remaining four are dropped.
