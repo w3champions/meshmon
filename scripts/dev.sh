@@ -22,7 +22,7 @@ set -euo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-DEPLOY_DIR=deploy
+DEPLOY_DIR="$REPO_ROOT/deploy"
 ADMIN_PASSWORD=${MESHMON_DEV_ADMIN_PASSWORD:-smoketest}
 PG_PASSWORD=${MESHMON_DEV_PG_PASSWORD:-meshmon}
 PG_GRAFANA_PASSWORD=${MESHMON_DEV_PG_GRAFANA_PASSWORD:-grafana}
@@ -182,7 +182,7 @@ if [[ "$service_ready" != "1" ]]; then
 fi
 
 if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
-    echo "[dev.sh] starting 3 dev agents on bridge 172.31.0.0/24 (first run builds Dockerfile.agent — slow)"
+    echo "[dev.sh] starting 3 dev agents on bridge 172.31.0.0/24 (cold Dockerfile.agent build can take several minutes)"
     (cd "$DEPLOY_DIR" && docker compose \
         -f docker-compose.agents-dev.yml up -d --build)
     echo "[dev.sh] 3 dev agents registering from 172.31.0.11/12/13 (Frankfurt, São Paulo, Singapore)"

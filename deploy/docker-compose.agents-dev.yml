@@ -22,7 +22,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.agent
     container_name: meshmon-dev-agent-1
-    restart: unless-stopped
+    restart: "no"
     cap_add:
       - NET_RAW    # ICMP + trippy raw sockets
       - NET_ADMIN  # trippy fd control
@@ -49,7 +49,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.agent
     container_name: meshmon-dev-agent-2
-    restart: unless-stopped
+    restart: "no"
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -76,7 +76,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.agent
     container_name: meshmon-dev-agent-3
-    restart: unless-stopped
+    restart: "no"
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -103,4 +103,6 @@ networks:
     driver: bridge
     ipam:
       config:
+        # 172.31.0.0/24 sits just above Docker's default auto-allocation pool
+        # (which starts at 172.17.x). Adjust if your VPN claims 172.31.x.
         - subnet: 172.31.0.0/24
