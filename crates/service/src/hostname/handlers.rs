@@ -13,7 +13,7 @@
 //! and the refresh rate-limiter all agree on a single key per session.
 
 use crate::{
-    hostname::{HostnameEvent, SessionHandle, SessionId},
+    hostname::{session_id_from_auth, HostnameEvent, SessionHandle},
     http::auth::AuthSession,
     state::AppState,
 };
@@ -25,22 +25,6 @@ use axum::{
 use futures::Stream;
 use std::{convert::Infallible, time::Duration};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-
-/// Resolve an `AuthSession` extractor to a stable session-id string.
-///
-/// `auth_session.session.id()` returns `Option<tower_sessions::Id>`.
-/// An authenticated session always has an id; we fall back to a
-/// placeholder only to keep the types total — `login_required!`
-/// already rejects anonymous callers before the handler runs.
-fn session_id_from(auth_session: &AuthSession) -> SessionId {
-    SessionId::new(
-        auth_session
-            .session
-            .id()
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "no-session-id".to_string()),
-    )
-}
 
 /// SSE stream of `hostname_resolved` events scoped to this session.
 #[utoipa::path(
@@ -56,7 +40,7 @@ pub async fn hostname_stream(
     State(state): State<AppState>,
     auth_session: AuthSession,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let session = session_id_from(&auth_session);
+    let session = session_id_from_auth(&auth_session);
     let (handle, rx): (SessionHandle, _) = state.hostname_broadcaster.register(session, 64);
 
     // The outer `move` captures `handle` by value, so the closure takes
@@ -99,7 +83,7 @@ pub async fn hostname_refresh(
     auth_session: AuthSession,
     Path(ip): Path<String>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
-    let session = session_id_from(&auth_session);
+    let session = session_id_from_auth(&auth_session);
 
     if !state.hostname_refresh_limiter.check_and_increment(&session) {
         return Err((StatusCode::TOO_MANY_REQUESTS, "rate limited"));

@@ -1350,6 +1350,18 @@ export interface components {
             /** @description Current enrichment pipeline status. */
             enrichment_status: components["schemas"]["EnrichmentStatus"];
             /**
+             * @description Server-joined reverse-DNS hostname for [`Self::ip`].
+             *
+             *     Populated by the handler after a single batched
+             *     [`crate::hostname::hostnames_for`] lookup: `Some(_)` is a positive
+             *     cache hit; `None` is either a confirmed-negative hit (serialized
+             *     as absent via the skip-none attribute) or a cold miss. Cold
+             *     misses also enqueue a background resolution scoped to the
+             *     caller's session so the value arrives over the hostname SSE
+             *     stream.
+             */
+            hostname?: string | null;
+            /**
              * Format: uuid
              * @description Primary key (UUID v4).
              */

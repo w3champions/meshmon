@@ -3423,6 +3423,13 @@
             "$ref": "#/components/schemas/EnrichmentStatus",
             "description": "Current enrichment pipeline status."
           },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server-joined reverse-DNS hostname for [`Self::ip`].\n\nPopulated by the handler after a single batched\n[`crate::hostname::hostnames_for`] lookup: `Some(_)` is a positive\ncache hit; `None` is either a confirmed-negative hit (serialized\nas absent via the skip-none attribute) or a cold miss. Cold\nmisses also enqueue a background resolution scoped to the\ncaller's session so the value arrives over the hostname SSE\nstream."
+          },
           "id": {
             "type": "string",
             "format": "uuid",

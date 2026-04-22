@@ -39,6 +39,7 @@ use super::model::{CatalogueSource, Field};
 use super::parse::{parse_ip_tokens, ParseReason};
 use super::repo;
 use super::repo::FacetsResponse;
+use crate::hostname::{hostnames_for, session_id_from_auth, SessionId};
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -46,8 +47,53 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
+use std::net::IpAddr;
 use std::str::FromStr;
 use uuid::Uuid;
+
+/// Stamp `dto.hostname` on every row whose IP the cache already knows
+/// about, and enqueue a background resolution for every cold miss.
+///
+/// - Positive cache hit: sets `dto.hostname = Some(h)`.
+/// - Negative cache hit: leaves `dto.hostname = None` (skip-none on the
+///   wire so the client sees an absent key, not `null`).
+/// - Cold miss: leaves `dto.hostname = None` and calls
+///   [`crate::hostname::Resolver::enqueue`] with the caller's
+///   [`SessionId`] so the resolution lands on that session's SSE stream
+///   when it completes.
+///
+/// Unparseable IP strings on a DTO are skipped — every DTO's `ip` comes
+/// from [`std::net::IpAddr::to_string`] so this branch is defensive only.
+/// A DB error is propagated; the caller maps it to a 500. The function
+/// is idempotent: running it twice leaves the DTO identical because
+/// the stamp is a simple assignment keyed on the cache contents.
+async fn stamp_hostnames(
+    state: &AppState,
+    session: &SessionId,
+    dtos: &mut [CatalogueEntryDto],
+) -> sqlx::Result<()> {
+    if dtos.is_empty() {
+        return Ok(());
+    }
+    let ips: Vec<IpAddr> = dtos.iter().filter_map(|d| d.ip.parse().ok()).collect();
+    if ips.is_empty() {
+        return Ok(());
+    }
+    let cache = hostnames_for(&state.pool, &ips).await?;
+    for dto in dtos.iter_mut() {
+        let Ok(ip): Result<IpAddr, _> = dto.ip.parse() else {
+            continue;
+        };
+        match cache.get(&ip) {
+            Some(Some(h)) => dto.hostname = Some(h.clone()),
+            Some(None) => {}
+            None => {
+                state.hostname_resolver.enqueue(ip, session.clone()).await;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Render a repo error as an HTTP 500 with a stable JSON error body.
 ///
@@ -313,7 +359,7 @@ pub async fn paste(
         "catalogue paste",
     );
 
-    let response = PasteResponse {
+    let mut response = PasteResponse {
         created: outcome
             .created
             .into_iter()
@@ -327,6 +373,15 @@ pub async fn paste(
         invalid,
         skipped_summary,
     };
+
+    let session = session_id_from_auth(&auth_session);
+    if let Err(e) = stamp_hostnames(&state, &session, &mut response.created).await {
+        return db_error("catalogue paste: stamp_hostnames failed", e);
+    }
+    if let Err(e) = stamp_hostnames(&state, &session, &mut response.existing).await {
+        return db_error("catalogue paste: stamp_hostnames failed", e);
+    }
+
     (StatusCode::OK, Json(response)).into_response()
 }
 
@@ -356,7 +411,11 @@ pub async fn paste(
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
-pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
+pub async fn list(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+    Query(q): Query<ListQuery>,
+) -> Response {
     // The `name` query param is a user-facing substring filter. The repo
     // binds it verbatim into `display_name ILIKE $5`, so `trim_to_ilike`
     // wraps the value with `%…%` here so callers can pass `?name=Fastly`
@@ -400,11 +459,15 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     };
     match repo::list(&state.pool, filter).await {
         Ok((entries, total, next_cursor)) => {
-            let body = ListResponse {
+            let mut body = ListResponse {
                 entries: entries.into_iter().map(CatalogueEntryDto::from).collect(),
                 total,
                 next_cursor: next_cursor.map(|c| c.encode()),
             };
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) = stamp_hostnames(&state, &session, &mut body.entries).await {
+                return db_error("catalogue list: stamp_hostnames failed", e);
+            }
             (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => db_error("catalogue list: repo::list failed", e),
@@ -430,9 +493,21 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
-pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+pub async fn get_one(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+    Path(id): Path<Uuid>,
+) -> Response {
     match repo::find_by_id(&state.pool, id).await {
-        Ok(Some(row)) => (StatusCode::OK, Json(CatalogueEntryDto::from(row))).into_response(),
+        Ok(Some(row)) => {
+            let mut dto = CatalogueEntryDto::from(row);
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) = stamp_hostnames(&state, &session, std::slice::from_mut(&mut dto)).await
+            {
+                return db_error("catalogue get_one: stamp_hostnames failed", e);
+            }
+            (StatusCode::OK, Json(dto)).into_response()
+        }
         // Body key matches the gateway's `backend_path_404` envelope and
         // the 500 path's `db_error` helper — every non-2xx `/api` response
         // carries a snake_case, machine-parseable `error` code.
@@ -479,6 +554,7 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
 )]
 pub async fn patch(
     State(state): State<AppState>,
+    auth_session: AuthSession,
     Path(id): Path<Uuid>,
     Json(req): Json<PatchRequest>,
 ) -> Response {
@@ -576,7 +652,13 @@ pub async fn patch(
             // cost of an extra DB round-trip is lower than missing a bucket
             // change because a field-level introspection was too conservative.
             state.facets_cache.invalidate().await;
-            (StatusCode::OK, Json(CatalogueEntryDto::from(entry))).into_response()
+            let mut dto = CatalogueEntryDto::from(entry);
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) = stamp_hostnames(&state, &session, std::slice::from_mut(&mut dto)).await
+            {
+                return db_error("catalogue patch: stamp_hostnames failed", e);
+            }
+            (StatusCode::OK, Json(dto)).into_response()
         }
         Err(sqlx::Error::RowNotFound) => {
             (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
@@ -655,6 +737,10 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resp
     ),
 )]
 pub async fn reenrich_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+    // No DTO is returned on the success path — the response is a bare
+    // 202 — so there is no body to stamp a hostname on. The enrichment
+    // pipeline re-reads the row from the DB, and the next
+    // `GET /api/catalogue/{id}` will stamp it through `stamp_hostnames`.
     match repo::find_by_id(&state.pool, id).await {
         Ok(Some(_)) => {
             if let Err(e) = repo::mark_enrichment_start(&state.pool, id).await {
@@ -717,6 +803,9 @@ pub async fn reenrich_many(
     State(state): State<AppState>,
     Json(body): Json<BulkReenrichRequest>,
 ) -> Response {
+    // Returns only a status (`202` / `400`); no DTOs on the wire so
+    // there is nothing to stamp with hostnames. The frontend refetches
+    // the affected rows through `list` / `get_one`, both of which stamp.
     if body.ids.len() > MAX_BULK_REENRICH_IDS {
         return (
             StatusCode::BAD_REQUEST,
@@ -767,7 +856,11 @@ pub async fn reenrich_many(
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
-pub async fn map(State(state): State<AppState>, Query(q): Query<MapQuery>) -> Response {
+pub async fn map(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+    Query(q): Query<MapQuery>,
+) -> Response {
     let filter = repo::MapFilter {
         country_code: q.country_code,
         asn: q.asn,
@@ -778,10 +871,13 @@ pub async fn map(State(state): State<AppState>, Query(q): Query<MapQuery>) -> Re
     };
     match repo::map_detail_or_clusters(&state.pool, filter, q.zoom).await {
         Ok(repo::MapResult::Detail { rows, total }) => {
-            let body = MapResponse::Detail {
-                rows: rows.into_iter().map(CatalogueEntryDto::from).collect(),
-                total,
-            };
+            let mut dtos: Vec<CatalogueEntryDto> =
+                rows.into_iter().map(CatalogueEntryDto::from).collect();
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) = stamp_hostnames(&state, &session, &mut dtos).await {
+                return db_error("catalogue map: stamp_hostnames failed", e);
+            }
+            let body = MapResponse::Detail { rows: dtos, total };
             (StatusCode::OK, Json(body)).into_response()
         }
         Ok(repo::MapResult::Clusters {
@@ -789,6 +885,8 @@ pub async fn map(State(state): State<AppState>, Query(q): Query<MapQuery>) -> Re
             total,
             cell_size,
         }) => {
+            // Cluster buckets are aggregates keyed by cell centre — they
+            // do not carry individual IPs, so there is nothing to stamp.
             let body = MapResponse::Clusters {
                 buckets,
                 total,
