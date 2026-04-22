@@ -38,6 +38,8 @@ export default defineConfig({
       allow: [path.resolve(__dirname, "..")],
     },
     proxy: {
+      // `changeOrigin: true` matches the other proxied prefixes for
+      // consistent cookie/host handling.
       "/api": { target: backend, changeOrigin: true },
       // `ws: true` carries Grafana Live (`/grafana/api/live/ws`).
       "/grafana": { target: backend, changeOrigin: true, ws: true },
