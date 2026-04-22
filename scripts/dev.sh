@@ -59,31 +59,42 @@ SERVICE_LOG="$REPO_ROOT/target/dev-logs/meshmon-service.log"
 cleanup() {
     local rc=$?
     set +e
+    # Disarm the trap so the bash-level exit path doesn't re-enter
+    # cleanup while we're still running (HUP during docker-compose down
+    # would otherwise re-fire this function and race with itself).
+    trap - EXIT INT TERM HUP
+    echo "[dev.sh] cleanup starting (exit status $rc)" >&2
     # Kill tmux surface first so pane-hosted processes (cargo, vite,
     # docker compose logs) receive SIGHUP before the containers they
     # watch go away. Both branches are idempotent.
     if [[ -n "$TMUX_WINDOW" ]]; then
+        echo "[dev.sh] cleanup: tmux kill-window $TMUX_WINDOW" >&2
         tmux kill-window -t "$TMUX_WINDOW" 2>/dev/null || true
     fi
     tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     if [[ -n "${SERVICE_PID:-}" ]]; then
+        echo "[dev.sh] cleanup: killing meshmon-service PID $SERVICE_PID" >&2
         kill "$SERVICE_PID" 2>/dev/null || true
         wait "$SERVICE_PID" 2>/dev/null || true
     fi
     if [[ "${KEEP_INFRA:-0}" != "1" ]]; then
         if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
+            echo "[dev.sh] cleanup: docker compose down dev agents" >&2
             (cd "$DEPLOY_DIR" && docker compose \
                 -f docker-compose.agents-dev.yml down -v) || true
         fi
+        echo "[dev.sh] cleanup: docker compose down infra (postgres / VM / grafana / alertmanager / vmalert)" >&2
         (cd "$DEPLOY_DIR" && docker compose \
             -f docker-compose.yml -f docker-compose.dev.yml down -v) || true
+        echo "[dev.sh] cleanup: removing throwaway $DEPLOY_DIR/.env and meshmon.toml" >&2
         rm -f "$DEPLOY_DIR/.env" "$DEPLOY_DIR/meshmon.toml"
     else
         echo "[dev.sh] KEEP_INFRA=1 — leaving infra containers running" >&2
     fi
+    echo "[dev.sh] cleanup done" >&2
     exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 echo "[dev.sh] staging deploy/.env + meshmon.toml"
 ADMIN_HASH=$(echo -n "$ADMIN_PASSWORD" | argon2 "$(openssl rand -base64 16)" -id -t 2 -m 19 -p 1 -e)
@@ -210,11 +221,16 @@ if [[ "$USE_TMUX" == "1" ]]; then
     # Make sure no stale session from a previous run is left behind.
     tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
-    # Shell-fragment helpers. `exec` so the pane shell is replaced by
-    # the child — when the child exits the pane closes, which keeps the
-    # tmux layout clean.
-    SERVICE_CMD="cd $(printf '%q' "$REPO_ROOT") && exec cargo run -p meshmon-service"
-    VITE_CMD="cd $(printf '%q' "$REPO_ROOT/frontend") && MESHMON_API_PROXY_TARGET=http://127.0.0.1:$SERVICE_PORT exec npm run dev"
+    # Shell-fragment helpers. The service and vite commands do NOT exec;
+    # instead they capture the child's exit code and pause on a keypress
+    # so a boot-time failure (config error, port collision, compile
+    # failure) remains on-screen for diagnosis instead of closing the
+    # pane instantly. The agent-logs pane runs `docker compose logs -f`
+    # which only exits on user Ctrl-C, so exec is fine there.
+    # shellcheck disable=SC2016  # intentional: $? and $rc expand in the pane shell, not here.
+    PAUSE_ON_EXIT='rc=$?; echo; echo "[dev.sh] pane command exited with status $rc"; echo "[dev.sh] press any key to close this pane"; read -n 1 -s -r'
+    SERVICE_CMD="cd $(printf '%q' "$REPO_ROOT") && cargo run -p meshmon-service; $PAUSE_ON_EXIT"
+    VITE_CMD="cd $(printf '%q' "$REPO_ROOT/frontend") && MESHMON_API_PROXY_TARGET=http://127.0.0.1:$SERVICE_PORT npm run dev; $PAUSE_ON_EXIT"
     AGENT_LOGS_CMD="cd $(printf '%q' "$DEPLOY_DIR") && exec docker compose -f docker-compose.agents-dev.yml logs -f"
 
     # When a tmux server is already running, new sessions/windows inherit
