@@ -373,10 +373,11 @@ describe("CatalogueMap", () => {
       notes: null,
     });
     renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
-    // IP renders in the header AND in the Hostname meta row (the row always
-    // appears; the shared `<IpHostname>` falls back to the bare IP until the
-    // provider has a positive hit).
-    expect(screen.getAllByText("192.168.1.1").length).toBeGreaterThanOrEqual(1);
+    // IP renders in the header (display_name is null → the header `<p>` shows
+    // the IP) AND in the Hostname meta row (the row always appears; the
+    // shared `<IpHostname>` falls back to the bare IP until the provider has
+    // a positive hit). Exactly two nodes, no more.
+    expect(screen.getAllByText("192.168.1.1")).toHaveLength(2);
     expect(screen.queryByText(/AS\s*—/i)).not.toBeInTheDocument();
   });
 
@@ -393,8 +394,9 @@ describe("CatalogueMap", () => {
     renderWithQuery(<EntryPopup entry={entry} onOpen={() => {}} />);
     expect(screen.getByText("My Server")).toBeInTheDocument();
     // IP appears twice — once under the display_name in the header and once
-    // in the Hostname meta row; `getAllByText` keeps the assertion honest.
-    expect(screen.getAllByText("10.1.2.3").length).toBeGreaterThanOrEqual(1);
+    // in the Hostname meta row via `<IpHostname>` (bare-IP fallback until the
+    // provider has a positive hit). Exactly two nodes, no more.
+    expect(screen.getAllByText("10.1.2.3")).toHaveLength(2);
     expect(screen.getByText("Hong Kong, Hong Kong")).toBeInTheDocument();
     expect(screen.getByText("AS13335 · Cloudflare")).toBeInTheDocument();
     const link = screen.getByRole("link", { name: "cloudflare.com" });

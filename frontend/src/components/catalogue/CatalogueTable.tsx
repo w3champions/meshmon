@@ -451,8 +451,7 @@ function buildNonActionColumns(): ColumnDef<CatalogueEntry>[] {
     {
       id: "hostname",
       header: "Hostname",
-      // Sort deliberately omitted — the backend has no hostname sort key in
-      // this batch; hostname is joined in at response time (see T53b §5).
+      // No hostname sort key on the server yet — render a plain header.
       // Reads from the shared `<IpHostnameProvider>` map; the seed-on-response
       // hook primes the map from the list query so the cell resolves without
       // flicker once the provider has a positive hit.

@@ -108,6 +108,8 @@ export function EntryMeta({ entry }: EntryMetaProps) {
           </span>
         </EntryMetaRow>
       ) : null}
+      {/* Unconditional: `<IpHostname>` always renders at least the bare IP,
+          so this row has nothing to guard on (unlike Location / Network). */}
       <EntryMetaRow icon={<Server className="h-3.5 w-3.5" />} label="Hostname">
         <IpHostname ip={entry.ip} />
       </EntryMetaRow>

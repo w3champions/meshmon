@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { type ReactNode, useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -374,65 +374,77 @@ describe("EntryDrawer", () => {
       expect(screen.getByText("(alpha.example.com)")).toBeInTheDocument();
     });
 
-    test("clicking Refresh hostname POSTs to /api/hostnames/:ip/refresh and disables optimistically", async () => {
-      const fetchSpy = vi
-        .spyOn(globalThis, "fetch")
-        .mockResolvedValue(new Response(null, { status: 202 }));
-
-      const user = userEvent.setup();
-      render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
-
-      const button = screen.getByRole("button", { name: /refresh hostname/i });
-      expect(button).not.toBeDisabled();
-
-      await user.click(button);
-
-      // Optimistic disable — the handler fires `setPending(true)` before
-      // awaiting the POST.
-      expect(button).toBeDisabled();
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const [url, init] = fetchSpy.mock.calls[0] ?? [];
-      expect(url).toBe(`/api/hostnames/${ENTRY.ip}/refresh`);
-      expect(init?.method).toBe("POST");
-
-      // After the 2 s cooldown the button re-enables. waitFor defaults to a
-      // 1 s interval cap on retries, well inside the 5 s Vitest test budget
-      // once the real timer fires.
-      await waitFor(
-        () => {
-          expect(button).not.toBeDisabled();
-        },
-        { timeout: 3000 },
-      );
-    });
-
-    test("failed refresh toasts and the button re-enables after the cooldown", async () => {
-      const { toast } = await import("sonner");
-      const errorSpy = vi.spyOn(toast, "error").mockReturnValue("toast-id");
-      vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 429 }));
-
-      const user = userEvent.setup();
-      render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
-
-      const button = screen.getByRole("button", { name: /refresh hostname/i });
-      await user.click(button);
-
-      // The rejected fetch resolves the handler's catch block — wait until
-      // toast.error has been called so the assertion is deterministic.
-      await waitFor(() => {
-        expect(errorSpy).toHaveBeenCalled();
+    // The two cooldown tests below drive a 2 s setTimeout inside the handler
+    // and must not wait on real elapsed time. Fake timers are scoped to this
+    // nested block so the sibling seed test above and every unrelated test
+    // in the file keep their default real-timer behavior.
+    describe("with cooldown timer", () => {
+      beforeEach(() => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
       });
-      const firstArg = errorSpy.mock.calls[0]?.[0];
-      expect(String(firstArg)).toMatch(/refresh hostname|HTTP 429/i);
+      afterEach(() => {
+        vi.useRealTimers();
+      });
 
-      // Button stays disabled until the cooldown elapses, even on failure.
-      expect(button).toBeDisabled();
-      await waitFor(
-        () => {
+      test("clicking Refresh hostname POSTs to /api/hostnames/:ip/refresh and disables optimistically", async () => {
+        const fetchSpy = vi
+          .spyOn(globalThis, "fetch")
+          .mockResolvedValue(new Response(null, { status: 202 }));
+
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+
+        const button = screen.getByRole("button", { name: /refresh hostname/i });
+        expect(button).not.toBeDisabled();
+
+        await user.click(button);
+
+        // Optimistic disable — the handler fires `setPending(true)` before
+        // awaiting the POST.
+        expect(button).toBeDisabled();
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0] ?? [];
+        expect(url).toBe(`/api/hostnames/${ENTRY.ip}/refresh`);
+        expect(init?.method).toBe("POST");
+
+        // Advance past the 2 000 ms cooldown inside `act` so React flushes
+        // the `setPending(false)` state transition deterministically.
+        await act(async () => {
+          vi.advanceTimersByTime(2001);
+        });
+        await waitFor(() => {
           expect(button).not.toBeDisabled();
-        },
-        { timeout: 3000 },
-      );
+        });
+      });
+
+      test("failed refresh toasts and the button re-enables after the cooldown", async () => {
+        const { toast } = await import("sonner");
+        const errorSpy = vi.spyOn(toast, "error").mockReturnValue("toast-id");
+        vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 429 }));
+
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        render(<EntryDrawer entry={ENTRY} onClose={vi.fn()} />, { wrapper: wrap() });
+
+        const button = screen.getByRole("button", { name: /refresh hostname/i });
+        await user.click(button);
+
+        // The rejected fetch resolves the handler's catch block — wait until
+        // toast.error has been called so the assertion is deterministic.
+        await waitFor(() => {
+          expect(errorSpy).toHaveBeenCalled();
+        });
+        const firstArg = errorSpy.mock.calls[0]?.[0];
+        expect(String(firstArg)).toMatch(/refresh hostname|HTTP 429/i);
+
+        // Button stays disabled until the cooldown elapses, even on failure.
+        expect(button).toBeDisabled();
+        await act(async () => {
+          vi.advanceTimersByTime(2001);
+        });
+        await waitFor(() => {
+          expect(button).not.toBeDisabled();
+        });
+      });
     });
   });
 });
