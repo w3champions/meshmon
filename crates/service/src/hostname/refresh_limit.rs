@@ -71,9 +71,15 @@ impl HostnameRefreshLimiter {
     /// called periodically from a long-running sweeper task so
     /// long-lived servers don't accumulate buckets for sessions that
     /// logged out.
+    ///
+    /// On process start the monotonic clock may be younger than
+    /// `2 * window`; in that case no bucket can possibly be stale, so
+    /// this is a no-op rather than falsely evicting fresh buckets.
     pub fn sweep(&self) {
         let now = Instant::now();
-        let cutoff = now.checked_sub(self.window * 2).unwrap_or(now);
+        let Some(cutoff) = now.checked_sub(self.window * 2) else {
+            return;
+        };
         self.buckets.retain(|_, b| b.window_started > cutoff);
     }
 

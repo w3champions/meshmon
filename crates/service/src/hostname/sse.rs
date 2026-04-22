@@ -5,9 +5,22 @@
 //! `catalogue::events::CatalogueBroker` — which broadcasts to every
 //! subscriber — this broker routes events through a [`DashMap`] keyed by
 //! [`SessionId`] so fan-out is O(recipients) rather than O(subscribers).
+//!
+//! A single session id may carry more than one concurrent subscription —
+//! a user can open two tabs, and `EventSource` can race a reconnect with
+//! the old connection's teardown. Each [`SessionHandle`] therefore carries
+//! a unique token; the map value is `Vec<Subscription>`, and `Drop`
+//! removes only the subscription that owns the token. Fanout delivers to
+//! every live subscription under the session.
 use dashmap::DashMap;
 use serde::Serialize;
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    net::IpAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::mpsc;
 use utoipa::ToSchema;
 
@@ -48,7 +61,13 @@ pub struct HostnameBroadcaster {
 
 #[derive(Default)]
 struct Inner {
-    sessions: DashMap<SessionId, mpsc::Sender<HostnameEvent>>,
+    sessions: DashMap<SessionId, Vec<Subscription>>,
+    next_token: AtomicU64,
+}
+
+struct Subscription {
+    token: u64,
+    tx: mpsc::Sender<HostnameEvent>,
 }
 
 impl HostnameBroadcaster {
@@ -57,37 +76,48 @@ impl HostnameBroadcaster {
         Self::default()
     }
 
-    /// Register a session. Returns a bounded receiver + a handle
-    /// whose Drop removes the channel from the registry.
+    /// Register a subscription for `session`. Multiple subscriptions
+    /// under the same session id coexist; each receives a dedicated
+    /// channel plus a handle whose `Drop` removes only that
+    /// subscription from the registry.
     pub fn register(
         &self,
         session: SessionId,
         capacity: usize,
     ) -> (SessionHandle, mpsc::Receiver<HostnameEvent>) {
         let (tx, rx) = mpsc::channel(capacity);
-        self.inner.sessions.insert(session.clone(), tx);
+        let token = self.inner.next_token.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .sessions
+            .entry(session.clone())
+            .or_default()
+            .push(Subscription { token, tx });
         let handle = SessionHandle {
             session,
+            token,
             inner: self.inner.clone(),
         };
         (handle, rx)
     }
 
-    /// Deliver `event` to every session in `recipients`. Sessions
-    /// whose channels are closed or full get the event silently
-    /// dropped (best-effort; the browser's EventSource reconnect
-    /// and TanStack-Query refetch-on-reconnect are the recovery
-    /// path).
+    /// Deliver `event` to every live subscription of every session in
+    /// `recipients`. Channels that are closed or full silently drop the
+    /// event (best-effort; the browser's EventSource reconnect and
+    /// TanStack-Query refetch-on-reconnect are the recovery path).
     pub fn fanout(&self, recipients: &[SessionId], event: HostnameEvent) {
         for session in recipients {
-            if let Some(sender) = self.inner.sessions.get(session) {
-                let _ = sender.try_send(event.clone());
+            if let Some(subs) = self.inner.sessions.get(session) {
+                for sub in subs.iter() {
+                    let _ = sub.tx.try_send(event.clone());
+                }
             }
         }
     }
 
-    /// Number of sessions currently registered. Diagnostic; used by
-    /// integration tests to assert registry lifecycle.
+    /// Number of distinct sessions currently registered. A session
+    /// appears here regardless of how many subscriptions it owns.
+    /// Diagnostic; used by integration tests to assert registry
+    /// lifecycle.
     #[doc(hidden)]
     pub fn session_count(&self) -> usize {
         self.inner.sessions.len()
@@ -95,15 +125,37 @@ impl HostnameBroadcaster {
 }
 
 /// RAII handle returned by [`HostnameBroadcaster::register`]. Dropping it
-/// removes the session's channel from the registry.
+/// removes exactly the subscription it owns from the registry; other
+/// subscriptions registered under the same session id are preserved.
 pub struct SessionHandle {
     session: SessionId,
+    token: u64,
     inner: Arc<Inner>,
 }
 
 impl Drop for SessionHandle {
     fn drop(&mut self) {
-        self.inner.sessions.remove(&self.session);
+        // Scope the `get_mut` guard so the shard lock is released before
+        // `remove_if` re-acquires it (DashMap's `remove_if` locks the
+        // same shard internally, and holding a mut guard across the call
+        // would deadlock).
+        {
+            if let Some(mut entry) = self.inner.sessions.get_mut(&self.session) {
+                entry.retain(|sub| sub.token != self.token);
+                if !entry.is_empty() {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        // Atomically remove the entry only if it's still empty. A
+        // concurrent `register` between the `get_mut` drop and here
+        // would have re-pushed; the `is_empty` predicate keeps that
+        // subscription alive.
+        self.inner
+            .sessions
+            .remove_if(&self.session, |_, v| v.is_empty());
     }
 }
 
@@ -182,5 +234,78 @@ mod tests {
             timeout(Duration::from_millis(50), rx.recv()).await.is_err(),
             "subsequent events should be silently dropped when the channel is full",
         );
+    }
+
+    #[tokio::test]
+    async fn multiple_subscriptions_under_one_session_all_receive() {
+        let broker = HostnameBroadcaster::new();
+        let session = SessionId::new("a");
+        let (_h1, mut rx1) = broker.register(session.clone(), 4);
+        let (_h2, mut rx2) = broker.register(session.clone(), 4);
+
+        assert_eq!(
+            broker.session_count(),
+            1,
+            "two subscriptions under one session still count as one session",
+        );
+
+        broker.fanout(std::slice::from_ref(&session), sample_event());
+
+        let got1 = timeout(Duration::from_millis(50), rx1.recv())
+            .await
+            .expect("first subscription should receive event")
+            .expect("channel open");
+        let got2 = timeout(Duration::from_millis(50), rx2.recv())
+            .await
+            .expect("second subscription should receive event")
+            .expect("channel open");
+        assert_eq!(got1.ip, sample_event().ip);
+        assert_eq!(got2.ip, sample_event().ip);
+    }
+
+    #[tokio::test]
+    async fn dropping_one_subscription_preserves_siblings() {
+        let broker = HostnameBroadcaster::new();
+        let session = SessionId::new("a");
+        let (h1, mut rx1) = broker.register(session.clone(), 4);
+        let (_h2, mut rx2) = broker.register(session.clone(), 4);
+
+        // Drop the first handle. The session entry must stay alive
+        // because the second subscription is still registered.
+        drop(h1);
+        assert_eq!(broker.session_count(), 1);
+
+        broker.fanout(std::slice::from_ref(&session), sample_event());
+
+        // The surviving subscription receives the event.
+        let got = timeout(Duration::from_millis(50), rx2.recv())
+            .await
+            .expect("surviving subscription should receive event")
+            .expect("channel open");
+        assert_eq!(got.ip, sample_event().ip);
+
+        // The dropped subscription's channel is closed — `recv()`
+        // returns `None` rather than an event.
+        assert!(
+            matches!(
+                timeout(Duration::from_millis(50), rx1.recv()).await,
+                Ok(None) | Err(_)
+            ),
+            "dropped subscription must not receive the event",
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_all_subscriptions_clears_session() {
+        let broker = HostnameBroadcaster::new();
+        let session = SessionId::new("a");
+        let (h1, _rx1) = broker.register(session.clone(), 4);
+        let (h2, _rx2) = broker.register(session.clone(), 4);
+        assert_eq!(broker.session_count(), 1);
+
+        drop(h1);
+        assert_eq!(broker.session_count(), 1);
+        drop(h2);
+        assert_eq!(broker.session_count(), 0);
     }
 }
