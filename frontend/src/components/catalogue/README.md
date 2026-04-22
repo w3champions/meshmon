@@ -1,7 +1,8 @@
 # `components/catalogue`
 
 UI components for the `/catalogue` page. They are composed inside the
-catalogue route and share a single SSE connection opened at the page level.
+catalogue route and share a single SSE connection opened once for the
+authenticated subtree.
 
 ## Files
 
