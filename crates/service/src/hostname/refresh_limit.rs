@@ -11,7 +11,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Per-session refresh-rate bucket. Caps at 60 calls / 60 seconds.
+/// Per-session refresh-rate bucket. Fixed-window: up to `max_per_window`
+/// calls per `window`, where the window starts on the first call and
+/// resets when it expires. A burst at the window boundary can therefore
+/// admit up to `2 * max_per_window` calls across the boundary — that's
+/// intentional; a PTR-lookup limiter doesn't need sliding-window rigor.
 pub struct HostnameRefreshLimiter {
     buckets: DashMap<SessionId, RefreshBucket>,
     max_per_window: u32,
@@ -63,16 +67,19 @@ impl HostnameRefreshLimiter {
         }
     }
 
-    /// Evict buckets whose window ended more than `window`
-    /// seconds ago. Called periodically by the sweeper task in
-    /// `AppState::new`.
+    /// Evict buckets idle for more than `2 * window`. Intended to be
+    /// called periodically from a long-running sweeper task so
+    /// long-lived servers don't accumulate buckets for sessions that
+    /// logged out.
     pub fn sweep(&self) {
-        let cutoff = Instant::now() - self.window * 2;
+        let now = Instant::now();
+        let cutoff = now.checked_sub(self.window * 2).unwrap_or(now);
         self.buckets.retain(|_, b| b.window_started > cutoff);
     }
 
-    /// Number of sessions currently tracked. Useful for asserting that
-    /// [`Self::sweep`] evicts idle sessions.
+    /// Number of sessions currently tracked. Diagnostic; used by tests
+    /// to assert that [`Self::sweep`] evicts idle sessions.
+    #[doc(hidden)]
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }

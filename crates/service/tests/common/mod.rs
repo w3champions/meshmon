@@ -1990,8 +1990,8 @@ impl ResolverBackend for StubHostnameBackend {
     }
 }
 
-/// `StubHostnameBackend` returning a panic via the backend impl.
-/// Used in Task 11 to prove panic containment.
+/// `ResolverBackend` that panics on first call. Used by the resolver
+/// panic-containment integration test.
 pub struct PanicHostnameBackend {
     pub panic_on_first_call: std::sync::atomic::AtomicBool,
 }

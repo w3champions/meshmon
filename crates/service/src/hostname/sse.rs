@@ -86,7 +86,9 @@ impl HostnameBroadcaster {
         }
     }
 
-    /// Number of sessions currently registered.
+    /// Number of sessions currently registered. Diagnostic; used by
+    /// integration tests to assert registry lifecycle.
+    #[doc(hidden)]
     pub fn session_count(&self) -> usize {
         self.inner.sessions.len()
     }
