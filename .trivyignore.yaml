@@ -1,0 +1,18 @@
+vulnerabilities:
+  - id: CVE-2026-33816
+    paths:
+      - "usr/share/grafana/bin/grafana"
+    statement: |
+      Not affected. CVE-2026-33816 / GHSA-9jj7-4m8r-rfcm covers pgx/v5
+      pgproto3 server-side decoders (Backend.Receive, FunctionCall.Decode),
+      reachable only when pgx implements a Postgres-protocol server.
+
+      Grafana uses pgx solely as a client against external PostgreSQL, does
+      not import pgproto3.Backend / pgproto3.FunctionCall, and does not
+      expose a Postgres-protocol listener. Verified against release-13.0.x
+      sources.
+
+      Upstream fix is on grafana/grafana main (pgx/v5 v5.9.1); backport to
+      release-13.0.2 tracked at grafana/grafana#123181. Remove this entry
+      after GRAFANA_TAG is bumped to a fixed release (>= 13.0.2).
+    expired_at: 2026-07-22
