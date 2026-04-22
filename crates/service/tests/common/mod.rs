@@ -914,6 +914,8 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
 // | `.61`  | `auth::rate_limit_does_not_leak_between_ips` (fresh IP)   |
 // | `.80`  | `auth::peer_addr_extractor_reads_connect_info_…`          |
 // | `.100` | `session::session_returns_version_and_username`           |
+// | `.44`  | `hostname_sse_http` + `hostname_refresh` — primary login  |
+// | `.201` | `hostname_sse_http::sse_events_do_not_leak_between_…`     |
 //
 // Pick a fresh octet when adding a new test that hits the login endpoint.
 // ---------------------------------------------------------------------------
@@ -1486,17 +1488,19 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     }
 
     /// Open a long-lived SSE connection to `path` and return a stream
-    /// of parsed JSON payloads. Only usable from a harness created via
-    /// [`Self::start_with_providers`] — the oneshot path cannot stream.
+    /// of parsed JSON payloads. Only usable from a live-listener harness
+    /// (`start_with_providers` or `start_with_hostname_resolver`) — the
+    /// oneshot path cannot stream.
     ///
     /// Delegates to [`subscribe_sse`] so the connect-and-wrap logic is
     /// shared with other test harnesses that stand up their own axum
     /// server (e.g. the campaigns SSE listener harness).
     pub async fn sse(&self, path: &str) -> SseStream {
-        let live = self
-            .live
-            .as_ref()
-            .expect("HttpHarness::sse requires start_with_providers — oneshot cannot stream");
+        let live = self.live.as_ref().expect(
+            "HttpHarness::sse requires a live-listener harness \
+             (start_with_providers or start_with_hostname_resolver) — \
+             oneshot cannot stream",
+        );
         let base_url = format!("http://{}", live.addr);
         subscribe_sse(&live.client, &base_url, path, &self.cookie).await
     }
