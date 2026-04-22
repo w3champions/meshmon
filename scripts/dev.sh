@@ -33,6 +33,17 @@
 # build). In tmux mode this also drops the bottom-right logs pane, so
 # Vite takes the full-height right column.
 #
+# Database persistence: cleanup runs `docker compose down` without `-v`,
+# so the meshmon-db named volume (catalogue, measurements, agent
+# registrations, campaigns) survives reboots. This honours the spec
+# contract that an `Enriched` ip_catalogue row is terminal and avoids
+# burning IPGeolocation free-tier quota by re-enriching the same dev
+# agent IPs (172.31.0.11/.12/.13) on every cycle. Cross-session testing
+# of catalogue and campaign flows works out of the box. Set
+# MESHMON_DEV_RESET_DB=1 to teardown with `-v` and start from a clean
+# database — useful when iterating on migrations or deliberately
+# exercising first-boot enrichment paths.
+#
 # Not for production. For the full stack (including the service
 # container built from Dockerfile.service), run the production compose:
 #
@@ -78,14 +89,25 @@ cleanup() {
         wait "$SERVICE_PID" 2>/dev/null || true
     fi
     if [[ "${KEEP_INFRA:-0}" != "1" ]]; then
+        # Default: tear containers down but preserve named volumes so
+        # meshmon-db (catalogue, measurements, agent registrations,
+        # campaigns) survives reboots. The agents compose carries no
+        # state worth wiping (config bind-mounted, logs are stdout) so
+        # the same `down`-without-`-v` rule applies. Set
+        # MESHMON_DEV_RESET_DB=1 for a full wipe.
+        local down_args=()
+        if [[ "${MESHMON_DEV_RESET_DB:-0}" == "1" ]]; then
+            down_args=(-v)
+            echo "[dev.sh] cleanup: MESHMON_DEV_RESET_DB=1 — tearing down with -v (named volumes will be deleted)" >&2
+        fi
         if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
             echo "[dev.sh] cleanup: docker compose down dev agents" >&2
             (cd "$DEPLOY_DIR" && docker compose \
-                -f docker-compose.agents-dev.yml down -v) || true
+                -f docker-compose.agents-dev.yml down "${down_args[@]}") || true
         fi
         echo "[dev.sh] cleanup: docker compose down infra (postgres / VM / grafana / alertmanager / vmalert)" >&2
         (cd "$DEPLOY_DIR" && docker compose \
-            -f docker-compose.yml -f docker-compose.dev.yml down -v) || true
+            -f docker-compose.yml -f docker-compose.dev.yml down "${down_args[@]}") || true
         echo "[dev.sh] cleanup: removing throwaway $DEPLOY_DIR/.env and meshmon.toml" >&2
         rm -f "$DEPLOY_DIR/.env" "$DEPLOY_DIR/meshmon.toml"
     else
