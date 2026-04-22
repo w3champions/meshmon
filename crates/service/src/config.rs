@@ -49,6 +49,8 @@ pub struct Config {
     pub enrichment: EnrichmentSection,
     /// Campaigns scheduler + size-preview configuration.
     pub campaigns: CampaignsSection,
+    /// Hostname-resolver upstream servers, timeout, and in-flight cap.
+    pub hostname_resolver: HostnameResolverConfig,
 }
 
 /// Campaigns scheduler, size-guard, and per-destination-rate-limit settings.
@@ -163,6 +165,32 @@ pub struct MaxmindSection {
 pub struct WhoisSection {
     /// Whether to invoke this provider during enrichment.
     pub enabled: bool,
+}
+
+/// Hostname-resolver settings: upstream recursive DNS servers, per-lookup
+/// timeout, and the in-flight lookup cap applied by the background
+/// resolver task.
+///
+/// Empty `upstreams` tells the resolver to use the host's default
+/// system resolver configuration (`/etc/resolv.conf` on unix).
+#[derive(Debug, Clone)]
+pub struct HostnameResolverConfig {
+    /// Recursive DNS servers to query. Empty means "use system default".
+    pub upstreams: Vec<std::net::IpAddr>,
+    /// Per-lookup timeout. Default 3s.
+    pub timeout: std::time::Duration,
+    /// Maximum concurrent in-flight lookups. Default 32.
+    pub max_in_flight: u32,
+}
+
+impl Default for HostnameResolverConfig {
+    fn default() -> Self {
+        Self {
+            upstreams: vec![],
+            timeout: std::time::Duration::from_millis(3000),
+            max_in_flight: 32,
+        }
+    }
 }
 
 /// Transport-layer settings for the axum HTTP server.
@@ -369,6 +397,32 @@ struct RawConfig {
     enrichment: RawEnrichmentSection,
     #[serde(default)]
     campaigns: RawCampaigns,
+    #[serde(default)]
+    hostname_resolver: RawHostnameResolver,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RawHostnameResolver {
+    #[serde(default)]
+    upstreams: Vec<std::net::IpAddr>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    max_in_flight: Option<u32>,
+}
+
+impl From<RawHostnameResolver> for HostnameResolverConfig {
+    fn from(r: RawHostnameResolver) -> Self {
+        let def = HostnameResolverConfig::default();
+        Self {
+            upstreams: r.upstreams,
+            timeout: r
+                .timeout_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(def.timeout),
+            max_in_flight: r.max_in_flight.unwrap_or(def.max_in_flight),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -829,6 +883,9 @@ impl Config {
             },
         };
 
+        // --- hostname_resolver section ---
+        let hostname_resolver = raw.hostname_resolver.into();
+
         Ok(Config {
             service,
             database,
@@ -840,6 +897,7 @@ impl Config {
             probing,
             enrichment,
             campaigns,
+            hostname_resolver,
         })
     }
 }
@@ -1823,5 +1881,29 @@ max_batch_size = 0
         );
         let err = Config::from_str(&toml, "t.toml").unwrap_err().to_string();
         assert!(err.contains("max_batch_size"), "err = {err}");
+    }
+
+    #[test]
+    fn hostname_resolver_defaults_when_section_missing() {
+        let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
+        assert!(cfg.hostname_resolver.upstreams.is_empty());
+        assert_eq!(cfg.hostname_resolver.timeout.as_millis(), 3000);
+        assert_eq!(cfg.hostname_resolver.max_in_flight, 32);
+    }
+
+    #[test]
+    fn hostname_resolver_parses_custom_values() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[hostname_resolver]
+upstreams = ["1.1.1.1", "9.9.9.9"]
+timeout_ms = 2000
+max_in_flight = 16
+"#
+        );
+        let cfg = Config::from_str(&toml, "t.toml").expect("parse");
+        assert_eq!(cfg.hostname_resolver.upstreams.len(), 2);
+        assert_eq!(cfg.hostname_resolver.timeout.as_millis(), 2000);
+        assert_eq!(cfg.hostname_resolver.max_in_flight, 16);
     }
 }
