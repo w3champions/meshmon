@@ -140,3 +140,34 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! Lib-internal test-only resolver backends. Integration tests
+    //! under `crates/service/tests/` should use
+    //! `common::StubHostnameBackend` from `tests/common/mod.rs` instead
+    //! — this module is only reachable from `#[cfg(test)]` code inside
+    //! the service crate itself.
+
+    use super::{LookupOutcome, ResolverBackend};
+    use async_trait::async_trait;
+    use std::{net::IpAddr, sync::Arc};
+
+    /// Minimal `ResolverBackend` that answers every query with
+    /// `NegativeNxDomain`. Satisfies `Resolver::new`'s trait bound for
+    /// lib-internal unit tests that don't exercise hostname lookup.
+    pub(crate) struct NxdomainBackend;
+
+    #[async_trait]
+    impl ResolverBackend for NxdomainBackend {
+        async fn reverse_lookup(&self, _ip: IpAddr) -> LookupOutcome {
+            LookupOutcome::NegativeNxDomain
+        }
+    }
+
+    impl NxdomainBackend {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self)
+        }
+    }
+}

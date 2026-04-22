@@ -884,7 +884,19 @@ impl Config {
         };
 
         // --- hostname_resolver section ---
-        let hostname_resolver = raw.hostname_resolver.into();
+        let hostname_resolver = HostnameResolverConfig::from(raw.hostname_resolver);
+        if hostname_resolver.timeout.is_zero() {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "hostname_resolver.timeout_ms must be > 0".to_string(),
+            });
+        }
+        if hostname_resolver.max_in_flight == 0 {
+            return Err(BootError::ConfigInvalid {
+                path: path.to_string(),
+                reason: "hostname_resolver.max_in_flight must be > 0".to_string(),
+            });
+        }
 
         Ok(Config {
             service,
@@ -1332,19 +1344,8 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
 
     let (queue, _rx) = crate::enrichment::runner::EnrichmentQueue::new(1024);
 
-    // Inline minimal `ResolverBackend` that always returns NXDOMAIN —
-    // used only to satisfy `Resolver::new`'s trait object requirement
-    // in hermetic unit tests that never actually enqueue a lookup.
-    // Integration tests plug in the richer `StubHostnameBackend` from
-    // `tests/common/mod.rs` instead.
-    struct NxdomainBackend;
-    #[async_trait::async_trait]
-    impl crate::hostname::ResolverBackend for NxdomainBackend {
-        async fn reverse_lookup(&self, _ip: std::net::IpAddr) -> crate::hostname::LookupOutcome {
-            crate::hostname::LookupOutcome::NegativeNxDomain
-        }
-    }
-    let backend: Arc<dyn crate::hostname::ResolverBackend> = Arc::new(NxdomainBackend);
+    use crate::hostname::test_support::NxdomainBackend;
+    let backend: Arc<dyn crate::hostname::ResolverBackend> = NxdomainBackend::new();
     let broadcaster = crate::hostname::HostnameBroadcaster::new();
     let limiter = crate::hostname::HostnameRefreshLimiter::default_production();
     let resolver = crate::hostname::Resolver::new(backend, broadcaster.clone(), pool.clone(), 32);
@@ -1925,5 +1926,35 @@ max_in_flight = 16
         assert_eq!(cfg.hostname_resolver.upstreams.len(), 2);
         assert_eq!(cfg.hostname_resolver.timeout.as_millis(), 2000);
         assert_eq!(cfg.hostname_resolver.max_in_flight, 16);
+    }
+
+    #[test]
+    fn hostname_resolver_rejects_zero_timeout() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[hostname_resolver]
+timeout_ms = 0
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("zero timeout must fail");
+        assert!(
+            err.to_string().contains("timeout_ms"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn hostname_resolver_rejects_zero_max_in_flight() {
+        let toml = format!(
+            r#"{MIN_TOML}
+[hostname_resolver]
+max_in_flight = 0
+"#
+        );
+        let err = Config::from_str(&toml, "t.toml").expect_err("zero max_in_flight must fail");
+        assert!(
+            err.to_string().contains("max_in_flight"),
+            "error should name the field: {err}"
+        );
     }
 }

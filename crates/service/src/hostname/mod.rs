@@ -17,3 +17,6 @@ pub use refresh_limit::HostnameRefreshLimiter;
 pub use repo::{hostnames_for, record_negative, record_positive};
 pub use resolver::Resolver;
 pub use sse::{HostnameBroadcaster, HostnameEvent, SessionHandle, SessionId};
+
+#[cfg(test)]
+pub(crate) use backend::test_support;
