@@ -2755,6 +2755,28 @@
   },
   "components": {
     "schemas": {
+      "AgentLivenessConfig": {
+        "type": "object",
+        "description": "Agent-liveness thresholds copied from `[agents]` in the service\nconfig. The SPA uses these to compute online / stale / offline state\nfrom `AgentSummary.last_seen_at` against the wall clock at render\ntime, instead of reading a server-computed boolean baked in at\nsnapshot-refresh moment (which can lag by `refresh_interval_seconds`\nand produce a brief \"offline\" flicker after a fresh push).",
+        "required": [
+          "target_active_window_minutes",
+          "refresh_interval_seconds"
+        ],
+        "properties": {
+          "refresh_interval_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`[agents].refresh_interval_seconds`. The UI uses `2 *` this as\nthe \"stale\" threshold (the window during which the snapshot\ncould reasonably still be in-flight from the registry refresh).",
+            "minimum": 0
+          },
+          "target_active_window_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`[agents].target_active_window_minutes`. After this many minutes\nwithout a `last_seen_at` update an agent is \"offline\".",
+            "minimum": 0
+          }
+        }
+      },
       "AgentSummary": {
         "type": "object",
         "description": "Summary of a single agent, returned by the list and detail endpoints.\n\nWrite-only on the server (constructed and serialized, never parsed) so\nonly `Serialize` is derived.",
@@ -5388,9 +5410,14 @@
         "description": "Minimal session probe response.\n\nWrite-only on the server — we only ever construct and serialize this\ntype, never parse one back in — so only `Serialize` is derived.",
         "required": [
           "version",
-          "username"
+          "username",
+          "agents"
         ],
         "properties": {
+          "agents": {
+            "$ref": "#/components/schemas/AgentLivenessConfig",
+            "description": "Thresholds the SPA needs to interpret `AgentSummary.last_seen_at`\nwithout baking the values into the bundle. See\n[`AgentLivenessConfig`] for the contract."
+          },
           "username": {
             "type": "string",
             "description": "Signed-in username. The SPA hydrates its auth store from this\nso a hard-refresh tab still knows who's signed in."

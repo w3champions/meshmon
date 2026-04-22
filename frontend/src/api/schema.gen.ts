@@ -950,6 +950,29 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * @description Agent-liveness thresholds copied from `[agents]` in the service
+         *     config. The SPA uses these to compute online / stale / offline state
+         *     from `AgentSummary.last_seen_at` against the wall clock at render
+         *     time, instead of reading a server-computed boolean baked in at
+         *     snapshot-refresh moment (which can lag by `refresh_interval_seconds`
+         *     and produce a brief "offline" flicker after a fresh push).
+         */
+        AgentLivenessConfig: {
+            /**
+             * Format: int32
+             * @description `[agents].refresh_interval_seconds`. The UI uses `2 *` this as
+             *     the "stale" threshold (the window during which the snapshot
+             *     could reasonably still be in-flight from the registry refresh).
+             */
+            refresh_interval_seconds: number;
+            /**
+             * Format: int32
+             * @description `[agents].target_active_window_minutes`. After this many minutes
+             *     without a `last_seen_at` update an agent is "offline".
+             */
+            target_active_window_minutes: number;
+        };
+        /**
          * @description Summary of a single agent, returned by the list and detail endpoints.
          *
          *     Write-only on the server (constructed and serialized, never parsed) so
@@ -2432,6 +2455,12 @@ export interface components {
          *     type, never parse one back in — so only `Serialize` is derived.
          */
         SessionResponse: {
+            /**
+             * @description Thresholds the SPA needs to interpret `AgentSummary.last_seen_at`
+             *     without baking the values into the bundle. See
+             *     [`AgentLivenessConfig`] for the contract.
+             */
+            agents: components["schemas"]["AgentLivenessConfig"];
             /**
              * @description Signed-in username. The SPA hydrates its auth store from this
              *     so a hard-refresh tab still knows who's signed in.

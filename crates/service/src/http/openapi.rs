@@ -113,6 +113,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::ingestion::json_shapes::HopIpJson,
         crate::ingestion::json_shapes::PathSummaryJson,
         crate::http::session::SessionResponse,
+        crate::http::session::AgentLivenessConfig,
     )),
 )]
 struct ApiDoc;

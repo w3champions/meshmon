@@ -3,11 +3,20 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import * as agentsHook from "@/api/hooks/agents";
+import * as livenessHook from "@/api/hooks/liveness";
 import { SourcePanel } from "@/components/campaigns/SourcePanel";
 import type { FilterValue } from "@/components/filter/FilterRail";
+import { DEFAULT_LIVENESS_THRESHOLDS } from "@/lib/health";
 import { renderWithQuery } from "@/test/query-wrapper";
 
 vi.mock("@/api/hooks/agents");
+// `useAgentLivenessThresholds` calls `useSession` which calls
+// `useQuery`. RTL's `rerender` does not re-wrap with the QueryClient
+// provider, so without this mock the second render in a `rerender`-style
+// test crashes with "No QueryClient set". Mocking with the library
+// defaults keeps the offline/stale thresholds aligned with the existing
+// fixtures (5 min offline, 20 s stale).
+vi.mock("@/api/hooks/liveness");
 
 const FUTURE = new Date(Date.now() + 60_000).toISOString();
 const STALE = new Date(Date.now() - 10 * 60_000).toISOString();
@@ -62,6 +71,7 @@ function mockAgents(agents: AgentSummary[]) {
     isLoading: false,
     isError: false,
   } as ReturnType<typeof agentsHook.useAgents>);
+  vi.mocked(livenessHook.useAgentLivenessThresholds).mockReturnValue(DEFAULT_LIVENESS_THRESHOLDS);
 }
 
 afterEach(() => {
@@ -149,6 +159,72 @@ describe("SourcePanel", () => {
       "title",
       "This agent is currently offline — its pairs will be skipped after 3 attempts.",
     );
+  });
+
+  test("renders soft 'stale' badge between the stale and offline thresholds", () => {
+    // 30 s ago is past the 20 s default stale threshold but well within
+    // the 5 min offline threshold. Bug 3 root cause: a snapshot lag of
+    // up to `refresh_interval_seconds` flipped this state straight to
+    // "offline" before. The fix surfaces a soft warning instead.
+    const recentlyStale: AgentSummary = {
+      id: "stale-soft",
+      display_name: "Recently Stale",
+      ip: "10.0.0.5",
+      last_seen_at: new Date(Date.now() - 30_000).toISOString(),
+      registered_at: "2026-01-01T00:00:00Z",
+      catalogue_coordinates: null,
+    };
+    mockAgents([recentlyStale]);
+
+    renderWithQuery(
+      <SourcePanel
+        selected={new Set()}
+        onSelectedChange={vi.fn()}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    // Soft state — the badge is labelled "Stale: <id>", NOT offline.
+    expect(screen.queryByLabelText(/offline/i)).not.toBeInTheDocument();
+    const badge = screen.getByLabelText(`Stale: stale-soft`);
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute(
+      "title",
+      expect.stringContaining("snapshot may be one refresh tick behind"),
+    );
+  });
+
+  test("treats a fresh push as online even when refetch lag would have flipped to offline", () => {
+    // The bug: dev-agent-2 briefly flickered to "offline" because the
+    // server's RegistrySnapshot was up to 10 s stale and the snapshot's
+    // active-window check ran at refresh moment, not render moment.
+    // With the fix, `Date.now()` is sampled at render time so a
+    // sub-second-old `last_seen_at` always renders as online.
+    const justPushed: AgentSummary = {
+      ...AGENT_BERLIN,
+      id: "fresh-push",
+      display_name: "Just Pushed",
+      last_seen_at: new Date(Date.now() - 500).toISOString(),
+    };
+    mockAgents([justPushed]);
+
+    renderWithQuery(
+      <SourcePanel
+        selected={new Set()}
+        onSelectedChange={vi.fn()}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByLabelText(/offline/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/stale/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Online")).toBeInTheDocument();
   });
 
   test("excludes agents with null catalogue_coordinates when a shape filter is active", () => {

@@ -5,18 +5,22 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
 import { useAgents } from "@/api/hooks/agents";
+import { useAgentLivenessThresholds } from "@/api/hooks/liveness";
 import type { components } from "@/api/schema.gen";
 import type { FilterValue } from "@/components/filter/FilterRail";
 import { FilterRail } from "@/components/filter/FilterRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { pointInShapes } from "@/lib/geo";
+import {
+  type AgentLivenessState,
+  DEFAULT_LIVENESS_THRESHOLDS,
+  getAgentLiveness,
+  type LivenessThresholds,
+} from "@/lib/health";
 import { cn } from "@/lib/utils";
 
 type FacetsResponse = components["schemas"]["FacetsResponse"];
-
-/** Threshold after which an agent is considered offline (5 min). */
-const OFFLINE_AFTER_MS = 5 * 60_000;
 
 /** Virtualized row height — matches shadcn TableRow default. */
 const ROW_HEIGHT = 44;
@@ -33,6 +37,8 @@ const INITIAL_SCROLL_RECT = { width: 1024, height: 600 };
 
 const OFFLINE_TOOLTIP =
   "This agent is currently offline — its pairs will be skipped after 3 attempts.";
+const STALE_TOOLTIP =
+  "Agent push is in-flight — the registry snapshot may be one refresh tick behind.";
 
 /**
  * Shared CSS grid track expression for the header + virtualized body.
@@ -57,10 +63,22 @@ export interface SourcePanelProps {
   disabled?: boolean;
 }
 
-export function isAgentOffline(agent: AgentSummary, now: number = Date.now()): boolean {
-  const lastSeenMs = Date.parse(agent.last_seen_at);
-  if (!Number.isFinite(lastSeenMs)) return true;
-  return now - lastSeenMs > OFFLINE_AFTER_MS;
+/**
+ * Backwards-compatible offline check used by the few call sites that
+ * still want a binary verdict. New rendering paths should prefer
+ * `getAgentLiveness` (three-state: online / stale / offline) so a brief
+ * snapshot lag flips the badge to a soft "stale" rather than full red.
+ *
+ * Defaults to the library thresholds when no config is passed — keeps
+ * existing tests working without threading the session through every
+ * caller.
+ */
+export function isAgentOffline(
+  agent: AgentSummary,
+  now: number = Date.now(),
+  thresholds: LivenessThresholds = DEFAULT_LIVENESS_THRESHOLDS,
+): boolean {
+  return getAgentLiveness(agent.last_seen_at, thresholds, now) === "offline";
 }
 
 /**
@@ -106,9 +124,35 @@ function matchesFilter(agent: AgentSummary, filter: FilterValue): boolean {
   return true;
 }
 
+/**
+ * Three-state liveness badge. Renders:
+ * - `online` → muted "Online" badge
+ * - `stale`  → soft warning badge (snapshot may be one refresh tick behind)
+ * - `offline` → destructive badge with the offline tooltip
+ *
+ * Always emits an `aria-label` so screen-reader and the existing
+ * `getByLabelText(/offline/i)` test selectors keep working.
+ */
+function LivenessBadge({ agentId, liveness }: { agentId: string; liveness: AgentLivenessState }) {
+  if (liveness === "offline") {
+    return (
+      <Badge variant="destructive" aria-label={`Offline: ${agentId}`} title={OFFLINE_TOOLTIP}>
+        Offline ⚠
+      </Badge>
+    );
+  }
+  if (liveness === "stale") {
+    return (
+      <Badge variant="outline" aria-label={`Stale: ${agentId}`} title={STALE_TOOLTIP}>
+        Stale
+      </Badge>
+    );
+  }
+  return <Badge variant="secondary">Online</Badge>;
+}
+
 interface AgentRow {
   agent: AgentSummary;
-  offline: boolean;
 }
 
 export function SourcePanel({
@@ -121,19 +165,18 @@ export function SourcePanel({
   disabled = false,
 }: SourcePanelProps) {
   const { data: agents } = useAgents();
+  const livenessThresholds = useAgentLivenessThresholds();
 
-  // Offline status is computed at memo time, not per render. Sampling
-  // `Date.now()` inside the callback (rather than threading it through
-  // the dep list) keeps the memo stable across renders that didn't
-  // change `agents`; the outer query refetches every 30 s (see
-  // `useAgents`), so offline cadence follows the data, not wall clock.
-  const allRows: AgentRow[] = useMemo(() => {
-    const now = Date.now();
-    return (agents ?? []).map((agent) => ({
-      agent,
-      offline: isAgentOffline(agent, now),
-    }));
-  }, [agents]);
+  // Liveness is computed inside the row render against `Date.now()` at
+  // render time, NOT memoized over `agents`. Sampling `now` inside the
+  // memo callback would freeze the badge to whichever snapshot
+  // `useAgents` last returned — the registry snapshot itself can lag by
+  // up to `refresh_interval_seconds` on the server, so a fresh push from
+  // the agent might briefly look stale-or-older than the threshold even
+  // though wall-clock time has actually moved on. Re-sampling per render
+  // means the next React tick after the agent pushes flips the badge
+  // back to online.
+  const allRows: AgentRow[] = useMemo(() => (agents ?? []).map((agent) => ({ agent })), [agents]);
 
   const filteredRows: AgentRow[] = useMemo(
     () => allRows.filter((row) => matchesFilter(row.agent, filter)),
@@ -291,7 +334,12 @@ export function SourcePanel({
               {virtualizer.getVirtualItems().map((item) => {
                 const row = filteredRows[item.index];
                 if (!row) return null;
-                const { agent, offline } = row;
+                const { agent } = row;
+                // Liveness sampled here, NOT in the upstream memo, so a
+                // late-arriving server snapshot doesn't pin a stale "now"
+                // into the badge for the lifetime of that snapshot. See
+                // the `allRows` comment for the full rationale.
+                const liveness = getAgentLiveness(agent.last_seen_at, livenessThresholds);
                 const isSelected = selected.has(agent.id);
                 return (
                   /* biome-ignore lint/a11y/useSemanticElements: virtualized row is a CSS-grid parent; role="button" keeps the click+keyboard affordance. */
@@ -343,17 +391,7 @@ export function SourcePanel({
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
                     <div role="cell" className="px-3">
-                      {offline ? (
-                        <Badge
-                          variant="destructive"
-                          aria-label={`Offline: ${agent.id}`}
-                          title={OFFLINE_TOOLTIP}
-                        >
-                          Offline ⚠
-                        </Badge>
-                      ) : (
-                        <Badge variant="secondary">Online</Badge>
-                      )}
+                      <LivenessBadge agentId={agent.id} liveness={liveness} />
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
                     <div role="cell" className="px-3 text-muted-foreground">

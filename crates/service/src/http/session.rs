@@ -3,7 +3,9 @@
 //!
 //! The SPA calls this endpoint before rendering any authenticated
 //! view. A 401 means "bounce to `/login`"; a 200 returns the JSON body
-//! below. The response is intentionally small: version + username.
+//! below. The response is intentionally small: version + username +
+//! the agent-liveness thresholds the UI needs to render online / stale
+//! / offline badges client-side against `Date.now()`.
 //!
 //! Grafana / Alertmanager base URLs used to live in this endpoint's
 //! body; they no longer do. Those services are now same-origin
@@ -19,6 +21,23 @@ use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+/// Agent-liveness thresholds copied from `[agents]` in the service
+/// config. The SPA uses these to compute online / stale / offline state
+/// from `AgentSummary.last_seen_at` against the wall clock at render
+/// time, instead of reading a server-computed boolean baked in at
+/// snapshot-refresh moment (which can lag by `refresh_interval_seconds`
+/// and produce a brief "offline" flicker after a fresh push).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AgentLivenessConfig {
+    /// `[agents].target_active_window_minutes`. After this many minutes
+    /// without a `last_seen_at` update an agent is "offline".
+    pub target_active_window_minutes: u32,
+    /// `[agents].refresh_interval_seconds`. The UI uses `2 *` this as
+    /// the "stale" threshold (the window during which the snapshot
+    /// could reasonably still be in-flight from the registry refresh).
+    pub refresh_interval_seconds: u32,
+}
+
 /// Minimal session probe response.
 ///
 /// Write-only on the server — we only ever construct and serialize this
@@ -31,6 +50,10 @@ pub struct SessionResponse {
     /// Signed-in username. The SPA hydrates its auth store from this
     /// so a hard-refresh tab still knows who's signed in.
     pub username: String,
+    /// Thresholds the SPA needs to interpret `AgentSummary.last_seen_at`
+    /// without baking the values into the bundle. See
+    /// [`AgentLivenessConfig`] for the contract.
+    pub agents: AgentLivenessConfig,
 }
 
 /// `GET /api/session` — return the session probe body.
@@ -58,9 +81,14 @@ pub async fn session(State(state): State<AppState>, auth_session: AuthSession) -
     let Some(principal) = auth_session.user.as_ref() else {
         return (StatusCode::UNAUTHORIZED, "not authenticated").into_response();
     };
+    let cfg = state.config();
     Json(SessionResponse {
         version: state.build.version.to_string(),
         username: principal.username.clone(),
+        agents: AgentLivenessConfig {
+            target_active_window_minutes: cfg.agents.target_active_window_minutes,
+            refresh_interval_seconds: cfg.agents.refresh_interval_seconds,
+        },
     })
     .into_response()
 }
