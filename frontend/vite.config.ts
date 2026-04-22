@@ -3,6 +3,17 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
+// Explicit 127.0.0.1 (not `localhost`) so Node's IPv6-first resolution
+// doesn't route to an unrelated `::<port>` listener. Override the
+// target via `MESHMON_API_PROXY_TARGET` when the service runs on a
+// non-default port (e.g. `scripts/dev.sh` uses :18322). All three
+// proxied prefixes share this upstream — the meshmon service itself
+// terminates Grafana and Alertmanager via `axum-reverse-proxy`, so the
+// dev SPA mirrors the production reverse-proxy surface on a single
+// origin.
+const backend =
+  process.env.MESHMON_API_PROXY_TARGET ?? "http://127.0.0.1:8080";
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -27,11 +38,10 @@ export default defineConfig({
       allow: [path.resolve(__dirname, "..")],
     },
     proxy: {
-      // Explicit 127.0.0.1 (not `localhost`) so Node's IPv6-first resolution
-      // doesn't route to an unrelated `::<port>` listener. Override the
-      // target via `MESHMON_API_PROXY_TARGET` when the service runs on a
-      // non-default port (e.g. `scripts/dev.sh` uses :18322).
-      "/api": process.env.MESHMON_API_PROXY_TARGET ?? "http://127.0.0.1:8080",
+      "/api": { target: backend, changeOrigin: true },
+      // `ws: true` carries Grafana Live (`/grafana/api/live/ws`).
+      "/grafana": { target: backend, changeOrigin: true, ws: true },
+      "/alertmanager": { target: backend, changeOrigin: true },
     },
   },
 });
