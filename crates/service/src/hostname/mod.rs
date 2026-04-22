@@ -5,6 +5,7 @@
 //! session's requests trigger lookups whose events must flow only to the
 //! session that caused them.
 mod backend;
+pub(crate) mod handlers;
 mod ip_canon;
 mod refresh_limit;
 mod repo;
