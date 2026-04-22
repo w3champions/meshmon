@@ -122,11 +122,11 @@ pub struct AppState {
     /// round-trip to complete — acceptable for a 30 s-TTL UI hint
     /// endpoint, not acceptable for hot paths.
     pub facets_cache: Arc<FacetsCache>,
-    /// Campaign scheduler cancel token. Wired in `main.rs`; integration
-    /// tests can spawn their own scheduler instead and leave this at `None`.
-    /// Handlers do not consume this directly — it exists so `main.rs` can
-    /// hold one reference on `AppState` and signal shutdown through it.
-    pub campaign_cancel: Option<CancellationToken>,
+    /// Campaign scheduler cancel token. [`AppState::new`] mints it;
+    /// `main.rs` clones it into `Scheduler::run(...)` at boot and into
+    /// the shutdown drain. Handlers do not consume this directly. Test
+    /// harnesses that don't spawn a scheduler hold a no-op token.
+    pub campaign_cancel: CancellationToken,
 }
 
 impl AppState {
@@ -177,10 +177,7 @@ impl AppState {
             campaign_broker: CampaignBroker::default(),
             enrichment_queue,
             facets_cache: Arc::new(FacetsCache::new(FacetsCache::DEFAULT_TTL)),
-            // `None` by default. `main.rs` overwrites this with the real
-            // token after constructing the scheduler; integration tests
-            // that don't spawn a scheduler keep this `None`.
-            campaign_cancel: None,
+            campaign_cancel: CancellationToken::new(),
         }
     }
 

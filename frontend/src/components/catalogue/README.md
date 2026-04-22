@@ -1,7 +1,8 @@
 # `components/catalogue`
 
 UI components for the `/catalogue` page. They are composed inside the
-catalogue route and share a single SSE connection opened at the page level.
+catalogue route and share a single SSE connection opened once for the
+authenticated subtree.
 
 ## Files
 
@@ -89,10 +90,13 @@ an entry closes the dialog and opens `EntryDrawer` for that id.
 
 ### SSE invalidation
 
-`useCatalogueStream()` mounts once at the page level and invalidates
+`CatalogueStreamProvider` (in `src/api/`) mounts `useCatalogueStream`
+once for the whole authenticated subtree from inside `AppShell`, so
+every page that consumes catalogue-derived data — the catalogue page,
+the campaign composer, campaign detail, the history pair page — sees
 `CATALOGUE_LIST_KEY`, `CATALOGUE_MAP_KEY`, `CATALOGUE_FACETS_KEY`, and
-the per-entry keys on every catalogue event so every server-driven
-query in this tree picks up inserts / deletes / updates automatically.
+per-entry caches invalidated on every catalogue event. Pages must not
+mount the hook themselves.
 
 ## Operator-locked field semantics
 

@@ -14,7 +14,6 @@ import {
   useReenrichMany,
   useReenrichOne,
 } from "@/api/hooks/catalogue";
-import { useCatalogueStream } from "@/api/hooks/catalogue-stream";
 import { CatalogueClusterDialog } from "@/components/catalogue/CatalogueClusterDialog";
 import { CatalogueMap } from "@/components/catalogue/CatalogueMap";
 import { CatalogueTable, type CatalogueTableSort } from "@/components/catalogue/CatalogueTable";
@@ -119,11 +118,6 @@ function ViewToggle({ value, onChange }: ViewToggleProps) {
 // ---------------------------------------------------------------------------
 
 export default function Catalogue() {
-  // Mount the SSE stream once for the lifetime of this page. The stream
-  // invalidates the list, map, and facets caches on every catalogue
-  // event so server-driven queries pick up inserts/deletes/updates.
-  useCatalogueStream();
-
   const rawSearch = useSearch({ strict: false }) as CatalogueSearch;
   const navigate = useNavigate();
 

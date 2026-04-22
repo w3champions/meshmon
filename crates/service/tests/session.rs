@@ -62,6 +62,22 @@ async fn session_returns_version_and_username() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["version"].is_string(), "body = {body}");
     assert_eq!(body["username"], "admin", "body = {body}");
+    // Agent-liveness thresholds are surfaced so the SPA can compute
+    // online / stale / offline against `Date.now()` at render time
+    // instead of reading a server-computed boolean baked in at the
+    // registry-snapshot moment (which produced a brief "offline"
+    // flicker on the campaigns page).
+    let agents = body
+        .get("agents")
+        .expect("session body must include `agents` block");
+    assert_eq!(
+        agents["target_active_window_minutes"], 5,
+        "expected default 5 min; agents = {agents}"
+    );
+    assert_eq!(
+        agents["refresh_interval_seconds"], 10,
+        "expected default 10 s; agents = {agents}"
+    );
     // Lock in the slim contract: the body must NOT leak upstream URLs
     // any more — those are same-origin and hardcoded in the frontend.
     assert!(body.get("grafana_base_url").is_none(), "body = {body}");

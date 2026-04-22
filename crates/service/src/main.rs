@@ -286,14 +286,10 @@ async fn run() -> anyhow::Result<()> {
         enrichment_queue,
     );
 
-    // Campaign SSE listener: runs regardless of `[campaigns] enabled`.
-    // The feature flag gates the scheduler/dispatcher (so a cluster can
-    // suppress dispatch) but the event stream is read-only fan-out from
-    // the same NOTIFY channels the scheduler writes to — subscribing
-    // even when dispatch is off lets operators observe lifecycle edits
-    // and pair settles from other processes. Owns its own cancel token
-    // so the main shutdown drain can await it separately from the
-    // scheduler.
+    // Campaign SSE listener: read-only fan-out from the two campaign
+    // NOTIFY channels the scheduler writes to. Owns its own cancel
+    // token so the main shutdown drain can await it separately from
+    // the scheduler.
     let campaign_sse_cancel = CancellationToken::new();
     let campaign_sse_handle = meshmon_service::campaign::listener::spawn_campaign_listener(
         pool.clone(),
@@ -302,14 +298,13 @@ async fn run() -> anyhow::Result<()> {
     );
     info!("campaign SSE listener spawned");
 
-    // Campaign scheduler: single tokio task, driven by a dedicated cancel
-    // token so it can be shut down AFTER the HTTP drain completes (in-flight
-    // handlers may still publish NOTIFY wake-ups until they finish). Gated
-    // on `[campaigns] enabled` — operators flip this off in TOML to
-    // suppress dispatch. The `RpcDispatcher` routes batches over the
-    // per-agent yamux tunnels owned by `state.tunnel_manager`.
-    let (campaign_cancel, campaign_scheduler_handle) = if initial_config.campaigns.enabled {
-        let cancel = CancellationToken::new();
+    // Campaign scheduler: single tokio task, driven by the cancel token
+    // owned by `AppState` so the shutdown drain (further down) can
+    // cancel via the same handle. Cancelled AFTER the HTTP drain so
+    // in-flight handlers can still publish NOTIFY wake-ups until they
+    // finish. The `RpcDispatcher` routes batches over the per-agent
+    // yamux tunnels owned by `state.tunnel_manager`.
+    let campaign_scheduler_handle = {
         let writer = meshmon_service::campaign::writer::SettleWriter::new(pool.clone());
         let dispatcher: Arc<dyn meshmon_service::campaign::dispatch::PairDispatcher> = Arc::new(
             meshmon_service::campaign::rpc_dispatcher::RpcDispatcher::new(
@@ -340,19 +335,11 @@ async fn run() -> anyhow::Result<()> {
             std::cmp::min(initial_config.campaigns.max_pair_attempts, i16::MAX as u16) as i16,
             registry_active_window,
         );
-        let handle = tokio::spawn(scheduler.run(cancel.clone()));
+        let handle = tokio::spawn(scheduler.run(state.campaign_cancel.clone()));
         info!("campaign scheduler spawned (RpcDispatcher)");
-        (Some(cancel), Some(handle))
-    } else {
-        info!("campaign scheduler disabled (set [campaigns] enabled = true to start)");
-        (None, None)
+        handle
     };
 
-    let state = {
-        let mut s = state;
-        s.campaign_cancel = campaign_cancel.clone();
-        s
-    };
     state.mark_ready();
 
     // Spawn the enrichment runner. The runner terminates when the last
@@ -528,21 +515,17 @@ async fn run() -> anyhow::Result<()> {
     // can still publish NOTIFY wake-ups while serving their final
     // responses. The scheduler's `run` loop observes the cancel token on
     // every select arm and exits promptly; the `timeout` is a backstop
-    // for a stuck Postgres query, not the expected path. Both `cancel`
-    // and `handle` are `None` when the scheduler was never spawned
-    // (`[campaigns] enabled = false`).
-    if let (Some(cancel), Some(handle)) = (campaign_cancel, campaign_scheduler_handle) {
-        cancel.cancel();
-        match tokio::time::timeout(deadline, handle).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!(error = %e, "campaign scheduler task ended abnormally"),
-            Err(_) => warn!(
-                deadline_ms = deadline.as_millis() as u64,
-                "campaign scheduler did not drain within shutdown_deadline; aborting",
-            ),
-        }
-        info!("campaign scheduler drained");
+    // for a stuck Postgres query, not the expected path.
+    state.campaign_cancel.cancel();
+    match tokio::time::timeout(deadline, campaign_scheduler_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "campaign scheduler task ended abnormally"),
+        Err(_) => warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "campaign scheduler did not drain within shutdown_deadline; aborting",
+        ),
     }
+    info!("campaign scheduler drained");
 
     // Campaign SSE listener: same post-HTTP-drain ordering as the
     // scheduler. In-flight handlers may still emit NOTIFY wake-ups

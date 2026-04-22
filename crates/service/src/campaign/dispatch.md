@@ -52,11 +52,7 @@ clone (interior state is `Arc`-owned) and holds references to:
    `probe_count == 1`, `Latency` otherwise. Targets are truncated at
    `max_batch_size`. Per-target `destination_port` is hardcoded to `0`
    (correct for ICMP); TCP/UDP campaigns require the port to be
-   populated from a per-target source — that lands with T46's real
-   prober and the `PendingPair::destination_port` plumbing. The
-   `enabled = false` default plus the agent's port-ignoring
-   `StubProber` keep the hardcoded zero from causing production harm
-   in the meantime.
+   populated from a per-target source once `PendingPair` carries one.
 5. **Open the server-streaming RPC.** `AgentCommandClient::new(channel)
    .run_measurement_batch(req)`. An open-phase error returns
    `skipped_reason = Some("rpc_error:<code>")` and every allowed pair

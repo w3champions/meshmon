@@ -101,12 +101,21 @@ Key patterns:
   position where the target's own IP appears. This matches mtr's output
   shape and stops trippy's over-probing from oscillating the reported
   hop count.
-- `path_summary.{loss_pct, avg_rtt_micros}` derives from the destination
-  hop only (`hops.last()`). The route tracker's truncate-at-target
-  invariant guarantees `hops.last()` is the destination. Per-hop loss/RTT
-  for intermediate hops stays in `hops[]` for visualization; aggregating
-  across all hops would conflate silent ICMP-rate-limited intermediate
-  routers (always 100 % loss) with end-to-end loss.
+- `path_summary.{loss_pct, avg_rtt_micros}` on a route snapshot derives
+  from the elected primary protocol's `RollingStats` — the same source
+  that feeds `meshmon_path_failure_rate`, so the matrix view and alerts
+  agree by construction. The supervisor samples
+  `last_state.primary` + the matching per-protocol stats at snapshot-tick
+  time and stamps the result onto `RouteSnapshotEnvelope.path_summary`;
+  the emitter encodes those values onto the wire. When `primary` is
+  `None` (cold start before the sample-floor is met, or every protocol
+  unhealthy), `loss_pct = 1.0` is emitted so the matrix renders red.
+  Trippy's destination-hop accounting (`hops.last()`) is intentionally
+  not the source: its 60 s window with 500 ms grace inflates phantom
+  loss whenever the destination's reply lands past the grace deadline
+  (common on healthy LANs at low pps). Per-hop loss / RTT for the
+  topology drilldown — including silent ICMP-rate-limited intermediate
+  routers carrying 100 % loss — stays in `hops[]`, untouched.
 - `TargetStateMachine` (in `state.rs`) evaluates per-protocol health and derives
   path health every 10 s; the supervisor publishes resulting rates and window
   sizes to the four prober watch channels — probers are never respawned
@@ -164,16 +173,14 @@ Key patterns:
 - Boot-time constraint: `[enrichment.ipgeolocation] enabled = true`
   requires `acknowledged_tos = true`. The config loader aborts
   startup otherwise.
-- Campaign scheduler is a single tokio task, gated on `[campaigns]
-  enabled` (default `false` until a real prober ships; the agent's
-  current `StubProber` would persist synthetic measurements otherwise).
-  It subscribes to two Postgres NOTIFY
-  channels — `campaign_state_changed` (lifecycle changes from the
-  `measurement_campaigns_notify` trigger) and `campaign_pair_settled`
-  (writer-side fan-out) — plus a periodic tick (default 500 ms), and
-  issues fair-RR batches across active campaigns to a pluggable
-  `PairDispatcher`. Both channel names are load-bearing contracts —
-  keep trigger / writer / listener constants in lockstep on rename.
+- Campaign scheduler is a single tokio task. It subscribes to two
+  Postgres NOTIFY channels — `campaign_state_changed` (lifecycle
+  changes from the `measurement_campaigns_notify` trigger) and
+  `campaign_pair_settled` (writer-side fan-out) — plus a periodic tick
+  (default 500 ms), and issues fair-RR batches across active campaigns
+  to a pluggable `PairDispatcher`. Both channel names are load-bearing
+  contracts — keep trigger / writer / listener constants in lockstep
+  on rename.
 - Campaign dispatch runs through `AgentCommand.RunMeasurementBatch`
   over the reverse tunnel. `RpcDispatcher` owns a per-agent semaphore
   (sized from `agents.campaign_max_concurrency` with a cluster-wide

@@ -54,13 +54,6 @@ pub struct Config {
 /// Campaigns scheduler, size-guard, and per-destination-rate-limit settings.
 #[derive(Debug, Clone)]
 pub struct CampaignsSection {
-    /// Enable the background scheduler. Defaults to `false` until a
-    /// real prober ships: T45 wires the transport but agents still use
-    /// `StubProber` (the real trippy-backed prober lands in T46).
-    /// Flipping this on before T46 would persist synthetic measurements
-    /// against real campaigns. Operators who need the scheduler off
-    /// even after T46 can keep this `false` in their config.
-    pub enabled: bool,
     /// Soft warning threshold on the composer's expected-dispatch count.
     /// Above this the frontend shows a confirm dialog. No hard cap.
     pub size_warning_threshold: u32,
@@ -72,8 +65,7 @@ pub struct CampaignsSection {
     /// with `last_error='agent_offline'`.
     pub max_pair_attempts: u16,
     /// Soft per-destination rate limit applied by the scheduler's token
-    /// bucket. T45 replaces this with the dispatch-transport's own
-    /// granularity; T44 uses it as the initial value.
+    /// bucket.
     pub per_destination_rps: u32,
     /// Cluster-wide default per-agent concurrent-measurement cap. A
     /// `RegisterRequest.campaign_max_concurrency` override persisted on
@@ -88,7 +80,6 @@ pub struct CampaignsSection {
 impl Default for CampaignsSection {
     fn default() -> Self {
         Self {
-            enabled: false,
             size_warning_threshold: 1000,
             scheduler_tick_ms: 500,
             max_pair_attempts: 3,
@@ -382,8 +373,6 @@ struct RawConfig {
 
 #[derive(Debug, Deserialize, Default)]
 struct RawCampaigns {
-    #[serde(default)]
-    enabled: Option<bool>,
     #[serde(default)]
     size_warning_threshold: Option<u32>,
     #[serde(default)]
@@ -784,7 +773,6 @@ impl Config {
         // --- campaigns section ---
         let campaigns_defaults = CampaignsSection::default();
         let campaigns = CampaignsSection {
-            enabled: raw.campaigns.enabled.unwrap_or(campaigns_defaults.enabled),
             size_warning_threshold: raw
                 .campaigns
                 .size_warning_threshold
@@ -1760,7 +1748,6 @@ acknowledged_tos = true
         let toml = format!(
             r#"{MIN_TOML}
 [campaigns]
-enabled = true
 size_warning_threshold = 500
 scheduler_tick_ms = 250
 max_pair_attempts = 5
@@ -1768,20 +1755,13 @@ per_destination_rps = 4
 "#
         );
         let cfg = Config::from_str(&toml, "t.toml").expect("parse");
-        assert!(cfg.campaigns.enabled);
         assert_eq!(cfg.campaigns.size_warning_threshold, 500);
         assert_eq!(cfg.campaigns.scheduler_tick_ms, 250);
         assert_eq!(cfg.campaigns.max_pair_attempts, 5);
         assert_eq!(cfg.campaigns.per_destination_rps, 4);
 
-        // Defaults apply when the section is omitted. Scheduler ships
-        // disabled by default — a real prober lands in T46; until then
-        // the agent's `StubProber` would persist synthetic measurements.
+        // Defaults apply when the section is omitted.
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
-        assert!(
-            !cfg.campaigns.enabled,
-            "scheduler must default to disabled until T46 ships a real prober",
-        );
         assert_eq!(cfg.campaigns.size_warning_threshold, 1000);
         assert_eq!(cfg.campaigns.scheduler_tick_ms, 500);
         assert_eq!(cfg.campaigns.max_pair_attempts, 3);
@@ -1801,17 +1781,8 @@ scheduler_tick_ms = 0
     }
 
     #[test]
-    fn campaigns_defaults_disabled_with_dispatch_knobs_seeded() {
-        // Scheduler stays off by default so the agent's `StubProber`
-        // does not persist synthetic campaign measurements. Dispatch
-        // knobs (`default_agent_concurrency`, `max_batch_size`) still
-        // seed with production values so T46 only has to flip
-        // `enabled = true` — no other config surgery required.
+    fn campaigns_dispatch_knobs_seeded_with_production_defaults() {
         let cfg = Config::from_str(MIN_TOML, "t.toml").expect("parse");
-        assert!(
-            !cfg.campaigns.enabled,
-            "scheduler must default off until a real prober ships",
-        );
         assert_eq!(cfg.campaigns.default_agent_concurrency, 16);
         assert_eq!(cfg.campaigns.max_batch_size, 50);
     }
@@ -1821,13 +1792,11 @@ scheduler_tick_ms = 0
         let toml = format!(
             r#"{MIN_TOML}
 [campaigns]
-enabled = false
 default_agent_concurrency = 8
 max_batch_size = 20
 "#
         );
         let cfg = Config::from_str(&toml, "t.toml").expect("parse");
-        assert!(!cfg.campaigns.enabled);
         assert_eq!(cfg.campaigns.default_agent_concurrency, 8);
         assert_eq!(cfg.campaigns.max_batch_size, 20);
     }

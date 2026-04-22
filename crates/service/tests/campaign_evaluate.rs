@@ -16,12 +16,11 @@
 //! | `get_evaluation_404_before_evaluate`                  | `eval-t4-a`                              | `192.0.2.41`                     |
 //! | `reused_pair_surfaces_in_baseline`                    | `eval-t5-a`, `eval-t5-b`                | `192.0.2.51`, `.52`, `.59`       |
 //!
-//! The campaign scheduler is not spawned in the test harness (its
-//! cancel token stays at `None` on the `AppState`), so
-//! state transitions happen only as a side effect of the explicit
-//! lifecycle endpoints these tests call; the evaluator is driven
-//! against a `mark_completed`-forced row rather than a naturally
-//! completed one.
+//! The campaign scheduler is not spawned in the test harness, so
+//! `AppState.campaign_cancel` is a no-op token; state transitions
+//! happen only as a side effect of the explicit lifecycle endpoints
+//! these tests call, and the evaluator is driven against a
+//! `mark_completed`-forced row rather than a naturally completed one.
 
 mod common;
 
