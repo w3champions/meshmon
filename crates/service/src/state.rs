@@ -127,6 +127,18 @@ pub struct AppState {
     /// the shutdown drain. Handlers do not consume this directly. Test
     /// harnesses that don't spawn a scheduler hold a no-op token.
     pub campaign_cancel: CancellationToken,
+    /// Session-scoped SSE broadcaster for `hostname_resolved` events.
+    /// Handlers subscribe per session; the resolver task fans resolved
+    /// outcomes out to exactly the sessions that requested them.
+    pub hostname_broadcaster: crate::hostname::HostnameBroadcaster,
+    /// Per-session fixed-window rate limiter for
+    /// `POST /api/hostnames/:ip/refresh`. Shared via `Arc` so handlers
+    /// and the periodic sweeper task both see the same bucket map.
+    pub hostname_refresh_limiter: Arc<crate::hostname::HostnameRefreshLimiter>,
+    /// Long-lived hostname resolver handle. Cheap to clone — all state
+    /// is behind an `Arc<Inner>`. Handlers call `enqueue` to request a
+    /// lookup; resolved outcomes fan out via `hostname_broadcaster`.
+    pub hostname_resolver: crate::hostname::Resolver,
 }
 
 impl AppState {
@@ -138,6 +150,12 @@ impl AppState {
     /// receiver (production binary) or dropping the receiver (tests
     /// that do not exercise the runner — enqueues become no-ops via the
     /// `TrySendError::Closed` arm).
+    ///
+    /// The arg count exceeds clippy's default limit; grouping into a
+    /// struct would just re-hide the same fields behind a builder
+    /// without improving call-site readability. Every caller is either
+    /// the production binary or a test harness updated in lockstep.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<ArcSwap<Config>>,
         config_rx: watch::Receiver<Arc<Config>>,
@@ -146,6 +164,9 @@ impl AppState {
         registry: Arc<AgentRegistry>,
         prom: PrometheusHandle,
         enrichment_queue: Arc<EnrichmentQueue>,
+        hostname_broadcaster: crate::hostname::HostnameBroadcaster,
+        hostname_refresh_limiter: Arc<crate::hostname::HostnameRefreshLimiter>,
+        hostname_resolver: crate::hostname::Resolver,
     ) -> Self {
         Self {
             config,
@@ -178,6 +199,9 @@ impl AppState {
             enrichment_queue,
             facets_cache: Arc::new(FacetsCache::new(FacetsCache::DEFAULT_TTL)),
             campaign_cancel: CancellationToken::new(),
+            hostname_broadcaster,
+            hostname_refresh_limiter,
+            hostname_resolver,
         }
     }
 

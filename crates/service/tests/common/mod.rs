@@ -541,6 +541,28 @@ pub fn test_enrichment_queue(
 /// exact bytes don't matter for these tests because no probing is exercised.
 pub const TEST_UDP_PROBE_SECRET_TOML: &str = "hex:0011223344556677";
 
+/// Build the triple of hostname fixtures that every `state_with_*`
+/// helper threads into `AppState::new`. Uses `StubHostnameBackend` so
+/// no DNS is issued and no `cap_net_raw` is needed.
+///
+/// Kept as a named helper rather than inlining at each call site so a
+/// future signature change (e.g. adding a shared `SessionId` default)
+/// touches one place.
+pub fn test_hostname_fixtures(
+    pool: &PgPool,
+) -> (
+    meshmon_service::hostname::HostnameBroadcaster,
+    std::sync::Arc<meshmon_service::hostname::HostnameRefreshLimiter>,
+    meshmon_service::hostname::Resolver,
+) {
+    let backend = StubHostnameBackend::new();
+    let broadcaster = meshmon_service::hostname::HostnameBroadcaster::new();
+    let limiter = meshmon_service::hostname::HostnameRefreshLimiter::default_production();
+    let resolver =
+        meshmon_service::hostname::Resolver::new(backend, broadcaster.clone(), pool.clone(), 32);
+    (broadcaster, limiter, resolver)
+}
+
 /// Construct an `AppState` with the minimum valid config (no auth users,
 /// no `[service]` section). Used by tests that exercise unauthenticated
 /// or transport-level routes (health, SPA static files) where user setup
@@ -560,6 +582,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -568,6 +591,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -597,6 +623,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -605,6 +632,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -639,6 +669,7 @@ password_hash = "{AUTH_TEST_HASH}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -647,6 +678,9 @@ password_hash = "{AUTH_TEST_HASH}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -677,6 +711,7 @@ alertmanager_url = "{alertmanager_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -685,6 +720,9 @@ alertmanager_url = "{alertmanager_url}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -715,6 +753,7 @@ grafana_url = "{grafana_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -723,6 +762,9 @@ grafana_url = "{grafana_url}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -753,6 +795,7 @@ vm_url = "{vm_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -761,6 +804,9 @@ vm_url = "{vm_url}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -787,6 +833,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -795,6 +842,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -832,6 +882,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -840,6 +891,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -1225,6 +1279,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         let (_cfg_tx, cfg_rx) = watch::channel(cfg);
         let ingestion = dummy_ingestion(db.pool.clone());
         let registry = dummy_registry(db.pool.clone());
+        let (hb, hl, hr) = test_hostname_fixtures(&db.pool);
         let state = AppState::new(
             swap,
             cfg_rx,
@@ -1233,6 +1288,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
             registry,
             test_prometheus_handle().await,
             queue,
+            hb,
+            hl,
+            hr,
         );
         state.mark_ready();
 

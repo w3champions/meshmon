@@ -85,6 +85,7 @@ primary_sec = 120
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(pool.clone());
     let registry = common::dummy_registry(pool.clone());
+    let (hb, hl, hr) = common::test_hostname_fixtures(&pool);
     let state = AppState::new(
         swap,
         rx,
@@ -93,6 +94,9 @@ primary_sec = 120
         registry,
         common::test_prometheus_handle().await,
         common::test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     );
 
     let mut client =

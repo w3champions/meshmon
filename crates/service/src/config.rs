@@ -1331,6 +1331,23 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
     ));
 
     let (queue, _rx) = crate::enrichment::runner::EnrichmentQueue::new(1024);
+
+    // Inline minimal `ResolverBackend` that always returns NXDOMAIN —
+    // used only to satisfy `Resolver::new`'s trait object requirement
+    // in hermetic unit tests that never actually enqueue a lookup.
+    // Integration tests plug in the richer `StubHostnameBackend` from
+    // `tests/common/mod.rs` instead.
+    struct NxdomainBackend;
+    #[async_trait::async_trait]
+    impl crate::hostname::ResolverBackend for NxdomainBackend {
+        async fn reverse_lookup(&self, _ip: std::net::IpAddr) -> crate::hostname::LookupOutcome {
+            crate::hostname::LookupOutcome::NegativeNxDomain
+        }
+    }
+    let backend: Arc<dyn crate::hostname::ResolverBackend> = Arc::new(NxdomainBackend);
+    let broadcaster = crate::hostname::HostnameBroadcaster::new();
+    let limiter = crate::hostname::HostnameRefreshLimiter::default_production();
+    let resolver = crate::hostname::Resolver::new(backend, broadcaster.clone(), pool.clone(), 32);
     AppState::new(
         swap,
         rx,
@@ -1339,6 +1356,9 @@ pub(crate) fn test_state_from_toml(toml: &str) -> crate::state::AppState {
         registry,
         crate::metrics::test_install(),
         Arc::new(queue),
+        broadcaster,
+        limiter,
+        resolver,
     )
 }
 

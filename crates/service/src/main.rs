@@ -272,6 +272,45 @@ async fn run() -> anyhow::Result<()> {
     let (enrichment_queue_raw, enrichment_rx) = EnrichmentQueue::new(ENRICHMENT_QUEUE_CAPACITY);
     let enrichment_queue = Arc::new(enrichment_queue_raw);
 
+    // --- Hostname resolver wiring ---
+    // `HickoryBackend::new` is the only fallible piece of the resolver
+    // fixture — an invalid upstream tuple should abort boot rather than
+    // silently fall back to the system resolver. `AppState::new` stays
+    // infallible so tests can construct state without touching the
+    // network.
+    let hostname_backend = meshmon_service::hostname::HickoryBackend::new(
+        &initial_config.hostname_resolver.upstreams,
+        initial_config.hostname_resolver.timeout,
+    )
+    .context("building hickory-resolver backend")?;
+    let hostname_broadcaster = meshmon_service::hostname::HostnameBroadcaster::new();
+    let hostname_refresh_limiter =
+        meshmon_service::hostname::HostnameRefreshLimiter::default_production();
+    let hostname_resolver = meshmon_service::hostname::Resolver::new(
+        hostname_backend,
+        hostname_broadcaster.clone(),
+        pool.clone(),
+        initial_config.hostname_resolver.max_in_flight as usize,
+    );
+
+    // Periodic sweeper for the refresh-rate limiter. Drops stale
+    // per-session buckets every 120 s so the map stays bounded even
+    // when many short-lived sessions churn through it. Cancelled via
+    // `shutdown_token` so the task exits with the rest of the drain.
+    {
+        let limiter = hostname_refresh_limiter.clone();
+        let shutdown = shutdown_token.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(120));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => limiter.sweep(),
+                    _ = shutdown.cancelled() => return,
+                }
+            }
+        });
+    }
+
     // Build AppState before the scheduler so the dispatcher can borrow
     // the tunnel manager from it. `AppState::new` is pure construction
     // — no tasks are spawned — so the scheduler still comes up after
@@ -284,6 +323,9 @@ async fn run() -> anyhow::Result<()> {
         registry.clone(),
         prom.clone(),
         enrichment_queue,
+        hostname_broadcaster,
+        hostname_refresh_limiter,
+        hostname_resolver,
     );
 
     // Campaign SSE listener: read-only fan-out from the two campaign
