@@ -2424,4 +2424,70 @@ mod tests {
         assert!((s.loss_pct - 0.3).abs() < 1e-9, "got {}", s.loss_pct);
         assert_eq!(s.avg_rtt_micros, 5_000);
     }
+
+    /// Regression backstop for the dev-cluster phantom-loss bug. Wires a
+    /// fully-populated `RouteTracker` whose destination hop reports 100%
+    /// loss — the trippy artefact that produced "40% loss" between
+    /// healthy LAN agents — alongside an `RollingStats[Icmp]` reporting
+    /// 0% loss. The supervisor's `compute_primary_summary` must follow
+    /// the elected primary's stats, not the tracker hop, so the matrix
+    /// agrees with `meshmon_path_failure_rate`.
+    ///
+    /// A future refactor that re-routes `path_summary` through
+    /// `snap.hops.last()` fails this test even if every existing
+    /// `compute_primary_summary_*` test still passes.
+    #[tokio::test]
+    async fn supervisor_path_summary_follows_primary_stats_when_dest_hop_is_100pct_loss() {
+        use crate::probing::HopObservation;
+        use crate::route::RouteTracker;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let target_ip: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 31, 0, 1));
+
+        // Seed the tracker so its destination hop carries 100% loss.
+        // Five rounds: every probe to position 1 is a silent timeout
+        // (no IP), which the truncate-at-target logic preserves as the
+        // destination hop with `loss_pct = 1.0`.
+        let mut tracker = RouteTracker::new(Duration::from_secs(60), target_ip);
+        tracker.reset_for_protocol(Some(Protocol::Icmp));
+        let now = tokio::time::Instant::now();
+        for round in 0..5u32 {
+            let obs = HopObservation {
+                position: 1,
+                ip: None,
+                rtt_micros: None,
+            };
+            tracker.observe(&[obs], now + Duration::from_millis(u64::from(round) * 10));
+        }
+        let snap = tracker
+            .build_snapshot(now + Duration::from_secs(1), SystemTime::now())
+            .expect("tracker has samples; snapshot must build");
+        // Sanity-check the precondition: destination-hop loss is 100%.
+        // If a future tracker change relaxes this, the test premise no
+        // longer exercises the "two sources disagree" path.
+        let dest_hop = snap.hops.last().expect("snapshot has at least one hop");
+        assert!(
+            (dest_hop.loss_pct - 1.0).abs() < 1e-9,
+            "test premise broken: destination hop loss is {} (expected 1.0)",
+            dest_hop.loss_pct,
+        );
+
+        // Seed the primary's RollingStats with 10 successful 1 ms
+        // samples — the dedicated pinger says 0% loss to the same target.
+        let stats = empty_stats_array();
+        fill_stats(&stats[0], &[Some(1_000); 10]);
+
+        // The supervisor reads `compute_primary_summary` from
+        // `last_state.primary` + `stats[index]`. With ICMP elected
+        // primary, the matrix value MUST follow the per-protocol stats
+        // (0% loss), not the tracker hop (100% loss).
+        let path_summary = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
+        assert_eq!(path_summary.primary_protocol, Some(Protocol::Icmp));
+        assert!(
+            (path_summary.loss_pct - 0.0).abs() < 1e-9,
+            "primary stats should win over tracker hop; got loss_pct = {}",
+            path_summary.loss_pct,
+        );
+        assert_eq!(path_summary.avg_rtt_micros, 1_000);
+    }
 }

@@ -2,7 +2,7 @@
 // carries catalogue-joined fields. See crates/service/src/http/agents.rs +
 // docs/superpowers/plans/meshmon/detail-plans/T47-plan.md F.2 line 503.
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
 import { useAgents } from "@/api/hooks/agents";
 import { useAgentLivenessThresholds } from "@/api/hooks/liveness";
@@ -12,12 +12,7 @@ import { FilterRail } from "@/components/filter/FilterRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { pointInShapes } from "@/lib/geo";
-import {
-  type AgentLivenessState,
-  DEFAULT_LIVENESS_THRESHOLDS,
-  getAgentLiveness,
-  type LivenessThresholds,
-} from "@/lib/health";
+import { type AgentLivenessState, getAgentLiveness } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
 type FacetsResponse = components["schemas"]["FacetsResponse"];
@@ -61,24 +56,6 @@ export interface SourcePanelProps {
    * source edits don't silently diverge from the persisted draft.
    */
   disabled?: boolean;
-}
-
-/**
- * Backwards-compatible offline check used by the few call sites that
- * still want a binary verdict. New rendering paths should prefer
- * `getAgentLiveness` (three-state: online / stale / offline) so a brief
- * snapshot lag flips the badge to a soft "stale" rather than full red.
- *
- * Defaults to the library thresholds when no config is passed — keeps
- * existing tests working without threading the session through every
- * caller.
- */
-export function isAgentOffline(
-  agent: AgentSummary,
-  now: number = Date.now(),
-  thresholds: LivenessThresholds = DEFAULT_LIVENESS_THRESHOLDS,
-): boolean {
-  return getAgentLiveness(agent.last_seen_at, thresholds, now) === "offline";
 }
 
 /**
@@ -148,12 +125,26 @@ function LivenessBadge({ agentId, liveness }: { agentId: string; liveness: Agent
       </Badge>
     );
   }
-  return <Badge variant="secondary">Online</Badge>;
+  return (
+    <Badge variant="secondary" aria-label={`Online: ${agentId}`}>
+      Online
+    </Badge>
+  );
 }
 
 interface AgentRow {
   agent: AgentSummary;
 }
+
+/**
+ * Liveness re-render cadence. The `useAgents` query refetches every
+ * 30 s; the default stale threshold is 20 s, so without an independent
+ * tick a freshly-still agent could read as Online for up to 10 s past
+ * the threshold. A 10 s `setInterval` bound to component lifetime
+ * matches the same pattern used by `RawTab` for "just now → 45s → …"
+ * cadence and forces re-rendering against a fresh `Date.now()`.
+ */
+const LIVENESS_TICK_MS = 10_000;
 
 export function SourcePanel({
   selected,
@@ -167,6 +158,17 @@ export function SourcePanel({
   const { data: agents } = useAgents();
   const livenessThresholds = useAgentLivenessThresholds();
 
+  // Drive a re-render every `LIVENESS_TICK_MS` so badges transition
+  // through the stale / offline thresholds even when no `useAgents`
+  // refetch has landed. The state value is unused — only the setter
+  // needs to be called to schedule a render. See the constant's doc
+  // comment for the cadence rationale.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const handle = window.setInterval(() => setTick((n) => n + 1), LIVENESS_TICK_MS);
+    return () => window.clearInterval(handle);
+  }, []);
+
   // Liveness is computed inside the row render against `Date.now()` at
   // render time, NOT memoized over `agents`. Sampling `now` inside the
   // memo callback would freeze the badge to whichever snapshot
@@ -174,8 +176,9 @@ export function SourcePanel({
   // up to `refresh_interval_seconds` on the server, so a fresh push from
   // the agent might briefly look stale-or-older than the threshold even
   // though wall-clock time has actually moved on. Re-sampling per render
-  // means the next React tick after the agent pushes flips the badge
-  // back to online.
+  // — combined with the `LIVENESS_TICK_MS` clock above — keeps the
+  // badge in sync with the wall clock across both data refreshes and
+  // quiet periods.
   const allRows: AgentRow[] = useMemo(() => (agents ?? []).map((agent) => ({ agent })), [agents]);
 
   const filteredRows: AgentRow[] = useMemo(

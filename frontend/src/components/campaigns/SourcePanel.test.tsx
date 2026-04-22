@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
@@ -163,9 +163,10 @@ describe("SourcePanel", () => {
 
   test("renders soft 'stale' badge between the stale and offline thresholds", () => {
     // 30 s ago is past the 20 s default stale threshold but well within
-    // the 5 min offline threshold. Bug 3 root cause: a snapshot lag of
-    // up to `refresh_interval_seconds` flipped this state straight to
-    // "offline" before. The fix surfaces a soft warning instead.
+    // the 5 min offline threshold. A snapshot lag of up to
+    // `refresh_interval_seconds` must surface as a soft "Stale" badge,
+    // not a destructive "Offline" badge — the agent is still well
+    // inside its active window, the registry just hasn't refreshed yet.
     const recentlyStale: AgentSummary = {
       id: "stale-soft",
       display_name: "Recently Stale",
@@ -198,11 +199,11 @@ describe("SourcePanel", () => {
   });
 
   test("treats a fresh push as online even when refetch lag would have flipped to offline", () => {
-    // The bug: dev-agent-2 briefly flickered to "offline" because the
-    // server's RegistrySnapshot was up to 10 s stale and the snapshot's
-    // active-window check ran at refresh moment, not render moment.
-    // With the fix, `Date.now()` is sampled at render time so a
-    // sub-second-old `last_seen_at` always renders as online.
+    // A sub-second-old `last_seen_at` must render as Online regardless
+    // of when the `useAgents` query last refetched. The badge samples
+    // `Date.now()` at render time, so a snapshot lag of up to
+    // `refresh_interval_seconds` cannot flip a freshly-pushed agent
+    // through the offline threshold.
     const justPushed: AgentSummary = {
       ...AGENT_BERLIN,
       id: "fresh-push",
@@ -225,6 +226,56 @@ describe("SourcePanel", () => {
     expect(screen.queryByLabelText(/offline/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/stale/i)).not.toBeInTheDocument();
     expect(screen.getByText("Online")).toBeInTheDocument();
+  });
+
+  test("clock tick transitions Online → Stale across the threshold without a data refresh", () => {
+    // The `useAgents` query refetches every 30 s but the default stale
+    // threshold is 20 s. Without an internal interval, an agent that
+    // stops responding would stay Online for up to 10 s past the
+    // threshold. The component owns a 10 s tick that drives a re-render
+    // against a fresh `Date.now()`; assert the badge transitions.
+    vi.useFakeTimers();
+    try {
+      const startMs = Date.parse("2026-04-22T12:00:00Z");
+      vi.setSystemTime(startMs);
+
+      // Agent pushed 5 s before the test starts — comfortably online.
+      const recent: AgentSummary = {
+        id: "ticking-agent",
+        display_name: "Ticking",
+        ip: "10.0.0.99",
+        last_seen_at: new Date(startMs - 5_000).toISOString(),
+        registered_at: "2026-01-01T00:00:00Z",
+        catalogue_coordinates: null,
+      };
+      mockAgents([recent]);
+
+      renderWithQuery(
+        <SourcePanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByLabelText("Online: ticking-agent")).toBeInTheDocument();
+      expect(screen.queryByLabelText(/stale/i)).not.toBeInTheDocument();
+
+      // Advance the wall clock past the 20 s default stale threshold.
+      // The age is now ~25 s with no data mutation; the component's
+      // own setInterval drives the re-render that flips the badge.
+      act(() => {
+        vi.advanceTimersByTime(20_000);
+      });
+
+      expect(screen.queryByLabelText("Online: ticking-agent")).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Stale: ticking-agent")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("excludes agents with null catalogue_coordinates when a shape filter is active", () => {
