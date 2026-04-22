@@ -1,13 +1,53 @@
 import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { type ReactElement, type ReactNode, useEffect } from "react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import * as agentsHook from "@/api/hooks/agents";
 import * as livenessHook from "@/api/hooks/liveness";
 import { SourcePanel } from "@/components/campaigns/SourcePanel";
 import type { FilterValue } from "@/components/filter/FilterRail";
+import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
 import { DEFAULT_LIVENESS_THRESHOLDS } from "@/lib/health";
 import { renderWithQuery } from "@/test/query-wrapper";
+
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  listeners: Record<string, Array<(event: { data: string }) => void>> = {};
+  constructor(public url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name] ?? [];
+    list.push(handler);
+    this.listeners[name] = list;
+  }
+  removeEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name];
+    if (!list) return;
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  }
+  close(): void {}
+}
+
+interface SeedEntry {
+  ip: string;
+  hostname?: string | null;
+}
+
+function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
+  const { seedFromResponse } = useIpHostnameContext();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+function renderPanel(ui: ReactElement, seed: SeedEntry[] = []) {
+  return renderWithQuery(<Seeder seed={seed}>{ui}</Seeder>);
+}
 
 vi.mock("@/api/hooks/agents");
 // `useAgentLivenessThresholds` calls `useSession` which calls
@@ -74,8 +114,14 @@ function mockAgents(agents: AgentSummary[]) {
   vi.mocked(livenessHook.useAgentLivenessThresholds).mockReturnValue(DEFAULT_LIVENESS_THRESHOLDS);
 }
 
+beforeEach(() => {
+  MockEventSource.instances = [];
+  vi.stubGlobal("EventSource", MockEventSource);
+});
+
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("SourcePanel", () => {
@@ -313,5 +359,108 @@ describe("SourcePanel", () => {
       />,
     );
     expect(screen.getByText("No Coords")).toBeInTheDocument();
+  });
+
+  describe("catalogue-joined fields", () => {
+    test("renders city, country (resolved via lookup), ASN, and network_operator when populated", () => {
+      const AGENT_ENRICHED: AgentSummary = {
+        id: "enriched-1",
+        display_name: "Enriched Agent",
+        ip: "10.0.0.10",
+        last_seen_at: FUTURE,
+        registered_at: "2026-01-01T00:00:00Z",
+        catalogue_coordinates: null,
+        city: "Amsterdam",
+        country_code: "NL",
+        country_name: "Netherlands",
+        asn: 64500,
+        network_operator: "ExampleNet",
+      };
+      mockAgents([AGENT_ENRICHED]);
+
+      renderPanel(
+        <SourcePanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("Amsterdam")).toBeInTheDocument();
+      // `lookupCountryName` resolves "NL" → "Netherlands"; matches the
+      // label shown by the destination panel for consistency.
+      expect(screen.getByText("Netherlands")).toBeInTheDocument();
+      expect(screen.getByText("64500")).toBeInTheDocument();
+      expect(screen.getByText("ExampleNet")).toBeInTheDocument();
+    });
+
+    test("renders em-dash placeholders when catalogue-joined fields are null", () => {
+      const AGENT_BARE: AgentSummary = {
+        id: "bare-1",
+        display_name: "Bare Agent",
+        ip: "10.0.0.11",
+        last_seen_at: FUTURE,
+        registered_at: "2026-01-01T00:00:00Z",
+        catalogue_coordinates: null,
+      };
+      mockAgents([AGENT_BARE]);
+
+      renderPanel(
+        <SourcePanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+      );
+
+      // Four null-valued cells (City, Country, ASN, Network) each render "—".
+      const placeholders = screen.getAllByText("—");
+      expect(placeholders.length).toBeGreaterThanOrEqual(4);
+    });
+  });
+
+  describe("hostname rendering", () => {
+    test("wraps the agent IP cell in <IpHostname>, appending `(hostname)` when seeded", async () => {
+      mockAgents([AGENT_BERLIN]);
+
+      renderPanel(
+        <SourcePanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+        [{ ip: "10.0.0.1", hostname: "berlin.example.com" }],
+      );
+
+      expect(await screen.findByText("(berlin.example.com)")).toBeInTheDocument();
+      expect(screen.getByText("10.0.0.1, hostname berlin.example.com")).toBeInTheDocument();
+    });
+
+    test("falls back to the bare IP when the provider has no hit", () => {
+      mockAgents([AGENT_BERLIN]);
+
+      renderPanel(
+        <SourcePanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("10.0.0.1")).toBeInTheDocument();
+      expect(screen.queryByText(/hostname/)).not.toBeInTheDocument();
+    });
   });
 });

@@ -5,6 +5,7 @@ import { useCatalogueListInfinite } from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
 import { PasteStaging } from "@/components/catalogue/PasteStaging";
 import { FilterRail, type FilterValue } from "@/components/filter/FilterRail";
+import { IpHostname } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { destinationFilterToQuery } from "@/lib/catalogue-query";
@@ -21,9 +22,14 @@ const PAGE_SIZE = 100;
 /**
  * Shared CSS grid track expression for the header + virtualized body.
  * Columns: IP, Name, City, Country, ASN, Network, selected-check.
+ *
+ * The IP track widens to `minmax(180px, 1.3fr)` so that `<IpHostname>`'s
+ * `ip (hostname)` rendering has room before the cell clips — a bare IP
+ * fits in 120px, but `203.0.113.10 (mail.example.com)` is a comfortable
+ * 180px floor on typical hostnames.
  */
 const GRID_TEMPLATE =
-  "120px minmax(140px, 1.2fr) minmax(100px, 1fr) minmax(110px, 1fr) 80px minmax(140px, 1.5fr) 32px";
+  "minmax(180px, 1.3fr) minmax(140px, 1.2fr) minmax(100px, 1fr) minmax(110px, 1fr) 80px minmax(140px, 1.5fr) 32px";
 
 export interface DestinationPanelProps {
   selected: Set<string>;
@@ -268,8 +274,8 @@ export function DestinationPanel({
                     }}
                   >
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
-                    <div role="cell" className="truncate px-3 font-mono text-xs">
-                      {entry.ip}
+                    <div role="cell" className="truncate px-3 text-xs">
+                      <IpHostname ip={entry.ip} />
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
                     <div role="cell" className="truncate px-3">

@@ -1,11 +1,51 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { type ReactElement, type ReactNode, useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry, CatalogueListResponse } from "@/api/hooks/catalogue";
 import * as catalogueHook from "@/api/hooks/catalogue";
 import { DestinationPanel } from "@/components/campaigns/DestinationPanel";
 import type { FilterValue } from "@/components/filter/FilterRail";
+import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
 import { renderWithQuery } from "@/test/query-wrapper";
+
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  listeners: Record<string, Array<(event: { data: string }) => void>> = {};
+  constructor(public url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name] ?? [];
+    list.push(handler);
+    this.listeners[name] = list;
+  }
+  removeEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name];
+    if (!list) return;
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  }
+  close(): void {}
+}
+
+interface SeedEntry {
+  ip: string;
+  hostname?: string | null;
+}
+
+function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
+  const { seedFromResponse } = useIpHostnameContext();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+function renderPanel(ui: ReactElement, seed: SeedEntry[] = []) {
+  return renderWithQuery(<Seeder seed={seed}>{ui}</Seeder>);
+}
 
 vi.mock("@/api/hooks/catalogue");
 
@@ -105,10 +145,13 @@ function mockList(pages: CatalogueListResponse[]) {
 
 beforeEach(() => {
   mockList(pagesOf([[ENTRY_A, ENTRY_B]]));
+  MockEventSource.instances = [];
+  vi.stubGlobal("EventSource", MockEventSource);
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("DestinationPanel", () => {
@@ -223,5 +266,44 @@ describe("DestinationPanel", () => {
       />,
     );
     expect(onSelectedChange).not.toHaveBeenCalled();
+  });
+
+  describe("hostname rendering", () => {
+    test("wraps the catalogue IP cell in <IpHostname>, appending `(hostname)` when seeded", async () => {
+      mockList(pagesOf([[ENTRY_A]]));
+
+      renderPanel(
+        <DestinationPanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+        [{ ip: "10.0.0.1", hostname: "alpha.example.com" }],
+      );
+
+      expect(await screen.findByText("(alpha.example.com)")).toBeInTheDocument();
+      expect(screen.getByText("10.0.0.1, hostname alpha.example.com")).toBeInTheDocument();
+    });
+
+    test("falls back to the bare IP when the provider has no hit", () => {
+      mockList(pagesOf([[ENTRY_A]]));
+
+      renderPanel(
+        <DestinationPanel
+          selected={new Set()}
+          onSelectedChange={vi.fn()}
+          filter={EMPTY_FILTER}
+          onFilterChange={vi.fn()}
+          facets={undefined}
+          onOpenMap={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("10.0.0.1")).toBeInTheDocument();
+      expect(screen.queryByText(/hostname/)).not.toBeInTheDocument();
+    });
   });
 });

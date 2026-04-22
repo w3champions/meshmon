@@ -11,6 +11,7 @@ import {
 import { formatDistanceToNowStrict } from "date-fns";
 import { useState } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
+import { IpHostname } from "@/components/ip-hostname";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import {
@@ -34,6 +35,16 @@ const columns: ColumnDef<AgentSummary>[] = [
   { accessorKey: "display_name", header: "Name" },
   { accessorKey: "location", header: "Location" },
   { accessorKey: "ip", header: "IP" },
+  {
+    id: "hostname",
+    header: "Hostname",
+    // Reads from the shared `<IpHostnameProvider>` map; the seed-on-response
+    // hook primes the map from the list query so the cell resolves without
+    // flicker once the provider has a positive hit. Mirrors the catalogue
+    // Hostname column — renders `ip (hostname)` on a positive hit and the
+    // bare IP on a cold miss so the column reads naturally next to IP.
+    cell: ({ row }) => <IpHostname ip={row.original.ip} />,
+  },
   { accessorKey: "agent_version", header: "Version" },
   {
     accessorKey: "last_seen_at",
