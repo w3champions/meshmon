@@ -54,8 +54,8 @@ pub async fn detect_timescaledb(pool: &PgPool) -> Result<bool, sqlx::Error> {
 }
 
 /// Apply the embedded sqlx migrations, then — if TimescaleDB is present —
-/// install the hypertable, compression policy, and retention policy for
-/// `route_snapshots`.
+/// install the hypertable / compression / retention policies for the
+/// tables that rely on them (`route_snapshots`, `ip_hostname_cache`).
 ///
 /// Safe to call on every service startup: sqlx only runs outstanding
 /// migrations, and the TimescaleDB DDL below uses `if_not_exists => TRUE` so
@@ -77,13 +77,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 /// Install or reinstall the TimescaleDB hypertable + compression + retention
-/// policies for `route_snapshots`. Idempotent.
+/// policies for `route_snapshots` and the hypertable + retention policy for
+/// `ip_hostname_cache`. Idempotent.
 ///
-/// All four DDL statements run inside a single transaction on one
-/// connection. Each individual `if_not_exists => TRUE` call is already
-/// idempotent, but wrapping them atomically means a mid-sequence failure
-/// (network blip, privilege edge case) leaves the DB in the pre-call state
-/// rather than half-configured.
+/// All DDL statements run inside a single transaction on one connection.
+/// Each individual `if_not_exists => TRUE` call is already idempotent, but
+/// wrapping them atomically means a mid-sequence failure (network blip,
+/// privilege edge case) leaves the DB in the pre-call state rather than
+/// half-configured.
 async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -127,6 +128,32 @@ async fn apply_timescaledb_setup(pool: &PgPool) -> Result<(), sqlx::Error> {
         "SELECT add_retention_policy(
             'route_snapshots',
             INTERVAL '2 years',
+            if_not_exists => TRUE
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // ip_hostname_cache: 7-day chunks keep per-IP history queries cheap
+    // (the ip+resolved_at DESC index is scoped to a single chunk in the
+    // common case); 90-day retention caps growth while giving operators
+    // a wide reread window for forensic lookups.
+    sqlx::query(
+        "SELECT create_hypertable(
+            'ip_hostname_cache',
+            'resolved_at',
+            chunk_time_interval => INTERVAL '7 days',
+            if_not_exists => TRUE,
+            migrate_data => TRUE
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "SELECT add_retention_policy(
+            'ip_hostname_cache',
+            INTERVAL '90 days',
             if_not_exists => TRUE
         )",
     )
