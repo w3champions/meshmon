@@ -135,6 +135,11 @@ listen_addr = "0.0.0.0:${SERVICE_PORT}"
 # Dev server is plain HTTP; browsers drop Secure cookies on HTTP.
 session_cookie_secure = false
 
+[logging]
+# Compact tracing lines beat JSON for reading in a tmux pane; prod
+# deploys override this via meshmon.example.toml.
+format = "compact"
+
 [database]
 url_env = "MESHMON_POSTGRES_URL"
 
@@ -165,6 +170,17 @@ enabled = true
 acknowledged_tos = true
 api_key_env = "MESHMON_IPGEO_API_KEY"
 EOF
+fi
+
+# Defensive: fail fast if something else already owns the service port.
+# Most commonly a stray `cargo run` from a prior dev.sh that didn't
+# fully clean up — cargo would then bind-fail inside the tmux pane and
+# the pane would close before you could read the error.
+if lsof -iTCP:"$SERVICE_PORT" -sTCP:LISTEN -n -P 2>/dev/null | grep -q LISTEN; then
+    echo "[dev.sh] ERROR: port $SERVICE_PORT is already in use:" >&2
+    lsof -iTCP:"$SERVICE_PORT" -sTCP:LISTEN -n -P >&2 || true
+    echo "[dev.sh]   kill the offender (\`lsof -ti :$SERVICE_PORT | xargs -r kill -9\`) or override MESHMON_DEV_SERVICE_PORT." >&2
+    exit 1
 fi
 
 echo "[dev.sh] starting infra via docker compose dev overlay"
