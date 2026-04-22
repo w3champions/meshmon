@@ -16,7 +16,15 @@ import type {
   CatalogueListResponse,
   CatalogueMapResponse,
 } from "@/api/hooks/catalogue";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import Catalogue from "@/pages/Catalogue";
+
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -203,7 +211,9 @@ function renderCatalogue(initialPath = "/catalogue") {
 
   return render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
@@ -214,10 +224,12 @@ function renderCatalogue(initialPath = "/catalogue") {
 
 beforeEach(() => {
   setupHookMocks();
+  vi.stubGlobal("EventSource", NoopEventSource);
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("Catalogue page — basic render", () => {
