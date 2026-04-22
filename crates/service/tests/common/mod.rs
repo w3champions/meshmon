@@ -2133,6 +2133,85 @@ impl Stream for SseStream {
     }
 }
 
+// -------- hostname cache-seeding helpers --------
+
+use meshmon_service::hostname::{record_negative, record_positive};
+
+/// Poll `ip_hostname_cache` up to ~2 seconds for a row on `ip`.
+///
+/// Used by cold-miss tests to observe that the resolver received an
+/// `enqueue` call: the stub backend defaults to `NegativeNxDomain`, so
+/// a processed enqueue writes a negative cache row we can see here.
+pub async fn wait_for_cache_row(pool: &sqlx::PgPool, ip: IpAddr) -> bool {
+    for _ in 0..40 {
+        let row: Option<(IpAddr,)> =
+            sqlx::query_as("SELECT ip FROM ip_hostname_cache WHERE ip = $1 LIMIT 1")
+                .bind(ip)
+                .fetch_optional(pool)
+                .await
+                .expect("query ip_hostname_cache");
+        if row.is_some() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// Seed a positive cache row for `ip` AFTER any handler-driven cold-miss
+/// writes have landed, winning the `DISTINCT ON (ip) ORDER BY
+/// resolved_at DESC` race against the stub resolver's cold-miss write.
+///
+/// The stub backend answers unseeded IPs with `NegativeNxDomain`, so
+/// if a handler run triggered a cold miss before the seed, the resulting
+/// negative row is drained and replaced with the authoritative positive
+/// hostname.
+pub async fn seed_hostname_positive(pool: &sqlx::PgPool, ip: IpAddr, hostname: &str) {
+    for _ in 0..40 {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ip_hostname_cache WHERE ip = $1")
+            .bind(ip)
+            .fetch_one(pool)
+            .await
+            .expect("count cache rows");
+        if count.0 > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1")
+        .bind(ip)
+        .execute(pool)
+        .await
+        .expect("clear cache");
+    record_positive(pool, ip, hostname)
+        .await
+        .expect("seed positive cache");
+}
+
+/// Sibling to [`seed_hostname_positive`] — drains any stub-resolver
+/// writes for `ip` then inserts the authoritative negative cache row.
+pub async fn seed_hostname_negative(pool: &sqlx::PgPool, ip: IpAddr) {
+    for _ in 0..40 {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ip_hostname_cache WHERE ip = $1")
+            .bind(ip)
+            .fetch_one(pool)
+            .await
+            .expect("count cache rows");
+        if count.0 > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1")
+        .bind(ip)
+        .execute(pool)
+        .await
+        .expect("clear cache");
+    record_negative(pool, ip)
+        .await
+        .expect("seed negative cache");
+}
+
 // -------- hostname test helpers --------
 
 use meshmon_service::hostname::{LookupOutcome, ResolverBackend};

@@ -19,7 +19,7 @@
           "agents"
         ],
         "summary": "`GET /api/agents` — return every agent known to the registry.",
-        "description": "The response is a flat JSON array sorted by `id` for determinism.\nEmpty when no agents have registered yet.",
+        "description": "The response is a flat JSON array sorted by `id` for determinism.\nEmpty when no agents have registered yet. Each row is stamped with\nits cached reverse-DNS hostname (when present) and cold-miss IPs\nare enqueued for background resolution against the caller's session.",
         "operationId": "list_agents",
         "responses": {
           "200": {
@@ -37,6 +37,9 @@
           },
           "401": {
             "description": "No active session"
+          },
+          "500": {
+            "description": "Internal error"
           }
         }
       }
@@ -47,7 +50,7 @@
           "agents"
         ],
         "summary": "`GET /api/agents/{id}` — return a single agent by id.",
-        "description": "Returns 404 with a JSON error body when the id is not found in the\ncurrent registry snapshot.",
+        "description": "Returns 404 with a JSON error body when the id is not found in the\ncurrent registry snapshot. The 200-OK branch stamps the hostname\nthrough the shared cache and enqueues a cold-miss resolution.",
         "operationId": "get_agent",
         "parameters": [
           {
@@ -76,6 +79,9 @@
           },
           "404": {
             "description": "Agent not found"
+          },
+          "500": {
+            "description": "Internal error"
           }
         }
       }
@@ -2830,7 +2836,7 @@
       },
       "AgentSummary": {
         "type": "object",
-        "description": "Summary of a single agent, returned by the list and detail endpoints.\n\nWrite-only on the server (constructed and serialized, never parsed) so\nonly `Serialize` is derived.",
+        "description": "Summary of a single agent, returned by the list and detail endpoints.\n\nWrite-only on the server (constructed and serialized, never parsed) so\nonly `Serialize` is derived. Catalogue-joined fields (`city`,\n`country_code`, `country_name`, `asn`, `network_operator`) and the\nsession-scoped `hostname` are optional and skip-none so a missing\nfield is omitted from the JSON rather than serialized as `null`.",
         "required": [
           "id",
           "display_name",
@@ -2846,6 +2852,14 @@
             ],
             "description": "Optional agent version string."
           },
+          "asn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Autonomous System Number joined from `ip_catalogue`."
+          },
           "catalogue_coordinates": {
             "oneOf": [
               {
@@ -2857,9 +2871,37 @@
               }
             ]
           },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "City joined from `ip_catalogue`."
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO-3166 alpha-2 country code joined from `ip_catalogue`."
+          },
+          "country_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable country name joined from `ip_catalogue`."
+          },
           "display_name": {
             "type": "string",
             "description": "Human-readable display label."
+          },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname joined at response time from the\n`ip_hostname_cache`. Present only on a positive cache hit; absent\non negative hits and cold misses (the handler enqueues cold IPs\nfor background resolution through the session-scoped\n[`crate::hostname::Resolver`])."
           },
           "id": {
             "type": "string",
@@ -2880,6 +2922,13 @@
               "null"
             ],
             "description": "Optional free-form location string."
+          },
+          "network_operator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Network operator / ISP name joined from `ip_catalogue`."
           },
           "registered_at": {
             "type": "string",
