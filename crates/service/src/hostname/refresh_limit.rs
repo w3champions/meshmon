@@ -71,9 +71,8 @@ impl HostnameRefreshLimiter {
         self.buckets.retain(|_, b| b.window_started > cutoff);
     }
 
-    /// Testing hook: count currently-live buckets. Useful for asserting
-    /// that [`Self::sweep`] evicts idle sessions.
-    #[cfg(test)]
+    /// Number of sessions currently tracked. Useful for asserting that
+    /// [`Self::sweep`] evicts idle sessions.
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }

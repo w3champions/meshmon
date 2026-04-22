@@ -86,8 +86,7 @@ impl HostnameBroadcaster {
         }
     }
 
-    /// Testing hook: count currently-registered sessions.
-    #[cfg(test)]
+    /// Number of sessions currently registered.
     pub fn session_count(&self) -> usize {
         self.inner.sessions.len()
     }
