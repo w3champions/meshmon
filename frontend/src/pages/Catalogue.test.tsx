@@ -35,10 +35,6 @@ vi.mock("@/api/hooks/catalogue", async () => {
   };
 });
 
-vi.mock("@/api/hooks/catalogue-stream", () => ({
-  useCatalogueStream: vi.fn(),
-}));
-
 // CatalogueMap uses Leaflet which requires DOM APIs not in jsdom — stub it out.
 // The stub exposes a button so tests can drive `onClusterOpen` directly.
 vi.mock("@/components/catalogue/CatalogueMap", () => ({
@@ -79,7 +75,6 @@ import {
   useReenrichMany,
   useReenrichOne,
 } from "@/api/hooks/catalogue";
-import { useCatalogueStream } from "@/api/hooks/catalogue-stream";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -183,7 +178,6 @@ function setupHookMocks(overrides: HookOverrides = {}) {
   vi.mocked(useReenrichMany).mockReturnValue(
     REENRICH_MANY_STUB as unknown as ReturnType<typeof useReenrichMany>,
   );
-  vi.mocked(useCatalogueStream).mockReturnValue(undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -234,12 +228,6 @@ describe("Catalogue page — basic render", () => {
     expect(screen.getByRole("button", { name: /add ips/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /table view/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /map view/i })).toBeInTheDocument();
-  });
-
-  test("calls useCatalogueStream once on mount", async () => {
-    renderCatalogue();
-    await screen.findByRole("complementary", { name: /catalogue filters/i });
-    expect(useCatalogueStream).toHaveBeenCalledTimes(1);
   });
 });
 
