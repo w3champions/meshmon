@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type CatalogueEntry,
   type CatalogueListResponse,
@@ -9,6 +9,14 @@ import {
   useCatalogueListInfinite,
   useCatalogueMap,
 } from "@/api/hooks/catalogue";
+import { IpHostnameProvider } from "@/components/ip-hostname";
+
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
 
 const ENTRY: CatalogueEntry = {
   id: "11111111-1111-1111-1111-111111111111",
@@ -31,7 +39,9 @@ function makeQueryClient(): QueryClient {
 
 function wrapWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>{children}</IpHostnameProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -46,7 +56,14 @@ function urlOf(call: unknown): string {
   return String(first);
 }
 
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("useCatalogueListInfinite — paging", () => {
   test("advances the cursor on fetchNextPage", async () => {

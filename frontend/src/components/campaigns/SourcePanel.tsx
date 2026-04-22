@@ -1,6 +1,3 @@
-// TODO(T47-followup): city/country/ASN columns are blank until AgentSummary
-// carries catalogue-joined fields. See crates/service/src/http/agents.rs +
-// docs/superpowers/plans/meshmon/detail-plans/T47-plan.md F.2 line 503.
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
@@ -9,8 +6,10 @@ import { useAgentLivenessThresholds } from "@/api/hooks/liveness";
 import type { components } from "@/api/schema.gen";
 import type { FilterValue } from "@/components/filter/FilterRail";
 import { FilterRail } from "@/components/filter/FilterRail";
+import { IpHostname } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { lookupCountryName } from "@/lib/countries";
 import { pointInShapes } from "@/lib/geo";
 import { type AgentLivenessState, getAgentLiveness } from "@/lib/health";
 import { cn } from "@/lib/utils";
@@ -37,9 +36,9 @@ const STALE_TOOLTIP =
 
 /**
  * Shared CSS grid track expression for the header + virtualized body.
- * Columns: ID, Name, City, Country, ASN, Status, selected-check.
+ * Columns: ID, Name, City, Country, ASN, Network, Status, selected-check.
  */
-const GRID_TEMPLATE = "100px minmax(160px, 1.5fr) 120px 110px 90px 110px 32px";
+const GRID_TEMPLATE = "100px minmax(160px, 1.5fr) 120px 110px 90px minmax(140px, 1.2fr) 110px 32px";
 
 export interface SourcePanelProps {
   selected: Set<string>;
@@ -92,11 +91,9 @@ function matchesFilter(agent: AgentSummary, filter: FilterValue): boolean {
   }
 
   // The remaining facets (country / asn / network / city) live on the
-  // catalogue row, not on AgentSummary. Agents are joined to that row
-  // by IP; the public AgentSummary type doesn't re-surface the fields
-  // today, so we intentionally do not filter on them here. When those
-  // fields are exposed on agents (T47 follow-ups) this function will
-  // gain predicates for each.
+  // catalogue-joined `AgentSummary` fields. Full facet-predicate wiring
+  // into this matcher is a larger scope deferred to a follow-up; this
+  // landing covers the render-side joins for the current UI.
 
   return true;
 }
@@ -319,6 +316,11 @@ export function SourcePanel({
             {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
             {/* biome-ignore lint/a11y/useFocusableInteractive: role="columnheader" is a non-interactive structural role. */}
             <div role="columnheader" className="px-3 py-2">
+              Network
+            </div>
+            {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
+            {/* biome-ignore lint/a11y/useFocusableInteractive: role="columnheader" is a non-interactive structural role. */}
+            <div role="columnheader" className="px-3 py-2">
               Status
             </div>
             {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
@@ -344,6 +346,13 @@ export function SourcePanel({
                 // the `allRows` comment for the full rationale.
                 const liveness = getAgentLiveness(agent.last_seen_at, livenessThresholds);
                 const isSelected = selected.has(agent.id);
+                // Catalogue-joined fields arrive from the registry query
+                // (`agents` LEFT JOIN `ip_catalogue`) and may be null when
+                // the agent's IP has no catalogue row. Resolve the country
+                // name via the same helper the destination picker uses so
+                // both panels display the same label for the same code.
+                const country =
+                  lookupCountryName(agent.country_code ?? undefined) ?? agent.country_code ?? "—";
                 return (
                   /* biome-ignore lint/a11y/useSemanticElements: virtualized row is a CSS-grid parent; role="button" keeps the click+keyboard affordance. */
                   <div
@@ -376,21 +385,43 @@ export function SourcePanel({
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
                     <div role="cell" className="truncate px-3">
                       <span className="block truncate">{agent.display_name}</span>
-                      <span className="block truncate font-mono text-[10px] text-muted-foreground">
-                        {agent.ip}
+                      <span className="block truncate text-[10px] text-muted-foreground">
+                        <IpHostname ip={agent.ip} />
                       </span>
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
-                    <div role="cell" className="truncate px-3 text-muted-foreground">
-                      —
+                    <div
+                      role="cell"
+                      className={cn("truncate px-3", agent.city == null && "text-muted-foreground")}
+                    >
+                      {agent.city ?? "—"}
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
-                    <div role="cell" className="truncate px-3 text-muted-foreground">
-                      —
+                    <div
+                      role="cell"
+                      className={cn(
+                        "truncate px-3",
+                        agent.country_code == null && "text-muted-foreground",
+                      )}
+                    >
+                      {country}
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
-                    <div role="cell" className="truncate px-3 text-muted-foreground">
-                      —
+                    <div
+                      role="cell"
+                      className={cn("truncate px-3", agent.asn == null && "text-muted-foreground")}
+                    >
+                      {agent.asn != null ? String(agent.asn) : "—"}
+                    </div>
+                    {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
+                    <div
+                      role="cell"
+                      className={cn(
+                        "truncate px-3",
+                        agent.network_operator == null && "text-muted-foreground",
+                      )}
+                    >
+                      {agent.network_operator ?? "—"}
                     </div>
                     {/* biome-ignore lint/a11y/useSemanticElements: see role="table" rationale. */}
                     <div role="cell" className="px-3">

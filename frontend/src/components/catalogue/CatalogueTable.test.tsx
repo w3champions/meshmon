@@ -1,7 +1,10 @@
 import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { type ReactElement, type ReactNode, useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
+import { IpHostnameProvider } from "@/components/ip-hostname";
+import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
 import { renderWithProviders } from "@/test/query-wrapper";
 import {
   CatalogueTable,
@@ -75,16 +78,83 @@ function buildProps(overrides: PartialProps = {}): CatalogueTableProps {
 }
 
 // ---------------------------------------------------------------------------
+// IpHostname provider test harness
+// ---------------------------------------------------------------------------
+
+/**
+ * Jsdom stand-in for `EventSource`. The provider opens the stream on mount;
+ * jsdom has no native implementation, so we plug in a minimal mock that
+ * records instances but never emits — tests that need stream-delivered
+ * updates reach for the instance and call `emit()`.
+ */
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  listeners: Record<string, Array<(event: { data: string }) => void>> = {};
+
+  constructor(public url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name] ?? [];
+    list.push(handler);
+    this.listeners[name] = list;
+  }
+  removeEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name];
+    if (!list) return;
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  }
+  close(): void {}
+}
+
+interface SeedEntry {
+  ip: string;
+  hostname?: string | null;
+}
+
+/**
+ * Seeds the provider map with a fixture set before first paint. The seed runs
+ * inside a mount-only `useEffect` so React 19 strict mode doesn't trip on a
+ * setState during render.
+ */
+function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
+  const { seedFromResponse } = useIpHostnameContext();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+/**
+ * Wraps the catalogue render under `IpHostnameProvider` and optionally seeds
+ * the map. `renderWithProviders` supplies the router + query client; the
+ * provider is the missing piece this helper adds for render-site tests that
+ * exercise the hostname column.
+ */
+function renderWithHostname(ui: ReactElement, seed: SeedEntry[] = []) {
+  return renderWithProviders(
+    <IpHostnameProvider>
+      <Seeder seed={seed}>{ui}</Seeder>
+    </IpHostnameProvider>,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
   localStorage.clear();
+  MockEventSource.instances = [];
+  vi.stubGlobal("EventSource", MockEventSource);
 });
 
 afterEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ---------------------------------------------------------------------------
@@ -376,11 +446,11 @@ describe("CatalogueTable", () => {
 
     test("Actions column is always the rightmost header with all optional columns enabled", async () => {
       const user = userEvent.setup();
-      renderWithProviders(<CatalogueTable {...buildProps()} />);
+      renderWithHostname(<CatalogueTable {...buildProps()} />);
 
       const chooserBtn = await screen.findByRole("button", { name: /columns/i });
       await user.click(chooserBtn);
-      for (const label of ["Location", "Website", "Notes"]) {
+      for (const label of ["Location", "Website", "Notes", "Hostname"]) {
         const checkbox = screen.getByRole("checkbox", { name: new RegExp(label, "i") });
         if (!checkbox.hasAttribute("checked") && !(checkbox as HTMLInputElement).checked) {
           await user.click(checkbox);
@@ -391,6 +461,50 @@ describe("CatalogueTable", () => {
       const headerNames = headers.map((h) => h.textContent?.trim() ?? "");
       // The last header contains "Actions" (plain text, no sort button).
       expect(headerNames.at(-1)).toBe("Actions");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Hostname column (optional, off by default)
+  // -----------------------------------------------------------------------
+
+  describe("hostname column", () => {
+    test("Hostname column is off by default (not rendered as a header)", async () => {
+      renderWithHostname(<CatalogueTable {...buildProps()} />);
+
+      await screen.findByRole("columnheader", { name: /IP/ });
+      expect(screen.queryByRole("columnheader", { name: /Hostname/ })).not.toBeInTheDocument();
+    });
+
+    test("enabling Hostname renders the seeded hostname next to the bare IP", async () => {
+      const user = userEvent.setup();
+      renderWithHostname(<CatalogueTable {...buildProps({ rows: [ENTRY_A], total: 1 })} />, [
+        { ip: ENTRY_A.ip, hostname: "alpha.example.com" },
+      ]);
+
+      const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+      await user.click(chooserBtn);
+      const hostnameCheckbox = screen.getByRole("checkbox", { name: /hostname/i });
+      expect(hostnameCheckbox).not.toBeChecked();
+      await user.click(hostnameCheckbox);
+
+      expect(screen.getByRole("columnheader", { name: /Hostname/ })).toBeInTheDocument();
+      // `<IpHostname>` renders the parenthesised hostname as an aria-hidden
+      // visible fragment and mirrors the announced phrase in an sr-only span.
+      expect(screen.getByText("(alpha.example.com)")).toBeInTheDocument();
+      expect(screen.getByText(`${ENTRY_A.ip}, hostname alpha.example.com`)).toBeInTheDocument();
+    });
+
+    test("hostname header is plain text (not sortable — no backend sort key in this batch)", async () => {
+      const user = userEvent.setup();
+      renderWithHostname(<CatalogueTable {...buildProps()} />);
+
+      const chooserBtn = await screen.findByRole("button", { name: /columns/i });
+      await user.click(chooserBtn);
+      await user.click(screen.getByRole("checkbox", { name: /hostname/i }));
+
+      const header = screen.getByRole("columnheader", { name: /Hostname/ });
+      expect(header.querySelectorAll("button").length).toBe(0);
     });
   });
 

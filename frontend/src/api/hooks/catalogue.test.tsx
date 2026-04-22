@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type CatalogueEntry,
   type CatalogueListResponse,
@@ -14,6 +14,14 @@ import {
   useReenrichMany,
   useReenrichOne,
 } from "@/api/hooks/catalogue";
+import { IpHostnameProvider, useIpHostname } from "@/components/ip-hostname";
+
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
 
 const ENTRY: CatalogueEntry = {
   id: "11111111-1111-1111-1111-111111111111",
@@ -41,7 +49,9 @@ function makeQueryClient() {
 
 function wrapWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>{children}</IpHostnameProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -49,7 +59,58 @@ function wrap() {
   return wrapWith(makeQueryClient());
 }
 
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("useCatalogueListInfinite — hostname seed wiring", () => {
+  test("seeds the hostname provider from every fetched page", async () => {
+    const entryWithHost: CatalogueEntry = { ...ENTRY, hostname: "seeded.example.com" };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ entries: [entryWithHost], total: 1 } satisfies CatalogueListResponse),
+        { status: 200 },
+      ),
+    );
+
+    const { result } = renderHook(
+      () => {
+        const q = useCatalogueListInfinite();
+        const hostname = useIpHostname("10.0.0.1");
+        return { q, hostname };
+      },
+      { wrapper: wrap() },
+    );
+
+    await waitFor(() => expect(result.current.q.isSuccess).toBe(true));
+    await waitFor(() => expect(result.current.hostname).toBe("seeded.example.com"));
+  });
+});
+
+describe("useCatalogueEntry — hostname seed wiring", () => {
+  test("seeds the hostname provider with the single-entry response", async () => {
+    const entryWithHost: CatalogueEntry = { ...ENTRY, hostname: "entry.example.com" };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(entryWithHost), { status: 200 }),
+    );
+
+    const { result } = renderHook(
+      () => {
+        const q = useCatalogueEntry(ENTRY.id);
+        const hostname = useIpHostname(ENTRY.ip);
+        return { q, hostname };
+      },
+      { wrapper: wrap() },
+    );
+    await waitFor(() => expect(result.current.q.isSuccess).toBe(true));
+    await waitFor(() => expect(result.current.hostname).toBe("entry.example.com"));
+  });
+});
 
 describe("useCatalogueListInfinite", () => {
   test("returns the first page body on 200", async () => {

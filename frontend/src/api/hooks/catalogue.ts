@@ -10,6 +10,7 @@ import {
 } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components, operations } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 
 export type CatalogueEntry = components["schemas"]["CatalogueEntryDto"];
 export type CatalogueListResponse = components["schemas"]["ListResponse"];
@@ -53,6 +54,30 @@ export function catalogueEntryKey(id: string) {
   return ["catalogue", "entry", id] as const;
 }
 
+/**
+ * Flatten an infinite-query payload's pages into a single `{ ip, hostname }`
+ * iterable for the shared hostname provider. Extracted so the selector
+ * signature in `useCatalogueListInfinite` stays terse.
+ */
+function* flattenEntryIps(
+  data: InfiniteData<CatalogueListResponse>,
+): Generator<{ ip: string; hostname?: string | null }> {
+  for (const page of data.pages) {
+    for (const entry of page.entries) yield entry;
+  }
+}
+
+/**
+ * Extract the per-row IP list from a `MapResponse`. The `clusters` variant
+ * only carries aggregated cell counts (no per-IP data) — treat it as empty
+ * so seeding is a no-op; the `detail` variant carries the full row shape.
+ */
+function mapResponseIps(
+  data: CatalogueMapResponse,
+): Iterable<{ ip: string; hostname?: string | null }> {
+  return data.kind === "detail" ? data.rows : [];
+}
+
 export interface CatalogueListInfiniteOptions {
   /** Page size; clamped server-side to `1..=500`. Default 100. */
   pageSize?: number;
@@ -83,7 +108,7 @@ export function useCatalogueListInfinite(
 ): UseInfiniteQueryResult<InfiniteData<CatalogueListResponse>, Error> {
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const enabled = options.enabled ?? true;
-  return useInfiniteQuery<
+  const infiniteQuery = useInfiniteQuery<
     CatalogueListResponse,
     Error,
     InfiniteData<CatalogueListResponse>,
@@ -109,6 +134,12 @@ export function useCatalogueListInfinite(
       return data;
     },
   });
+  // Seed the shared hostname provider from every refreshed page set. Uses
+  // the flattened-pages generator so newly fetched pages land on the map
+  // alongside the already-loaded ones — no flicker when the drawer or
+  // table re-opens later.
+  useSeedHostnamesOnResponse(infiniteQuery.data, flattenEntryIps);
+  return infiniteQuery;
 }
 
 /**
@@ -133,7 +164,7 @@ export function useCatalogueMap(
   options: { enabled?: boolean } = {},
 ): UseQueryResult<CatalogueMapResponse, Error> {
   const { enabled = true } = options;
-  return useQuery({
+  const query = useQuery({
     queryKey: [...CATALOGUE_MAP_KEY, bbox, zoom, filters],
     enabled: enabled && bbox !== undefined,
     queryFn: async (): Promise<CatalogueMapResponse> => {
@@ -153,12 +184,15 @@ export function useCatalogueMap(
       return data;
     },
   });
+  // Only the `detail` variant carries per-IP rows; `clusters` is a no-op.
+  useSeedHostnamesOnResponse(query.data, mapResponseIps);
+  return query;
 }
 
 export function useCatalogueEntry(
   id: string | undefined,
 ): UseQueryResult<CatalogueEntry | null, Error> {
-  return useQuery({
+  const query = useQuery({
     queryKey: id ? catalogueEntryKey(id) : ["catalogue", "entry", "__disabled__"],
     enabled: !!id,
     queryFn: async (): Promise<CatalogueEntry | null> => {
@@ -173,6 +207,10 @@ export function useCatalogueEntry(
       return data;
     },
   });
+  // Single-entry responses still seed the shared provider so the drawer's
+  // hostname row renders on first paint without waiting for an SSE tick.
+  useSeedHostnamesOnResponse(query.data, (entry) => (entry ? [entry] : []));
+  return query;
 }
 
 export function useCatalogueFacets(): UseQueryResult<CatalogueFacets, Error> {

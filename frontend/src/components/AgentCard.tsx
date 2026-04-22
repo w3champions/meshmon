@@ -1,5 +1,6 @@
 import { formatDistanceToNowStrict } from "date-fns";
 import type { AgentSummary } from "@/api/hooks/agents";
+import { IpHostname } from "@/components/ip-hostname";
 import { StatusBadge } from "@/components/StatusBadge";
 import {
   Card,
@@ -35,7 +36,7 @@ export function AgentCard({ agent, compact = false }: AgentCardProps) {
         <div className="space-y-1 text-sm">
           <div>
             <span className="text-muted-foreground">IP: </span>
-            <span>{agent.ip}</span>
+            <IpHostname ip={agent.ip} />
           </div>
           {agent.location != null && (
             <div>

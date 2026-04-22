@@ -11,6 +11,7 @@ import {
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import "@/test/cytoscape-mock";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import PathDetail from "@/pages/PathDetail";
 
 afterEach(() => vi.restoreAllMocks());
@@ -138,7 +139,9 @@ function renderPage(initialUrl = "/paths/a/b?range=24h"): {
   });
   const rendered = render(
     <QueryClientProvider client={qc}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
   return { rendered, router };

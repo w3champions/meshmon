@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT a.id, a.display_name, a.location,\n               a.ip AS \"ip: IpNetwork\",\n               c.latitude, c.longitude,\n               a.agent_version,\n               a.tcp_probe_port, a.udp_probe_port,\n               a.registered_at, a.last_seen_at,\n               a.campaign_max_concurrency\n        FROM agents a\n        LEFT JOIN ip_catalogue c ON c.ip = a.ip\n        ",
+  "query": "\n        SELECT a.id, a.display_name, a.location,\n               a.ip AS \"ip: IpNetwork\",\n               c.latitude, c.longitude,\n               c.city, c.country_code, c.country_name,\n               c.asn, c.network_operator,\n               a.agent_version,\n               a.tcp_probe_port, a.udp_probe_port,\n               a.registered_at, a.last_seen_at,\n               a.campaign_max_concurrency\n        FROM agents a\n        LEFT JOIN ip_catalogue c ON c.ip = a.ip\n        ",
   "describe": {
     "columns": [
       {
@@ -35,31 +35,56 @@
       },
       {
         "ordinal": 6,
-        "name": "agent_version",
+        "name": "city",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
+        "name": "country_code",
+        "type_info": "Bpchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "country_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "asn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "network_operator",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "agent_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
         "name": "tcp_probe_port",
         "type_info": "Int4"
       },
       {
-        "ordinal": 8,
+        "ordinal": 13,
         "name": "udp_probe_port",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 14,
         "name": "registered_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 15,
         "name": "last_seen_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 16,
         "name": "campaign_max_concurrency",
         "type_info": "Int2"
       }
@@ -75,6 +100,11 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
+      true,
+      true,
       false,
       false,
       false,
@@ -82,5 +112,5 @@
       true
     ]
   },
-  "hash": "40bf73b2492aa52ca50be3a5c4b7d59c34bca26f2ffc3fe1fbaaec076033b8f5"
+  "hash": "cebeb30cf6b6dfda92fe9ffaf27f19c5548381ca6424921792df20fe2c029e1d"
 }

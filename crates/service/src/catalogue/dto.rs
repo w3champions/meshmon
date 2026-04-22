@@ -132,6 +132,17 @@ pub struct CatalogueEntryDto {
     /// Operator principal (session username) that created the row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
+    /// Server-joined reverse-DNS hostname for [`Self::ip`].
+    ///
+    /// Populated by the handler after a single batched
+    /// [`crate::hostname::hostnames_for`] lookup: `Some(_)` is a positive
+    /// cache hit; `None` is either a confirmed-negative hit (serialized
+    /// as absent via the skip-none attribute) or a cold miss. Cold
+    /// misses also enqueue a background resolution scoped to the
+    /// caller's session so the value arrives over the hostname SSE
+    /// stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 impl From<CatalogueEntry> for CatalogueEntryDto {
@@ -155,6 +166,7 @@ impl From<CatalogueEntry> for CatalogueEntryDto {
             source: e.source,
             created_at: e.created_at,
             created_by: e.created_by,
+            hostname: None,
         }
     }
 }

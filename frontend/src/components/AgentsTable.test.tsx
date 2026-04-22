@@ -1,9 +1,59 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { type ReactElement, type ReactNode, useEffect } from "react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import { AgentsTable } from "@/components/AgentsTable";
+import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
 import { renderWithProviders } from "@/test/query-wrapper";
+
+// Jsdom stand-in for the provider's lazy `EventSource`. Tests don't emit;
+// seeded fixtures exercise the resolved-path, and cold-miss tests rely on the
+// provider's natural absent-key state.
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  listeners: Record<string, Array<(event: { data: string }) => void>> = {};
+  constructor(public url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name] ?? [];
+    list.push(handler);
+    this.listeners[name] = list;
+  }
+  removeEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name];
+    if (!list) return;
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  }
+  close(): void {}
+}
+
+interface SeedEntry {
+  ip: string;
+  hostname?: string | null;
+}
+
+/**
+ * Seeds the shared `IpHostnameProvider` with a fixture set before first
+ * paint. Runs inside a mount-only `useEffect` so React 19 strict mode
+ * doesn't trip on a setState during render; RTL flushes effects before
+ * returning from `render`, so assertions immediately afterwards see the
+ * seeded value.
+ */
+function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
+  const { seedFromResponse } = useIpHostnameContext();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+function renderWithSeed(ui: ReactElement, seed: SeedEntry[] = []) {
+  return renderWithProviders(<Seeder seed={seed}>{ui}</Seeder>);
+}
 
 const navigate = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -44,8 +94,14 @@ const AGENTS: AgentSummary[] = [
   },
 ];
 
+beforeEach(() => {
+  MockEventSource.instances = [];
+  vi.stubGlobal("EventSource", MockEventSource);
+});
+
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("AgentsTable", () => {
@@ -57,6 +113,7 @@ describe("AgentsTable", () => {
       expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Location" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "IP" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Hostname" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Version" })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: /Last seen/i })).toBeInTheDocument();
       expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
@@ -77,9 +134,11 @@ describe("AgentsTable", () => {
       expect(screen.getByText("Osaka")).toBeInTheDocument();
       expect(screen.getByText("Frankfurt")).toBeInTheDocument();
 
-      // IPs
-      expect(screen.getByText("10.0.0.26")).toBeInTheDocument();
-      expect(screen.getByText("10.0.0.1")).toBeInTheDocument();
+      // IPs — rendered in both the IP column (plain) and the Hostname
+      // column (via <IpHostname>, which falls back to a bare IP on a cold
+      // miss). Two matches per IP is the expected shape.
+      expect(screen.getAllByText("10.0.0.26")).toHaveLength(2);
+      expect(screen.getAllByText("10.0.0.1")).toHaveLength(2);
 
       // Versions
       const versions = screen.getAllByText("0.1.0");
@@ -221,6 +280,50 @@ describe("AgentsTable", () => {
 
       const alphaRow = screen.getByRole("link", { name: /Open agent alpha/i });
       expect(alphaRow).toHaveAttribute("tabindex", "0");
+    });
+
+    test("clicking the Hostname cell still bubbles to the row-level navigation", async () => {
+      const user = userEvent.setup();
+      renderWithSeed(<AgentsTable agents={AGENTS} />, [
+        { ip: "10.0.0.1", hostname: "alpha.example.com" },
+      ]);
+
+      // Wait for the seeded hostname to paint, then click directly on the
+      // hostname-bearing cell. The row's onClick must still fire because
+      // the IpHostname cell does not stop propagation.
+      const hostnameCell = await screen.findByText("(alpha.example.com)");
+      navigate.mockClear();
+      await user.click(hostnameCell);
+
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/agents/$id",
+        params: { id: "alpha" },
+      });
+    });
+  });
+
+  describe("hostname column", () => {
+    test("renders `ip (hostname)` in the Hostname cell when the provider has a positive hit", async () => {
+      renderWithSeed(<AgentsTable agents={AGENTS} />, [
+        { ip: "10.0.0.1", hostname: "alpha.example.com" },
+      ]);
+
+      // Seeder effect primes the provider map; the cell re-renders with
+      // the muted parenthesised hostname once the value lands.
+      expect(await screen.findByText("(alpha.example.com)")).toBeInTheDocument();
+      // Screen-reader companion is a single combined phrase.
+      expect(screen.getByText("10.0.0.1, hostname alpha.example.com")).toBeInTheDocument();
+    });
+
+    test("renders bare IP in the Hostname cell on a cold miss (no seed)", async () => {
+      renderWithSeed(<AgentsTable agents={AGENTS} />, []);
+
+      // Cold-miss: the IP column renders the plain IP and the Hostname
+      // column falls back to the bare IP as well — two matches total.
+      const ips = await screen.findAllByText("10.0.0.1");
+      expect(ips).toHaveLength(2);
+      // No hostname suffix is emitted when the map has no entry.
+      expect(screen.queryByText(/hostname/)).not.toBeInTheDocument();
     });
   });
 });

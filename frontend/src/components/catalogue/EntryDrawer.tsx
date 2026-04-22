@@ -1,4 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { RefreshCw } from "lucide-react";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -11,6 +12,7 @@ import {
   useReenrichOne,
 } from "@/api/hooks/catalogue";
 import { StatusChip } from "@/components/catalogue/StatusChip";
+import { IpHostname, useRefreshHostname } from "@/components/ip-hostname";
 import { LocationPicker } from "@/components/map/LocationPicker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -244,6 +246,79 @@ function ReadonlyRow({ label, children }: ReadonlyRowProps) {
     <div className="grid grid-cols-[8rem_1fr] items-center gap-2 text-sm">
       <span className="text-muted-foreground">{label}</span>
       <span className="text-foreground">{children}</span>
+    </div>
+  );
+}
+
+/**
+ * Optimistic disable window for the hostname refresh button, in ms.
+ *
+ * After the POST resolves we keep the button disabled briefly so the
+ * operator's click doesn't race against the backend: the 202 lands
+ * quickly, but the SSE-delivered updated hostname takes a round-trip
+ * through the resolver and the stream fan-out. A short cooldown
+ * prevents a second click that would no-op against the cache the
+ * resolver just populated.
+ */
+const HOSTNAME_REFRESH_COOLDOWN_MS = 2000;
+
+interface HostnameRefreshRowProps {
+  ip: string;
+}
+
+/**
+ * Read-only Hostname row with a refresh affordance. The displayed value
+ * comes from the shared `<IpHostnameProvider>` — after the SSE event
+ * arrives, the cell re-renders with the new hostname.
+ */
+function HostnameRefreshRow({ ip }: HostnameRefreshRowProps) {
+  const refreshHostname = useRefreshHostname();
+  const [pending, setPending] = useState(false);
+  const cooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (cooldownRef.current !== null) {
+        clearTimeout(cooldownRef.current);
+        cooldownRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleRefresh = async (): Promise<void> => {
+    setPending(true);
+    if (cooldownRef.current !== null) {
+      clearTimeout(cooldownRef.current);
+    }
+    // Re-enable after a short cooldown regardless of fetch outcome so
+    // the operator isn't locked out by a pathological slow response.
+    cooldownRef.current = setTimeout(() => {
+      setPending(false);
+      cooldownRef.current = null;
+    }, HOSTNAME_REFRESH_COOLDOWN_MS);
+    try {
+      await refreshHostname(ip);
+    } catch (err) {
+      toast.error(toastMessage("Couldn't refresh hostname", err));
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-[8rem_1fr_auto] items-center gap-2 text-sm">
+      <span className="text-muted-foreground">Hostname</span>
+      <span className="text-foreground">
+        <IpHostname ip={ip} />
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={handleRefresh}
+        disabled={pending}
+        aria-label="Refresh hostname"
+      >
+        <RefreshCw className="h-4 w-4" aria-hidden="true" />
+      </Button>
     </div>
   );
 }
@@ -548,6 +623,12 @@ export function EntryDrawer({ entry, onClose }: EntryDrawerProps) {
                 <ReadonlyRow label="Created by">{entry.created_by ?? "—"}</ReadonlyRow>
                 <ReadonlyRow label="Source">{entry.source}</ReadonlyRow>
                 <ReadonlyRow label="Enriched at">{formatTimestamp(entry.enriched_at)}</ReadonlyRow>
+                {/* Hostname spans both columns so the refresh button has room
+                    to sit to the right of the value without compressing the
+                    sibling metadata rows on narrow viewports. */}
+                <div className="sm:col-span-2">
+                  <HostnameRefreshRow ip={entry.ip} />
+                </div>
               </div>
             </section>
 

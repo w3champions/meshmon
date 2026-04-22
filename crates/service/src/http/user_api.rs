@@ -10,6 +10,9 @@
 //! unauthenticated callers receive 401 from the middleware before the
 //! handler runs.
 
+use crate::catalogue::dto::ErrorEnvelope;
+use crate::hostname::{hostnames_for, session_id_from_auth, SessionId};
+use crate::http::auth::AuthSession;
 use crate::ingestion::json_shapes::{HopJson, PathSummaryJson};
 use crate::registry::AgentInfo;
 use crate::state::AppState;
@@ -19,7 +22,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::types::Json as SqlxJson;
+use std::net::IpAddr;
 use utoipa::{IntoParams, ToSchema};
 
 /// Latitude / longitude pair sourced from the IP catalogue join.
@@ -37,7 +42,10 @@ pub struct CatalogueCoordinates {
 /// Summary of a single agent, returned by the list and detail endpoints.
 ///
 /// Write-only on the server (constructed and serialized, never parsed) so
-/// only `Serialize` is derived.
+/// only `Serialize` is derived. Catalogue-joined fields (`city`,
+/// `country_code`, `country_name`, `asn`, `network_operator`) and the
+/// session-scoped `hostname` are optional and skip-none so a missing
+/// field is omitted from the JSON rather than serialized as `null`.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AgentSummary {
     /// Unique agent identifier (matches the agent's `AGENT_ID` env var).
@@ -53,6 +61,28 @@ pub struct AgentSummary {
     /// agent's IP is not in the catalogue or neither coord is populated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalogue_coordinates: Option<CatalogueCoordinates>,
+    /// City joined from `ip_catalogue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    /// ISO-3166 alpha-2 country code joined from `ip_catalogue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    /// Human-readable country name joined from `ip_catalogue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    /// Autonomous System Number joined from `ip_catalogue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asn: Option<i32>,
+    /// Network operator / ISP name joined from `ip_catalogue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_operator: Option<String>,
+    /// Reverse-DNS hostname joined at response time from the
+    /// `ip_hostname_cache`. Present only on a positive cache hit; absent
+    /// on negative hits and cold misses (the handler enqueues cold IPs
+    /// for background resolution through the session-scoped
+    /// [`crate::hostname::Resolver`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     /// Optional agent version string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_version: Option<String>,
@@ -77,6 +107,15 @@ impl From<AgentInfo> for AgentSummary {
             location: a.location,
             ip: a.ip.ip().to_string(),
             catalogue_coordinates,
+            city: a.city,
+            country_code: a.country_code,
+            country_name: a.country_name,
+            asn: a.asn,
+            network_operator: a.network_operator,
+            // Hostname is stamped by the handler after the registry
+            // snapshot is converted to DTOs; the registry itself never
+            // stores hostname state.
+            hostname: None,
             agent_version: a.agent_version,
             registered_at: a.registered_at,
             last_seen_at: a.last_seen_at,
@@ -84,10 +123,69 @@ impl From<AgentInfo> for AgentSummary {
     }
 }
 
+/// Stamp `summary.hostname` on every row whose IP the cache already
+/// knows about, and enqueue a background resolution for every cold miss.
+///
+/// Mirrors the catalogue-layer stamp helper:
+/// - Positive cache hit: sets `summary.hostname = Some(h)`.
+/// - Negative cache hit: leaves `summary.hostname = None` (skip-none on
+///   the wire so the client sees an absent key, not `null`).
+/// - Cold miss: leaves `summary.hostname = None` and calls
+///   [`crate::hostname::Resolver::enqueue`] with the caller's
+///   [`SessionId`] so the resolution lands on that session's SSE stream
+///   when it completes.
+///
+/// `AgentSummary.ip` comes from [`std::net::IpAddr::to_string`] via
+/// [`From<AgentInfo>`], so unparseable IPs are a defensive branch only
+/// and are silently skipped. Propagates a `sqlx::Error` to the caller;
+/// both callers map it to a 500 via [`db_error`].
+async fn stamp_hostnames(
+    state: &AppState,
+    session: &SessionId,
+    summaries: &mut [AgentSummary],
+) -> sqlx::Result<()> {
+    if summaries.is_empty() {
+        return Ok(());
+    }
+    let ips: Vec<IpAddr> = summaries.iter().filter_map(|s| s.ip.parse().ok()).collect();
+    if ips.is_empty() {
+        return Ok(());
+    }
+    let cache = hostnames_for(&state.pool, &ips).await?;
+    for summary in summaries.iter_mut() {
+        let Ok(ip): Result<IpAddr, _> = summary.ip.parse() else {
+            continue;
+        };
+        match cache.get(&ip) {
+            Some(Some(h)) => summary.hostname = Some(h.clone()),
+            Some(None) => {}
+            None => {
+                state.hostname_resolver.enqueue(ip, session.clone()).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Render a `hostnames_for` failure as an HTTP 500 with a stable JSON
+/// error body. Logs the full error server-side and hides the internal
+/// message from the client, parallel to
+/// `catalogue::handlers::db_error`.
+fn db_error(context: &'static str, err: sqlx::Error) -> Response {
+    tracing::error!(error = %err, "{context}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "database_error" })),
+    )
+        .into_response()
+}
+
 /// `GET /api/agents` — return every agent known to the registry.
 ///
 /// The response is a flat JSON array sorted by `id` for determinism.
-/// Empty when no agents have registered yet.
+/// Empty when no agents have registered yet. Each row is stamped with
+/// its cached reverse-DNS hostname (when present) and cold-miss IPs
+/// are enqueued for background resolution against the caller's session.
 #[utoipa::path(
     get,
     path = "/api/agents",
@@ -95,19 +193,25 @@ impl From<AgentInfo> for AgentSummary {
     responses(
         (status = 200, description = "List of all registered agents", body = Vec<AgentSummary>),
         (status = 401, description = "No active session"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
-pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary>> {
+pub async fn list_agents(State(state): State<AppState>, auth_session: AuthSession) -> Response {
     let snap = state.registry.snapshot();
     let mut agents: Vec<AgentSummary> = snap.all().into_iter().map(AgentSummary::from).collect();
     agents.sort_by(|a, b| a.id.cmp(&b.id));
-    Json(agents)
+    let session = session_id_from_auth(&auth_session);
+    if let Err(e) = stamp_hostnames(&state, &session, &mut agents).await {
+        return db_error("list_agents: stamp_hostnames failed", e);
+    }
+    Json(agents).into_response()
 }
 
 /// `GET /api/agents/{id}` — return a single agent by id.
 ///
 /// Returns 404 with a JSON error body when the id is not found in the
-/// current registry snapshot.
+/// current registry snapshot. The 200-OK branch stamps the hostname
+/// through the shared cache and enqueues a cold-miss resolution.
 #[utoipa::path(
     get,
     path = "/api/agents/{id}",
@@ -119,12 +223,26 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
         (status = 200, description = "Agent detail", body = AgentSummary),
         (status = 401, description = "No active session"),
         (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
-pub async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub async fn get_agent(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+    Path(id): Path<String>,
+) -> Response {
     let snap = state.registry.snapshot();
     match snap.get(&id).cloned() {
-        Some(info) => Json(AgentSummary::from(info)).into_response(),
+        Some(info) => {
+            let mut summary = AgentSummary::from(info);
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) =
+                stamp_hostnames(&state, &session, std::slice::from_mut(&mut summary)).await
+            {
+                return db_error("get_agent: stamp_hostnames failed", e);
+            }
+            Json(summary).into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "agent not found" })),

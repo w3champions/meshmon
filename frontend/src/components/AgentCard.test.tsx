@@ -1,6 +1,49 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
+import { type ReactElement, type ReactNode, useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentCard } from "@/components/AgentCard";
+import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
+import { renderWithQuery } from "@/test/query-wrapper";
+
+// Minimal EventSource stand-in — the `<IpHostnameProvider>` opens the stream
+// on mount; jsdom has no native implementation.
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  listeners: Record<string, Array<(event: { data: string }) => void>> = {};
+  constructor(public url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name] ?? [];
+    list.push(handler);
+    this.listeners[name] = list;
+  }
+  removeEventListener(name: string, handler: (event: { data: string }) => void): void {
+    const list = this.listeners[name];
+    if (!list) return;
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  }
+  close(): void {}
+}
+
+interface SeedEntry {
+  ip: string;
+  hostname?: string | null;
+}
+
+function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
+  const { seedFromResponse } = useIpHostnameContext();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+function render(ui: ReactElement, seed: SeedEntry[] = []) {
+  return renderWithQuery(<Seeder seed={seed}>{ui}</Seeder>);
+}
 
 const FIXED_NOW = new Date("2026-04-16T12:00:00Z");
 
@@ -32,10 +75,13 @@ const MINIMAL_AGENT = {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(FIXED_NOW);
+  MockEventSource.instances = [];
+  vi.stubGlobal("EventSource", MockEventSource);
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("AgentCard", () => {
@@ -85,5 +131,16 @@ describe("AgentCard", () => {
     expect(screen.getByText(/ago/)).toBeInTheDocument();
     expect(screen.queryByText(/·\s*v/)).not.toBeInTheDocument();
     expect(screen.queryByText(/v\d/)).not.toBeInTheDocument();
+  });
+
+  test("renders the IP through <IpHostname>, appending `(hostname)` on a positive hit", () => {
+    render(<AgentCard agent={AGENT} />, [{ ip: "10.0.0.1", hostname: "alpha.example.com" }]);
+
+    // RTL's `render` flushes mount-effects synchronously, so the Seeder's
+    // `useEffect` has already primed the provider by the time `getByText`
+    // runs. Fake timers in this suite prevent `findByText`'s internal
+    // waiter from advancing — the synchronous queries sidestep that.
+    expect(screen.getByText("(alpha.example.com)")).toBeInTheDocument();
+    expect(screen.getByText("10.0.0.1, hostname alpha.example.com")).toBeInTheDocument();
   });
 });

@@ -37,7 +37,11 @@
 //! | `.150` | `recent_routes_returns_latest_across_pairs`                 |
 //! | `.151` | `recent_routes_respects_limit_cap`                          |
 //! | `.152` | `recent_routes_rejects_invalid_limit`                       |
-//! | `.153` | (reserved for future)                                       |
+//! | `.160` | `agents_list_carries_catalogue_joined_fields`               |
+//! | `.161` | `agents_list_stamps_hostname_from_positive_cache`           |
+//! | `.162` | `agents_list_omits_hostname_on_negative_cache`              |
+//! | `.163` | `agents_list_cold_cache_miss_enqueues_resolver`             |
+//! | `.164` | `agent_detail_stamps_hostname_from_positive_cache`          |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -1135,4 +1139,336 @@ async fn recent_routes_requires_session() {
         .await
         .unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue-joined fields + hostname stamping on /api/agents[/:id]
+// ---------------------------------------------------------------------------
+
+/// Per-test seed fields. Grouped in a struct so the helper doesn't trip
+/// clippy's `too_many_arguments` lint and each call site names the
+/// fields it cares about.
+struct AgentCatalogueSeed<'a> {
+    agent_id: &'a str,
+    ip: &'a str,
+    city: &'a str,
+    country_code: &'a str,
+    country_name: &'a str,
+    asn: i32,
+    network_operator: &'a str,
+}
+
+/// Seed an agent row plus its `ip_catalogue` join row with the given
+/// city / country / ASN / network_operator fields populated.
+///
+/// Shared DB isolation: the helper uses the caller-supplied id (unique
+/// per test) and its IP (unique per test) so parallel tests do not
+/// collide. Each test pairs this with [`cleanup_agent_with_catalogue`]
+/// on its success path.
+async fn seed_agent_with_catalogue(pool: &sqlx::PgPool, seed: &AgentCatalogueSeed<'_>) {
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, location, ip, tcp_probe_port, udp_probe_port, agent_version) \
+         VALUES ($1, $1, 'TEST', $2::inet, 8002, 8005, 'v0.1.0')",
+    )
+    .bind(seed.agent_id)
+    .bind(seed.ip)
+    .execute(pool)
+    .await
+    .expect("seed agent row");
+
+    sqlx::query(
+        "INSERT INTO ip_catalogue (ip, source, city, country_code, country_name, asn, network_operator, \
+                                   operator_edited_fields) \
+         VALUES ($1::inet, 'agent_registration', $2, $3, $4, $5, $6, \
+                 ARRAY['City','CountryCode','CountryName','Asn','NetworkOperator']::text[]) \
+         ON CONFLICT (ip) DO UPDATE SET city = EXCLUDED.city, \
+                                        country_code = EXCLUDED.country_code, \
+                                        country_name = EXCLUDED.country_name, \
+                                        asn = EXCLUDED.asn, \
+                                        network_operator = EXCLUDED.network_operator",
+    )
+    .bind(seed.ip)
+    .bind(seed.city)
+    .bind(seed.country_code)
+    .bind(seed.country_name)
+    .bind(seed.asn)
+    .bind(seed.network_operator)
+    .execute(pool)
+    .await
+    .expect("seed catalogue row");
+}
+
+/// Drop the rows created by [`seed_agent_with_catalogue`]. Called on
+/// every test success path so leakage across the shared test DB stays
+/// bounded.
+async fn cleanup_agent_with_catalogue(pool: &sqlx::PgPool, agent_id: &str, ip: &str) {
+    sqlx::query("DELETE FROM agents WHERE id = $1")
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .expect("cleanup agent row");
+    sqlx::query("DELETE FROM ip_catalogue WHERE ip = $1::inet")
+        .bind(ip)
+        .execute(pool)
+        .await
+        .expect("cleanup catalogue row");
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1::inet")
+        .bind(ip)
+        .execute(pool)
+        .await
+        .expect("cleanup hostname cache");
+}
+
+/// Pull `/api/agents` through the real router, locate the row whose `id`
+/// matches the per-test seed, and return the row as a `serde_json::Value`.
+///
+/// Panics if the row is missing from the list — every test that calls
+/// this helper first calls `seed_agent_with_catalogue` and `force_refresh`
+/// so the row must appear in the snapshot.
+async fn fetch_agent_row(app: &axum::Router, cookie: &str, agent_id: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/agents")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let agents = list.as_array().expect("agents list is an array");
+    agents
+        .iter()
+        .find(|a| a["id"].as_str() == Some(agent_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("agent {agent_id} not found in /api/agents response: {list}"))
+}
+
+#[tokio::test]
+async fn agents_list_carries_catalogue_joined_fields() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let agent_id = "t53b-catfields";
+    let ip = "170.80.160.90";
+
+    seed_agent_with_catalogue(
+        &pool,
+        &AgentCatalogueSeed {
+            agent_id,
+            ip,
+            city: "Fortaleza",
+            country_code: "BR",
+            country_name: "Brazil",
+            asn: 64512,
+            network_operator: "AS Example",
+        },
+    )
+    .await;
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+
+    let cookie = common::login_as_admin(&app, "203.0.113.160").await;
+    let row = fetch_agent_row(&app, &cookie, agent_id).await;
+
+    assert_eq!(row["city"], "Fortaleza", "row = {row}");
+    assert_eq!(row["country_code"], "BR", "row = {row}");
+    assert_eq!(row["country_name"], "Brazil", "row = {row}");
+    assert_eq!(row["asn"], 64512, "row = {row}");
+    assert_eq!(row["network_operator"], "AS Example", "row = {row}");
+
+    cleanup_agent_with_catalogue(&pool, agent_id, ip).await;
+}
+
+#[tokio::test]
+async fn agents_list_stamps_hostname_from_positive_cache() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let agent_id = "t53b-host-pos";
+    let ip = "170.80.161.90";
+
+    seed_agent_with_catalogue(
+        &pool,
+        &AgentCatalogueSeed {
+            agent_id,
+            ip,
+            city: "Sao Paulo",
+            country_code: "BR",
+            country_name: "Brazil",
+            asn: 64513,
+            network_operator: "AS Example",
+        },
+    )
+    .await;
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.161").await;
+
+    let ip_addr: std::net::IpAddr = ip.parse().unwrap();
+    common::seed_hostname_positive(&pool, ip_addr, "agent-161.example.com").await;
+
+    let row = fetch_agent_row(&app, &cookie, agent_id).await;
+    assert_eq!(
+        row["hostname"].as_str(),
+        Some("agent-161.example.com"),
+        "list must stamp hostname from positive cache; row = {row}",
+    );
+
+    cleanup_agent_with_catalogue(&pool, agent_id, ip).await;
+}
+
+#[tokio::test]
+async fn agents_list_omits_hostname_on_negative_cache() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let agent_id = "t53b-host-neg";
+    let ip = "170.80.162.90";
+
+    seed_agent_with_catalogue(
+        &pool,
+        &AgentCatalogueSeed {
+            agent_id,
+            ip,
+            city: "Berlin",
+            country_code: "DE",
+            country_name: "Germany",
+            asn: 64514,
+            network_operator: "AS Example",
+        },
+    )
+    .await;
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.162").await;
+
+    let ip_addr: std::net::IpAddr = ip.parse().unwrap();
+    common::seed_hostname_negative(&pool, ip_addr).await;
+
+    let row = fetch_agent_row(&app, &cookie, agent_id).await;
+    assert!(
+        row.get("hostname").is_none(),
+        "negative cache hit must omit hostname; row = {row}",
+    );
+
+    cleanup_agent_with_catalogue(&pool, agent_id, ip).await;
+}
+
+#[tokio::test]
+async fn agents_list_cold_cache_miss_enqueues_resolver() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let agent_id = "t53b-host-cold";
+    let ip = "170.80.163.90";
+
+    seed_agent_with_catalogue(
+        &pool,
+        &AgentCatalogueSeed {
+            agent_id,
+            ip,
+            city: "Paris",
+            country_code: "FR",
+            country_name: "France",
+            asn: 64515,
+            network_operator: "AS Example",
+        },
+    )
+    .await;
+
+    // Drain any prior cache state for this IP so the handler sees a true
+    // cold miss and issues an enqueue to the resolver.
+    let ip_addr: std::net::IpAddr = ip.parse().unwrap();
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1::inet")
+        .bind(ip)
+        .execute(&pool)
+        .await
+        .expect("clear cache");
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.163").await;
+
+    let row = fetch_agent_row(&app, &cookie, agent_id).await;
+    assert!(
+        row.get("hostname").is_none(),
+        "cold miss must omit hostname; row = {row}",
+    );
+
+    // The stub backend answers every unseeded IP with `NegativeNxDomain`,
+    // so a successful enqueue writes a negative row we can observe. The
+    // stub is the `test_hostname_fixtures` default — see `StubHostnameBackend`.
+    assert!(
+        common::wait_for_cache_row(&pool, ip_addr).await,
+        "resolver never wrote a cache row for {ip_addr} — enqueue was skipped",
+    );
+
+    cleanup_agent_with_catalogue(&pool, agent_id, ip).await;
+}
+
+#[tokio::test]
+async fn agent_detail_stamps_hostname_from_positive_cache() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let agent_id = "t53b-detail-pos";
+    let ip = "170.80.164.90";
+
+    seed_agent_with_catalogue(
+        &pool,
+        &AgentCatalogueSeed {
+            agent_id,
+            ip,
+            city: "Warsaw",
+            country_code: "PL",
+            country_name: "Poland",
+            asn: 64516,
+            network_operator: "AS Example",
+        },
+    )
+    .await;
+
+    let state = common::state_with_admin(pool.clone()).await;
+    state.registry.force_refresh().await.expect("refresh");
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.164").await;
+
+    let ip_addr: std::net::IpAddr = ip.parse().unwrap();
+    common::seed_hostname_positive(&pool, ip_addr, "agent-164.example.com").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/agents/{agent_id}"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(body["id"], agent_id, "body = {body}");
+    assert_eq!(
+        body["hostname"].as_str(),
+        Some("agent-164.example.com"),
+        "detail must stamp hostname from positive cache; body = {body}",
+    );
+    // Catalogue-joined fields also reach the detail path.
+    assert_eq!(body["city"], "Warsaw", "body = {body}");
+    assert_eq!(body["country_code"], "PL", "body = {body}");
+    assert_eq!(body["asn"], 64516, "body = {body}");
+    assert_eq!(body["network_operator"], "AS Example", "body = {body}");
+
+    cleanup_agent_with_catalogue(&pool, agent_id, ip).await;
 }

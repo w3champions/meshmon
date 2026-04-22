@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { Campaign, PreviewDispatchResponse } from "@/api/hooks/campaigns";
 import type { CatalogueEntry, CatalogueListResponse } from "@/api/hooks/catalogue";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 // ---------------------------------------------------------------------------
 // Module mocks. Register BEFORE importing the component under test so the
@@ -231,7 +232,9 @@ function renderComposer(initialPath = "/campaigns/new") {
   });
   return render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }

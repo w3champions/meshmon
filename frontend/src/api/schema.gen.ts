@@ -14,7 +14,9 @@ export interface paths {
         /**
          * `GET /api/agents` — return every agent known to the registry.
          * @description The response is a flat JSON array sorted by `id` for determinism.
-         *     Empty when no agents have registered yet.
+         *     Empty when no agents have registered yet. Each row is stamped with
+         *     its cached reverse-DNS hostname (when present) and cold-miss IPs
+         *     are enqueued for background resolution against the caller's session.
          */
         get: operations["list_agents"];
         put?: never;
@@ -35,7 +37,8 @@ export interface paths {
         /**
          * `GET /api/agents/{id}` — return a single agent by id.
          * @description Returns 404 with a JSON error body when the id is not found in the
-         *     current registry snapshot.
+         *     current registry snapshot. The 200-OK branch stamps the hostname
+         *     through the shared cache and enqueues a cold-miss resolution.
          */
         get: operations["get_agent"];
         put?: never;
@@ -1010,14 +1013,36 @@ export interface components {
          * @description Summary of a single agent, returned by the list and detail endpoints.
          *
          *     Write-only on the server (constructed and serialized, never parsed) so
-         *     only `Serialize` is derived.
+         *     only `Serialize` is derived. Catalogue-joined fields (`city`,
+         *     `country_code`, `country_name`, `asn`, `network_operator`) and the
+         *     session-scoped `hostname` are optional and skip-none so a missing
+         *     field is omitted from the JSON rather than serialized as `null`.
          */
         AgentSummary: {
             /** @description Optional agent version string. */
             agent_version?: string | null;
+            /**
+             * Format: int32
+             * @description Autonomous System Number joined from `ip_catalogue`.
+             */
+            asn?: number | null;
             catalogue_coordinates?: null | components["schemas"]["CatalogueCoordinates"];
+            /** @description City joined from `ip_catalogue`. */
+            city?: string | null;
+            /** @description ISO-3166 alpha-2 country code joined from `ip_catalogue`. */
+            country_code?: string | null;
+            /** @description Human-readable country name joined from `ip_catalogue`. */
+            country_name?: string | null;
             /** @description Human-readable display label. */
             display_name: string;
+            /**
+             * @description Reverse-DNS hostname joined at response time from the
+             *     `ip_hostname_cache`. Present only on a positive cache hit; absent
+             *     on negative hits and cold misses (the handler enqueues cold IPs
+             *     for background resolution through the session-scoped
+             *     [`crate::hostname::Resolver`]).
+             */
+            hostname?: string | null;
             /** @description Unique agent identifier (matches the agent's `AGENT_ID` env var). */
             id: string;
             /** @description Agent source IP (host address only, CIDR prefix stripped). */
@@ -1029,6 +1054,8 @@ export interface components {
             last_seen_at: string;
             /** @description Optional free-form location string. */
             location?: string | null;
+            /** @description Network operator / ISP name joined from `ip_catalogue`. */
+            network_operator?: string | null;
             /**
              * Format: date-time
              * @description When this agent first registered.
@@ -1349,6 +1376,18 @@ export interface components {
             enriched_at?: string | null;
             /** @description Current enrichment pipeline status. */
             enrichment_status: components["schemas"]["EnrichmentStatus"];
+            /**
+             * @description Server-joined reverse-DNS hostname for [`Self::ip`].
+             *
+             *     Populated by the handler after a single batched
+             *     [`crate::hostname::hostnames_for`] lookup: `Some(_)` is a positive
+             *     cache hit; `None` is either a confirmed-negative hit (serialized
+             *     as absent via the skip-none attribute) or a cold miss. Cold
+             *     misses also enqueue a background resolution scoped to the
+             *     caller's session so the value arrives over the hostname SSE
+             *     stream.
+             */
+            hostname?: string | null;
             /**
              * Format: uuid
              * @description Primary key (UUID v4).
@@ -2586,6 +2625,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
     get_agent: {
@@ -2622,6 +2670,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
         };
     };

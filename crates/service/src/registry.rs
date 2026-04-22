@@ -35,6 +35,16 @@ pub struct AgentInfo {
     pub latitude: Option<f64>,
     /// Longitude joined from `ip_catalogue`, if present.
     pub longitude: Option<f64>,
+    /// City joined from `ip_catalogue`, if present.
+    pub city: Option<String>,
+    /// ISO-3166 alpha-2 country code joined from `ip_catalogue`.
+    pub country_code: Option<String>,
+    /// Human-readable country name joined from `ip_catalogue`.
+    pub country_name: Option<String>,
+    /// Autonomous System Number joined from `ip_catalogue`.
+    pub asn: Option<i32>,
+    /// Network operator / ISP name joined from `ip_catalogue`.
+    pub network_operator: Option<String>,
     /// Optional `agent_version` string reported on register.
     pub agent_version: Option<String>,
     /// Advertised TCP echo-listener port (1-65535, enforced by DB CHECK).
@@ -143,6 +153,11 @@ struct AgentRow {
     ip: IpNetwork,
     latitude: Option<f64>,
     longitude: Option<f64>,
+    city: Option<String>,
+    country_code: Option<String>,
+    country_name: Option<String>,
+    asn: Option<i32>,
+    network_operator: Option<String>,
     agent_version: Option<String>,
     tcp_probe_port: i32,
     udp_probe_port: i32,
@@ -163,6 +178,8 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
         SELECT a.id, a.display_name, a.location,
                a.ip AS "ip: IpNetwork",
                c.latitude, c.longitude,
+               c.city, c.country_code, c.country_name,
+               c.asn, c.network_operator,
                a.agent_version,
                a.tcp_probe_port, a.udp_probe_port,
                a.registered_at, a.last_seen_at,
@@ -212,6 +229,11 @@ async fn refresh_once(pool: &PgPool) -> Result<RegistrySnapshot, sqlx::Error> {
                 ip: row.ip,
                 latitude: row.latitude,
                 longitude: row.longitude,
+                city: row.city,
+                country_code: row.country_code,
+                country_name: row.country_name,
+                asn: row.asn,
+                network_operator: row.network_operator,
                 agent_version: row.agent_version,
                 tcp_probe_port,
                 udp_probe_port,

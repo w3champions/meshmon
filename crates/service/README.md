@@ -144,6 +144,32 @@ IP-carrying DTOs consume the cache via `hostname::hostnames_for`
 and enqueue cold misses through `AppState::hostname_resolver`. See
 `src/hostname/README.md` for the full contract.
 
+IP-carrying response DTOs — `CatalogueEntryDto` (in
+`src/catalogue/dto.rs`) and `AgentSummary` (in `src/http/user_api.rs`,
+reused by both `GET /api/agents` and `GET /api/agents/{id}`) —
+carry a server-joined `hostname: Option<String>` field. The catalogue
+and agent handlers build the DTOs from their data source, then call
+a `stamp_hostnames` helper that runs one batched `hostnames_for`
+lookup per response: positive cache hits set `Some(h)`, negative
+hits leave `None`, and cold misses enqueue a background resolution
+against the caller's `SessionId` so the completion lands on that
+session's SSE stream. The field is `#[serde(skip_serializing_if =
+"Option::is_none")]` — absent on the wire rather than `null` — and
+the registry itself never stores hostname state.
+
+The frontend `frontend/src/components/ip-hostname/` module is the
+sole consumer of these wire surfaces. It maintains a client-side
+`Map<ip, Option<string>>` seeded from DTO `hostname` fields via the
+`useSeedHostnamesOnResponse` hook, subscribes to
+`/api/hostnames/stream` through an `EventSource` to receive
+resolution completions, and calls `POST /api/hostnames/:ip/refresh`
+from the operator-facing refresh action. Render sites (catalogue
+table, entry card, entry drawer, agents table, agent card, and the
+campaign composer source and destination panels) read from the
+module through `<IpHostname />` and the `useIpHostname` /
+`useIpHostnames` hooks; no other code path touches the stream, the
+refresh endpoint, or the hostname DTO field directly.
+
 ## Agent API (gRPC)
 
 The service exposes a tonic gRPC endpoint named `meshmon.AgentApi`. It shares

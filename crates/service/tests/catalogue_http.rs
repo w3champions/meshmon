@@ -24,6 +24,13 @@
 //! | `patch_rejects_invalid_latitude_longitude_cc`   | `198.51.100.121`     |
 //! | `facets_response_has_expected_array_shape`      | (no seeded IPs)      |
 //! | `facets_cache_invalidated_after_paste`          | `198.51.100.131`     |
+//! | `list_stamps_hostname_from_positive_cache`      | `198.51.100.201`     |
+//! | `get_one_stamps_hostname_from_positive_cache`   | `198.51.100.202`     |
+//! | `negative_cache_hit_omits_hostname_field`       | `198.51.100.203`     |
+//! | `cold_cache_miss_omits_hostname_and_enqueues`   | `198.51.100.204`     |
+//! | `map_stamps_hostname_from_positive_cache`       | `198.51.100.205`     |
+//! | `patch_response_stamps_hostname_from_cache`     | `198.51.100.206`     |
+//! | `paste_response_stamps_hostname_from_cache`     | `198.51.100.207`     |
 
 mod common;
 
@@ -1006,4 +1013,190 @@ async fn paste_with_half_location_rejects_400() {
         .expect("collect body");
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("parse body");
     assert_eq!(parsed["error"], "paired_metadata_half_missing");
+}
+
+// ---- hostname stamping ----
+//
+// `seed_positive` / `seed_negative` / `wait_for_cache_row` live in
+// `tests/common/mod.rs` as
+// `common::seed_hostname_positive` / `common::seed_hostname_negative` /
+// `common::wait_for_cache_row` so every integration-test binary shares
+// one implementation.
+
+use std::net::IpAddr;
+
+#[tokio::test]
+async fn list_stamps_hostname_from_positive_cache() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.201").await;
+    let ip: IpAddr = "198.51.100.201".parse().unwrap();
+
+    common::seed_hostname_positive(&h.state.pool, ip, "host-201.example.com").await;
+
+    let body: serde_json::Value = h
+        .get_json("/api/catalogue?ip_prefix=198.51.100.201/32")
+        .await;
+    let entries = body["entries"].as_array().expect("entries array");
+    let row = entries
+        .iter()
+        .find(|e| e["id"].as_str() == Some(&id))
+        .expect("seeded row in response");
+    assert_eq!(
+        row["hostname"].as_str(),
+        Some("host-201.example.com"),
+        "list must stamp hostname from positive cache; body = {body}",
+    );
+}
+
+#[tokio::test]
+async fn get_one_stamps_hostname_from_positive_cache() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.202").await;
+    let ip: IpAddr = "198.51.100.202".parse().unwrap();
+
+    common::seed_hostname_positive(&h.state.pool, ip, "host-202.example.com").await;
+
+    let body: serde_json::Value = h.get_json(&format!("/api/catalogue/{id}")).await;
+    assert_eq!(
+        body["hostname"].as_str(),
+        Some("host-202.example.com"),
+        "get_one must stamp hostname from positive cache; body = {body}",
+    );
+}
+
+#[tokio::test]
+async fn negative_cache_hit_omits_hostname_field() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.203").await;
+    let ip: IpAddr = "198.51.100.203".parse().unwrap();
+
+    common::seed_hostname_negative(&h.state.pool, ip).await;
+
+    let body: serde_json::Value = h.get_json(&format!("/api/catalogue/{id}")).await;
+    // `skip_serializing_if = "Option::is_none"` keeps the key absent
+    // from the serialized JSON on a confirmed-negative cache entry.
+    assert!(
+        body.get("hostname").is_none(),
+        "negative cache hit must omit hostname from the JSON; body = {body}",
+    );
+}
+
+#[tokio::test]
+async fn cold_cache_miss_omits_hostname_and_enqueues() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.204").await;
+    let ip: IpAddr = "198.51.100.204".parse().unwrap();
+
+    // No seed → cold miss. Make sure the cache is empty for this IP.
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1")
+        .bind(ip)
+        .execute(&h.state.pool)
+        .await
+        .expect("clear cache for 198.51.100.204");
+
+    let body: serde_json::Value = h.get_json(&format!("/api/catalogue/{id}")).await;
+    assert!(
+        body.get("hostname").is_none(),
+        "cold miss must omit hostname from the JSON; body = {body}",
+    );
+
+    // The stub backend answers every unseeded IP with `NegativeNxDomain`,
+    // so a successful enqueue writes a negative row we can observe.
+    assert!(
+        common::wait_for_cache_row(&h.state.pool, ip).await,
+        "resolver never wrote a cache row for {ip} — enqueue was skipped",
+    );
+}
+
+#[tokio::test]
+async fn map_stamps_hostname_from_positive_cache() {
+    let h = common::HttpHarness::start().await;
+    let _ = ensure_row_id(&h, "198.51.100.205").await;
+    let ip: IpAddr = "198.51.100.205".parse().unwrap();
+
+    // The map endpoint only surfaces rows with lat/lng, so stamp both.
+    sqlx::query("UPDATE ip_catalogue SET latitude = $2, longitude = $3 WHERE ip = $1")
+        .bind(IpNetwork::from_str("198.51.100.205/32").unwrap())
+        .bind(10.0_f64)
+        .bind(20.0_f64)
+        .execute(&h.state.pool)
+        .await
+        .expect("stamp lat/lng on .205");
+
+    common::seed_hostname_positive(&h.state.pool, ip, "host-205.example.com").await;
+
+    // Bbox covers (10, 20); zoom 0 yields the coarsest cell size and
+    // always lands in the detail branch as long as the shared DB's
+    // viewport count stays below MAP_DETAIL_THRESHOLD.
+    let body: serde_json::Value = h
+        .get_json("/api/catalogue/map?bbox=9,19,11,21&zoom=15&ip_prefix=198.51.100.205/32")
+        .await;
+    assert_eq!(body["kind"], "detail", "body = {body}");
+    let rows = body["rows"].as_array().expect("rows array");
+    let row = rows
+        .iter()
+        .find(|r| r["ip"].as_str() == Some("198.51.100.205"))
+        .expect("seeded row in map response");
+    assert_eq!(
+        row["hostname"].as_str(),
+        Some("host-205.example.com"),
+        "map must stamp hostname from positive cache; body = {body}",
+    );
+}
+
+#[tokio::test]
+async fn patch_response_stamps_hostname_from_cache() {
+    let h = common::HttpHarness::start().await;
+    let id = ensure_row_id(&h, "198.51.100.206").await;
+    let ip: IpAddr = "198.51.100.206".parse().unwrap();
+
+    common::seed_hostname_positive(&h.state.pool, ip, "host-206.example.com").await;
+
+    let body: serde_json::Value = h
+        .patch_json(
+            &format!("/api/catalogue/{id}"),
+            &serde_json::json!({ "display_name": "Stamp Me" }),
+        )
+        .await;
+    assert_eq!(
+        body["hostname"].as_str(),
+        Some("host-206.example.com"),
+        "patch response must stamp hostname from positive cache; body = {body}",
+    );
+}
+
+#[tokio::test]
+async fn paste_response_stamps_hostname_from_cache() {
+    let h = common::HttpHarness::start().await;
+    let ip: IpAddr = "198.51.100.207".parse().unwrap();
+
+    common::seed_hostname_positive(&h.state.pool, ip, "host-207.example.com").await;
+
+    let body: serde_json::Value = h
+        .post_json(
+            "/api/catalogue",
+            &serde_json::json!({ "ips": ["198.51.100.207"] }),
+        )
+        .await;
+
+    // The row may live in either bucket depending on prior state of the
+    // shared test DB — either way its hostname must be stamped.
+    let row = body["created"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|r| r["ip"].as_str() == Some("198.51.100.207"))
+        })
+        .or_else(|| {
+            body["existing"].as_array().and_then(|a| {
+                a.iter()
+                    .find(|r| r["ip"].as_str() == Some("198.51.100.207"))
+            })
+        })
+        .unwrap_or_else(|| panic!("paste response missing .207 row: {body}"));
+    assert_eq!(
+        row["hostname"].as_str(),
+        Some("host-207.example.com"),
+        "paste response must stamp hostname from positive cache; body = {body}",
+    );
 }

@@ -8,8 +8,16 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render } from "@testing-library/react";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
+/**
+ * Renders `ui` under a fresh `QueryClient` and the shared
+ * `<IpHostnameProvider>`. The providers mount via RTL's `wrapper` option
+ * (not as parents of `ui` in the render call) so the returned `rerender`
+ * helper preserves them — without this, a rerender with a naked element
+ * drops the provider tree and consumers throw "IpHostnameProvider missing".
+ */
 export function renderWithQuery(ui: ReactElement) {
   const client = new QueryClient({
     defaultOptions: {
@@ -17,7 +25,14 @@ export function renderWithQuery(ui: ReactElement) {
       mutations: { retry: false },
     },
   });
-  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+  function Wrapper({ children }: { children: ReactNode }) {
+    return (
+      <QueryClientProvider client={client}>
+        <IpHostnameProvider>{children}</IpHostnameProvider>
+      </QueryClientProvider>
+    );
+  }
+  return render(ui, { wrapper: Wrapper });
 }
 
 export function renderWithProviders(ui: ReactElement, initialPath = "/") {
@@ -81,7 +96,9 @@ export function renderWithProviders(ui: ReactElement, initialPath = "/") {
 
   return render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
