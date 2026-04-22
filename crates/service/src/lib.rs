@@ -8,6 +8,7 @@
 //! - [`enrichment`] — pluggable provider chain for catalogue enrichment.
 //! - [`error`] — boot/startup error types.
 //! - [`grpc`] — tonic gRPC service assembly.
+//! - [`hostname`] — IP→hostname reverse-DNS cache + session-scoped SSE.
 //! - [`http`] — axum router assembly, health endpoints, OpenAPI serving.
 //! - [`logging`] — tracing-subscriber JSON initializer.
 //! - [`metrics`] — central metric registry (names + typed accessors + describe).
@@ -27,6 +28,7 @@ pub mod db;
 pub mod enrichment;
 pub mod error;
 pub mod grpc;
+pub mod hostname;
 pub mod http;
 pub mod ingestion;
 pub mod logging;

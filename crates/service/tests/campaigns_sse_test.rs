@@ -79,6 +79,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         let (_cfg_tx, cfg_rx) = watch::channel(cfg);
         let ingestion = common::dummy_ingestion(db.pool.clone());
         let registry = common::dummy_registry(db.pool.clone());
+        let (hb, hl, hr) = common::test_hostname_fixtures(&db.pool);
         let state = AppState::new(
             swap,
             cfg_rx,
@@ -87,6 +88,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
             registry,
             common::test_prometheus_handle().await,
             common::test_enrichment_queue(),
+            hb,
+            hl,
+            hr,
         );
         state.mark_ready();
 

@@ -541,6 +541,28 @@ pub fn test_enrichment_queue(
 /// exact bytes don't matter for these tests because no probing is exercised.
 pub const TEST_UDP_PROBE_SECRET_TOML: &str = "hex:0011223344556677";
 
+/// Build the triple of hostname fixtures that every `state_with_*`
+/// helper threads into `AppState::new`. Uses `StubHostnameBackend` so
+/// no DNS is issued and no `cap_net_raw` is needed.
+///
+/// Kept as a named helper rather than inlining at each call site so a
+/// future signature change (e.g. adding a shared `SessionId` default)
+/// touches one place.
+pub fn test_hostname_fixtures(
+    pool: &PgPool,
+) -> (
+    meshmon_service::hostname::HostnameBroadcaster,
+    std::sync::Arc<meshmon_service::hostname::HostnameRefreshLimiter>,
+    meshmon_service::hostname::Resolver,
+) {
+    let backend = StubHostnameBackend::new();
+    let broadcaster = meshmon_service::hostname::HostnameBroadcaster::new();
+    let limiter = meshmon_service::hostname::HostnameRefreshLimiter::default_production();
+    let resolver =
+        meshmon_service::hostname::Resolver::new(backend, broadcaster.clone(), pool.clone(), 32);
+    (broadcaster, limiter, resolver)
+}
+
 /// Construct an `AppState` with the minimum valid config (no auth users,
 /// no `[service]` section). Used by tests that exercise unauthenticated
 /// or transport-level routes (health, SPA static files) where user setup
@@ -560,6 +582,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -568,6 +591,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -597,6 +623,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -605,6 +632,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -639,6 +669,7 @@ password_hash = "{AUTH_TEST_HASH}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -647,6 +678,9 @@ password_hash = "{AUTH_TEST_HASH}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -677,6 +711,7 @@ alertmanager_url = "{alertmanager_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -685,6 +720,9 @@ alertmanager_url = "{alertmanager_url}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -715,6 +753,7 @@ grafana_url = "{grafana_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -723,6 +762,9 @@ grafana_url = "{grafana_url}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -753,6 +795,7 @@ vm_url = "{vm_url}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -761,6 +804,9 @@ vm_url = "{vm_url}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -787,6 +833,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -795,6 +842,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -832,6 +882,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = dummy_ingestion(pool.clone());
     let registry = dummy_registry(pool.clone());
+    let (hb, hl, hr) = test_hostname_fixtures(&pool);
     AppState::new(
         swap,
         rx,
@@ -840,6 +891,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         registry,
         test_prometheus_handle().await,
         test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     )
 }
 
@@ -860,6 +914,8 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
 // | `.61`  | `auth::rate_limit_does_not_leak_between_ips` (fresh IP)   |
 // | `.80`  | `auth::peer_addr_extractor_reads_connect_info_…`          |
 // | `.100` | `session::session_returns_version_and_username`           |
+// | `.44`  | `hostname_sse_http` + `hostname_refresh` — primary login  |
+// | `.201` | `hostname_sse_http::sse_events_do_not_leak_between_…`     |
 //
 // Pick a fresh octet when adding a new test that hits the login endpoint.
 // ---------------------------------------------------------------------------
@@ -1131,9 +1187,12 @@ struct LiveHarness {
     /// Owns the `axum::serve` task. Aborted on drop as a second-line
     /// safety net if graceful shutdown stalls.
     server_task: JoinHandle<()>,
-    /// Owns the enrichment runner. Aborted on drop to prevent the
-    /// runner from outliving the test process and leaking pg connections.
-    runner_task: JoinHandle<()>,
+    /// Owns the enrichment runner, when the harness started one.
+    /// Aborted on drop to prevent the runner from outliving the test
+    /// process and leaking pg connections. `None` when the harness
+    /// was spawned without an enrichment runner (e.g. the hostname
+    /// resolver variant only needs the HTTP surface).
+    runner_task: Option<JoinHandle<()>>,
     /// Per-test throwaway Postgres database. Owned here so `Drop`
     /// closes it synchronously via [`TestDb::close`]; a panic in the
     /// test body will orphan the database inside the shared container,
@@ -1149,7 +1208,9 @@ impl Drop for LiveHarness {
         // before the hard abort fires.
         self.shutdown.cancel();
         self.server_task.abort();
-        self.runner_task.abort();
+        if let Some(task) = self.runner_task.take() {
+            task.abort();
+        }
         // Note: no `block_on` DB close here — a synchronous `Drop` can
         // deadlock on a single-threaded runtime. The throwaway DB is
         // reaped when the shared container exits at process end.
@@ -1225,6 +1286,7 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
         let (_cfg_tx, cfg_rx) = watch::channel(cfg);
         let ingestion = dummy_ingestion(db.pool.clone());
         let registry = dummy_registry(db.pool.clone());
+        let (hb, hl, hr) = test_hostname_fixtures(&db.pool);
         let state = AppState::new(
             swap,
             cfg_rx,
@@ -1233,6 +1295,9 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
             registry,
             test_prometheus_handle().await,
             queue,
+            hb,
+            hl,
+            hr,
         );
         state.mark_ready();
 
@@ -1287,24 +1352,155 @@ udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
                 client,
                 shutdown,
                 server_task,
-                runner_task,
+                runner_task: Some(runner_task),
                 db: Some(db),
             }),
         }
     }
 
+    /// Start a harness bound to a test-supplied
+    /// [`meshmon_service::hostname::ResolverBackend`] so hostname SSE
+    /// and refresh tests can pin the resolver's output without going
+    /// through hickory. No enrichment runner is spawned. Uses a
+    /// per-test fresh Postgres database so concurrent test binaries
+    /// don't see each other's `ip_hostname_cache` rows.
+    pub async fn start_with_hostname_resolver(
+        backend: Arc<dyn meshmon_service::hostname::ResolverBackend>,
+    ) -> Self {
+        let db = acquire(false).await;
+        meshmon_service::db::run_migrations(&db.pool)
+            .await
+            .expect("run migrations for hostname resolver harness");
+
+        let toml = format!(
+            r#"
+[database]
+url = "postgres://ignored@h/d"
+
+[service]
+trust_forwarded_headers = true
+
+[[auth.users]]
+username = "admin"
+password_hash = "{AUTH_TEST_HASH}"
+
+[probing]
+udp_probe_secret = "{TEST_UDP_PROBE_SECRET_TOML}"
+"#
+        );
+        let cfg = Arc::new(Config::from_str(&toml, "synthetic.toml").expect("parse"));
+        let swap = Arc::new(arc_swap::ArcSwap::from(cfg.clone()));
+        let (_cfg_tx, cfg_rx) = watch::channel(cfg);
+        let ingestion = dummy_ingestion(db.pool.clone());
+        let registry = dummy_registry(db.pool.clone());
+
+        // Build the hostname fixtures from the caller-provided backend
+        // so tests control exactly which IPs resolve to which outcomes.
+        let broadcaster = meshmon_service::hostname::HostnameBroadcaster::new();
+        let limiter = meshmon_service::hostname::HostnameRefreshLimiter::default_production();
+        let resolver = meshmon_service::hostname::Resolver::new(
+            backend,
+            broadcaster.clone(),
+            db.pool.clone(),
+            32,
+        );
+
+        let state = AppState::new(
+            swap,
+            cfg_rx,
+            db.pool.clone(),
+            ingestion,
+            registry,
+            test_prometheus_handle().await,
+            test_enrichment_queue(),
+            broadcaster,
+            limiter,
+            resolver,
+        );
+        state.mark_ready();
+
+        let app = meshmon_service::http::router(state.clone());
+        let cookie = login_as_admin(&app, "203.0.113.44").await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hostname resolver TCP listener");
+        let addr = listener.local_addr().expect("resolve local addr");
+
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server_app = app.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, server_app)
+                .with_graceful_shutdown(async move { server_shutdown.cancelled().await })
+                .await;
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("build reqwest client");
+
+        Self {
+            app,
+            cookie,
+            state,
+            live: Some(LiveHarness {
+                addr,
+                client,
+                shutdown,
+                server_task,
+                runner_task: None,
+                db: Some(db),
+            }),
+        }
+    }
+
+    /// Base URL (e.g. `http://127.0.0.1:12345`) of the live listener,
+    /// when the harness has one. Panics when called on a harness built
+    /// via [`Self::start`] since there is no server to hit.
+    pub fn base_url(&self) -> String {
+        let live = self
+            .live
+            .as_ref()
+            .expect("HttpHarness::base_url requires a live-listener variant");
+        format!("http://{}", live.addr)
+    }
+
+    /// Shared `reqwest::Client` used by the live harness. Returned as
+    /// a reference so callers can pass it to [`subscribe_sse`] without
+    /// constructing their own client.
+    pub fn client(&self) -> &reqwest::Client {
+        &self
+            .live
+            .as_ref()
+            .expect("HttpHarness::client requires a live-listener variant")
+            .client
+    }
+
+    /// Log in again as the default admin user with a distinct client
+    /// IP so tower_sessions issues a separate session id. Returned as
+    /// the raw `Set-Cookie` value so SSE / API calls can attach it.
+    /// Used by tests that need two independent sessions against the
+    /// same harness (e.g. per-session isolation assertions).
+    pub async fn login_additional_session(&self, client_ip: &str) -> String {
+        login_as_admin(&self.app, client_ip).await
+    }
+
     /// Open a long-lived SSE connection to `path` and return a stream
-    /// of parsed JSON payloads. Only usable from a harness created via
-    /// [`Self::start_with_providers`] — the oneshot path cannot stream.
+    /// of parsed JSON payloads. Only usable from a live-listener harness
+    /// (`start_with_providers` or `start_with_hostname_resolver`) — the
+    /// oneshot path cannot stream.
     ///
     /// Delegates to [`subscribe_sse`] so the connect-and-wrap logic is
     /// shared with other test harnesses that stand up their own axum
     /// server (e.g. the campaigns SSE listener harness).
     pub async fn sse(&self, path: &str) -> SseStream {
-        let live = self
-            .live
-            .as_ref()
-            .expect("HttpHarness::sse requires start_with_providers — oneshot cannot stream");
+        let live = self.live.as_ref().expect(
+            "HttpHarness::sse requires a live-listener harness \
+             (start_with_providers or start_with_hostname_resolver) — \
+             oneshot cannot stream",
+        );
         let base_url = format!("http://{}", live.addr);
         subscribe_sse(&live.client, &base_url, path, &self.cookie).await
     }
@@ -1934,5 +2130,85 @@ impl Stream for SseStream {
                 }
             }
         }
+    }
+}
+
+// -------- hostname test helpers --------
+
+use meshmon_service::hostname::{LookupOutcome, ResolverBackend};
+
+/// Programmable backend for hostname-resolver tests.
+///
+/// Each IP can map to a fixed `LookupOutcome` with an optional
+/// per-call sleep. Unseeded IPs default to `NegativeNxDomain`.
+#[derive(Default)]
+pub struct StubHostnameBackend {
+    routes: Mutex<std::collections::HashMap<IpAddr, (LookupOutcome, Option<Duration>)>>,
+    calls: Mutex<std::collections::HashMap<IpAddr, usize>>,
+}
+
+impl StubHostnameBackend {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set(&self, ip: IpAddr, outcome: LookupOutcome) {
+        self.routes.lock().unwrap().insert(ip, (outcome, None));
+    }
+
+    pub fn set_with_delay(&self, ip: IpAddr, outcome: LookupOutcome, delay: Duration) {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(ip, (outcome, Some(delay)));
+    }
+
+    pub fn call_count(&self, ip: IpAddr) -> usize {
+        self.calls.lock().unwrap().get(&ip).copied().unwrap_or(0)
+    }
+}
+
+#[async_trait]
+impl ResolverBackend for StubHostnameBackend {
+    async fn reverse_lookup(&self, ip: IpAddr) -> LookupOutcome {
+        let entry = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&ip)
+            .cloned()
+            .unwrap_or((LookupOutcome::NegativeNxDomain, None));
+        *self.calls.lock().unwrap().entry(ip).or_insert(0) += 1;
+        if let Some(d) = entry.1 {
+            tokio::time::sleep(d).await;
+        }
+        entry.0
+    }
+}
+
+/// `ResolverBackend` that panics on first call. Used by the resolver
+/// panic-containment integration test.
+pub struct PanicHostnameBackend {
+    pub panic_on_first_call: std::sync::atomic::AtomicBool,
+}
+
+impl PanicHostnameBackend {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            panic_on_first_call: std::sync::atomic::AtomicBool::new(true),
+        })
+    }
+}
+
+#[async_trait]
+impl ResolverBackend for PanicHostnameBackend {
+    async fn reverse_lookup(&self, _ip: IpAddr) -> LookupOutcome {
+        if self
+            .panic_on_first_call
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("synthetic panic for containment test");
+        }
+        LookupOutcome::Positive("recovered.example.com".into())
     }
 }

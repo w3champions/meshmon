@@ -44,6 +44,7 @@ udp_probe_secret = "hex:0011223344556677"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(testdb.pool.clone());
     let registry = common::dummy_registry(testdb.pool.clone());
+    let (hb, hl, hr) = common::test_hostname_fixtures(&testdb.pool);
     let state = AppState::new(
         swap,
         rx,
@@ -52,6 +53,9 @@ udp_probe_secret = "hex:0011223344556677"
         registry,
         common::test_prometheus_handle().await,
         common::test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     );
 
     let listener = TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
@@ -245,6 +249,7 @@ udp_probe_secret = "hex:0011223344556677"
     let (_tx, rx) = watch::channel(cfg);
     let ingestion = common::dummy_ingestion(testdb.pool.clone());
     let registry = common::dummy_registry(testdb.pool.clone());
+    let (hb, hl, hr) = common::test_hostname_fixtures(&testdb.pool);
     let state = AppState::new(
         swap,
         rx,
@@ -253,6 +258,9 @@ udp_probe_secret = "hex:0011223344556677"
         registry,
         common::test_prometheus_handle().await,
         common::test_enrichment_queue(),
+        hb,
+        hl,
+        hr,
     );
     state.mark_ready();
     assert!(state.is_ready());

@@ -83,6 +83,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::catalogue::dto::SortDir,
         crate::catalogue::shapes::Polygon,
         crate::catalogue::events::CatalogueEvent,
+        crate::hostname::HostnameEvent,
         crate::catalogue::model::CatalogueSource,
         crate::catalogue::model::EnrichmentStatus,
         crate::catalogue::repo::AsnFacet,
@@ -168,6 +169,15 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         // `matchit`; registering it here keeps the readability convention.
         .routes(utoipa_axum::routes!(
             crate::catalogue::sse::catalogue_stream
+        ))
+        // Hostname resolution: per-session SSE stream + force-refresh.
+        // Both handlers live behind the same `login_required!` layer as
+        // the catalogue/campaign routes above.
+        .routes(utoipa_axum::routes!(
+            crate::hostname::handlers::hostname_stream
+        ))
+        .routes(utoipa_axum::routes!(
+            crate::hostname::handlers::hostname_refresh
         ))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::get_one))
         .routes(utoipa_axum::routes!(crate::catalogue::handlers::patch))

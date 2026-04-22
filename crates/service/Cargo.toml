@@ -42,6 +42,7 @@ futures-util = { workspace = true }
 # the dependency lean via `default-features = false`.
 geo = { version = "0.33", default-features = false }
 governor = { workspace = true }
+hickory-resolver = { workspace = true }
 hyper = { workspace = true }
 icann-rdap-client = { workspace = true }
 icann-rdap-common = { workspace = true }

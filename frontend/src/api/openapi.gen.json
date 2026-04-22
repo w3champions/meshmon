@@ -2257,6 +2257,57 @@
         }
       }
     },
+    "/api/hostnames/stream": {
+      "get": {
+        "tags": [
+          "hostnames"
+        ],
+        "summary": "SSE stream of `hostname_resolved` events scoped to this session.",
+        "operationId": "hostname_stream",
+        "responses": {
+          "200": {
+            "description": "SSE stream of hostname resolutions for this session"
+          },
+          "401": {
+            "description": "No active session"
+          }
+        }
+      }
+    },
+    "/api/hostnames/{ip}/refresh": {
+      "post": {
+        "tags": [
+          "hostnames"
+        ],
+        "summary": "Force a re-resolution of a single IP, bypassing cache freshness.",
+        "operationId": "hostname_refresh",
+        "parameters": [
+          {
+            "name": "ip",
+            "in": "path",
+            "description": "IPv4 or IPv6 literal to re-resolve",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Enqueued; event will arrive on the session's stream"
+          },
+          "400": {
+            "description": "Invalid IP literal"
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "429": {
+            "description": "Session exceeded 60 refresh calls / minute"
+          }
+        }
+      }
+    },
     "/api/metrics/query": {
       "get": {
         "tags": [
@@ -4396,6 +4447,26 @@
             "format": "int32",
             "description": "Standard deviation of RTT to this hop, in microseconds.",
             "minimum": 0
+          }
+        }
+      },
+      "HostnameEvent": {
+        "type": "object",
+        "description": "Wire payload for the `hostname_resolved` SSE event.\n\n`IpAddr` has no built-in `ToSchema` impl under utoipa 5, so we annotate\nthe field with `schema(value_type = String)`. Serde still uses the\ndefault `IpAddr` display serializer, which matches the shape the\nfrontend expects (e.g. `\"192.0.2.1\"` / `\"2001:db8::1\"`).",
+        "required": [
+          "ip"
+        ],
+        "properties": {
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolved hostname, or `None` when the lookup confirmed no PTR\nrecord exists."
+          },
+          "ip": {
+            "type": "string",
+            "description": "Canonicalized IP the lookup applies to."
           }
         }
       },

@@ -892,6 +892,13 @@ udp_probe_secret = "hex:6d73686d6e2d7631"
             Duration::from_secs(300),
         ));
         let (queue, _rx) = crate::enrichment::runner::EnrichmentQueue::new(1024);
+
+        use crate::hostname::test_support::NxdomainBackend;
+        let backend: Arc<dyn crate::hostname::ResolverBackend> = NxdomainBackend::new();
+        let broadcaster = crate::hostname::HostnameBroadcaster::new();
+        let limiter = crate::hostname::HostnameRefreshLimiter::default_production();
+        let resolver =
+            crate::hostname::Resolver::new(backend, broadcaster.clone(), pool.clone(), 32);
         AppState::new(
             swap,
             rx,
@@ -900,6 +907,9 @@ udp_probe_secret = "hex:6d73686d6e2d7631"
             registry,
             crate::metrics::test_install(),
             Arc::new(queue),
+            broadcaster,
+            limiter,
+            resolver,
         )
     }
 

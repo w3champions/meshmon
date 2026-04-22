@@ -49,6 +49,7 @@ futures-util = "0.3"
 # version must match what `tower_governor` pulls in transitively, or the
 # type alias will fail to unify.
 governor = "0.10"
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 icann-rdap-client = "0.0.28"
 icann-rdap-common = "0.0.28"
 # Enumerates local network interface IPs (POSIX + Windows); used by the
