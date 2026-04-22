@@ -25,8 +25,10 @@ pub enum LookupOutcome {
     /// The authoritative answer was NXDOMAIN or "no records found" — cache
     /// as a confirmed negative so we don't re-query for 90 days.
     NegativeNxDomain,
-    /// Any other failure (timeout, SERVFAIL, transport error). Not cached;
-    /// the inner string is an operator-facing diagnostic.
+    /// Timeout, SERVFAIL, connection failure, or any other error that
+    /// should be retried on the next resolution attempt. Includes
+    /// `NetError::Timeout`, `NoConnections`, and transport-layer errors.
+    /// Never written to the cache.
     Transient(String),
 }
 
@@ -34,9 +36,10 @@ pub enum LookupOutcome {
 /// exercised with deterministic fakes in tests.
 #[async_trait]
 pub trait ResolverBackend: Send + Sync + 'static {
-    /// Issue a reverse-DNS (PTR) lookup for `ip` and collapse hickory's
-    /// error taxonomy onto the three [`LookupOutcome`] variants the cache
-    /// distinguishes between.
+    /// Issue a reverse-DNS (PTR) lookup for `ip`. Returns a `LookupOutcome`
+    /// indicating whether a hostname was found, the IP is confirmed
+    /// unresolvable (NXDOMAIN / no records), or the lookup should be
+    /// retried (transient failure).
     async fn reverse_lookup(&self, ip: IpAddr) -> LookupOutcome;
 }
 
@@ -53,6 +56,9 @@ impl HickoryBackend {
         let mut builder = if upstreams.is_empty() {
             TokioResolver::builder_tokio()?
         } else {
+            // server_name is SNI for DNS-over-TLS; ignored for UDP/TCP which is
+            // what we use. If DoT upstreams are ever needed, promote to a
+            // parameter.
             let group = ServerGroup {
                 ips: upstreams,
                 server_name: "meshmon-hostname",
@@ -80,9 +86,14 @@ impl ResolverBackend for HickoryBackend {
             Ok(lookup) => {
                 for record in lookup.answers() {
                     if let RData::PTR(ptr) = &record.data {
+                        // DNS allows multiple PTR records per IP; the first is taken as the
+                        // canonical hostname (same behaviour as `dig` and most resolvers).
                         let raw = ptr.0.to_string();
                         let trimmed = raw.trim_end_matches('.');
                         if trimmed.is_empty() {
+                            // A PTR record whose name is only `.` (DNS root) trims to empty;
+                            // treat as a confirmed negative — this is structurally equivalent
+                            // to "no usable hostname".
                             return LookupOutcome::NegativeNxDomain;
                         }
                         return LookupOutcome::Positive(trimmed.to_string());
