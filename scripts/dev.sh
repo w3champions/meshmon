@@ -217,15 +217,37 @@ if [[ "$USE_TMUX" == "1" ]]; then
     VITE_CMD="cd $(printf '%q' "$REPO_ROOT/frontend") && MESHMON_API_PROXY_TARGET=http://127.0.0.1:$SERVICE_PORT exec npm run dev"
     AGENT_LOGS_CMD="cd $(printf '%q' "$DEPLOY_DIR") && exec docker compose -f docker-compose.agents-dev.yml logs -f"
 
+    # When a tmux server is already running, new sessions/windows inherit
+    # the server's environment (from its first invocation), NOT the
+    # current shell's. Without forwarding, the service pane boots with
+    # no MESHMON_* env vars and cargo-run exits immediately on config
+    # load. Pass every required var via -e so the pane's cargo invocation
+    # sees them. Pane splits inherit the parent session/window env — no
+    # need to duplicate -e on split-window.
+    TMUX_ENV_ARGS=(
+        -e "MESHMON_CONFIG=$MESHMON_CONFIG"
+        -e "MESHMON_AGENT_TOKEN=$MESHMON_AGENT_TOKEN"
+        -e "MESHMON_ADMIN_PASSWORD_HASH=$MESHMON_ADMIN_PASSWORD_HASH"
+        -e "MESHMON_PG_GRAFANA_PASSWORD=$MESHMON_PG_GRAFANA_PASSWORD"
+        -e "MESHMON_UDP_PROBE_SECRET=$MESHMON_UDP_PROBE_SECRET"
+        -e "MESHMON_POSTGRES_URL=$MESHMON_POSTGRES_URL"
+        -e "RUST_LOG=$RUST_LOG"
+    )
+    if [[ -n "${MESHMON_IPGEO_API_KEY:-}" ]]; then
+        TMUX_ENV_ARGS+=(-e "MESHMON_IPGEO_API_KEY=$MESHMON_IPGEO_API_KEY")
+    fi
+
     if [[ "$NESTED_TMUX" == "1" ]]; then
         # Choice (a): open a new window in the caller's existing session
         # rather than nesting sessions. Capture the window id so cleanup
         # can target it precisely.
         TMUX_WINDOW=$(tmux new-window -P -F '#{session_name}:#{window_id}' \
+            "${TMUX_ENV_ARGS[@]}" \
             -n "$TMUX_SESSION" "bash -lc $(printf '%q' "$SERVICE_CMD")")
         echo "[dev.sh] opened tmux window $TMUX_WINDOW for meshmon-service (nested tmux mode)"
     else
         tmux new-session -d -s "$TMUX_SESSION" -n main \
+            "${TMUX_ENV_ARGS[@]}" \
             "bash -lc $(printf '%q' "$SERVICE_CMD")"
     fi
 fi
@@ -275,8 +297,21 @@ if [[ "$USE_TMUX" == "1" ]]; then
     # caller's session.
     if [[ "$NESTED_TMUX" == "1" ]]; then
         SPLIT_TARGET="$TMUX_WINDOW"
+        tmux list-windows -F '#{window_id}' -t "${TMUX_WINDOW%%:*}" 2>/dev/null \
+            | grep -qx "${TMUX_WINDOW##*:}" || {
+            echo "[dev.sh] ERROR: tmux window $TMUX_WINDOW died before splits could be applied." >&2
+            echo "[dev.sh]   Usually means the service pane exited on startup (config error, port in use, DB unreachable)." >&2
+            echo "[dev.sh]   Re-run with MESHMON_DEV_TMUX=0 to see the error inline." >&2
+            exit 1
+        }
     else
         SPLIT_TARGET="$TMUX_SESSION:main"
+        tmux has-session -t "$TMUX_SESSION" 2>/dev/null || {
+            echo "[dev.sh] ERROR: tmux session $TMUX_SESSION died before splits could be applied." >&2
+            echo "[dev.sh]   Usually means the service pane exited on startup (config error, port in use, DB unreachable)." >&2
+            echo "[dev.sh]   Re-run with MESHMON_DEV_TMUX=0 to see the error inline." >&2
+            exit 1
+        }
     fi
 
     # Top-right: Vite. Split horizontally (new pane to the right), 50%.
