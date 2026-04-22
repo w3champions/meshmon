@@ -3,15 +3,35 @@
 #
 # Brings up the bundled infra (Postgres + VM + Grafana + AM + vmalert)
 # via deploy/docker-compose.dev.yml, writes a throwaway meshmon.toml
-# pointing at the exposed ports, starts `cargo run -p meshmon-service`
-# in the background, and spawns 3 dev agents (docker-compose.agents-dev.yml)
-# on a bridge network so the campaigns UI and multi-agent mesh flows are
-# exercisable end-to-end. Finally runs the Vite dev server in the
-# foreground. Ctrl-C tears everything down.
+# pointing at the exposed ports, and spawns 3 dev agents
+# (docker-compose.agents-dev.yml) on a bridge network so the campaigns
+# UI and multi-agent mesh flows are exercisable end-to-end.
+#
+# When tmux is available (default), the script drops into a 3-pane
+# tmux session named "meshmon-dev":
+#
+#   +--------------------+--------------------------+
+#   |                    |  Vite dev server         |
+#   |  cargo run         |  (top-right)             |
+#   |  meshmon-service   +--------------------------+
+#   |  (left)            |  docker compose logs -f  |
+#   |                    |  agents (bottom-right)   |
+#   +--------------------+--------------------------+
+#
+# Detach with the tmux prefix + d; Ctrl-C in the parent shell tears
+# everything down. Set MESHMON_DEV_TMUX=0 to bypass tmux entirely — the
+# service is then backgrounded with logs redirected to
+# target/dev-logs/meshmon-service.log and Vite runs in the foreground
+# (the legacy flow).
+#
+# If $TMUX is set (already inside a tmux session), a new window is
+# opened inside the current session rather than nesting a new session —
+# cleanup kills that window on exit.
 #
 # Set MESHMON_DEV_SKIP_AGENTS=1 to skip the 3-agent overlay (useful when
 # iterating on frontend-only changes — saves the first-run Dockerfile.agent
-# build).
+# build). In tmux mode this also drops the bottom-right logs pane, so
+# Vite takes the full-height right column.
 #
 # Not for production. For the full stack (including the service
 # container built from Dockerfile.service), run the production compose:
@@ -31,9 +51,21 @@ AGENT_TOKEN=${MESHMON_DEV_AGENT_TOKEN:-dev-token-0123456789}
 # common :8080 binding.
 SERVICE_PORT=${MESHMON_DEV_SERVICE_PORT:-18322}
 
+TMUX_SESSION="meshmon-dev"
+# TMUX_WINDOW is set only in nested-tmux mode (choice (a)) — see below.
+TMUX_WINDOW=""
+SERVICE_LOG="$REPO_ROOT/target/dev-logs/meshmon-service.log"
+
 cleanup() {
     local rc=$?
     set +e
+    # Kill tmux surface first so pane-hosted processes (cargo, vite,
+    # docker compose logs) receive SIGHUP before the containers they
+    # watch go away. Both branches are idempotent.
+    if [[ -n "$TMUX_WINDOW" ]]; then
+        tmux kill-window -t "$TMUX_WINDOW" 2>/dev/null || true
+    fi
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     if [[ -n "${SERVICE_PID:-}" ]]; then
         kill "$SERVICE_PID" 2>/dev/null || true
         wait "$SERVICE_PID" 2>/dev/null || true
@@ -160,10 +192,54 @@ export RUST_LOG="${RUST_LOG:-meshmon_service=debug,info}"
 # edit SERVICE_PORT at the top of this script if you need a different
 # port.
 
-cargo run -p meshmon-service &
-SERVICE_PID=$!
+# Decide whether to use tmux for multi-pane output. See the header
+# comment for the full matrix; nested tmux uses choice (a) — open a new
+# window inside the existing session and kill that window on cleanup.
+USE_TMUX=1
+NESTED_TMUX=0
+if [[ "${MESHMON_DEV_TMUX:-1}" == "0" ]]; then
+    USE_TMUX=0
+elif ! command -v tmux >/dev/null 2>&1; then
+    echo "[dev.sh] tmux not found — falling back to single-terminal mode; service logs → $SERVICE_LOG" >&2
+    USE_TMUX=0
+elif [[ -n "${TMUX:-}" ]]; then
+    NESTED_TMUX=1
+fi
 
-echo "[dev.sh] service PID $SERVICE_PID; login as admin / $ADMIN_PASSWORD"
+if [[ "$USE_TMUX" == "1" ]]; then
+    # Make sure no stale session from a previous run is left behind.
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+
+    # Shell-fragment helpers. `exec` so the pane shell is replaced by
+    # the child — when the child exits the pane closes, which keeps the
+    # tmux layout clean.
+    SERVICE_CMD="cd $(printf '%q' "$REPO_ROOT") && exec cargo run -p meshmon-service"
+    VITE_CMD="cd $(printf '%q' "$REPO_ROOT/frontend") && MESHMON_API_PROXY_TARGET=http://127.0.0.1:$SERVICE_PORT exec npm run dev"
+    AGENT_LOGS_CMD="cd $(printf '%q' "$DEPLOY_DIR") && exec docker compose -f docker-compose.agents-dev.yml logs -f"
+
+    if [[ "$NESTED_TMUX" == "1" ]]; then
+        # Choice (a): open a new window in the caller's existing session
+        # rather than nesting sessions. Capture the window id so cleanup
+        # can target it precisely.
+        TMUX_WINDOW=$(tmux new-window -P -F '#{session_name}:#{window_id}' \
+            -n "$TMUX_SESSION" "bash -lc $(printf '%q' "$SERVICE_CMD")")
+        echo "[dev.sh] opened tmux window $TMUX_WINDOW for meshmon-service (nested tmux mode)"
+    else
+        tmux new-session -d -s "$TMUX_SESSION" -n main \
+            "bash -lc $(printf '%q' "$SERVICE_CMD")"
+    fi
+fi
+
+if [[ "$USE_TMUX" != "1" ]]; then
+    mkdir -p "$(dirname "$SERVICE_LOG")"
+    echo "[dev.sh] service logs → $SERVICE_LOG (tail -F $SERVICE_LOG from another terminal)"
+    # shellcheck disable=SC2024  # redirect is for cargo, not sudo
+    cargo run -p meshmon-service >"$SERVICE_LOG" 2>&1 &
+    SERVICE_PID=$!
+    echo "[dev.sh] service PID $SERVICE_PID; login as admin / $ADMIN_PASSWORD"
+else
+    echo "[dev.sh] meshmon-service launching in tmux pane (session $TMUX_SESSION); login as admin / $ADMIN_PASSWORD"
+fi
 
 # Wait for the service to come up before firing up the dev agents —
 # agents hit /healthz-adjacent gRPC on first boot and would burn through
@@ -190,7 +266,57 @@ else
     echo "[dev.sh] MESHMON_DEV_SKIP_AGENTS=1 — skipping dev agents"
 fi
 
-echo "[dev.sh] starting Vite dev server (Ctrl-C tears down everything)"
-cd frontend
-npm install
-MESHMON_API_PROXY_TARGET="http://127.0.0.1:$SERVICE_PORT" npm run dev
+if [[ "$USE_TMUX" == "1" ]]; then
+    echo "[dev.sh] installing frontend deps (npm install)"
+    (cd "$REPO_ROOT/frontend" && npm install)
+
+    # Target for splits: the service pane in either the detached
+    # session's "main" window, or the window we just opened inside the
+    # caller's session.
+    if [[ "$NESTED_TMUX" == "1" ]]; then
+        SPLIT_TARGET="$TMUX_WINDOW"
+    else
+        SPLIT_TARGET="$TMUX_SESSION:main"
+    fi
+
+    # Top-right: Vite. Split horizontally (new pane to the right), 50%.
+    tmux split-window -h -t "$SPLIT_TARGET" -p 50 \
+        "bash -lc $(printf '%q' "$VITE_CMD")"
+
+    if [[ "${MESHMON_DEV_SKIP_AGENTS:-0}" != "1" ]]; then
+        # Bottom-right: agent container logs. Split the Vite pane
+        # vertically; -p 40 so the logs pane is a bit shorter than Vite's.
+        tmux split-window -v -p 40 \
+            "bash -lc $(printf '%q' "$AGENT_LOGS_CMD")"
+    fi
+
+    tmux select-pane -t "$SPLIT_TARGET"
+
+    echo "[dev.sh] tmux layout: cargo logs in left pane, Vite in top-right, agents in bottom-right; prefix-d to detach"
+    echo "[dev.sh] login as admin / $ADMIN_PASSWORD"
+    if [[ "$NESTED_TMUX" == "1" ]]; then
+        tmux select-window -t "$TMUX_WINDOW"
+        # Nested mode: caller is already attached to the session, so we
+        # just block until the window closes. A simple wait loop is
+        # enough — cleanup handles the teardown regardless.
+        while tmux list-windows -F '#{window_id}' \
+            -t "${TMUX_WINDOW%%:*}" 2>/dev/null | grep -qx "${TMUX_WINDOW##*:}"; do
+            sleep 1
+        done
+    else
+        tmux attach-session -t "$TMUX_SESSION"
+    fi
+
+    # attach returned (user detached or session died). Clean up
+    # proactively — the EXIT trap below will no-op on the second kill.
+    if [[ -n "$TMUX_WINDOW" ]]; then
+        tmux kill-window -t "$TMUX_WINDOW" 2>/dev/null || true
+    fi
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+else
+    echo "[dev.sh] starting Vite dev server (Ctrl-C tears down everything)"
+    echo "[dev.sh] follow service logs with: tail -F $SERVICE_LOG"
+    cd frontend
+    npm install
+    MESHMON_API_PROXY_TARGET="http://127.0.0.1:$SERVICE_PORT" npm run dev
+fi
