@@ -50,14 +50,17 @@ pub fn run(extra: Vec<String>) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    // Run `cargo sqlx prepare`. Forwarded extras land after the
-    // `--` separator so a developer can pass `-- --check` to verify
-    // the cache instead of regenerating it.
+    // Run `cargo sqlx prepare`. Forwarded extras land BEFORE the
+    // `--` separator so they are interpreted as sqlx-cli flags
+    // (e.g. `cargo xtask sqlx-prepare -- --check` runs in cache-
+    // verify mode). The fixed `--all-targets --all-features` after
+    // the separator are passed through to the inner cargo build.
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&root)
-        .args(["sqlx", "prepare", "--workspace", "--"])
-        .args(["--all-targets", "--all-features"])
+        .args(["sqlx", "prepare", "--workspace"])
         .args(&extra)
+        .arg("--")
+        .args(["--all-targets", "--all-features"])
         .env("DATABASE_URL", &database_url);
     let status = cmd.status().context("invoke cargo sqlx prepare")?;
 
