@@ -12,8 +12,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { type ReactNode, useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import "@/test/cytoscape-mock";
-import { IpHostnameProvider } from "@/components/ip-hostname";
-import { useIpHostnameContext } from "@/components/ip-hostname/IpHostnameProvider";
+import { IpHostnameProvider, useSeedHostnames } from "@/components/ip-hostname";
 import PathDetail from "@/pages/PathDetail";
 
 class NoopEventSource {
@@ -174,7 +173,7 @@ interface SeedEntry {
 }
 
 function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
-  const { seedFromResponse } = useIpHostnameContext();
+  const seedFromResponse = useSeedHostnames();
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
   useEffect(() => {
     if (seed.length > 0) seedFromResponse(seed);

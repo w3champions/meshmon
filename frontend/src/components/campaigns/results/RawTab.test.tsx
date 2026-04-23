@@ -6,6 +6,19 @@ import { Toaster, toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { Campaign, CampaignMeasurement, CampaignState } from "@/api/hooks/campaigns";
+import { IpHostnameProvider } from "@/components/ip-hostname";
+
+// ---------------------------------------------------------------------------
+// EventSource stub — IpHostnameProvider opens an SSE connection on mount;
+// jsdom has no native EventSource so we replace it with a no-op.
+// ---------------------------------------------------------------------------
+
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -154,19 +167,24 @@ function renderTab(campaign: Campaign) {
   });
   return render(
     <QueryClientProvider client={client}>
-      <RawTab campaign={campaign} />
-      <Toaster />
+      <IpHostnameProvider>
+        <RawTab campaign={campaign} />
+        <Toaster />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
 
 beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
   navigate.mockReset();
   forcePairStub.mutate.mockReset();
   currentSearch = { tab: "raw" };
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   cleanup();
   toast.dismiss();
   vi.clearAllMocks();

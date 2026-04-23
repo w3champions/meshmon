@@ -955,3 +955,239 @@ async fn history_measurements_stamps_mtr_hop_hostnames_three_state() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// T53c: hostname stamping on campaign_measurements (destination + MTR hops)
+// ---------------------------------------------------------------------------
+
+/// IPs used across campaign_measurements hostname tests. Disjoint from
+/// the `history_measurements` IP block so the shared pool doesn't collide.
+const CM_DEST_IP_POS: &str = "10.55.1.1";
+const CM_DEST_IP_NEG: &str = "10.55.1.2";
+const CM_DEST_IP_COLD: &str = "10.55.1.3";
+const CM_HOP_IP_POS: &str = "10.55.2.1";
+const CM_HOP_IP_NEG: &str = "10.55.2.2";
+const CM_HOP_IP_COLD: &str = "10.55.2.3";
+const CM_DEST_HOSTNAME_POS: &str = "cm-dest-pos.example.com";
+const CM_HOP_HOSTNAME_POS: &str = "cm-hop-pos.example.com";
+
+/// Three-state coverage for `destination_hostname` on `campaign_measurements`:
+/// positive cache hit stamped, negative cache hit omitted, cold miss omitted +
+/// enqueued, with a joined MTR trace so hop hostnames are also exercised.
+#[tokio::test]
+async fn campaign_measurements_stamps_destination_and_hop_hostnames_three_state() {
+    use meshmon_service::hostname::{record_negative, record_positive};
+
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // Three campaigns, each with one destination in a different cache state,
+    // and a joined MTR trace on the third (cold-miss) to verify hop stamping.
+    let campaign_id_pos =
+        common::seed_minimal_campaign_for_measurements(pool, "cm-hn-agent-pos").await;
+    let campaign_id_neg =
+        common::seed_minimal_campaign_for_measurements(pool, "cm-hn-agent-neg").await;
+    let campaign_id_mtr =
+        common::seed_minimal_campaign_for_measurements(pool, "cm-hn-agent-mtr").await;
+
+    // Positive-cache destination.
+    common::seed_settled_pair(
+        pool,
+        campaign_id_pos,
+        "cm-hn-agent-pos",
+        CM_DEST_IP_POS,
+        "campaign",
+    )
+    .await;
+    let pos_dest_ip: std::net::IpAddr = CM_DEST_IP_POS.parse().unwrap();
+    record_positive(pool, pos_dest_ip, CM_DEST_HOSTNAME_POS)
+        .await
+        .expect("seed positive dest hostname");
+
+    // Negative-cache destination.
+    common::seed_settled_pair(
+        pool,
+        campaign_id_neg,
+        "cm-hn-agent-neg",
+        CM_DEST_IP_NEG,
+        "campaign",
+    )
+    .await;
+    let neg_dest_ip: std::net::IpAddr = CM_DEST_IP_NEG.parse().unwrap();
+    record_negative(pool, neg_dest_ip)
+        .await
+        .expect("seed negative dest hostname");
+
+    // Cold-miss destination with a joined MTR trace carrying three hop IPs.
+    let hops = serde_json::json!([
+        {
+            "position": 1,
+            "observed_ips": [{"ip": CM_HOP_IP_POS, "freq": 1.0}],
+            "avg_rtt_micros": 1000,
+            "stddev_rtt_micros": 100,
+            "loss_pct": 0.0
+        },
+        {
+            "position": 2,
+            "observed_ips": [{"ip": CM_HOP_IP_NEG, "freq": 1.0}],
+            "avg_rtt_micros": 2000,
+            "stddev_rtt_micros": 100,
+            "loss_pct": 0.0
+        },
+        {
+            "position": 3,
+            "observed_ips": [{"ip": CM_HOP_IP_COLD, "freq": 1.0}],
+            "avg_rtt_micros": 3000,
+            "stddev_rtt_micros": 100,
+            "loss_pct": 0.0
+        }
+    ]);
+    let mtr_id: i64 =
+        sqlx::query_scalar("INSERT INTO mtr_traces (hops) VALUES ($1::jsonb) RETURNING id")
+            .bind(&hops)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    // Seed a measurement with the MTR trace and link it to a campaign pair.
+    let measurement_id: i64 = sqlx::query_scalar(
+        "INSERT INTO measurements \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, \
+              loss_pct, kind, mtr_id) \
+         VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'detail_mtr', $3) \
+         RETURNING id",
+    )
+    .bind("cm-hn-agent-mtr")
+    .bind(CM_DEST_IP_COLD)
+    .bind(mtr_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, resolution_state, \
+              kind, measurement_id, settled_at) \
+         VALUES ($1, $2, $3::inet, 'succeeded', 'detail_mtr'::measurement_kind, $4, now())",
+    )
+    .bind(campaign_id_mtr)
+    .bind("cm-hn-agent-mtr")
+    .bind(CM_DEST_IP_COLD)
+    .bind(measurement_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Seed hop hostnames: positive for hop 0, negative for hop 1, nothing for hop 2.
+    let hop_pos_ip: std::net::IpAddr = CM_HOP_IP_POS.parse().unwrap();
+    let hop_neg_ip: std::net::IpAddr = CM_HOP_IP_NEG.parse().unwrap();
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1::inet")
+        .bind(CM_HOP_IP_COLD)
+        .execute(pool)
+        .await
+        .unwrap();
+    record_positive(pool, hop_pos_ip, CM_HOP_HOSTNAME_POS)
+        .await
+        .expect("seed positive hop hostname");
+    record_negative(pool, hop_neg_ip)
+        .await
+        .expect("seed negative hop hostname");
+    // Defensive: clear cold-miss dest so the handler sees a genuine cold miss.
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1::inet")
+        .bind(CM_DEST_IP_COLD)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // ---- positive destination ----
+    let body: serde_json::Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id_pos}/measurements"))
+        .await;
+    let entries = body["entries"].as_array().expect("entries array");
+    let row = entries
+        .iter()
+        .find(|r| r["destination_ip"].as_str() == Some(CM_DEST_IP_POS))
+        .expect("pos destination row not found");
+    assert_eq!(
+        row["destination_hostname"], CM_DEST_HOSTNAME_POS,
+        "positive-cached destination_hostname missing: {row}"
+    );
+
+    // ---- negative destination ----
+    let body: serde_json::Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id_neg}/measurements"))
+        .await;
+    let entries = body["entries"].as_array().expect("entries array");
+    let row = entries
+        .iter()
+        .find(|r| r["destination_ip"].as_str() == Some(CM_DEST_IP_NEG))
+        .expect("neg destination row not found");
+    assert!(
+        row.get("destination_hostname").is_none(),
+        "negative-cached destination_hostname must be absent: {row}"
+    );
+
+    // ---- cold-miss destination + mtr hop hostnames ----
+    let body: serde_json::Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id_mtr}/measurements"))
+        .await;
+    let entries = body["entries"].as_array().expect("entries array");
+    let row = entries
+        .iter()
+        .find(|r| r["destination_ip"].as_str() == Some(CM_DEST_IP_COLD))
+        .expect("cold destination row not found");
+    assert!(
+        row.get("destination_hostname").is_none(),
+        "cold-miss destination_hostname must be absent: {row}"
+    );
+
+    // Hop hostname assertions on the MTR row.
+    let hops_json = row["mtr_hops"].as_array().expect("mtr_hops array");
+    assert_eq!(hops_json.len(), 3, "expected three hops: {row}");
+
+    let hop0_ip0 = &hops_json[0]["observed_ips"][0];
+    assert_eq!(
+        hop0_ip0["ip"].as_str(),
+        Some(CM_HOP_IP_POS),
+        "hop 0 ip mismatch: {row}"
+    );
+    assert_eq!(
+        hop0_ip0["hostname"], CM_HOP_HOSTNAME_POS,
+        "positive-cached MTR hop hostname missing: {row}"
+    );
+
+    let hop1_ip0 = &hops_json[1]["observed_ips"][0];
+    assert_eq!(
+        hop1_ip0["ip"].as_str(),
+        Some(CM_HOP_IP_NEG),
+        "hop 1 ip mismatch: {row}"
+    );
+    assert!(
+        hop1_ip0.get("hostname").is_none(),
+        "negative-cached MTR hop must omit hostname: {row}"
+    );
+
+    let hop2_ip0 = &hops_json[2]["observed_ips"][0];
+    assert_eq!(
+        hop2_ip0["ip"].as_str(),
+        Some(CM_HOP_IP_COLD),
+        "hop 2 ip mismatch: {row}"
+    );
+    assert!(
+        hop2_ip0.get("hostname").is_none(),
+        "cold-miss MTR hop must omit hostname: {row}"
+    );
+
+    // Cold-miss destination should have been enqueued. The stub resolver
+    // writes a negative row on processing, which is observable here.
+    let cold_dest_ip: std::net::IpAddr = CM_DEST_IP_COLD.parse().unwrap();
+    assert!(
+        common::wait_for_cache_row(pool, cold_dest_ip).await,
+        "resolver never wrote a cache row for {cold_dest_ip} — enqueue was skipped"
+    );
+
+    // Cleanup seeded MTR trace.
+    sqlx::query("DELETE FROM mtr_traces WHERE id = $1")
+        .bind(mtr_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}

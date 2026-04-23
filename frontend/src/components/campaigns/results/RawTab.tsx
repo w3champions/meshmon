@@ -28,6 +28,7 @@ import type {
 } from "@/api/hooks/campaigns";
 import { useCampaignMeasurements, useForcePair } from "@/api/hooks/campaigns";
 import { RawFilterBar, type RawFilterSelection } from "@/components/campaigns/results/RawFilterBar";
+import { IpHostname } from "@/components/ip-hostname";
 import { RouteTopology } from "@/components/RouteTopology";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -425,7 +426,9 @@ function MeasurementRow({
         </div>
       </Cell>
       <Cell>
-        <span className="truncate font-mono text-xs">{row.destination_ip}</span>
+        <span className="truncate text-xs">
+          <IpHostname ip={row.destination_ip} />
+        </span>
       </Cell>
       <Cell>{row.protocol ? <ProtocolBadge protocol={row.protocol} /> : "—"}</Cell>
       <Cell>

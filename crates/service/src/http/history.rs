@@ -13,8 +13,8 @@
 //! the measurements-attribution SQL.
 //!
 //! Every handler sits behind the user-API middleware that enforces an
-//! active session. `sources` and `campaign_measurements` consume auth
-//! transparently through that layer; `destinations` and `measurements`
+//! active session. `sources` consumes auth transparently through that
+//! layer; `destinations`, `measurements`, and `campaign_measurements`
 //! take an explicit [`AuthSession`] extractor so the hostname stamp can
 //! attribute cold-miss resolver enqueues to the caller's session id.
 
@@ -40,10 +40,10 @@ use crate::state::AppState;
 // All history handlers use `&state.pool` (PgPool is a public field on
 // AppState — there is no `pg_pool()` accessor). Every handler sits
 // behind the user-API middleware that enforces an active session.
-// `destinations` and `measurements` additionally take an `AuthSession`
-// extractor to attribute hostname cold-miss resolver enqueues to the
-// caller's session id; `sources` and `campaign_measurements` don't
-// stamp hostnames and consume auth transparently through middleware.
+// `destinations`, `measurements`, and `campaign_measurements` take an
+// explicit `AuthSession` extractor so the hostname stamp can attribute
+// cold-miss resolver enqueues to the caller's session id. `sources`
+// consumes auth transparently through the middleware layer only.
 
 /// Shared error mapper for history handlers — all failures collapse to 500.
 fn internal_error(scope: &str, err: sqlx::Error) -> Response {
@@ -628,6 +628,10 @@ pub struct CampaignMeasurementDto {
     /// `mtr_traces` row.
     #[schema(value_type = Option<Vec<HopJson>>)]
     pub mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
+    /// Reverse-DNS hostname for the destination IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_hostname: Option<String>,
 }
 
 /// One page of the Raw-tab's joined campaign+measurements feed.
@@ -666,6 +670,7 @@ pub struct CampaignMeasurementsPage {
 )]
 pub async fn campaign_measurements(
     State(state): State<AppState>,
+    auth: AuthSession,
     Path(id): Path<Uuid>,
     Query(q): Query<CampaignMeasurementsQuery>,
 ) -> Response {
@@ -690,9 +695,101 @@ pub async fn campaign_measurements(
         None => None,
     };
 
-    match fetch_campaign_measurements(pool, id, &q, limit, cursor).await {
-        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
-        Err(e) => internal_error("history::campaign_measurements", e),
+    let mut page = match fetch_campaign_measurements(pool, id, &q, limit, cursor).await {
+        Ok(p) => p,
+        Err(e) => return internal_error("history::campaign_measurements", e),
+    };
+
+    // Collect all IPs for hostname stamping: destination_ip of each entry
+    // + every hop IP from mtr_hops[*].observed_ips[*].
+    let session = session_id_from_auth(&auth);
+    let mut all_ips: Vec<IpAddr> = Vec::new();
+    for entry in page.entries.iter() {
+        if let Ok(ip) = entry.destination_ip.parse::<IpAddr>() {
+            all_ips.push(ip);
+        }
+        if let Some(hops_json) = &entry.mtr_hops {
+            for hop in hops_json.iter() {
+                for hop_ip in &hop.observed_ips {
+                    if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                        all_ips.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    if !all_ips.is_empty() {
+        match bulk_hostnames_and_enqueue(&state, &session, &all_ips).await {
+            Ok(map) => {
+                for entry in page.entries.iter_mut() {
+                    // Stamp destination hostname.
+                    if let Ok(ip) = entry.destination_ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            entry.destination_hostname = Some(h.clone());
+                        }
+                    }
+                    // Stamp MTR hop hostnames.
+                    if let Some(hops_json) = &mut entry.mtr_hops {
+                        for hop in hops_json.iter_mut() {
+                            for hop_ip in hop.observed_ips.iter_mut() {
+                                if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                                    if let Some(Some(h)) = map.get(&ip) {
+                                        hop_ip.hostname = Some(h.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "history::campaign_measurements: hostname stamp failed; returning unhostnamed response"
+                );
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(page)).into_response()
+}
+
+/// Internal row shape for the `campaign_measurements` query (without hostname).
+/// `sqlx::query_as!` requires every struct field to map to a SQL column;
+/// `destination_hostname` is added after the DB round-trip.
+struct CampaignMeasurementRow {
+    pair_id: i64,
+    source_agent_id: String,
+    destination_ip: String,
+    resolution_state: PairResolutionState,
+    pair_kind: MeasurementKind,
+    measurement_id: Option<i64>,
+    protocol: Option<ProbeProtocol>,
+    measured_at: Option<chrono::DateTime<chrono::Utc>>,
+    latency_avg_ms: Option<f32>,
+    loss_pct: Option<f32>,
+    mtr_id: Option<i64>,
+    mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
+}
+
+impl From<CampaignMeasurementRow> for CampaignMeasurementDto {
+    fn from(r: CampaignMeasurementRow) -> Self {
+        Self {
+            pair_id: r.pair_id,
+            source_agent_id: r.source_agent_id,
+            destination_ip: r.destination_ip,
+            resolution_state: r.resolution_state,
+            pair_kind: r.pair_kind,
+            measurement_id: r.measurement_id,
+            protocol: r.protocol,
+            measured_at: r.measured_at,
+            latency_avg_ms: r.latency_avg_ms,
+            loss_pct: r.loss_pct,
+            mtr_id: r.mtr_id,
+            mtr_hops: r.mtr_hops,
+            destination_hostname: None,
+        }
     }
 }
 
@@ -716,7 +813,7 @@ async fn fetch_campaign_measurements(
     let cur_i = cursor.map(|(_, i)| i);
 
     let rows: Vec<CampaignMeasurementDto> = sqlx::query_as!(
-        CampaignMeasurementDto,
+        CampaignMeasurementRow,
         r#"
         SELECT
           cp.id                         AS "pair_id!",
@@ -765,7 +862,10 @@ async fn fetch_campaign_measurements(
         limit,
     )
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    .map(Into::into)
+    .collect();
 
     // Emit next_cursor only when the page is full AND the last row has a
     // settled `measured_at`. Pending-row tails don't paginate; the

@@ -579,7 +579,7 @@ pub async fn path_overview(
     // 3. Registry lookup — the source/target must exist. 404 keeps the
     //    response shape consistent with the other `/api/agents` endpoints.
     let snap = state.registry.snapshot();
-    let source = match snap.get(&src).cloned() {
+    let mut source = match snap.get(&src).cloned() {
         Some(info) => AgentSummary::from(info),
         None => {
             return (
@@ -589,7 +589,7 @@ pub async fn path_overview(
                 .into_response()
         }
     };
-    let target = match snap.get(&tgt).cloned() {
+    let mut target = match snap.get(&tgt).cloned() {
         Some(info) => AgentSummary::from(info),
         None => {
             return (
@@ -649,15 +649,22 @@ pub async fn path_overview(
         recent_snapshots.truncate(RECENT_LIMIT as usize);
     }
 
-    // 7. Stamp reverse-DNS hostnames on hop IPs across all three protocol
-    //    variants in one DB round-trip. `source` / `target` agent hostnames
-    //    are already stamped via the `AgentSummary` path (T53b — handled
-    //    separately by those handlers when agents are looked up). Here we
-    //    only handle the `latest_by_protocol.*` hop IPs.
+    // 7. Stamp reverse-DNS hostnames on source/target agent IPs and on all
+    //    hop IPs across the three protocol variants — all in one DB
+    //    round-trip. Source/target hostnames are stamped alongside hop IPs
+    //    in this single bulk lookup (they are NOT already set via the
+    //    AgentSummary path; that path only runs in list_agents / get_agent).
     {
-        // Flatten all hop IPs across icmp / udp / tcp into one Vec for a
-        // single bulk lookup.
-        let all_ips: Vec<IpAddr> = [
+        // Flatten source/target agent IPs + all hop IPs across icmp / udp /
+        // tcp into one Vec for a single bulk lookup.
+        let mut all_ips: Vec<IpAddr> = Vec::new();
+        if let Ok(ip) = source.ip.parse::<IpAddr>() {
+            all_ips.push(ip);
+        }
+        if let Ok(ip) = target.ip.parse::<IpAddr>() {
+            all_ips.push(ip);
+        }
+        for hop_ip in [
             latest_by_protocol.icmp.as_ref(),
             latest_by_protocol.udp.as_ref(),
             latest_by_protocol.tcp.as_ref(),
@@ -665,14 +672,28 @@ pub async fn path_overview(
         .into_iter()
         .flatten()
         .flat_map(|snap| snap.hops.iter().flat_map(|h| h.observed_ips.iter()))
-        .filter_map(|hop_ip| hop_ip.ip.parse::<IpAddr>().ok())
-        .collect();
+        {
+            if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                all_ips.push(ip);
+            }
+        }
 
         if !all_ips.is_empty() {
             let session = session_id_from_auth(&auth_session);
             match bulk_hostnames_and_enqueue(&state, &session, &all_ips).await {
                 Ok(map) => {
-                    // Walk each present protocol variant and apply hostnames.
+                    // Stamp source/target hostnames.
+                    if let Ok(ip) = source.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            source.hostname = Some(h.clone());
+                        }
+                    }
+                    if let Ok(ip) = target.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            target.hostname = Some(h.clone());
+                        }
+                    }
+                    // Walk each present protocol variant and apply hop hostnames.
                     for snap in [
                         latest_by_protocol.icmp.as_mut(),
                         latest_by_protocol.udp.as_mut(),
@@ -693,11 +714,11 @@ pub async fn path_overview(
                     }
                 }
                 Err(e) => {
-                    // Hop hostname stamping failure is non-fatal: log and
+                    // Hostname stamping failure is non-fatal: log and
                     // continue — the rest of the response is complete.
                     tracing::warn!(
                         error = %e,
-                        "path_overview: hop hostname stamp failed, returning unhostnamed hops"
+                        "path_overview: hostname stamp failed, returning unhostnamed response"
                     );
                 }
             }

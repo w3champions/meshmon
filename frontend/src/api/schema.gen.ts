@@ -1236,6 +1236,11 @@ export interface components {
          *     JSONB; serde renders it as a bare JSON array on the wire.
          */
         CampaignMeasurementDto: {
+            /**
+             * @description Reverse-DNS hostname for the destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            destination_hostname?: string | null;
             /** @description Destination IP as a host string. */
             destination_ip: string;
             /**

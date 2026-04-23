@@ -343,7 +343,7 @@ export function useCampaignMeasurements(
   id: string | undefined,
   filter: CampaignMeasurementsFilter,
 ): UseInfiniteQueryResult<InfiniteData<CampaignMeasurementsPage>, Error> {
-  return useInfiniteQuery<
+  const query = useInfiniteQuery<
     CampaignMeasurementsPage,
     Error,
     InfiniteData<CampaignMeasurementsPage>,
@@ -379,6 +379,24 @@ export function useCampaignMeasurements(
       return data as CampaignMeasurementsPage;
     },
   });
+  // Seed the shared hostname map from every loaded page. Each entry carries
+  // `destination_ip` + optional `destination_hostname`, plus optional
+  // `mtr_hops[*].observed_ips[*]` with per-hop hostnames.
+  useSeedHostnamesOnResponse(query.data?.pages, function* (pages) {
+    for (const page of pages) {
+      for (const m of page.entries) {
+        yield { ip: m.destination_ip, hostname: m.destination_hostname };
+        if (m.mtr_hops) {
+          for (const hop of m.mtr_hops) {
+            for (const o of hop.observed_ips) {
+              yield { ip: o.ip, hostname: o.hostname };
+            }
+          }
+        }
+      }
+    }
+  });
+  return query;
 }
 
 /**

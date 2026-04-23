@@ -3217,6 +3217,13 @@
           "pair_kind"
         ],
         "properties": {
+          "destination_hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the destination IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
+          },
           "destination_ip": {
             "type": "string",
             "description": "Destination IP as a host string."
