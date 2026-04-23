@@ -243,6 +243,10 @@ pub struct PairDto {
     /// Last error observed on this pair, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Reverse-DNS hostname for the destination IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_hostname: Option<String>,
 }
 
 impl From<PairRow> for PairDto {
@@ -260,6 +264,7 @@ impl From<PairRow> for PairDto {
             settled_at: r.settled_at,
             attempt_count: r.attempt_count,
             last_error: r.last_error,
+            destination_hostname: None,
         }
     }
 }
@@ -422,6 +427,10 @@ pub struct EvaluationCandidateDto {
     pub composite_score: f32,
     /// Per-pair scoring detail for this candidate.
     pub pair_details: Vec<EvaluationPairDetailDto>,
+    /// Reverse-DNS hostname for the transit destination IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 /// Per-pair scoring row inside an [`EvaluationCandidateDto`].
@@ -458,6 +467,10 @@ pub struct EvaluationPairDetailDto {
     /// FK to the `measurements` row covering X→B, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtr_measurement_id_xb: Option<i64>,
+    /// Reverse-DNS hostname for the transit destination IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_hostname: Option<String>,
 }
 
 /// Which slice of candidates the detail-trigger handler should re-measure.

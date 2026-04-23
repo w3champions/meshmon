@@ -2987,6 +2987,13 @@
               "type": "string"
             }
           },
+          "source_hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the source agent IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
+          },
           "starts_at": {
             "type": "string",
             "description": "RFC 3339 timestamp when the alert started firing."
@@ -3001,6 +3008,13 @@
               "null"
             ],
             "description": "Short human-readable summary from the `summary` annotation."
+          },
+          "target_hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the target agent IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none).\nAlso absent for `AgentOffline` alerts (no `target` label)."
           }
         }
       },
@@ -4009,6 +4023,13 @@
             ],
             "description": "Operator-facing label from the catalogue, when present."
           },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the transit destination IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
+          },
           "is_mesh_member": {
             "type": "boolean",
             "description": "True when destination_ip appears in agents.ip. UI renders a\n\"mesh member — no acquisition needed\" badge."
@@ -4135,6 +4156,13 @@
           "destination_agent_id": {
             "type": "string",
             "description": "Destination agent id of the baseline pair."
+          },
+          "destination_hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the transit destination IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
           },
           "destination_ip": {
             "type": "string",
@@ -4324,6 +4352,13 @@
             "type": "string",
             "description": "Catalogue-derived label when known, else the IP string."
           },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the destination IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
+          },
           "is_mesh_member": {
             "type": "boolean",
             "description": "Whether the destination IP is itself a mesh-agent IP."
@@ -4344,6 +4379,13 @@
           "loss_pct"
         ],
         "properties": {
+          "destination_hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the destination IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
+          },
           "destination_ip": {
             "type": "string",
             "description": "Destination IP as a host string."
@@ -4825,6 +4867,13 @@
             "type": "string",
             "format": "uuid",
             "description": "Owning campaign."
+          },
+          "destination_hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for the destination IP, when cached.\nAbsent on cold miss and negative-cached IPs (skip-none)."
           },
           "destination_ip": {
             "type": "string",

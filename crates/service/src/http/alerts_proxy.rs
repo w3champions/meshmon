@@ -13,6 +13,9 @@
 //! frontend receives a stable, minimal shape that hides upstream schema
 //! drift.
 
+use crate::hostname::session_id_from_auth;
+use crate::hostname::stamp::bulk_hostnames_and_enqueue;
+use crate::http::auth::AuthSession;
 use crate::http::http_client::proxy_client;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -21,6 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use utoipa::{IntoParams, ToSchema};
 
 // ---------------------------------------------------------------------------
@@ -51,6 +55,15 @@ pub struct AlertSummary {
     /// RFC 3339 timestamp when the alert resolved (may be empty/zero for
     /// active alerts).
     pub ends_at: String,
+    /// Reverse-DNS hostname for the source agent IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_hostname: Option<String>,
+    /// Reverse-DNS hostname for the target agent IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    /// Also absent for `AgentOffline` alerts (no `target` label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_hostname: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +103,8 @@ impl From<AlertmanagerV2Alert> for AlertSummary {
             state: a.status.state,
             starts_at: a.starts_at,
             ends_at: a.ends_at,
+            source_hostname: None,
+            target_hostname: None,
         }
     }
 }
@@ -214,6 +229,92 @@ impl IntoResponse for ProxyError {
 }
 
 // ---------------------------------------------------------------------------
+// Hostname stamping
+// ---------------------------------------------------------------------------
+
+/// Stamp `source_hostname` / `target_hostname` onto each alert in place.
+///
+/// Resolves agent IDs from `labels["source"]` / `labels["target"]` to IPs
+/// via the registry snapshot, then bulk-resolves all IPs from the hostname
+/// cache in one DB round-trip.
+///
+/// - `labels["source"]` is always present; `labels["target"]` is absent for
+///   `AgentOffline` alerts — the missing-key case results in `target_hostname`
+///   absent WITHOUT panic.
+/// - Unknown agent IDs (not present in registry snapshot) → hostname absent.
+/// - Cold miss → field absent on wire, resolver enqueued.
+/// - Negative cache → field absent on wire (skip-none).
+/// - Positive cache → field populated.
+async fn stamp_alerts(
+    state: &AppState,
+    session: &crate::hostname::SessionId,
+    alerts: &mut [AlertSummary],
+) -> sqlx::Result<()> {
+    if alerts.is_empty() {
+        return Ok(());
+    }
+
+    // Snapshot is lock-free (ArcSwap load_full).
+    let registry = state.registry.snapshot();
+
+    // Collect all agent IDs (source + optional target) and resolve to IPs.
+    // Build a mapping from IpAddr → which alerts reference it so we can stamp back.
+    let mut ips: Vec<IpAddr> = Vec::new();
+
+    // Pre-compute the resolved IPs for each alert (source_ip, target_ip).
+    let resolved: Vec<(Option<IpAddr>, Option<IpAddr>)> = alerts
+        .iter()
+        .map(|alert| {
+            let source_ip = alert
+                .labels
+                .get("source")
+                .and_then(|agent_id| registry.get(agent_id))
+                .map(|info| info.ip.ip());
+
+            let target_ip = alert
+                .labels
+                .get("target")
+                .and_then(|agent_id| registry.get(agent_id))
+                .map(|info| info.ip.ip());
+
+            (source_ip, target_ip)
+        })
+        .collect();
+
+    // Gather all distinct IPs for a single bulk call.
+    for (src, tgt) in &resolved {
+        if let Some(ip) = src {
+            ips.push(*ip);
+        }
+        if let Some(ip) = tgt {
+            ips.push(*ip);
+        }
+    }
+
+    if ips.is_empty() {
+        return Ok(());
+    }
+
+    let map = bulk_hostnames_and_enqueue(state, session, &ips).await?;
+
+    // Stamp back.
+    for (alert, (src_ip, tgt_ip)) in alerts.iter_mut().zip(resolved.iter()) {
+        if let Some(ip) = src_ip {
+            if let Some(Some(h)) = map.get(ip) {
+                alert.source_hostname = Some(h.clone());
+            }
+        }
+        if let Some(ip) = tgt_ip {
+            if let Some(Some(h)) = map.get(ip) {
+                alert.target_hostname = Some(h.clone());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -237,14 +338,24 @@ impl IntoResponse for ProxyError {
         (status = 503, description = "Alertmanager not configured"),
     ),
 )]
-pub async fn list_alerts(State(state): State<AppState>, Query(q): Query<AlertsQuery>) -> Response {
+pub async fn list_alerts(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Query(q): Query<AlertsQuery>,
+) -> Response {
     let base = match alertmanager_base(&state) {
         Some(b) => b,
         None => return ProxyError::NotConfigured.into_response(),
     };
 
     match fetch_alerts(&base, &q).await {
-        Ok(alerts) => Json(alerts).into_response(),
+        Ok(mut alerts) => {
+            let session = session_id_from_auth(&auth);
+            if let Err(e) = stamp_alerts(&state, &session, &mut alerts).await {
+                tracing::warn!(error = %e, "list_alerts: hostname stamp failed; returning unhostnamed response");
+            }
+            Json(alerts).into_response()
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -272,7 +383,11 @@ pub async fn list_alerts(State(state): State<AppState>, Query(q): Query<AlertsQu
         (status = 503, description = "Alertmanager not configured"),
     ),
 )]
-pub async fn get_alert(State(state): State<AppState>, Path(fingerprint): Path<String>) -> Response {
+pub async fn get_alert(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Path(fingerprint): Path<String>,
+) -> Response {
     let base = match alertmanager_base(&state) {
         Some(b) => b,
         None => return ProxyError::NotConfigured.into_response(),
@@ -283,7 +398,18 @@ pub async fn get_alert(State(state): State<AppState>, Path(fingerprint): Path<St
 
     match fetch_alerts(&base, &empty_query).await {
         Ok(alerts) => match alerts.into_iter().find(|a| a.fingerprint == fingerprint) {
-            Some(alert) => Json(alert).into_response(),
+            // Filter first, then stamp only the matched alert — skipping
+            // the hostname cache lookup for every alert the caller never
+            // sees cuts DB traffic on clusters with long alert lists.
+            Some(alert) => {
+                let mut single = [alert];
+                let session = session_id_from_auth(&auth);
+                if let Err(e) = stamp_alerts(&state, &session, &mut single).await {
+                    tracing::warn!(error = %e, "get_alert: hostname stamp failed; returning unhostnamed alert");
+                }
+                let [alert] = single;
+                Json(alert).into_response()
+            }
             None => (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({ "error": "alert not found" })),

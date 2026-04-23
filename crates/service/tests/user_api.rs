@@ -48,6 +48,12 @@
 //! | `.168` | `routes_by_id_stamps_positive_hop_hostname`                 |
 //! | `.169` | `routes_by_id_omits_hop_hostname_on_negative_cache`         |
 //! | `.170` | `routes_by_id_cold_hop_miss_enqueues_resolver`              |
+//! | `.171` | `alerts_stamps_source_and_target_hostname_from_positive_cache` |
+//! | `.172` | `alerts_omits_hostname_on_negative_cache`                    |
+//! | `.173` | `alerts_cold_miss_omits_hostname_and_enqueues_resolver`      |
+//! | `.174` | `alerts_agent_offline_shape_has_no_target_hostname`          |
+//! | `.175` | `alerts_stale_agent_id_omits_hostname_without_panic`         |
+//! | `.176` | `get_alert_stamps_source_hostname_from_positive_cache`       |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -777,6 +783,547 @@ async fn alerts_proxy_returns_503_when_alertmanager_not_configured() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---------------------------------------------------------------------------
+// T53c: Alert hostname stamping — three-state assertions
+//
+// IP allocation (TEST-NET-3):
+//   .171  alerts_stamps_source_and_target_hostname_from_positive_cache
+//   .172  alerts_omits_hostname_on_negative_cache
+//   .173  alerts_cold_miss_omits_hostname_and_enqueues_resolver
+//   .174  alerts_agent_offline_shape_has_no_target_hostname
+// ---------------------------------------------------------------------------
+
+/// Helper: seed an agent row (and hostname cache row) then force-refresh the registry.
+/// Returns the agent's assigned IP as an IpAddr.
+async fn seed_alert_agent(
+    pool: &sqlx::PgPool,
+    state: &meshmon_service::state::AppState,
+    agent_id: &str,
+    ip: &str,
+) -> std::net::IpAddr {
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+         VALUES ($1, $1, $2::inet, 8002, 8005) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(agent_id)
+    .bind(ip)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_alert_agent({agent_id}, {ip}): {e}"));
+    state
+        .registry
+        .force_refresh()
+        .await
+        .expect("registry force_refresh");
+    ip.parse().expect("parse alert agent ip")
+}
+
+#[tokio::test]
+async fn alerts_stamps_source_and_target_hostname_from_positive_cache() {
+    use meshmon_service::hostname::record_positive;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let mock_server = MockServer::start().await;
+
+    // Canned Alertmanager response: one alert with source + target agent labels.
+    let am_response = serde_json::json!([{
+        "fingerprint": "hn-pos-001",
+        "labels": {
+            "alertname": "HighLatency",
+            "severity": "warning",
+            "source": "alert-src-pos",
+            "target": "alert-tgt-pos"
+        },
+        "annotations": {},
+        "status": { "state": "active", "silencedBy": [], "inhibitedBy": [] },
+        "startsAt": "2025-01-01T00:00:00Z",
+        "endsAt": "0001-01-01T00:00:00Z"
+    }]);
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let state = common::state_with_admin_and_alertmanager(pool.clone(), &mock_server.uri()).await;
+
+    let src_ip = seed_alert_agent(&pool, &state, "alert-src-pos", "203.0.113.71").await;
+    let tgt_ip = seed_alert_agent(&pool, &state, "alert-tgt-pos", "203.0.113.72").await;
+
+    // Seed positive cache entries.
+    record_positive(&pool, src_ip, "source.example.com")
+        .await
+        .expect("seed source hostname");
+    record_positive(&pool, tgt_ip, "target.example.com")
+        .await
+        .expect("seed target hostname");
+
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.171").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let alert = &body.as_array().unwrap()[0];
+
+    assert_eq!(
+        alert["source_hostname"], "source.example.com",
+        "positive-cached source hostname missing: {alert}"
+    );
+    assert_eq!(
+        alert["target_hostname"], "target.example.com",
+        "positive-cached target hostname missing: {alert}"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM agents WHERE id IN ('alert-src-pos', 'alert-tgt-pos')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM ip_hostname_cache WHERE ip IN ('203.0.113.71'::inet, '203.0.113.72'::inet)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn alerts_omits_hostname_on_negative_cache() {
+    use meshmon_service::hostname::record_negative;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let mock_server = MockServer::start().await;
+
+    let am_response = serde_json::json!([{
+        "fingerprint": "hn-neg-001",
+        "labels": {
+            "alertname": "HighLatency",
+            "severity": "warning",
+            "source": "alert-src-neg",
+            "target": "alert-tgt-neg"
+        },
+        "annotations": {},
+        "status": { "state": "active", "silencedBy": [], "inhibitedBy": [] },
+        "startsAt": "2025-01-01T00:00:00Z",
+        "endsAt": "0001-01-01T00:00:00Z"
+    }]);
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let state = common::state_with_admin_and_alertmanager(pool.clone(), &mock_server.uri()).await;
+
+    let src_ip = seed_alert_agent(&pool, &state, "alert-src-neg", "203.0.113.73").await;
+    let tgt_ip = seed_alert_agent(&pool, &state, "alert-tgt-neg", "203.0.113.74").await;
+
+    // Seed negative cache entries.
+    record_negative(&pool, src_ip)
+        .await
+        .expect("seed source negative hostname");
+    record_negative(&pool, tgt_ip)
+        .await
+        .expect("seed target negative hostname");
+
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.172").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let alert = &body.as_array().unwrap()[0];
+
+    // Negative-cached IPs → fields absent (skip_serializing_if = Option::is_none).
+    assert!(
+        alert.get("source_hostname").is_none(),
+        "negative-cached source must omit source_hostname: {alert}"
+    );
+    assert!(
+        alert.get("target_hostname").is_none(),
+        "negative-cached target must omit target_hostname: {alert}"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM agents WHERE id IN ('alert-src-neg', 'alert-tgt-neg')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM ip_hostname_cache WHERE ip IN ('203.0.113.73'::inet, '203.0.113.74'::inet)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn alerts_cold_miss_omits_hostname_and_enqueues_resolver() {
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let mock_server = MockServer::start().await;
+
+    // Cold miss: agents are in registry but IPs have NO cache entry.
+    let am_response = serde_json::json!([{
+        "fingerprint": "hn-cold-001",
+        "labels": {
+            "alertname": "HighLatency",
+            "severity": "warning",
+            "source": "alert-src-cold",
+            "target": "alert-tgt-cold"
+        },
+        "annotations": {},
+        "status": { "state": "active", "silencedBy": [], "inhibitedBy": [] },
+        "startsAt": "2025-01-01T00:00:00Z",
+        "endsAt": "0001-01-01T00:00:00Z"
+    }]);
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let state = common::state_with_admin_and_alertmanager(pool.clone(), &mock_server.uri()).await;
+
+    let src_ip = seed_alert_agent(&pool, &state, "alert-src-cold", "203.0.113.75").await;
+    let _tgt_ip = seed_alert_agent(&pool, &state, "alert-tgt-cold", "203.0.113.76").await;
+    // No cache rows seeded → cold miss.
+
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.173").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let alert = &body.as_array().unwrap()[0];
+
+    // Cold miss → fields absent.
+    assert!(
+        alert.get("source_hostname").is_none(),
+        "cold-miss source must omit source_hostname: {alert}"
+    );
+    assert!(
+        alert.get("target_hostname").is_none(),
+        "cold-miss target must omit target_hostname: {alert}"
+    );
+
+    // Resolver should have been enqueued (StubHostnameBackend writes a
+    // negative cache row for unknown IPs). Wait for it.
+    assert!(
+        common::wait_for_cache_row(&pool, src_ip).await,
+        "resolver never wrote a cache row for {src_ip} — enqueue was skipped"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM agents WHERE id IN ('alert-src-cold', 'alert-tgt-cold')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM ip_hostname_cache WHERE ip IN ('203.0.113.75'::inet, '203.0.113.76'::inet)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn alerts_agent_offline_shape_has_no_target_hostname() {
+    use meshmon_service::hostname::record_positive;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let mock_server = MockServer::start().await;
+
+    // AgentOffline alert: `source` label present, `target` label ABSENT.
+    let am_response = serde_json::json!([{
+        "fingerprint": "hn-offline-001",
+        "labels": {
+            "alertname": "AgentOffline",
+            "severity": "critical",
+            "source": "alert-src-offline"
+            // no "target" key
+        },
+        "annotations": {},
+        "status": { "state": "active", "silencedBy": [], "inhibitedBy": [] },
+        "startsAt": "2025-01-01T00:00:00Z",
+        "endsAt": "0001-01-01T00:00:00Z"
+    }]);
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let state = common::state_with_admin_and_alertmanager(pool.clone(), &mock_server.uri()).await;
+
+    let src_ip = seed_alert_agent(&pool, &state, "alert-src-offline", "203.0.113.77").await;
+    record_positive(&pool, src_ip, "offline-source.example.com")
+        .await
+        .expect("seed source hostname");
+
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.174").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let alert = &body.as_array().unwrap()[0];
+
+    // Source hostname resolved (positive cache).
+    assert_eq!(
+        alert["source_hostname"], "offline-source.example.com",
+        "AgentOffline source_hostname should be stamped: {alert}"
+    );
+    // No target label → target_hostname must be absent (not null, not empty).
+    assert!(
+        alert.get("target_hostname").is_none(),
+        "AgentOffline must omit target_hostname when target label absent: {alert}"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM agents WHERE id = 'alert-src-offline'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = '203.0.113.77'::inet")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn alerts_stale_agent_id_omits_hostname_without_panic() {
+    // Regression guard: the stamp helper resolves `labels["source"]` and
+    // `labels["target"]` through `state.registry.snapshot()`. If the
+    // agent id is NOT present in the snapshot (e.g. a stale alert whose
+    // agent was deregistered), the resolver must silently skip the stamp
+    // — no panic, no 500, no leaked partial hostname.
+    use meshmon_service::hostname::record_positive;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let mock_server = MockServer::start().await;
+
+    // Alert references an UNREGISTERED agent id. Only the `source` label
+    // is set so the assertion surface stays tight.
+    let am_response = serde_json::json!([{
+        "fingerprint": "hn-stale-001",
+        "labels": {
+            "alertname": "HighLatency",
+            "severity": "warning",
+            "source": "alert-src-unregistered",
+            "target": "alert-tgt-stale-present"
+        },
+        "annotations": {},
+        "status": { "state": "active", "silencedBy": [], "inhibitedBy": [] },
+        "startsAt": "2025-01-01T00:00:00Z",
+        "endsAt": "0001-01-01T00:00:00Z"
+    }]);
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let state = common::state_with_admin_and_alertmanager(pool.clone(), &mock_server.uri()).await;
+
+    // Seed ONE registered agent (so the registry is non-empty) whose id
+    // matches the alert's `target` label. The alert's `source` id is
+    // never registered.
+    let tgt_ip = seed_alert_agent(&pool, &state, "alert-tgt-stale-present", "203.0.113.78").await;
+    record_positive(&pool, tgt_ip, "tgt-stale.example.com")
+        .await
+        .expect("seed tgt hostname");
+
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.175").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/alerts")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Handler must return 200 — a stale agent id is NOT a server error.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "stale source agent id must not produce 500"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let alert = &body.as_array().unwrap()[0];
+
+    // Unregistered agent id → source_hostname absent (skip-none).
+    assert!(
+        alert.get("source_hostname").is_none(),
+        "stale (unregistered) source agent must omit source_hostname: {alert}"
+    );
+    // Registered target — hostname still stamps correctly so we know the
+    // stale-source branch did not short-circuit the whole alert.
+    assert_eq!(
+        alert["target_hostname"], "tgt-stale.example.com",
+        "target_hostname should still stamp for the registered target: {alert}"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM agents WHERE id = 'alert-tgt-stale-present'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = '203.0.113.78'::inet")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn get_alert_stamps_source_hostname_from_positive_cache() {
+    // Covers the single-alert endpoint (`GET /api/alerts/{fingerprint}`).
+    // The five other alert tests exercise the list endpoint; this
+    // pins the single-alert path so its filter-then-stamp ordering is
+    // protected against regression.
+    use meshmon_service::hostname::record_positive;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let pool = common::shared_migrated_pool().await.clone();
+    let mock_server = MockServer::start().await;
+
+    let fingerprint = "hn-single-001";
+    let am_response = serde_json::json!([{
+        "fingerprint": fingerprint,
+        "labels": {
+            "alertname": "HighLatency",
+            "severity": "warning",
+            "source": "alert-src-single"
+        },
+        "annotations": {},
+        "status": { "state": "active", "silencedBy": [], "inhibitedBy": [] },
+        "startsAt": "2025-01-01T00:00:00Z",
+        "endsAt": "0001-01-01T00:00:00Z"
+    }]);
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v2/alerts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&am_response))
+        .mount(&mock_server)
+        .await;
+
+    let state = common::state_with_admin_and_alertmanager(pool.clone(), &mock_server.uri()).await;
+    let src_ip = seed_alert_agent(&pool, &state, "alert-src-single", "203.0.113.79").await;
+    record_positive(&pool, src_ip, "single-source.example.com")
+        .await
+        .expect("seed source hostname");
+
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.176").await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/alerts/{fingerprint}"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(
+        body["fingerprint"], fingerprint,
+        "fingerprint mismatch on single-alert response: {body}"
+    );
+    assert_eq!(
+        body["source_hostname"], "single-source.example.com",
+        "positive-cached source_hostname must be stamped on /api/alerts/{{fingerprint}}: {body}"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM agents WHERE id = 'alert-src-single'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = '203.0.113.79'::inet")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------

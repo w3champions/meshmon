@@ -16,6 +16,8 @@ use super::dto::{
 use super::eval::{self, EvalError};
 use super::model::{CampaignState, PairResolutionState};
 use super::repo::{self, CreateInput, EditInput, EvaluationRow, RepoError};
+use crate::hostname::session_id_from_auth;
+use crate::hostname::stamp::bulk_hostnames_and_enqueue;
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -378,6 +380,92 @@ fn invalid_destination_ip_response() -> Response {
         .into_response()
 }
 
+/// Stamp `destination_hostname` on a slice of [`PairDto`]s.
+///
+/// Collects all destination IPs, bulk-resolves in one DB round-trip,
+/// and writes matched hostnames back. Non-fatal: on DB error, logs at
+/// `warn!` and returns without hostnames.
+async fn stamp_pair_dtos(
+    state: &AppState,
+    session: &crate::hostname::SessionId,
+    pairs: &mut [PairDto],
+) {
+    let ips: Vec<IpAddr> = pairs
+        .iter()
+        .filter_map(|p| p.destination_ip.parse::<IpAddr>().ok())
+        .collect();
+    if ips.is_empty() {
+        return;
+    }
+    match bulk_hostnames_and_enqueue(state, session, &ips).await {
+        Ok(map) => {
+            for pair in pairs.iter_mut() {
+                if let Ok(ip) = pair.destination_ip.parse::<IpAddr>() {
+                    if let Some(Some(h)) = map.get(&ip) {
+                        pair.destination_hostname = Some(h.clone());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "campaign::pairs: hostname stamp failed; returning unhostnamed response");
+        }
+    }
+}
+
+/// Stamp `hostname` on [`EvaluationDto`] candidates and
+/// `destination_hostname` on their nested `pair_details`.
+///
+/// Collects all destination IPs from the full nested structure, bulk-
+/// resolves in one DB round-trip, and writes matched hostnames back.
+/// Non-fatal: on DB error, logs at `warn!` and returns without hostnames.
+async fn stamp_evaluation_dto(
+    state: &AppState,
+    session: &crate::hostname::SessionId,
+    dto: &mut EvaluationDto,
+) {
+    // Collect all unique IPs in one flat pass.
+    let ips: Vec<IpAddr> = dto
+        .results
+        .candidates
+        .iter()
+        .flat_map(|c| {
+            let cand_ip = c.destination_ip.parse::<IpAddr>().ok();
+            let detail_ips = c
+                .pair_details
+                .iter()
+                .filter_map(|pd| pd.destination_ip.parse::<IpAddr>().ok());
+            cand_ip.into_iter().chain(detail_ips)
+        })
+        .collect();
+
+    if ips.is_empty() {
+        return;
+    }
+
+    match bulk_hostnames_and_enqueue(state, session, &ips).await {
+        Ok(map) => {
+            for cand in dto.results.candidates.iter_mut() {
+                if let Ok(ip) = cand.destination_ip.parse::<IpAddr>() {
+                    if let Some(Some(h)) = map.get(&ip) {
+                        cand.hostname = Some(h.clone());
+                    }
+                }
+                for pd in cand.pair_details.iter_mut() {
+                    if let Ok(ip) = pd.destination_ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            pd.destination_hostname = Some(h.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "campaign::evaluation: hostname stamp failed; returning unhostnamed response");
+        }
+    }
+}
+
 /// `POST /api/campaigns/{id}/edit` — apply an edit delta.
 ///
 /// Adds/removes pairs on a finished campaign (`completed`, `stopped`,
@@ -475,6 +563,7 @@ pub async fn force_pair(
 )]
 pub async fn pairs(
     State(state): State<AppState>,
+    auth: AuthSession,
     Path(id): Path<Uuid>,
     Query(q): Query<PairListQuery>,
 ) -> Response {
@@ -490,14 +579,13 @@ pub async fn pairs(
     } else {
         q.state
     };
-    match repo::list_pairs(&state.pool, id, &states, q.limit.min(5000)).await {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(rows.into_iter().map(PairDto::from).collect::<Vec<_>>()),
-        )
-            .into_response(),
-        Err(e) => repo_error("campaign::pairs", e),
-    }
+    let mut dtos = match repo::list_pairs(&state.pool, id, &states, q.limit.min(5000)).await {
+        Ok(rows) => rows.into_iter().map(PairDto::from).collect::<Vec<_>>(),
+        Err(e) => return repo_error("campaign::pairs", e),
+    };
+    let session = session_id_from_auth(&auth);
+    stamp_pair_dtos(&state, &session, &mut dtos).await;
+    (StatusCode::OK, Json(dtos)).into_response()
 }
 
 /// `GET /api/campaigns/{id}/preview-dispatch-count` — dispatch estimate.
@@ -614,7 +702,7 @@ fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Resp
 )]
 pub async fn evaluate(
     State(state): State<AppState>,
-    _auth: AuthSession,
+    auth: AuthSession,
     Path(id): Path<Uuid>,
 ) -> Response {
     let campaign = match repo::get(&state.pool, id).await {
@@ -683,7 +771,11 @@ pub async fn evaluate(
     // same-instance clients to receive a duplicate `evaluated` frame.
 
     match to_evaluation_dto(row) {
-        Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),
+        Ok(mut dto) => {
+            let session = session_id_from_auth(&auth);
+            stamp_evaluation_dto(&state, &session, &mut dto).await;
+            (StatusCode::OK, Json(dto)).into_response()
+        }
         Err(e) => invalid_evaluation_payload(id, e),
     }
 }
@@ -709,12 +801,16 @@ pub async fn evaluate(
 )]
 pub async fn get_evaluation(
     State(state): State<AppState>,
-    _auth: AuthSession,
+    auth: AuthSession,
     Path(id): Path<Uuid>,
 ) -> Response {
     match repo::read_evaluation(&state.pool, id).await {
         Ok(Some(row)) => match to_evaluation_dto(row) {
-            Ok(dto) => (StatusCode::OK, Json(dto)).into_response(),
+            Ok(mut dto) => {
+                let session = session_id_from_auth(&auth);
+                stamp_evaluation_dto(&state, &session, &mut dto).await;
+                (StatusCode::OK, Json(dto)).into_response()
+            }
             Err(e) => invalid_evaluation_payload(id, e),
         },
         Ok(None) => (

@@ -12,8 +12,11 @@
 //! feeds the Results browser's Raw tab — it lives here for locality with
 //! the measurements-attribution SQL.
 //!
-//! Auth is inherited from the user-API middleware layer; handlers do not
-//! take an `AuthSession` extractor.
+//! Every handler sits behind the user-API middleware that enforces an
+//! active session. `sources` and `campaign_measurements` consume auth
+//! transparently through that layer; `destinations` and `measurements`
+//! take an explicit [`AuthSession`] extractor so the hostname stamp can
+//! attribute cold-miss resolver enqueues to the caller's session id.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -22,17 +25,25 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::types::ipnetwork::IpNetwork;
 use sqlx::PgPool;
+use std::net::IpAddr;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::campaign::dto::ErrorEnvelope;
 use crate::campaign::model::{MeasurementKind, PairResolutionState, ProbeProtocol};
+use crate::hostname::session_id_from_auth;
+use crate::hostname::stamp::bulk_hostnames_and_enqueue;
+use crate::http::auth::AuthSession;
 use crate::ingestion::json_shapes::HopJson;
 use crate::state::AppState;
 
 // All history handlers use `&state.pool` (PgPool is a public field on
-// AppState — there is no `pg_pool()` accessor). Auth is inherited from
-// the user-API middleware; handlers do not take an `AuthSession` extractor.
+// AppState — there is no `pg_pool()` accessor). Every handler sits
+// behind the user-API middleware that enforces an active session.
+// `destinations` and `measurements` additionally take an `AuthSession`
+// extractor to attribute hostname cold-miss resolver enqueues to the
+// caller's session id; `sources` and `campaign_measurements` don't
+// stamp hostnames and consume auth transparently through middleware.
 
 /// Shared error mapper for history handlers — all failures collapse to 500.
 fn internal_error(scope: &str, err: sqlx::Error) -> Response {
@@ -129,6 +140,10 @@ pub struct HistoryDestinationDto {
     pub asn: Option<i32>,
     /// Whether the destination IP is itself a mesh-agent IP.
     pub is_mesh_member: bool,
+    /// Reverse-DNS hostname for the destination IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 /// `GET /api/history/destinations` — every destination reachable from
@@ -148,22 +163,34 @@ pub struct HistoryDestinationDto {
 )]
 pub async fn destinations(
     State(state): State<AppState>,
+    auth: AuthSession,
     Query(q): Query<HistoryDestinationsQuery>,
 ) -> Response {
     let pool = &state.pool;
     let pattern = q.q.as_deref().map(|s| format!("%{}%", s.to_lowercase()));
 
-    match sqlx::query_as!(
-        HistoryDestinationDto,
+    // `sqlx::query_as!` cannot handle the new `hostname` field because it is
+    // not a DB column. We fetch only the DB columns and default `hostname` to
+    // `None`; the stamp call below fills it in from the cache.
+    #[derive(sqlx::FromRow)]
+    struct DestRow {
+        destination_ip: String,
+        display_name: String,
+        city: Option<String>,
+        country_code: Option<String>,
+        asn: Option<i32>,
+        is_mesh_member: bool,
+    }
+
+    let rows: Vec<DestRow> = match sqlx::query_as::<_, DestRow>(
         r#"
         SELECT
-          host(m.destination_ip)                           AS "destination_ip!",
-          COALESCE(c.display_name, host(m.destination_ip)) AS "display_name!",
+          host(m.destination_ip)                           AS destination_ip,
+          COALESCE(c.display_name, host(m.destination_ip)) AS display_name,
           c.city,
           c.country_code,
           c.asn,
-          EXISTS (SELECT 1 FROM agents a WHERE a.ip = m.destination_ip)
-                                                            AS "is_mesh_member!"
+          EXISTS (SELECT 1 FROM agents a WHERE a.ip = m.destination_ip) AS is_mesh_member
         FROM (
           SELECT DISTINCT destination_ip
             FROM measurements
@@ -175,15 +202,54 @@ pub async fn destinations(
            OR (c.display_name IS NOT NULL AND LOWER(c.display_name) LIKE $2)
         ORDER BY 2 ASC
         "#,
-        q.source,
-        pattern,
     )
+    .bind(&q.source)
+    .bind(&pattern)
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
-        Err(e) => internal_error("history::destinations", e),
+        Ok(v) => v,
+        Err(e) => return internal_error("history::destinations", e),
+    };
+
+    let mut dtos: Vec<HistoryDestinationDto> = rows
+        .into_iter()
+        .map(|r| HistoryDestinationDto {
+            destination_ip: r.destination_ip,
+            display_name: r.display_name,
+            city: r.city,
+            country_code: r.country_code,
+            asn: r.asn,
+            is_mesh_member: r.is_mesh_member,
+            hostname: None,
+        })
+        .collect();
+
+    // Collect destination IPs for bulk hostname resolution.
+    let ips: Vec<IpAddr> = dtos
+        .iter()
+        .filter_map(|d| d.destination_ip.parse::<IpAddr>().ok())
+        .collect();
+
+    if !ips.is_empty() {
+        let session = session_id_from_auth(&auth);
+        match bulk_hostnames_and_enqueue(&state, &session, &ips).await {
+            Ok(map) => {
+                for dto in dtos.iter_mut() {
+                    if let Ok(ip) = dto.destination_ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            dto.hostname = Some(h.clone());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "history::destinations: hostname stamp failed; returning unhostnamed response");
+            }
+        }
     }
+
+    (StatusCode::OK, Json(dtos)).into_response()
 }
 
 // --- measurements ------------------------------------------------------
@@ -246,6 +312,10 @@ pub struct HistoryMeasurementDto {
     pub mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
     /// When the associated `mtr_traces` row was captured.
     pub mtr_captured_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Reverse-DNS hostname for the destination IP, when cached.
+    /// Absent on cold miss and negative-cached IPs (skip-none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_hostname: Option<String>,
 }
 
 /// Parse the comma-separated `protocols=` query param into a typed
@@ -280,6 +350,50 @@ fn parse_protocols(raw: Option<&str>) -> Result<Option<Vec<ProbeProtocol>>, Stri
     }
 }
 
+/// Internal row shape for the `measurements` query (without hostname).
+/// `sqlx::query_as!` requires every struct field to map to a SQL column;
+/// `destination_hostname` is added after the DB round-trip.
+struct MeasurementRow {
+    id: i64,
+    source_agent_id: String,
+    destination_ip: String,
+    protocol: ProbeProtocol,
+    kind: MeasurementKind,
+    probe_count: i16,
+    measured_at: chrono::DateTime<chrono::Utc>,
+    latency_min_ms: Option<f32>,
+    latency_avg_ms: Option<f32>,
+    latency_p95_ms: Option<f32>,
+    latency_max_ms: Option<f32>,
+    latency_stddev_ms: Option<f32>,
+    loss_pct: f32,
+    mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
+    mtr_captured_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<MeasurementRow> for HistoryMeasurementDto {
+    fn from(r: MeasurementRow) -> Self {
+        Self {
+            id: r.id,
+            source_agent_id: r.source_agent_id,
+            destination_ip: r.destination_ip,
+            protocol: r.protocol,
+            kind: r.kind,
+            probe_count: r.probe_count,
+            measured_at: r.measured_at,
+            latency_min_ms: r.latency_min_ms,
+            latency_avg_ms: r.latency_avg_ms,
+            latency_p95_ms: r.latency_p95_ms,
+            latency_max_ms: r.latency_max_ms,
+            latency_stddev_ms: r.latency_stddev_ms,
+            loss_pct: r.loss_pct,
+            mtr_hops: r.mtr_hops,
+            mtr_captured_at: r.mtr_captured_at,
+            destination_hostname: None,
+        }
+    }
+}
+
 /// `GET /api/history/measurements` — measurement rows (+ optional MTR
 /// hops) for a (source, destination) range. Hard-capped at 5 000 rows
 /// so a pathologically long history can't blow a browser tab; the
@@ -299,6 +413,7 @@ fn parse_protocols(raw: Option<&str>) -> Result<Option<Vec<ProbeProtocol>>, Stri
 )]
 pub async fn measurements(
     State(state): State<AppState>,
+    auth: AuthSession,
     Query(q): Query<HistoryMeasurementsQuery>,
 ) -> Response {
     let pool = &state.pool;
@@ -340,8 +455,8 @@ pub async fn measurements(
     // means the underlying set is larger than the cap and the visible
     // view is the most recent `cap`. The frontend trims and surfaces
     // the cap notice on that signal.
-    match sqlx::query_as!(
-        HistoryMeasurementDto,
+    let db_rows = match sqlx::query_as!(
+        MeasurementRow,
         r#"
         SELECT
           m.id                             AS "id!",
@@ -378,9 +493,68 @@ pub async fn measurements(
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
-        Err(e) => internal_error("history::measurements", e),
+        Ok(rows) => rows,
+        Err(e) => return internal_error("history::measurements", e),
+    };
+
+    let mut dtos: Vec<HistoryMeasurementDto> = db_rows.into_iter().map(Into::into).collect();
+
+    // Collect all IPs for hostname stamping: destination IP + all MTR hop IPs.
+    let session = session_id_from_auth(&auth);
+    let mut all_ips: Vec<IpAddr> = Vec::new();
+
+    // Destination IPs (all rows share the same destination, but include
+    // in case of future query shape changes).
+    for dto in dtos.iter() {
+        if let Ok(ip) = dto.destination_ip.parse::<IpAddr>() {
+            all_ips.push(ip);
+        }
     }
+
+    // MTR hop IPs.
+    for dto in dtos.iter() {
+        if let Some(hops_json) = &dto.mtr_hops {
+            for hop in hops_json.iter() {
+                for hop_ip in &hop.observed_ips {
+                    if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                        all_ips.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    if !all_ips.is_empty() {
+        match bulk_hostnames_and_enqueue(&state, &session, &all_ips).await {
+            Ok(map) => {
+                for dto in dtos.iter_mut() {
+                    // Stamp destination hostname.
+                    if let Ok(ip) = dto.destination_ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            dto.destination_hostname = Some(h.clone());
+                        }
+                    }
+                    // Stamp MTR hop hostnames.
+                    if let Some(hops_json) = &mut dto.mtr_hops {
+                        for hop in hops_json.iter_mut() {
+                            for hop_ip in hop.observed_ips.iter_mut() {
+                                if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                                    if let Some(Some(h)) = map.get(&ip) {
+                                        hop_ip.hostname = Some(h.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "history::measurements: hostname stamp failed; returning unhostnamed response");
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(dtos)).into_response()
 }
 
 // --- campaign measurements ---------------------------------------------
