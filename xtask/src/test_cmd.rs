@@ -5,7 +5,11 @@ use std::process::Command;
 use crate::test_db;
 
 pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
-    test_db::up()?;
+    // Spawn a fresh per-invocation container. The guard's Drop runs
+    // `docker rm -f` on every exit path; signal::on_signal (registered
+    // inside up_unique) covers Ctrl-C.
+    let db = test_db::up_unique()?;
+    let database_url = db.database_url();
 
     // nextest must be installed — xtask deliberately does NOT install
     // it (cargo installs are slow in CI; CI installs via
@@ -27,11 +31,10 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
     // Exclusions:
     //   * `meshmon-e2e` — requires the full compose stack, covered by
     //     `cargo xtask test-e2e`.
-    //   * `xtask` — its integration tests drive the singleton
-    //     `meshmon-test-pg` container lifecycle (down/up/stop/start).
-    //     Running them alongside the service's `DATABASE_URL`-based
-    //     integration tests races the shared DB. Run them via
-    //     `cargo test -p xtask` instead.
+    //   * `xtask` — its integration tests drive container lifecycles
+    //     (up/down/inspect) directly. Letting them race against an
+    //     in-flight `xtask test` invocation muddies the docker-side
+    //     state. Run them via `cargo test -p xtask`.
     let mut cmd = Command::new("cargo");
     cmd.args([
         "nextest",
@@ -44,13 +47,16 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
         "--all-targets",
     ])
     .args(&extra)
-    .env("DATABASE_URL", test_db::DATABASE_URL)
+    .env("DATABASE_URL", &database_url)
     // Use the committed .sqlx/ offline cache so sqlx::query! macros do
     // not try to verify queries against the just-provisioned (un-migrated)
     // DB during compilation.
     .env("SQLX_OFFLINE", "true");
     let status = cmd.status()?;
     if !status.success() {
+        // `db` drops on the std::process::exit path? No — exit() does
+        // not unwind. Force teardown explicitly before exiting.
+        drop(db);
         std::process::exit(status.code().unwrap_or(1));
     }
 
@@ -67,13 +73,18 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
             "--exclude",
             "xtask",
         ])
-        .env("DATABASE_URL", test_db::DATABASE_URL)
+        .env("DATABASE_URL", &database_url)
         .env("SQLX_OFFLINE", "true")
         .status()?;
     if !status.success() {
+        drop(db);
         std::process::exit(status.code().unwrap_or(1));
     }
 
+    // Explicit drop is redundant on the success path (Rust would do it
+    // anyway), but documents intent — the container teardown is part of
+    // the contract, not a side effect.
+    drop(db);
     Ok(())
 }
 

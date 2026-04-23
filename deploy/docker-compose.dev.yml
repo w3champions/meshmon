@@ -12,7 +12,7 @@ services:
     # this service is not started. Other services (with no profile) are.
     profiles: ["skip"]
   meshmon-db:
-    ports: ["127.0.0.1:5432:5432"]
+    ports: ["127.0.0.1:15432:5432"]
   meshmon-vm:
     ports: ["127.0.0.1:8428:8428"]
   meshmon-grafana:
