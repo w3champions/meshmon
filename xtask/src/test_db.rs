@@ -171,12 +171,32 @@ pub fn cmd_up() -> Result<()> {
 /// (idempotent).
 pub fn cmd_down(name: Option<String>) -> Result<()> {
     match name {
-        Some(n) => down_one(&n),
+        Some(n) => {
+            validate_owned_name(&n)?;
+            down_one(&n)
+        }
         None => {
             // Fail-fast: if Docker is unreachable for the first prefix, surface the error instead of silently masking it with the second prefix's result. The operator should see the daemon problem and rerun once it's resolved.
             down_all_prefix(TEST_PREFIX)?;
             down_all_prefix(SQLX_PREP_PREFIX)
         }
+    }
+}
+
+/// Guard against typos like `xtask test-db down --name postgres-prod`
+/// nuking unrelated containers. Only names with the prefixes minted by
+/// `up_unique` / `up_sqlx_prep_unique` are considered xtask-owned; for
+/// genuine cross-namespace removals the operator should call
+/// `docker rm -f` directly.
+fn validate_owned_name(name: &str) -> Result<()> {
+    if name.starts_with(TEST_PREFIX) || name.starts_with(SQLX_PREP_PREFIX) {
+        Ok(())
+    } else {
+        bail!(
+            "refusing to remove '{name}': xtask only manages containers \
+             prefixed with '{TEST_PREFIX}' or '{SQLX_PREP_PREFIX}'. Use \
+             `docker rm -f {name}` directly if you really mean it."
+        )
     }
 }
 
@@ -358,4 +378,29 @@ fn register_signal_teardown(name: &str) {
             .stderr(Stdio::null())
             .status();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_owned_name_accepts_test_prefix() {
+        assert!(validate_owned_name("meshmon-test-pg-abcd1234").is_ok());
+    }
+
+    #[test]
+    fn validate_owned_name_accepts_sqlx_prep_prefix() {
+        assert!(validate_owned_name("meshmon-sqlx-prep-abcd1234").is_ok());
+    }
+
+    #[test]
+    fn validate_owned_name_rejects_unrelated_name() {
+        let err =
+            validate_owned_name("postgres-prod").expect_err("unrelated names must be rejected");
+        assert!(
+            err.to_string().contains("refusing to remove"),
+            "error message should mention 'refusing to remove', got: {err}"
+        );
+    }
 }
