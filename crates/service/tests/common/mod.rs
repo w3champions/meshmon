@@ -37,9 +37,16 @@
 //!
 //! Canonical workflow:
 //! ```sh
-//! cargo xtask test            # provisions shared DB, runs nextest
-//! cargo xtask test-db down    # explicit teardown when done
+//! cargo xtask test            # spawns a per-invocation TimescaleDB container, runs nextest, tears it down
+//! cargo xtask test-db down    # reap any leftover meshmon-test-pg-* containers from crashed runs
 //! ```
+//! Each `cargo xtask test` invocation owns its own container
+//! (`meshmon-test-pg-<uuid>` on a kernel-assigned host port), so two
+//! concurrent invocations never collide. Inside one invocation, every
+//! nextest test process shares that one container via the inherited
+//! `DATABASE_URL` env var — that's where the "process-shared" wording
+//! below applies.
+//!
 //! `cargo test` still works (falls back to the per-binary testcontainers
 //! path, unchanged). `cargo nextest run` without `DATABASE_URL` will
 //! panic loudly — use xtask.
