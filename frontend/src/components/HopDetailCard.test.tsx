@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import type { components } from "@/api/schema.gen";
 import { HopDetailCard } from "@/components/HopDetailCard";
+import { IpHostnameProvider } from "@/components/ip-hostname/IpHostnameProvider";
 
 type HopJson = components["schemas"]["HopJson"];
 
@@ -20,7 +21,11 @@ const HOP: HopJson = {
 
 describe("HopDetailCard", () => {
   test("renders hop metadata", () => {
-    render(<HopDetailCard hop={HOP} onClose={() => {}} />);
+    render(
+      <IpHostnameProvider>
+        <HopDetailCard hop={HOP} onClose={() => {}} />
+      </IpHostnameProvider>,
+    );
     expect(screen.getByText(/hop 4/i)).toBeInTheDocument();
     expect(screen.getByText("10.0.0.5")).toBeInTheDocument();
     expect(screen.getByText(/×8/)).toBeInTheDocument();
@@ -32,7 +37,11 @@ describe("HopDetailCard", () => {
 
   test("close button fires onClose", async () => {
     const onClose = vi.fn();
-    render(<HopDetailCard hop={HOP} onClose={onClose} />);
+    render(
+      <IpHostnameProvider>
+        <HopDetailCard hop={HOP} onClose={onClose} />
+      </IpHostnameProvider>,
+    );
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /close hop detail/i }));
     expect(onClose).toHaveBeenCalledOnce();

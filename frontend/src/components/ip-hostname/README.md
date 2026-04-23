@@ -13,6 +13,7 @@ goes through this module — no bespoke rendering, no ad-hoc streams.
 | `useIpHostname(ip)` | Hook variant for callers that own their own rendering (e.g. Cytoscape node labels). |
 | `useIpHostnames(ips)` | Bulk variant returning a stable map reference keyed on the input IP set. |
 | `useRefreshHostname()` | Returns a stable `(ip) => Promise<void>` that POSTs `/api/hostnames/:ip/refresh`. |
+| `useSeedHostnames()` | Returns the stable `seedFromResponse` callback for callers that own their own effect (or tests that drive the provider synchronously). Prefer `useSeedHostnamesOnResponse` for TanStack-Query flows. |
 | `useSeedHostnamesOnResponse(data, selector)` | Primes the provider map from TanStack-Query response payloads. |
 | `formatIpWithHostname`, `hostnameDisplay`, `tooltipForHostname` | Plain-text helpers for non-JSX contexts. |
 
