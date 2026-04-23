@@ -23,7 +23,7 @@ fn handlers() -> &'static Mutex<Vec<Teardown>> {
 pub fn install_once() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
-        let _ = ctrlc::set_handler(|| {
+        if let Err(e) = ctrlc::set_handler(|| {
             let guard = handlers().lock().unwrap_or_else(|p| p.into_inner());
             for handler in guard.iter() {
                 handler();
@@ -31,7 +31,9 @@ pub fn install_once() {
             // Match the conventional 130 = 128 + SIGINT exit code so
             // wrapping shells (CI, lefthook) see the right cause.
             std::process::exit(130);
-        });
+        }) {
+            eprintln!("xtask: failed to install signal handler: {e}");
+        }
     });
 }
 
@@ -71,5 +73,37 @@ mod tests {
         });
         let n = handlers().lock().unwrap().len();
         assert!(n >= 1, "at least one handler registered, got {n}");
+    }
+
+    #[test]
+    fn handlers_run_in_fifo_order() {
+        let log: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Record how many handlers exist before registering ours so we
+        // can slice exactly those three out later — immune to other
+        // tests appending their own closures before or after us.
+        let start = handlers().lock().unwrap().len();
+
+        let l1 = log.clone();
+        on_signal(move || l1.lock().unwrap().push(1));
+        let l2 = log.clone();
+        on_signal(move || l2.lock().unwrap().push(2));
+        let l3 = log.clone();
+        on_signal(move || l3.lock().unwrap().push(3));
+
+        // Invoke only the three handlers we just registered, in the
+        // order they were appended (FIFO).  We do NOT fire a real signal
+        // — that would kill the test process.
+        let guard = handlers().lock().unwrap_or_else(|p| p.into_inner());
+        for h in guard.iter().skip(start) {
+            h();
+        }
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![1, 2, 3],
+            "handlers must fire in registration order"
+        );
     }
 }
