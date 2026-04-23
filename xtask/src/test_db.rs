@@ -50,8 +50,10 @@ impl TestDbContainer {
         self.port
     }
 
-    /// `postgres://postgres:postgres@127.0.0.1:<port>/postgres` —
-    /// matches the credentials wired into `docker_run_unique`.
+    /// `postgres://postgres:postgres@127.0.0.1:<port>/postgres`. The
+    /// `postgres/postgres` credentials are baked in by `docker_run_unique`
+    /// and shared between `up_unique` and `up_sqlx_prep_unique` containers
+    /// so this method is correct for both.
     pub fn database_url(&self) -> String {
         format!(
             "postgres://postgres:postgres@127.0.0.1:{}/postgres",
@@ -97,32 +99,52 @@ pub fn up_unique() -> Result<TestDbContainer> {
     let uuid = Uuid::new_v4().simple().to_string();
     let name = format!("{TEST_PREFIX}{}", &uuid[..8]);
     docker_run_unique(&name, TIMESCALEDB_IMAGE, "postgres", "postgres")?;
-    let port = inspect_port(&name)?;
-    wait_ready(&name, Duration::from_secs(30))?;
-    register_signal_teardown(&name);
-    let guard = TestDbContainer {
-        name,
-        port,
-        teardown_on_drop: Arc::new(Mutex::new(true)),
-    };
-    Ok(guard)
+    finalize_or_cleanup(name, |n| {
+        let port = inspect_port(n)?;
+        wait_ready(n, Duration::from_secs(30))?;
+        Ok(port)
+    })
 }
 
 /// Spawn a `meshmon-sqlx-prep-<uuid>` container with the same shape as
-/// the test DB, but using the `meshmon` password expected by the
-/// existing sqlx prepare workflow.
+/// the test DB and using the same `postgres` credentials so
+/// `TestDbContainer::database_url()` is correct for both container types.
 pub fn up_sqlx_prep_unique() -> Result<TestDbContainer> {
     let uuid = Uuid::new_v4().simple().to_string();
     let name = format!("{SQLX_PREP_PREFIX}{}", &uuid[..8]);
-    docker_run_unique(&name, TIMESCALEDB_IMAGE, "postgres", "meshmon")?;
-    let port = inspect_port(&name)?;
-    wait_ready(&name, Duration::from_secs(30))?;
-    register_signal_teardown(&name);
-    Ok(TestDbContainer {
-        name,
-        port,
-        teardown_on_drop: Arc::new(Mutex::new(true)),
+    docker_run_unique(&name, TIMESCALEDB_IMAGE, "postgres", "postgres")?;
+    finalize_or_cleanup(name, |n| {
+        let port = inspect_port(n)?;
+        wait_ready(n, Duration::from_secs(30))?;
+        Ok(port)
     })
+}
+
+/// Run post-`docker run` setup (port discovery + readiness wait); on
+/// failure, best-effort `docker rm -f` the container so a startup
+/// failure (image pull stall, daemon hiccup, slow CI) doesn't leak it.
+/// The signal-teardown handler is registered first, so Ctrl-C during
+/// the wait_ready window also reaps the container.
+fn finalize_or_cleanup(
+    name: String,
+    setup: impl FnOnce(&str) -> Result<u16>,
+) -> Result<TestDbContainer> {
+    register_signal_teardown(&name);
+    match setup(&name) {
+        Ok(port) => Ok(TestDbContainer {
+            name,
+            port,
+            teardown_on_drop: Arc::new(Mutex::new(true)),
+        }),
+        Err(e) => {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            Err(e)
+        }
+    }
 }
 
 /// `cargo xtask test-db up` entry point. Spawns a fresh container,
@@ -141,20 +163,26 @@ pub fn cmd_up() -> Result<()> {
 }
 
 /// `cargo xtask test-db down [--name <n>]`. With no name, removes
-/// every `meshmon-test-pg-*` container (idempotent).
+/// every `meshmon-test-pg-*` and `meshmon-sqlx-prep-*` container
+/// (idempotent).
 pub fn cmd_down(name: Option<String>) -> Result<()> {
     match name {
         Some(n) => down_one(&n),
-        None => down_all_prefix(TEST_PREFIX),
+        None => {
+            down_all_prefix(TEST_PREFIX)?;
+            down_all_prefix(SQLX_PREP_PREFIX)
+        }
     }
 }
 
 /// `cargo xtask test-db status`. Lists every running container with
-/// the `meshmon-test-pg-` prefix and the connect URL.
+/// the `meshmon-test-pg-` or `meshmon-sqlx-prep-` prefix and the
+/// connect URL.
 pub fn cmd_status() -> Result<()> {
-    let names = list_running_with_prefix(TEST_PREFIX)?;
+    let mut names = list_running_with_prefix(TEST_PREFIX)?;
+    names.extend(list_running_with_prefix(SQLX_PREP_PREFIX)?);
     if names.is_empty() {
-        println!("no containers running with prefix '{TEST_PREFIX}'");
+        println!("no containers running");
         return Ok(());
     }
     for name in &names {

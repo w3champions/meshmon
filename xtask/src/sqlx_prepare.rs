@@ -30,10 +30,7 @@ pub fn run(extra: Vec<String>) -> Result<()> {
 
     let root = crate::workspace_root()?;
     let db = test_db::up_sqlx_prep_unique()?;
-    let database_url = format!(
-        "postgres://postgres:meshmon@127.0.0.1:{}/postgres",
-        db.port()
-    );
+    let database_url = db.database_url();
 
     eprintln!(
         "[xtask sqlx-prepare] container {name} on host port {port}",
