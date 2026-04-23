@@ -37,6 +37,7 @@
 //!
 //! Bring up the compose stack and run the `meshmon-e2e` test package.
 
+mod signal;
 mod test_cmd;
 mod test_db;
 
@@ -48,6 +49,7 @@ use std::path::PathBuf;
 const OPENAPI_RELATIVE_PATH: &str = "frontend/src/api/openapi.gen.json";
 
 fn main() -> Result<()> {
+    signal::install_once();
     let mut args = env::args().skip(1);
     let Some(cmd) = args.next() else {
         print_usage();
