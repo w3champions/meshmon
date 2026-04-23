@@ -13,6 +13,30 @@ permissions:
   contents: read
   packages: read
 
+# Cargo + sccache tuning shared by every Rust job.
+#
+# - RUSTC_WRAPPER=sccache routes every rustc invocation through sccache,
+#   which keys cache entries by (source + dep rmeta + flags + rustc
+#   version). Hits survive Cargo.lock churn, profile changes, and
+#   cross-branch context. Backed by GHA cache via SCCACHE_GHA_ENABLED.
+# - CARGO_INCREMENTAL=0 because (a) incremental metadata is invalidated
+#   on every restored cache (different source state), (b) it bloats
+#   artifacts 2-5x, and (c) it produces non-deterministic rustc output
+#   that defeats sccache's content-hash keys.
+# - CARGO_PROFILE_DEV_DEBUG=line-tables-only and CODEGEN_UNITS=256
+#   shrink dev artifacts and parallelize codegen — wins are bandwidth
+#   (cache transfer) and link parallelism, both CI-relevant.
+# - RUSTFLAGS routes the linker through mold (installed per job below).
+#   mold is ~3-5x faster than ld for the workspace's larger binaries
+#   (meshmon-service, integration test bins).
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_DEV_CODEGEN_UNITS: "256"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
 jobs:
   rust-lint:
     name: Rust lint (fmt, check, clippy, openapi drift)
@@ -27,10 +51,22 @@ jobs:
           toolchain: "1.94"
           components: clippy, rustfmt
 
-      - name: Cache cargo
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # Registry/index only — sccache owns target/ caching at the rustc
+      # invocation level (much higher hit rate, no tarball repackaging).
+      # shared-key: meshmon-debug is shared with rust-test + rust-e2e so
+      # the registry cache is populated once across all three.
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: rust-lint
+          shared-key: meshmon-debug
+          cache-targets: false
+          cache-on-failure: true
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -51,6 +87,10 @@ jobs:
             exit 1
           fi
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   rust-test:
     name: Rust test (cargo xtask test)
     runs-on: ubuntu-latest
@@ -64,16 +104,28 @@ jobs:
         with:
           toolchain: "1.94"
 
-      - name: Cache cargo
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: rust-test
+          shared-key: meshmon-debug
+          cache-targets: false
+          cache-on-failure: true
 
       - name: Install cargo-nextest (prebuilt)
         uses: taiki-e/install-action@nextest
 
       - name: cargo xtask test
         run: cargo xtask test
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   actionlint:
     name: actionlint (workflow YAML)
@@ -184,10 +236,22 @@ jobs:
         with:
           toolchain: "1.94"
 
-      - name: Cache cargo
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # Release-profile artifacts are disjoint from the debug-profile
+      # graph (rustc keys include opt-level), so a separate shared-key
+      # keeps the registry cache narrow and avoids debug/release
+      # tarball cross-contamination.
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-binary
+          shared-key: meshmon-release
+          cache-targets: false
+          cache-on-failure: true
 
       - name: cargo build --release
         run: cargo build --release -p meshmon-service
@@ -217,6 +281,10 @@ jobs:
           path: target/release/meshmon-service
           retention-days: 14
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   rust-e2e:
     name: Rust E2E (bundled compose smoke)
     runs-on: ubuntu-latest
@@ -231,13 +299,18 @@ jobs:
         with:
           toolchain: "1.94"
 
-      - name: Cache cargo
+      - name: Install system deps (mold linker, argon2 CLI)
+        run: sudo apt-get update && sudo apt-get install -y mold argon2
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: rust-e2e
-
-      - name: Install argon2 CLI
-        run: sudo apt-get update && sudo apt-get install -y argon2
+          shared-key: meshmon-debug
+          cache-targets: false
+          cache-on-failure: true
 
       - name: Stage deploy/.env
         working-directory: deploy
@@ -300,3 +373,7 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose down -v
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
