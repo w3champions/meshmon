@@ -1,181 +1,306 @@
-//! `cargo xtask test-db` — shared TimescaleDB container lifecycle.
+//! `cargo xtask test-db` — per-invocation TimescaleDB containers.
 //!
 //! KEEP IN SYNC with `crates/service/tests/common/mod.rs::TIMESCALEDB_{IMAGE,TAG}`
-//! and `deploy/docker-compose.yml::meshmon-db.image`. If the pair
-//! drifts, CI (which calls `xtask test-db up`) and the integration-test
-//! harness (which shares the server the test binary assumes) will see
-//! different Postgres majors and one of them will break.
+//! and `deploy/docker-compose.yml::meshmon-db.image`. If the pair drifts,
+//! CI (which calls `xtask test`) and the integration-test harness will
+//! talk to different Postgres majors and one of them will break.
 //!
-//! Consider extracting to a shared crate (e.g., `crates/common::test_db`)
-//! if the duplication becomes painful — out of scope here.
+//! Container naming: every `up` call mints a fresh
+//! `meshmon-test-pg-<short-uuid>` container with `-p 0:5432`, so
+//! parallel `xtask test` runs (developer + CI, multiple terminals,
+//! pre-commit hooks) never collide on either name or host port. The
+//! `up_unique()` helper returns a [`TestDbContainer`] RAII guard whose
+//! `Drop` runs `docker rm -f`; signal handlers (`crate::signal`) ensure
+//! the same teardown runs on Ctrl-C.
 
+use crate::signal;
+use anyhow::{bail, Context, Result};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
-const IMAGE: &str = "timescale/timescaledb:2.26.3-pg16";
-const CONTAINER_NAME: &str = "meshmon-test-pg";
-const HOST_PORT: u16 = 5432;
-pub(crate) const DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/postgres";
+pub(crate) const TIMESCALEDB_IMAGE: &str = "timescale/timescaledb:2.26.3-pg16";
+pub(crate) const TEST_PREFIX: &str = "meshmon-test-pg-";
+pub(crate) const SQLX_PREP_PREFIX: &str = "meshmon-sqlx-prep-";
 
-pub fn up() -> anyhow::Result<()> {
-    match container_state()? {
-        ContainerState::Running => {
-            // Docker "Running" state means the container process is alive,
-            // NOT that Postgres is accepting connections. After a Docker
-            // daemon restart or an OS reboot, the container can surface in
-            // Running state a few seconds before Postgres finishes
-            // crash-recovery startup. `wait_ready` is cheap when the DB is
-            // already healthy (first `pg_isready` returns success
-            // immediately) and prevents `cargo xtask test` from racing
-            // past a not-yet-ready server.
-            wait_ready(Duration::from_secs(30))?;
-            println!("test DB already running on port {HOST_PORT}");
-        }
-        ContainerState::Stopped => {
-            docker_start()?;
-            wait_ready(Duration::from_secs(30))?;
-            println!("started existing {CONTAINER_NAME} ({IMAGE})");
-        }
-        ContainerState::Absent => {
-            docker_run()?;
-            wait_ready(Duration::from_secs(30))?;
-            println!("created {CONTAINER_NAME} ({IMAGE})");
-        }
+/// RAII handle for one ephemeral Postgres container.
+///
+/// `Drop` runs `docker rm -f <name>`; a paired entry in the process
+/// signal-handler registry triggers the same removal on Ctrl-C. Both
+/// paths are idempotent — `docker rm -f` on an absent container is a
+/// silent no-op via stderr discard.
+pub struct TestDbContainer {
+    name: String,
+    port: u16,
+    /// Set to `false` by [`Self::leak`] when the caller wants the
+    /// container to outlive this guard (used by `xtask test-db up`,
+    /// which transfers ownership to the user).
+    teardown_on_drop: Arc<Mutex<bool>>,
+}
+
+impl TestDbContainer {
+    /// Container name (e.g. `meshmon-test-pg-1a2b3c4d`).
+    pub fn name(&self) -> &str {
+        &self.name
     }
+
+    /// Host port assigned by the kernel.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// `postgres://postgres:postgres@127.0.0.1:<port>/postgres` —
+    /// matches the credentials wired into `docker_run_unique`.
+    pub fn database_url(&self) -> String {
+        format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            self.port
+        )
+    }
+
+    /// Detach the guard so the container survives `Drop`. Used by
+    /// `xtask test-db up`, which prints the export line and hands the
+    /// container off to the caller.
+    pub fn leak(self) -> (String, u16) {
+        *self.teardown_on_drop.lock().expect("poison") = false;
+        let name = self.name.clone();
+        let port = self.port;
+        // Drop runs but the flag tells it to no-op.
+        drop(self);
+        (name, port)
+    }
+}
+
+impl Drop for TestDbContainer {
+    fn drop(&mut self) {
+        let should_tear_down = *self.teardown_on_drop.lock().expect("poison");
+        if !should_tear_down {
+            return;
+        }
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Spawn a fresh `meshmon-test-pg-<uuid>` container and return its
+/// RAII guard. Blocks until `pg_isready` succeeds (30 s budget).
+///
+/// Registers a signal-handler teardown so Ctrl-C also reaps the
+/// container. The teardown reads the same name as `Drop` does, so a
+/// race between Ctrl-C and normal exit can't double-remove (docker
+/// silently no-ops the second call).
+pub fn up_unique() -> Result<TestDbContainer> {
+    let uuid = Uuid::new_v4().simple().to_string();
+    let name = format!("{TEST_PREFIX}{}", &uuid[..8]);
+    docker_run_unique(&name, TIMESCALEDB_IMAGE, "postgres", "postgres")?;
+    let port = inspect_port(&name)?;
+    wait_ready(&name, Duration::from_secs(30))?;
+    register_signal_teardown(&name);
+    let guard = TestDbContainer {
+        name,
+        port,
+        teardown_on_drop: Arc::new(Mutex::new(true)),
+    };
+    Ok(guard)
+}
+
+/// Spawn a `meshmon-sqlx-prep-<uuid>` container with the same shape as
+/// the test DB, but using the `meshmon` password expected by the
+/// existing sqlx prepare workflow.
+pub fn up_sqlx_prep_unique() -> Result<TestDbContainer> {
+    let uuid = Uuid::new_v4().simple().to_string();
+    let name = format!("{SQLX_PREP_PREFIX}{}", &uuid[..8]);
+    docker_run_unique(&name, TIMESCALEDB_IMAGE, "postgres", "meshmon")?;
+    let port = inspect_port(&name)?;
+    wait_ready(&name, Duration::from_secs(30))?;
+    register_signal_teardown(&name);
+    Ok(TestDbContainer {
+        name,
+        port,
+        teardown_on_drop: Arc::new(Mutex::new(true)),
+    })
+}
+
+/// `cargo xtask test-db up` entry point. Spawns a fresh container,
+/// prints the export line + container name, and detaches — the caller
+/// is responsible for calling `xtask test-db down --name <name>`
+/// (or the bare `down` to reap every leftover).
+pub fn cmd_up() -> Result<()> {
+    let guard = up_unique()?;
+    let url = guard.database_url();
+    let (name, port) = guard.leak();
+    println!("created {name} on host port {port}");
     println!();
-    println!("export DATABASE_URL={DATABASE_URL}");
+    println!("export DATABASE_URL={url}");
+    println!("# tear down with: cargo xtask test-db down --name {name}");
     Ok(())
 }
 
-pub fn down() -> anyhow::Result<()> {
-    // Idempotent at both the business and exit-code level: on Docker >=
-    // 25, `docker rm -f <name>` returns non-zero when the container is
-    // absent. Pre-check via `container_state()` so that repeated calls
-    // (e.g. a CI teardown with `if: always()` plus a developer running
-    // `down` twice) all exit 0.
-    if matches!(container_state()?, ContainerState::Absent) {
-        println!("{CONTAINER_NAME} already absent");
+/// `cargo xtask test-db down [--name <n>]`. With no name, removes
+/// every `meshmon-test-pg-*` container (idempotent).
+pub fn cmd_down(name: Option<String>) -> Result<()> {
+    match name {
+        Some(n) => down_one(&n),
+        None => down_all_prefix(TEST_PREFIX),
+    }
+}
+
+/// `cargo xtask test-db status`. Lists every running container with
+/// the `meshmon-test-pg-` prefix and the connect URL.
+pub fn cmd_status() -> Result<()> {
+    let names = list_running_with_prefix(TEST_PREFIX)?;
+    if names.is_empty() {
+        println!("no containers running with prefix '{TEST_PREFIX}'");
         return Ok(());
     }
+    for name in &names {
+        match inspect_port(name) {
+            Ok(port) => {
+                println!(
+                    "{name}  127.0.0.1:{port}  postgres://postgres:postgres@127.0.0.1:{port}/postgres"
+                );
+            }
+            Err(e) => {
+                println!("{name}  (port unknown: {e})");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn down_one(name: &str) -> Result<()> {
     let status = Command::new("docker")
-        .args(["rm", "-f", CONTAINER_NAME])
+        .args(["rm", "-f", name])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        println!("removed {CONTAINER_NAME}");
+        .stderr(Stdio::piped())
+        .output()?;
+    if status.status.success() {
+        println!("removed {name}");
         Ok(())
     } else {
-        anyhow::bail!("docker rm -f {CONTAINER_NAME} failed ({status})")
-    }
-}
-
-pub fn status() -> anyhow::Result<()> {
-    match container_state()? {
-        ContainerState::Running => {
-            println!("running on localhost:{HOST_PORT}");
-            println!("DATABASE_URL={DATABASE_URL}");
-        }
-        ContainerState::Stopped | ContainerState::Absent => {
-            println!("not running");
-        }
-    }
-    Ok(())
-}
-
-/// Three-way state of the shared test DB container.
-///
-/// `Absent` vs `Stopped` matters because `docker run --name X` on a
-/// stopped-but-existing container fails with "container name already in
-/// use" — the `up()` path must `docker start X` instead.
-enum ContainerState {
-    Running,
-    Stopped,
-    Absent,
-}
-
-fn container_state() -> anyhow::Result<ContainerState> {
-    // Capture stderr (don't `Stdio::null` it) so we can distinguish
-    // "container missing" from "daemon unreachable / not installed /
-    // permission denied" — the former is a normal Absent state, the
-    // latter are operational errors the user needs to see.
-    let out = Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", CONTAINER_NAME])
-        .output()
-        .map_err(|e| {
-            anyhow::anyhow!("failed to spawn docker: {e}. Is Docker installed and on PATH?")
-        })?;
-
-    if out.status.success() {
-        let running = String::from_utf8_lossy(&out.stdout).trim() == "true";
-        return Ok(if running {
-            ContainerState::Running
+        let err = String::from_utf8_lossy(&status.stderr);
+        if err.to_ascii_lowercase().contains("no such") {
+            println!("{name} already absent");
+            Ok(())
         } else {
-            ContainerState::Stopped
-        });
+            bail!("docker rm -f {name} failed: {}", err.trim())
+        }
     }
-
-    // `docker inspect`'s not-found message varies across versions
-    // ("No such object", "No such container", etc.) but always contains
-    // "no such" (case-insensitive). Anything else — daemon unreachable,
-    // socket permission denied, network error talking to a remote
-    // daemon — is an operational failure we must surface.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr.to_ascii_lowercase().contains("no such") {
-        return Ok(ContainerState::Absent);
-    }
-
-    anyhow::bail!(
-        "docker inspect for {CONTAINER_NAME} failed ({status}): {msg}",
-        status = out.status,
-        msg = stderr.trim(),
-    )
 }
 
-fn docker_start() -> anyhow::Result<()> {
-    let status = Command::new("docker")
-        .args(["start", CONTAINER_NAME])
-        .stdout(Stdio::null())
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("docker start {CONTAINER_NAME} failed ({status})");
+fn down_all_prefix(prefix: &str) -> Result<()> {
+    let names = list_all_with_prefix(prefix)?;
+    if names.is_empty() {
+        println!("no containers found with prefix '{prefix}'");
+        return Ok(());
+    }
+    for name in &names {
+        down_one(name)?;
     }
     Ok(())
 }
 
-fn docker_run() -> anyhow::Result<()> {
+fn docker_run_unique(name: &str, image: &str, user: &str, password: &str) -> Result<()> {
     let status = Command::new("docker")
         .args([
             "run",
             "-d",
             "--name",
-            CONTAINER_NAME,
+            name,
             "-e",
-            "POSTGRES_PASSWORD=postgres",
+            &format!("POSTGRES_USER={user}"),
             "-e",
-            "POSTGRES_USER=postgres",
+            &format!("POSTGRES_PASSWORD={password}"),
             "-e",
             "POSTGRES_DB=postgres",
             "-p",
-            &format!("{HOST_PORT}:5432"),
-            IMAGE,
+            "127.0.0.1::5432",
+            image,
         ])
         .stdout(Stdio::null())
-        .status()?;
-    if !status.success() {
-        anyhow::bail!(
-            "docker run for {CONTAINER_NAME} failed ({status}); \
-             check that port {HOST_PORT} is free and Docker is running"
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("spawn docker for {name}"))?;
+    if !status.status.success() {
+        bail!(
+            "docker run for {name} failed ({}): {}",
+            status.status,
+            String::from_utf8_lossy(&status.stderr).trim()
         );
     }
     Ok(())
 }
 
-fn wait_ready(timeout: Duration) -> anyhow::Result<()> {
+/// Resolve the host port docker assigned to container port 5432/tcp.
+fn inspect_port(name: &str) -> Result<u16> {
+    // `docker port <name> 5432/tcp` prints lines like
+    //   127.0.0.1:54321
+    //   [::]:54321
+    // Take the first one and parse the trailing port number. We do
+    // not use `docker inspect -f '...'` here because the JSON path
+    // for HostPort is awkward and varies by daemon version.
+    let out = Command::new("docker")
+        .args(["port", name, "5432/tcp"])
+        .output()
+        .with_context(|| format!("docker port {name}"))?;
+    if !out.status.success() {
+        bail!(
+            "docker port {name} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("docker port {name} returned no lines"))?;
+    let port_str = line
+        .rsplit(':')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not parse port from '{line}'"))?;
+    port_str
+        .trim()
+        .parse::<u16>()
+        .with_context(|| format!("parse host port from '{line}'"))
+}
+
+fn list_running_with_prefix(prefix: &str) -> Result<Vec<String>> {
+    list_with_prefix(prefix, &["ps", "--format", "{{.Names}}"])
+}
+
+fn list_all_with_prefix(prefix: &str) -> Result<Vec<String>> {
+    list_with_prefix(prefix, &["ps", "-a", "--format", "{{.Names}}"])
+}
+
+fn list_with_prefix(prefix: &str, args: &[&str]) -> Result<Vec<String>> {
+    let out = Command::new("docker")
+        .args(args)
+        .output()
+        .context("docker ps")?;
+    if !out.status.success() {
+        bail!(
+            "docker ps failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|n| n.starts_with(prefix))
+        .collect())
+}
+
+fn wait_ready(name: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         let out = Command::new("docker")
-            .args(["exec", CONTAINER_NAME, "pg_isready", "-U", "postgres"])
+            .args(["exec", name, "pg_isready", "-U", "postgres"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .output();
@@ -185,8 +310,19 @@ fn wait_ready(timeout: Duration) -> anyhow::Result<()> {
             }
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("{CONTAINER_NAME} did not become ready within {:?}", timeout);
+            bail!("{name} did not become ready within {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+fn register_signal_teardown(name: &str) {
+    let owned = name.to_string();
+    signal::on_signal(move || {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &owned])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
 }
