@@ -204,6 +204,16 @@ if lsof -iTCP:"$SERVICE_PORT" -sTCP:LISTEN -n -P 2>/dev/null | grep -q LISTEN; t
     exit 1
 fi
 
+# Defensive: fail fast if something else already owns the dev DB
+# port. Most commonly a stray `meshmon-db` from a prior dev.sh that
+# didn't fully clean up, or a system Postgres squatting on the slot.
+if lsof -iTCP:15432 -sTCP:LISTEN -n -P 2>/dev/null | grep -q LISTEN; then
+    echo "[dev.sh] ERROR: port 15432 (dev Postgres) is already in use:" >&2
+    lsof -iTCP:15432 -sTCP:LISTEN -n -P >&2 || true
+    echo "[dev.sh]   stop the offender (e.g. \`docker rm -f meshmon-db\`) or free the port." >&2
+    exit 1
+fi
+
 echo "[dev.sh] starting infra via docker compose dev overlay"
 (cd "$DEPLOY_DIR" && docker compose \
     -f docker-compose.yml -f docker-compose.dev.yml up -d --wait)
@@ -216,7 +226,7 @@ done
 # Apply migrations before seeding; the dev overlay skips meshmon-service
 # (profiles: ["skip"]) so no other process has created the schema yet.
 echo "[dev.sh] applying migrations"
-DATABASE_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable" \
+DATABASE_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:15432/meshmon?sslmode=disable" \
     sqlx migrate run --source crates/service/migrations >/dev/null
 
 echo "[dev.sh] starting meshmon-service on :$SERVICE_PORT"
@@ -225,7 +235,7 @@ export MESHMON_AGENT_TOKEN="$AGENT_TOKEN"
 export MESHMON_ADMIN_PASSWORD_HASH="$ADMIN_HASH"
 export MESHMON_PG_GRAFANA_PASSWORD="$PG_GRAFANA_PASSWORD"
 export MESHMON_UDP_PROBE_SECRET="$UDP_PROBE_SECRET"
-export MESHMON_POSTGRES_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:5432/meshmon?sslmode=disable"
+export MESHMON_POSTGRES_URL="postgres://meshmon:$PG_PASSWORD@127.0.0.1:15432/meshmon?sslmode=disable"
 # Forward the ipgeolocation.io key when present so the service picks it up via
 # `api_key_env`. Unset by default — export it in your shell (do NOT commit).
 if [[ -n "${MESHMON_IPGEO_API_KEY:-}" ]]; then
