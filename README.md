@@ -172,12 +172,12 @@ docker run --rm -d --name meshmon-db \
     -e POSTGRES_PASSWORD=meshmon \
     -e POSTGRES_USER=meshmon \
     -e POSTGRES_DB=meshmon \
-    -p 5432:5432 \
+    -p 15432:5432 \
     timescale/timescaledb:2.26.3-pg16
 
 # 2. Copy the example config.
 cp deploy/meshmon.example.toml /tmp/meshmon.toml
-# Edit /tmp/meshmon.toml: set `url = "postgres://meshmon:meshmon@localhost:5432/meshmon"` or similar.
+# Edit /tmp/meshmon.toml: set `url = "postgres://meshmon:meshmon@localhost:15432/meshmon"` or similar.
 
 # 3. Run.
 MESHMON_CONFIG=/tmp/meshmon.toml cargo run --package meshmon-service
@@ -261,9 +261,11 @@ cargo xtask test-e2e        # compose-stack end-to-end tests
 cargo xtask test-db down    # tear down the shared test database
 ```
 
-`cargo xtask test` provisions a single shared `timescale/timescaledb`
-container, sets `DATABASE_URL`, and runs `cargo nextest` against it. This
-is the canonical path for local dev and CI.
+`cargo xtask test` spawns a per-invocation `meshmon-test-pg-<uuid>`
+container with a kernel-assigned host port, sets `DATABASE_URL`, runs
+`cargo nextest` against it, then tears the container down. Two
+concurrent `cargo xtask test` invocations are safe — each owns its own
+container. This is the canonical path for local dev and CI.
 
 `cargo xtask test` excludes the `xtask` and `meshmon-e2e` packages —
 they run in separate invocations. Verify xtask's own lifecycle commands
@@ -291,19 +293,18 @@ cargo test -p meshmon-service --test migrations
 The service uses `sqlx::query!` / `sqlx::query_as!` macros for compile-time-checked SQL. The macros validate against either a live `DATABASE_URL` or the committed `.sqlx/` offline cache.
 
 ```bash
-# One-time:
+# One-time setup:
 cargo install sqlx-cli --no-default-features --features rustls,postgres --version ~0.8
 
-# After changing any query!/query_as! macro: bring up Postgres, regenerate, commit.
-docker run -d --rm --name meshmon-prep -p 55432:5432 \
-    -e POSTGRES_PASSWORD=meshmon timescale/timescaledb:2.26.3-pg16
-sleep 3
-export DATABASE_URL=postgres://postgres:meshmon@127.0.0.1:55432/postgres
-sqlx migrate run --source crates/service/migrations
-cargo sqlx prepare --workspace -- --all-targets --all-features
+# After changing any query!/query_as! macro:
+cargo xtask sqlx-prepare
 git add .sqlx
-docker stop meshmon-prep
 ```
+
+`cargo xtask sqlx-prepare` spawns a throwaway `meshmon-sqlx-prep-<uuid>`
+TimescaleDB container on a kernel-assigned host port, applies migrations,
+runs `cargo sqlx prepare --workspace -- --all-targets --all-features`,
+then tears the container down. Concurrent invocations are safe.
 
 CI sets `SQLX_OFFLINE=true` and runs `cargo sqlx prepare --check` to guard against stale caches.
 
