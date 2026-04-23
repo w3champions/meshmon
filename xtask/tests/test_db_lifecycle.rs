@@ -17,6 +17,24 @@ fn docker_available() -> bool {
             .unwrap_or(false)
 }
 
+fn running_test_pg_containers() -> std::collections::BTreeSet<String> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--format",
+            "{{.Names}}",
+            "--filter",
+            "name=meshmon-test-pg-",
+        ])
+        .output()
+        .expect("docker ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|n| n.starts_with("meshmon-test-pg-"))
+        .collect()
+}
+
 fn parse_export_line(stdout: &str) -> Option<(String, String)> {
     // Lines in stdout we care about:
     //   created meshmon-test-pg-1a2b3c4d on host port 54321
@@ -77,8 +95,11 @@ fn xtask_test_db_up_is_parallel_safe() {
     let _ = xtask(&["test-db", "down", "--name", &name2]);
 }
 
-/// `down --name <n>` removes exactly one container; `down` (no flag)
-/// reaps every leftover with the prefix.
+/// `down --name <n>` removes exactly one container. We deliberately
+/// avoid asserting global state (e.g. bare `down` + "no containers
+/// running") because other concurrent test runs or operator workflows
+/// on the same Docker daemon may legitimately have their own
+/// `meshmon-test-pg-*` containers in flight.
 #[test]
 fn xtask_test_db_down_targets_correctly() {
     if !docker_available() {
@@ -111,15 +132,20 @@ fn xtask_test_db_down_targets_correctly() {
         "name2 should still be running; got: {s}"
     );
 
-    // Bare down reaps the rest.
-    let down_all = xtask(&["test-db", "down"]);
-    assert!(down_all.status.success(), "bare down failed");
+    // Targeted down on the second container — proves `--name` reaps
+    // exactly the named container without trampling siblings owned by
+    // other concurrent runs.
+    let down2 = xtask(&["test-db", "down", "--name", &name2]);
+    assert!(
+        down2.status.success(),
+        "down --name failed: {}",
+        String::from_utf8_lossy(&down2.stderr)
+    );
+
     let status = xtask(&["test-db", "status"]);
     let s = String::from_utf8_lossy(&status.stdout);
-    assert!(
-        s.contains("no containers running"),
-        "all containers must be reaped; got: {s}"
-    );
+    assert!(!s.contains(&name1), "name1 should still be gone; got: {s}");
+    assert!(!s.contains(&name2), "name2 should be gone; got: {s}");
 }
 
 /// `xtask test` runs nextest end-to-end against a fresh container and
@@ -141,6 +167,12 @@ fn xtask_test_runs_nextest_end_to_end() {
         return;
     }
 
+    // Snapshot the set of running test-pg containers BEFORE the run
+    // so we can prove the test's container was reaped without
+    // depending on global state (other concurrent runs may legitimately
+    // have their own containers up).
+    let before = running_test_pg_containers();
+
     // Filter to a single known-fast test so the assertion is cheap.
     let out = xtask(&[
         "test",
@@ -154,11 +186,15 @@ fn xtask_test_runs_nextest_end_to_end() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Container should be torn down on the success path.
-    let status = xtask(&["test-db", "status"]);
-    let s = String::from_utf8_lossy(&status.stdout);
+    // No NEW meshmon-test-pg-* container should be running after
+    // `xtask test` exits — the container it spawned must have been
+    // torn down on the success path. We diff against the pre-run
+    // snapshot instead of asserting a global "no containers running"
+    // state.
+    let after = running_test_pg_containers();
+    let leaked: Vec<&String> = after.difference(&before).collect();
     assert!(
-        s.contains("no containers running"),
-        "test must clean up; got: {s}"
+        leaked.is_empty(),
+        "xtask test leaked containers: {leaked:?} (before={before:?}, after={after:?})"
     );
 }

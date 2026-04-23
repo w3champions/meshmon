@@ -154,6 +154,10 @@ fn finalize_or_cleanup(
 pub fn cmd_up() -> Result<()> {
     let guard = up_unique()?;
     let url = guard.database_url();
+    // The signal-handler teardown registered inside up_unique stays
+    // armed across leak() — intentional, so Ctrl-C during the startup
+    // window before the export line is printed reaps the half-spawned
+    // container instead of leaving it for the user.
     let (name, port) = guard.leak();
     println!("created {name} on host port {port}");
     println!();
@@ -169,6 +173,7 @@ pub fn cmd_down(name: Option<String>) -> Result<()> {
     match name {
         Some(n) => down_one(&n),
         None => {
+            // Fail-fast: if Docker is unreachable for the first prefix, surface the error instead of silently masking it with the second prefix's result. The operator should see the daemon problem and rerun once it's resolved.
             down_all_prefix(TEST_PREFIX)?;
             down_all_prefix(SQLX_PREP_PREFIX)
         }
