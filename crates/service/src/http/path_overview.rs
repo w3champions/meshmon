@@ -29,6 +29,8 @@
 //! response — the UI then renders "metrics unavailable" without breaking
 //! the page.
 
+use crate::hostname::{bulk_hostnames_and_enqueue, session_id_from_auth};
+use crate::http::auth::AuthSession;
 use crate::http::http_client::proxy_client;
 use crate::http::user_api::{
     invalid_protocol, AgentSummary, RouteSnapshotDetail, RouteSnapshotSummary,
@@ -43,6 +45,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 use sqlx::PgPool;
+use std::net::IpAddr;
 use utoipa::{IntoParams, ToSchema};
 
 // ---------------------------------------------------------------------------
@@ -548,6 +551,7 @@ async fn fetch_metrics(
 )]
 pub async fn path_overview(
     State(state): State<AppState>,
+    auth_session: AuthSession,
     Path((src, tgt)): Path<(String, String)>,
     Query(params): Query<PathOverviewParams>,
 ) -> Response {
@@ -600,14 +604,14 @@ pub async fn path_overview(
     // 4. Fetch latest-per-protocol first — we need the resolved primary
     //    protocol before we can kick off the protocol-scoped recent
     //    snapshots query (T32).
-    let latest_by_protocol = match fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to).await
-    {
-        Ok(latest) => latest,
-        Err(e) => {
-            tracing::error!(error = %e, %src, %tgt, "path_overview: latest fetch failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let mut latest_by_protocol =
+        match fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to).await {
+            Ok(latest) => latest,
+            Err(e) => {
+                tracing::error!(error = %e, %src, %tgt, "path_overview: latest fetch failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     // 5. Pick the primary protocol. Without one, there is nothing to
     //    query for recent snapshots or metrics; we short-circuit to
@@ -643,6 +647,61 @@ pub async fn path_overview(
     let recent_snapshots_truncated = recent_snapshots.len() as i64 > RECENT_LIMIT;
     if recent_snapshots_truncated {
         recent_snapshots.truncate(RECENT_LIMIT as usize);
+    }
+
+    // 7. Stamp reverse-DNS hostnames on hop IPs across all three protocol
+    //    variants in one DB round-trip. `source` / `target` agent hostnames
+    //    are already stamped via the `AgentSummary` path (T53b — handled
+    //    separately by those handlers when agents are looked up). Here we
+    //    only handle the `latest_by_protocol.*` hop IPs.
+    {
+        // Flatten all hop IPs across icmp / udp / tcp into one Vec for a
+        // single bulk lookup.
+        let all_ips: Vec<IpAddr> = [
+            latest_by_protocol.icmp.as_ref(),
+            latest_by_protocol.udp.as_ref(),
+            latest_by_protocol.tcp.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|snap| snap.hops.iter().flat_map(|h| h.observed_ips.iter()))
+        .filter_map(|hop_ip| hop_ip.ip.parse::<IpAddr>().ok())
+        .collect();
+
+        if !all_ips.is_empty() {
+            let session = session_id_from_auth(&auth_session);
+            match bulk_hostnames_and_enqueue(&state, &session, &all_ips).await {
+                Ok(map) => {
+                    // Walk each present protocol variant and apply hostnames.
+                    for snap in [
+                        latest_by_protocol.icmp.as_mut(),
+                        latest_by_protocol.udp.as_mut(),
+                        latest_by_protocol.tcp.as_mut(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        for hop in snap.hops.iter_mut() {
+                            for hop_ip in hop.observed_ips.iter_mut() {
+                                if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                                    if let Some(Some(h)) = map.get(&ip) {
+                                        hop_ip.hostname = Some(h.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Hop hostname stamping failure is non-fatal: log and
+                    // continue — the rest of the response is complete.
+                    tracing::warn!(
+                        error = %e,
+                        "path_overview: hop hostname stamp failed, returning unhostnamed hops"
+                    );
+                }
+            }
+        }
     }
 
     Json(PathOverviewResponse {

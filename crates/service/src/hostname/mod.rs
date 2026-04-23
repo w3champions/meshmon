@@ -12,6 +12,7 @@ mod repo;
 mod resolver;
 mod session;
 mod sse;
+pub mod stamp;
 
 pub use backend::{HickoryBackend, LookupOutcome, ResolverBackend};
 pub use ip_canon::canonicalize;
@@ -20,6 +21,7 @@ pub use repo::{hostnames_for, record_negative, record_positive};
 pub use resolver::Resolver;
 pub(crate) use session::session_id_from_auth;
 pub use sse::{HostnameBroadcaster, HostnameEvent, SessionHandle, SessionId};
+pub use stamp::{bulk_hostnames_and_enqueue, stamp_hostnames};
 
 #[cfg(test)]
 pub(crate) use backend::test_support;

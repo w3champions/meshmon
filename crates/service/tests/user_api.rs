@@ -42,6 +42,12 @@
 //! | `.162` | `agents_list_omits_hostname_on_negative_cache`              |
 //! | `.163` | `agents_list_cold_cache_miss_enqueues_resolver`             |
 //! | `.164` | `agent_detail_stamps_hostname_from_positive_cache`          |
+//! | `.165` | `routes_latest_stamps_positive_hop_hostname`                |
+//! | `.166` | `routes_latest_omits_hop_hostname_on_negative_cache`        |
+//! | `.167` | `routes_latest_cold_hop_miss_enqueues_resolver`             |
+//! | `.168` | `routes_by_id_stamps_positive_hop_hostname`                 |
+//! | `.169` | `routes_by_id_omits_hop_hostname_on_negative_cache`         |
+//! | `.170` | `routes_by_id_cold_hop_miss_enqueues_resolver`              |
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -1471,4 +1477,425 @@ async fn agent_detail_stamps_hostname_from_positive_cache() {
     assert_eq!(body["network_operator"], "AS Example", "body = {body}");
 
     cleanup_agent_with_catalogue(&pool, agent_id, ip).await;
+}
+
+// ---------------------------------------------------------------------------
+// T53c I1: hop-hostname stamping on route-snapshot detail endpoints
+// ---------------------------------------------------------------------------
+
+/// Three IPs used across the hop-hostname tests. Each IP plays a different
+/// role in the three-state coverage:
+///
+/// - `HOP_IP_POS` — seeded in `ip_hostname_cache` as a positive hit before
+///   the handler runs.
+/// - `HOP_IP_NEG` — seeded in `ip_hostname_cache` as a negative hit before
+///   the handler runs; the `hostname` field must be absent in the response.
+/// - `HOP_IP_COLD` — not seeded; the handler must enqueue it for background
+///   resolution and leave `hostname` absent in the response.
+const HOP_IP_POS: &str = "10.53.1.1";
+const HOP_IP_NEG: &str = "10.53.1.2";
+const HOP_IP_COLD: &str = "10.53.1.3";
+const HOP_HOSTNAME_POS: &str = "hop-pos.example.com";
+
+/// Seed a single route-snapshot row with three hops, each carrying one of the
+/// three test IPs above. Also ensures the required agent rows exist.
+async fn seed_three_hop_snapshot(pool: &sqlx::PgPool, src: &str, tgt: &str, protocol: &str) {
+    for id in [src, tgt] {
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, ip, tcp_probe_port, udp_probe_port) \
+             VALUES ($1, $1, '10.0.0.1', 8002, 8005) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let hops = serde_json::json!([
+        {
+            "position": 1,
+            "observed_ips": [{"ip": HOP_IP_POS, "freq": 1.0}],
+            "avg_rtt_micros": 1000,
+            "stddev_rtt_micros": 100,
+            "loss_pct": 0.0
+        },
+        {
+            "position": 2,
+            "observed_ips": [{"ip": HOP_IP_NEG, "freq": 1.0}],
+            "avg_rtt_micros": 2000,
+            "stddev_rtt_micros": 100,
+            "loss_pct": 0.0
+        },
+        {
+            "position": 3,
+            "observed_ips": [{"ip": HOP_IP_COLD, "freq": 1.0}],
+            "avg_rtt_micros": 3000,
+            "stddev_rtt_micros": 100,
+            "loss_pct": 0.0
+        }
+    ]);
+    let summary = serde_json::json!({
+        "avg_rtt_micros": 2000,
+        "loss_pct": 0.0,
+        "hop_count": 3
+    });
+    sqlx::query(
+        "INSERT INTO route_snapshots \
+         (source_id, target_id, protocol, observed_at, hops, path_summary) \
+         VALUES ($1, $2, $3, NOW() - INTERVAL '1 minute', $4::jsonb, $5::jsonb)",
+    )
+    .bind(src)
+    .bind(tgt)
+    .bind(protocol)
+    .bind(&hops)
+    .bind(&summary)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Delete route-snapshots + agents seeded for hop-hostname tests.
+async fn cleanup_hop_snapshots(pool: &sqlx::PgPool, src: &str, tgt: &str) {
+    sqlx::query("DELETE FROM route_snapshots WHERE source_id = $1 AND target_id = $2")
+        .bind(src)
+        .bind(tgt)
+        .execute(pool)
+        .await
+        .expect("cleanup route_snapshots");
+    sqlx::query("DELETE FROM agents WHERE id IN ($1, $2)")
+        .bind(src)
+        .bind(tgt)
+        .execute(pool)
+        .await
+        .expect("cleanup agents");
+}
+
+/// Seed the hostname cache into the three-state configuration used by all
+/// hop-hostname tests: positive for `HOP_IP_POS`, negative for `HOP_IP_NEG`,
+/// nothing for `HOP_IP_COLD`.
+async fn seed_hop_hostname_cache(pool: &sqlx::PgPool) {
+    let pos_ip: std::net::IpAddr = HOP_IP_POS.parse().unwrap();
+    let neg_ip: std::net::IpAddr = HOP_IP_NEG.parse().unwrap();
+    common::seed_hostname_positive(pool, pos_ip, HOP_HOSTNAME_POS).await;
+    common::seed_hostname_negative(pool, neg_ip).await;
+    // HOP_IP_COLD: ensure no stale cache row exists so the handler sees a
+    // genuine cold miss.
+    sqlx::query("DELETE FROM ip_hostname_cache WHERE ip = $1::inet")
+        .bind(HOP_IP_COLD)
+        .execute(pool)
+        .await
+        .expect("clear cold-miss cache");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/paths/{src}/{tgt}/routes/latest — hop hostname three-state tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn routes_latest_stamps_positive_hop_hostname() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t53c-hop-latest-pos-src", "t53c-hop-latest-pos-tgt");
+    seed_three_hop_snapshot(&pool, src, tgt, "icmp").await;
+    seed_hop_hostname_cache(&pool).await;
+
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.165").await;
+
+    let uri = format!("/api/paths/{src}/{tgt}/routes/latest?protocol=icmp");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Hop 0 (position 1) must carry a positive hostname.
+    let hop0_ip0 = &body["hops"][0]["observed_ips"][0];
+    assert_eq!(
+        hop0_ip0["ip"].as_str(),
+        Some(HOP_IP_POS),
+        "hop 0 ip mismatch: {body}"
+    );
+    assert_eq!(
+        hop0_ip0["hostname"].as_str(),
+        Some(HOP_HOSTNAME_POS),
+        "hop 0 must have positive hostname: {body}"
+    );
+
+    cleanup_hop_snapshots(&pool, src, tgt).await;
+}
+
+#[tokio::test]
+async fn routes_latest_omits_hop_hostname_on_negative_cache() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t53c-hop-latest-neg-src", "t53c-hop-latest-neg-tgt");
+    seed_three_hop_snapshot(&pool, src, tgt, "icmp").await;
+    seed_hop_hostname_cache(&pool).await;
+
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.166").await;
+
+    let uri = format!("/api/paths/{src}/{tgt}/routes/latest?protocol=icmp");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Hop 1 (position 2) must NOT have a hostname key (negative cache hit).
+    let hop1_ip0 = &body["hops"][1]["observed_ips"][0];
+    assert_eq!(
+        hop1_ip0["ip"].as_str(),
+        Some(HOP_IP_NEG),
+        "hop 1 ip mismatch: {body}"
+    );
+    assert!(
+        hop1_ip0.get("hostname").is_none(),
+        "negative cache hit must omit hostname: {body}"
+    );
+
+    cleanup_hop_snapshots(&pool, src, tgt).await;
+}
+
+#[tokio::test]
+async fn routes_latest_cold_hop_miss_enqueues_resolver() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t53c-hop-latest-cold-src", "t53c-hop-latest-cold-tgt");
+    seed_three_hop_snapshot(&pool, src, tgt, "icmp").await;
+    seed_hop_hostname_cache(&pool).await;
+
+    let cold_ip: std::net::IpAddr = HOP_IP_COLD.parse().unwrap();
+
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.167").await;
+
+    let uri = format!("/api/paths/{src}/{tgt}/routes/latest?protocol=icmp");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Hop 2 (position 3) must NOT have a hostname key (cold miss).
+    let hop2_ip0 = &body["hops"][2]["observed_ips"][0];
+    assert_eq!(
+        hop2_ip0["ip"].as_str(),
+        Some(HOP_IP_COLD),
+        "hop 2 ip mismatch: {body}"
+    );
+    assert!(
+        hop2_ip0.get("hostname").is_none(),
+        "cold miss must omit hostname: {body}"
+    );
+
+    // The stub backend answers every unseeded IP with NegativeNxDomain so a
+    // processed enqueue writes a negative row we can observe.
+    assert!(
+        common::wait_for_cache_row(&pool, cold_ip).await,
+        "resolver never wrote a cache row for {cold_ip} — enqueue was skipped",
+    );
+
+    cleanup_hop_snapshots(&pool, src, tgt).await;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/paths/{src}/{tgt}/routes/{id} — hop hostname three-state tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn routes_by_id_stamps_positive_hop_hostname() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t53c-hop-byid-pos-src", "t53c-hop-byid-pos-tgt");
+    seed_three_hop_snapshot(&pool, src, tgt, "icmp").await;
+    seed_hop_hostname_cache(&pool).await;
+
+    let snapshot_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM route_snapshots WHERE source_id = $1 AND target_id = $2 LIMIT 1",
+    )
+    .bind(src)
+    .bind(tgt)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch snapshot id");
+
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.168").await;
+
+    let uri = format!("/api/paths/{src}/{tgt}/routes/{snapshot_id}");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let hop0_ip0 = &body["hops"][0]["observed_ips"][0];
+    assert_eq!(
+        hop0_ip0["ip"].as_str(),
+        Some(HOP_IP_POS),
+        "hop 0 ip mismatch: {body}"
+    );
+    assert_eq!(
+        hop0_ip0["hostname"].as_str(),
+        Some(HOP_HOSTNAME_POS),
+        "hop 0 must have positive hostname: {body}"
+    );
+
+    cleanup_hop_snapshots(&pool, src, tgt).await;
+}
+
+#[tokio::test]
+async fn routes_by_id_omits_hop_hostname_on_negative_cache() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t53c-hop-byid-neg-src", "t53c-hop-byid-neg-tgt");
+    seed_three_hop_snapshot(&pool, src, tgt, "icmp").await;
+    seed_hop_hostname_cache(&pool).await;
+
+    let snapshot_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM route_snapshots WHERE source_id = $1 AND target_id = $2 LIMIT 1",
+    )
+    .bind(src)
+    .bind(tgt)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch snapshot id");
+
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.169").await;
+
+    let uri = format!("/api/paths/{src}/{tgt}/routes/{snapshot_id}");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let hop1_ip0 = &body["hops"][1]["observed_ips"][0];
+    assert_eq!(
+        hop1_ip0["ip"].as_str(),
+        Some(HOP_IP_NEG),
+        "hop 1 ip mismatch: {body}"
+    );
+    assert!(
+        hop1_ip0.get("hostname").is_none(),
+        "negative cache hit must omit hostname: {body}"
+    );
+
+    cleanup_hop_snapshots(&pool, src, tgt).await;
+}
+
+#[tokio::test]
+async fn routes_by_id_cold_hop_miss_enqueues_resolver() {
+    let pool = common::shared_migrated_pool().await.clone();
+    let (src, tgt) = ("t53c-hop-byid-cold-src", "t53c-hop-byid-cold-tgt");
+    seed_three_hop_snapshot(&pool, src, tgt, "icmp").await;
+    seed_hop_hostname_cache(&pool).await;
+
+    let cold_ip: std::net::IpAddr = HOP_IP_COLD.parse().unwrap();
+
+    let snapshot_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM route_snapshots WHERE source_id = $1 AND target_id = $2 LIMIT 1",
+    )
+    .bind(src)
+    .bind(tgt)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch snapshot id");
+
+    let state = common::state_with_admin(pool.clone()).await;
+    let app = meshmon_service::http::router(state);
+    let cookie = common::login_as_admin(&app, "203.0.113.170").await;
+
+    let uri = format!("/api/paths/{src}/{tgt}/routes/{snapshot_id}");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let hop2_ip0 = &body["hops"][2]["observed_ips"][0];
+    assert_eq!(
+        hop2_ip0["ip"].as_str(),
+        Some(HOP_IP_COLD),
+        "hop 2 ip mismatch: {body}"
+    );
+    assert!(
+        hop2_ip0.get("hostname").is_none(),
+        "cold miss must omit hostname: {body}"
+    );
+
+    assert!(
+        common::wait_for_cache_row(&pool, cold_ip).await,
+        "resolver never wrote a cache row for {cold_ip} — enqueue was skipped",
+    );
+
+    cleanup_hop_snapshots(&pool, src, tgt).await;
 }

@@ -11,7 +11,9 @@
 //! handler runs.
 
 use crate::catalogue::dto::ErrorEnvelope;
-use crate::hostname::{hostnames_for, session_id_from_auth, SessionId};
+use crate::hostname::{
+    bulk_hostnames_and_enqueue, session_id_from_auth, stamp_hostnames, SessionId,
+};
 use crate::http::auth::AuthSession;
 use crate::ingestion::json_shapes::{HopJson, PathSummaryJson};
 use crate::registry::AgentInfo;
@@ -123,50 +125,6 @@ impl From<AgentInfo> for AgentSummary {
     }
 }
 
-/// Stamp `summary.hostname` on every row whose IP the cache already
-/// knows about, and enqueue a background resolution for every cold miss.
-///
-/// Mirrors the catalogue-layer stamp helper:
-/// - Positive cache hit: sets `summary.hostname = Some(h)`.
-/// - Negative cache hit: leaves `summary.hostname = None` (skip-none on
-///   the wire so the client sees an absent key, not `null`).
-/// - Cold miss: leaves `summary.hostname = None` and calls
-///   [`crate::hostname::Resolver::enqueue`] with the caller's
-///   [`SessionId`] so the resolution lands on that session's SSE stream
-///   when it completes.
-///
-/// `AgentSummary.ip` comes from [`std::net::IpAddr::to_string`] via
-/// [`From<AgentInfo>`], so unparseable IPs are a defensive branch only
-/// and are silently skipped. Propagates a `sqlx::Error` to the caller;
-/// both callers map it to a 500 via [`db_error`].
-async fn stamp_hostnames(
-    state: &AppState,
-    session: &SessionId,
-    summaries: &mut [AgentSummary],
-) -> sqlx::Result<()> {
-    if summaries.is_empty() {
-        return Ok(());
-    }
-    let ips: Vec<IpAddr> = summaries.iter().filter_map(|s| s.ip.parse().ok()).collect();
-    if ips.is_empty() {
-        return Ok(());
-    }
-    let cache = hostnames_for(&state.pool, &ips).await?;
-    for summary in summaries.iter_mut() {
-        let Ok(ip): Result<IpAddr, _> = summary.ip.parse() else {
-            continue;
-        };
-        match cache.get(&ip) {
-            Some(Some(h)) => summary.hostname = Some(h.clone()),
-            Some(None) => {}
-            None => {
-                state.hostname_resolver.enqueue(ip, session.clone()).await;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Render a `hostnames_for` failure as an HTTP 500 with a stable JSON
 /// error body. Logs the full error server-side and hides the internal
 /// message from the client, parallel to
@@ -178,6 +136,55 @@ fn db_error(context: &'static str, err: sqlx::Error) -> Response {
         Json(json!({ "error": "database_error" })),
     )
         .into_response()
+}
+
+/// Stamp reverse-DNS hostnames on all hop IPs inside a [`RouteSnapshotDetail`].
+///
+/// Collects every `hops[*].observed_ips[*].ip` string, parses to [`IpAddr`]
+/// (logging a `warn!` for any genuinely unexpected parse failures but not
+/// failing the response), resolves the set in one DB round-trip via
+/// [`bulk_hostnames_and_enqueue`], and writes each matched hostname back into
+/// the corresponding [`crate::ingestion::json_shapes::HopIpJson::hostname`].
+async fn stamp_route_snapshot_hops(
+    state: &AppState,
+    session: &SessionId,
+    detail: &mut RouteSnapshotDetail,
+) -> sqlx::Result<()> {
+    let ips: Vec<IpAddr> = detail
+        .hops
+        .iter()
+        .flat_map(|h| h.observed_ips.iter())
+        .filter_map(|hop_ip| {
+            hop_ip.ip.parse::<IpAddr>().map_or_else(
+                |_| {
+                    tracing::warn!(
+                        raw_ip = %hop_ip.ip,
+                        "route snapshot: unexpected hop IP parse failure"
+                    );
+                    None
+                },
+                Some,
+            )
+        })
+        .collect();
+
+    if ips.is_empty() {
+        return Ok(());
+    }
+
+    let map = bulk_hostnames_and_enqueue(state, session, &ips).await?;
+
+    for hop in detail.hops.iter_mut() {
+        for hop_ip in hop.observed_ips.iter_mut() {
+            if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                if let Some(Some(h)) = map.get(&ip) {
+                    hop_ip.hostname = Some(h.clone());
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// `GET /api/agents` — return every agent known to the registry.
@@ -201,7 +208,21 @@ pub async fn list_agents(State(state): State<AppState>, auth_session: AuthSessio
     let mut agents: Vec<AgentSummary> = snap.all().into_iter().map(AgentSummary::from).collect();
     agents.sort_by(|a, b| a.id.cmp(&b.id));
     let session = session_id_from_auth(&auth_session);
-    if let Err(e) = stamp_hostnames(&state, &session, &mut agents).await {
+    if let Err(e) = stamp_hostnames(
+        &state,
+        &session,
+        &mut agents,
+        |s| s.ip.parse::<IpAddr>().ok().into_iter().collect(),
+        |s, map| {
+            if let Ok(ip) = s.ip.parse::<IpAddr>() {
+                if let Some(Some(h)) = map.get(&ip) {
+                    s.hostname = Some(h.clone());
+                }
+            }
+        },
+    )
+    .await
+    {
         return db_error("list_agents: stamp_hostnames failed", e);
     }
     Json(agents).into_response()
@@ -236,8 +257,20 @@ pub async fn get_agent(
         Some(info) => {
             let mut summary = AgentSummary::from(info);
             let session = session_id_from_auth(&auth_session);
-            if let Err(e) =
-                stamp_hostnames(&state, &session, std::slice::from_mut(&mut summary)).await
+            if let Err(e) = stamp_hostnames(
+                &state,
+                &session,
+                std::slice::from_mut(&mut summary),
+                |s| s.ip.parse::<IpAddr>().ok().into_iter().collect(),
+                |s, map| {
+                    if let Ok(ip) = s.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            s.hostname = Some(h.clone());
+                        }
+                    }
+                },
+            )
+            .await
             {
                 return db_error("get_agent: stamp_hostnames failed", e);
             }
@@ -388,6 +421,7 @@ async fn fetch_latest(
 )]
 pub async fn get_route_latest(
     State(state): State<AppState>,
+    auth_session: AuthSession,
     Path((src, tgt)): Path<(String, String)>,
     Query(q): Query<ProtocolQuery>,
 ) -> Response {
@@ -395,7 +429,16 @@ pub async fn get_route_latest(
         return resp;
     }
     match fetch_latest(&state.pool, &src, &tgt, &q.protocol).await {
-        Ok(Some(detail)) => Json(detail).into_response(),
+        Ok(Some(mut detail)) => {
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) = stamp_route_snapshot_hops(&state, &session, &mut detail).await {
+                tracing::warn!(
+                    error = %e,
+                    "get_route_latest: hop hostname stamp failed, returning unhostnamed hops",
+                );
+            }
+            Json(detail).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "no snapshot found" })),
@@ -468,10 +511,20 @@ async fn fetch_by_id(
 )]
 pub async fn get_route_by_id(
     State(state): State<AppState>,
+    auth_session: AuthSession,
     Path((src, tgt, snapshot_id)): Path<(String, String, i64)>,
 ) -> Response {
     match fetch_by_id(&state.pool, snapshot_id, &src, &tgt).await {
-        Ok(Some(detail)) => Json(detail).into_response(),
+        Ok(Some(mut detail)) => {
+            let session = session_id_from_auth(&auth_session);
+            if let Err(e) = stamp_route_snapshot_hops(&state, &session, &mut detail).await {
+                tracing::warn!(
+                    error = %e,
+                    "get_route_by_id: hop hostname stamp failed, returning unhostnamed hops",
+                );
+            }
+            Json(detail).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "snapshot not found" })),

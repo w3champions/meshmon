@@ -4471,6 +4471,13 @@
             "format": "double",
             "description": "Fraction of probes that observed this IP at this hop."
           },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reverse-DNS hostname for this IP, populated server-side at\nresponse-serialize time only; never written to the\n`route_snapshots.hops` / `mtr_traces.hops` JSONB (guarded by\n`skip_serializing_if = \"Option::is_none\"`). Existing stored rows\ndeserialize with `hostname: None` without a migration."
+          },
           "ip": {
             "type": "string",
             "description": "Human-readable IP string (IPv4 or IPv6 `to_string()` form)."
