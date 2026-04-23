@@ -294,6 +294,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                 qualifies,
                 mtr_measurement_id_ax: a_to_x.mtr_measurement_id,
                 mtr_measurement_id_xb: x_to_b.mtr_measurement_id,
+                destination_hostname: None,
             });
         }
 
@@ -335,6 +336,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             avg_loss_pct,
             composite_score,
             pair_details,
+            hostname: None,
         });
     }
 

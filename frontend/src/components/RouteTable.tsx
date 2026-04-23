@@ -1,4 +1,5 @@
 import type { components } from "@/api/schema.gen";
+import { IpHostname } from "@/components/ip-hostname";
 import {
   Table,
   TableBody,
@@ -81,7 +82,7 @@ export function RouteTable({ hops, diff, className }: RouteTableProps) {
       <TableHeader>
         <TableRow>
           <TableHead className="w-12">TTL</TableHead>
-          <TableHead>Observed IP</TableHead>
+          <TableHead>Hostname</TableHead>
           <TableHead className="w-20">Freq.</TableHead>
           <TableHead className="w-28">Avg RTT</TableHead>
           <TableHead className="w-24">Loss</TableHead>
@@ -96,7 +97,9 @@ export function RouteTable({ hops, diff, className }: RouteTableProps) {
           return (
             <TableRow key={h.position} data-diff-state={state} className={ROW_TINT[state]}>
               <TableCell>{h.position}</TableCell>
-              <TableCell className="font-mono">{ip}</TableCell>
+              <TableCell>
+                <IpHostname ip={ip} />
+              </TableCell>
               <TableCell>{freq < 1 ? `${Math.round(freq * 100)}%` : "—"}</TableCell>
               <TableCell>{fmtMs(h.avg_rtt_micros)}</TableCell>
               <TableCell>{fmtPct(h.loss_pct)}</TableCell>

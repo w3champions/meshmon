@@ -9,7 +9,8 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import Report from "./Report";
 
 interface MockResponse {
@@ -56,12 +57,28 @@ function renderReport(search: string) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const defaultSearch =
   "?source_id=br&target_id=fr&from=2026-04-13T10:00:00.000Z&to=2026-04-13T14:00:00.000Z";
@@ -753,5 +770,53 @@ describe("Report page", () => {
 
     renderReport(defaultSearch);
     await screen.findByText(/showing latest 100/i);
+  });
+
+  it("renders source and target IPs in the header via IpHostname (bare IP fallback when no hostname in provider)", async () => {
+    // When the IpHostnameProvider has no hostname for the IPs (cold miss),
+    // IpHostname renders the bare IP — same text content as before, now
+    // via the shared component rather than a plain string.
+    installFetchMock([
+      {
+        url: /\/api\/paths\/.*\/overview/,
+        status: 200,
+        body: {
+          source: {
+            id: "br",
+            display_name: "BR",
+            ip: "11.22.33.44",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          target: {
+            id: "fr",
+            display_name: "FR",
+            ip: "55.66.77.88",
+            registered_at: "2026-01-01T00:00:00Z",
+            last_seen_at: new Date().toISOString(),
+          },
+          window: {
+            from: "2026-04-13T10:00:00Z",
+            to: "2026-04-13T14:00:00Z",
+          },
+          primary_protocol: null,
+          latest_by_protocol: { icmp: null, tcp: null, udp: null },
+          recent_snapshots: [],
+          recent_snapshots_truncated: false,
+          metrics: null,
+          step: "1m",
+        },
+      },
+    ]);
+
+    renderReport(defaultSearch);
+
+    // Both IPs are rendered via IpHostname — bare IP fallback since the
+    // test provider has no hostname for either.
+    await screen.findByText("11.22.33.44");
+    expect(screen.getByText("55.66.77.88")).toBeInTheDocument();
+    // IpHostname wraps in font-mono spans.
+    const sourceSpan = screen.getByText("11.22.33.44");
+    expect(sourceSpan.className).toMatch(/font-mono/);
   });
 });

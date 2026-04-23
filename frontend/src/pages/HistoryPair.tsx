@@ -1,5 +1,6 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useMemo } from "react";
+import { useAgent } from "@/api/hooks/agents";
 import { useHistoryMeasurements } from "@/api/hooks/history";
 import {
   HistoryPairFilters,
@@ -8,6 +9,7 @@ import {
 } from "@/components/history/HistoryPairFilters";
 import { MtrTracesList } from "@/components/history/MtrTracesList";
 import { PairChart } from "@/components/history/PairChart";
+import { IpHostname } from "@/components/ip-hostname";
 import { Skeleton } from "@/components/ui/skeleton";
 import { type HistoryPairSearch, historyPairRoute } from "@/router/index";
 
@@ -31,6 +33,12 @@ export default function HistoryPair() {
   // boundary via `historyPairSearchSchema`, so casting here is safe.
   const search = useSearch({ strict: false }) as HistoryPairSearch;
   const navigate = useNavigate({ from: historyPairRoute.fullPath });
+
+  // Resolve the source agent IP so the pair heading can render
+  // <IpHostname> for the source side. useAgent seeds the shared hostname
+  // provider as a side effect, so the IpHostname render will have a warm
+  // cache on first paint once the query settles.
+  const sourceAgent = useAgent(search.source ?? "");
 
   const filtersValue = useMemo<HistoryPairFiltersValue>(
     () => ({
@@ -118,6 +126,13 @@ export default function HistoryPair() {
                 Showing most recent {HISTORY_MEASUREMENTS_CAP.toLocaleString()} measurements — the
                 window exceeds the server cap. Narrow the time range or protocol filter to see older
                 rows.
+              </p>
+            )}
+            {(sourceAgent.data?.ip || search.destination) && (
+              <p className="text-sm text-muted-foreground" data-testid="history-pair-heading">
+                {sourceAgent.data?.ip && <IpHostname ip={sourceAgent.data.ip} />}
+                {sourceAgent.data?.ip && search.destination && <span className="mx-1">→</span>}
+                {search.destination && <IpHostname ip={search.destination} />}
               </p>
             )}
             <section aria-labelledby="pair-chart-heading" className="flex flex-col gap-3">

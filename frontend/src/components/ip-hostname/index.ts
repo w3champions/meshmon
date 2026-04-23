@@ -7,10 +7,10 @@
  *
  * The public barrel intentionally excludes `IpHostnameContextValue` and
  * `useIpHostnameContext` — the context shape is a provider internal, and
- * external callers go through `useIpHostname`, `useIpHostnames`, or
- * `useSeedHostnamesOnResponse` instead. Sibling hooks + tests inside
- * `components/ip-hostname/` may import those directly from the provider
- * module.
+ * external callers go through `useIpHostname`, `useIpHostnames`,
+ * `useSeedHostnames`, or `useSeedHostnamesOnResponse` instead. Sibling
+ * hooks + tests inside `components/ip-hostname/` may import those
+ * directly from the provider module.
  */
 
 export { formatIpWithHostname, hostnameDisplay, tooltipForHostname } from "./format";
@@ -23,4 +23,5 @@ export {
 export { useIpHostname } from "./useIpHostname";
 export { useIpHostnames } from "./useIpHostnames";
 export { useRefreshHostname } from "./useRefreshHostname";
+export { useSeedHostnames } from "./useSeedHostnames";
 export { useSeedHostnamesOnResponse } from "./useSeedHostnamesOnResponse";

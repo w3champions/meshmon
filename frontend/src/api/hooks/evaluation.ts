@@ -26,6 +26,7 @@ import {
   campaignPreviewKey,
 } from "@/api/hooks/campaigns";
 import type { components } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 
 export type Evaluation = components["schemas"]["EvaluationDto"];
 export type DetailRequest = components["schemas"]["DetailRequest"];
@@ -38,7 +39,7 @@ export type DetailScope = components["schemas"]["DetailScope"];
  * query error.
  */
 export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation | null, Error> {
-  return useQuery({
+  const query = useQuery({
     queryKey: id ? campaignEvaluationKey(id) : ["campaigns", "entry", "__disabled__", "evaluation"],
     enabled: !!id,
     queryFn: async (): Promise<Evaluation | null> => {
@@ -53,6 +54,20 @@ export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation
       return data as Evaluation;
     },
   });
+  // Seed the shared hostname map from every response. Flattens
+  // `results.candidates[*]` (destination_ip + hostname) and their nested
+  // `pair_details[*]` (destination_ip + destination_hostname). Null (404 /
+  // not-yet-evaluated) produces no entries.
+  useSeedHostnamesOnResponse(query.data, function* (evaluation) {
+    if (!evaluation) return;
+    for (const candidate of evaluation.results.candidates) {
+      yield { ip: candidate.destination_ip, hostname: candidate.hostname };
+      for (const detail of candidate.pair_details) {
+        yield { ip: detail.destination_ip, hostname: detail.destination_hostname };
+      }
+    }
+  });
+  return query;
 }
 
 /**

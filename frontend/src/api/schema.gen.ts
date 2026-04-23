@@ -1083,12 +1083,23 @@ export interface components {
             labels: {
                 [key: string]: string;
             };
+            /**
+             * @description Reverse-DNS hostname for the source agent IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            source_hostname?: string | null;
             /** @description RFC 3339 timestamp when the alert started firing. */
             starts_at: string;
             /** @description Alert state: `active`, `suppressed`, or `unprocessed`. */
             state: string;
             /** @description Short human-readable summary from the `summary` annotation. */
             summary?: string | null;
+            /**
+             * @description Reverse-DNS hostname for the target agent IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             *     Also absent for `AgentOffline` alerts (no `target` label).
+             */
+            target_hostname?: string | null;
         };
         /** @description Per-ASN occurrence count. */
         AsnFacet: {
@@ -1225,6 +1236,11 @@ export interface components {
          *     JSONB; serde renders it as a bare JSON array on the wire.
          */
         CampaignMeasurementDto: {
+            /**
+             * @description Reverse-DNS hostname for the destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            destination_hostname?: string | null;
             /** @description Destination IP as a host string. */
             destination_ip: string;
             /**
@@ -1640,6 +1656,11 @@ export interface components {
             /** @description Operator-facing label from the catalogue, when present. */
             display_name?: string | null;
             /**
+             * @description Reverse-DNS hostname for the transit destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            hostname?: string | null;
+            /**
              * @description True when destination_ip appears in agents.ip. UI renders a
              *     "mesh member — no acquisition needed" badge.
              */
@@ -1727,6 +1748,11 @@ export interface components {
         EvaluationPairDetailDto: {
             /** @description Destination agent id of the baseline pair. */
             destination_agent_id: string;
+            /**
+             * @description Reverse-DNS hostname for the transit destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            destination_hostname?: string | null;
             /** @description Transit destination IP (also a candidate key). */
             destination_ip: string;
             /**
@@ -1834,6 +1860,11 @@ export interface components {
             destination_ip: string;
             /** @description Catalogue-derived label when known, else the IP string. */
             display_name: string;
+            /**
+             * @description Reverse-DNS hostname for the destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            hostname?: string | null;
             /** @description Whether the destination IP is itself a mesh-agent IP. */
             is_mesh_member: boolean;
         };
@@ -1847,6 +1878,11 @@ export interface components {
          *     `sqlx::types::Json`'s transparent serde impl.
          */
         HistoryMeasurementDto: {
+            /**
+             * @description Reverse-DNS hostname for the destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            destination_hostname?: string | null;
             /** @description Destination IP as a host string. */
             destination_ip: string;
             /**
@@ -1925,6 +1961,14 @@ export interface components {
              * @description Fraction of probes that observed this IP at this hop.
              */
             freq: number;
+            /**
+             * @description Reverse-DNS hostname for this IP, populated server-side at
+             *     response-serialize time only; never written to the
+             *     `route_snapshots.hops` / `mtr_traces.hops` JSONB (guarded by
+             *     `skip_serializing_if = "Option::is_none"`). Existing stored rows
+             *     deserialize with `hostname: None` without a migration.
+             */
+            hostname?: string | null;
             /** @description Human-readable IP string (IPv4 or IPv6 `to_string()` form). */
             ip: string;
         };
@@ -2126,6 +2170,11 @@ export interface components {
              * @description Owning campaign.
              */
             campaign_id: string;
+            /**
+             * @description Reverse-DNS hostname for the destination IP, when cached.
+             *     Absent on cold miss and negative-cached IPs (skip-none).
+             */
+            destination_hostname?: string | null;
             /** @description Destination IP as a bare host string. */
             destination_ip: string;
             /**

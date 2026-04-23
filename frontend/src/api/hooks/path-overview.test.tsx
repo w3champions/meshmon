@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { usePathOverview } from "@/api/hooks/path-overview";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 const OVERVIEW = {
   source: {
@@ -32,14 +33,30 @@ const OVERVIEW = {
   step: "1m",
 };
 
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>{children}</IpHostnameProvider>
+    </QueryClientProvider>
   );
 }
 
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("usePathOverview", () => {
   test("returns the overview body on 200", async () => {

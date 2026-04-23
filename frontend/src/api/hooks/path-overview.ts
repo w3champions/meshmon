@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 import type { TimeRangeKey } from "@/lib/time-range";
 import { rangeBounds } from "@/lib/time-range";
 
@@ -44,7 +45,7 @@ export function usePathOverview(opts: UsePathOverviewOpts) {
     toIso = to.toISOString();
   }
 
-  return useQuery({
+  const query = useQuery({
     queryKey: ["path-overview", source, target, fromIso, toIso, protocol],
     queryFn: async (): Promise<PathOverviewResponse> => {
       const { data, error } = await api.GET("/api/paths/{src}/{tgt}/overview", {
@@ -74,4 +75,24 @@ export function usePathOverview(opts: UsePathOverviewOpts) {
     },
     refetchInterval: 60_000,
   });
+
+  // Seed the shared hostname map from every response. Seeds source + target
+  // agent IPs and all hop IPs from the three protocol snapshots (icmp/udp/tcp)
+  // in `latest_by_protocol`. Each field may be null/undefined — guard before
+  // iterating.
+  useSeedHostnamesOnResponse(query.data, function* (d) {
+    yield { ip: d.source.ip, hostname: d.source.hostname };
+    yield { ip: d.target.ip, hostname: d.target.hostname };
+    for (const proto of ["icmp", "udp", "tcp"] as const) {
+      const snap = d.latest_by_protocol[proto];
+      if (!snap) continue;
+      for (const hop of snap.hops) {
+        for (const o of hop.observed_ips) {
+          yield { ip: o.ip, hostname: o.hostname };
+        }
+      }
+    }
+  });
+
+  return query;
 }

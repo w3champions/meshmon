@@ -1,4 +1,5 @@
 import type { components } from "@/api/schema.gen";
+import { IpHostname } from "@/components/ip-hostname";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -31,7 +32,7 @@ export function HopDetailCard({ hop, onClose, className }: HopDetailCardProps) {
           <ul className="font-mono">
             {hop.observed_ips.map((ip) => (
               <li key={ip.ip}>
-                {ip.ip} <span className="text-muted-foreground">×{ip.freq}</span>
+                <IpHostname ip={ip.ip} /> <span className="text-muted-foreground">×{ip.freq}</span>
               </li>
             ))}
           </ul>

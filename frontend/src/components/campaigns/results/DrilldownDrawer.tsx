@@ -14,6 +14,7 @@ import { type AgentSummary, useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import { useCampaignMeasurements } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
+import { IpHostname } from "@/components/ip-hostname";
 import { RouteTopology } from "@/components/RouteTopology";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -139,7 +140,11 @@ function CandidateBody({ candidate, campaign, agentsById, unqualifiedReason }: C
     <>
       <SheetHeader>
         <SheetTitle>
-          {candidate.display_name ?? candidate.destination_ip}
+          {candidate.display_name ? (
+            candidate.display_name
+          ) : (
+            <IpHostname ip={candidate.destination_ip} />
+          )}
           {candidate.is_mesh_member ? (
             <Badge variant="secondary" className="ml-2" aria-label="Mesh member">
               mesh
@@ -147,8 +152,8 @@ function CandidateBody({ candidate, campaign, agentsById, unqualifiedReason }: C
           ) : null}
         </SheetTitle>
         <SheetDescription>
-          Transit candidate {candidate.destination_ip} — {candidate.pairs_improved} of{" "}
-          {candidate.pairs_total_considered} baseline pairs improved.
+          Transit candidate <IpHostname ip={candidate.destination_ip} /> —{" "}
+          {candidate.pairs_improved} of {candidate.pairs_total_considered} baseline pairs improved.
         </SheetDescription>
       </SheetHeader>
 
@@ -220,7 +225,9 @@ function PairRow({ pair, sourceAgent, destAgent, onOpenMtr }: PairRowProps) {
               →
             </span>
             <span className="font-medium">{destLabel}</span>
-            <span className="font-mono text-xs text-muted-foreground">({destIp})</span>
+            <span className="text-xs text-muted-foreground">
+              (<IpHostname ip={destIp} />)
+            </span>
           </div>
           <div className="flex items-center gap-2">
             {pair.qualifies ? (

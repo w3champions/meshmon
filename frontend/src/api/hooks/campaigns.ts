@@ -10,6 +10,7 @@ import {
 } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components, operations } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 
 export type Campaign = components["schemas"]["CampaignDto"];
 export type CreateCampaignBody = components["schemas"]["CreateCampaignRequest"];
@@ -342,7 +343,7 @@ export function useCampaignMeasurements(
   id: string | undefined,
   filter: CampaignMeasurementsFilter,
 ): UseInfiniteQueryResult<InfiniteData<CampaignMeasurementsPage>, Error> {
-  return useInfiniteQuery<
+  const query = useInfiniteQuery<
     CampaignMeasurementsPage,
     Error,
     InfiniteData<CampaignMeasurementsPage>,
@@ -378,6 +379,24 @@ export function useCampaignMeasurements(
       return data as CampaignMeasurementsPage;
     },
   });
+  // Seed the shared hostname map from every loaded page. Each entry carries
+  // `destination_ip` + optional `destination_hostname`, plus optional
+  // `mtr_hops[*].observed_ips[*]` with per-hop hostnames.
+  useSeedHostnamesOnResponse(query.data?.pages, function* (pages) {
+    for (const page of pages) {
+      for (const m of page.entries) {
+        yield { ip: m.destination_ip, hostname: m.destination_hostname };
+        if (m.mtr_hops) {
+          for (const hop of m.mtr_hops) {
+            for (const o of hop.observed_ips) {
+              yield { ip: o.ip, hostname: o.hostname };
+            }
+          }
+        }
+      }
+    }
+  });
+  return query;
 }
 
 /**
@@ -405,7 +424,7 @@ export function useCampaignPairs(
   id: string | undefined,
   filter: CampaignPairsFilter = {},
 ): UseQueryResult<CampaignPair[], Error> {
-  return useQuery({
+  const query = useQuery({
     queryKey: id
       ? [...campaignPairsKey(id), filter]
       : ["campaigns", "entry", "__disabled__", "pairs"],
@@ -428,6 +447,12 @@ export function useCampaignPairs(
       return data as CampaignPair[];
     },
   });
+  // Seed the shared hostname map from every response. Each `PairDto` carries
+  // `{ destination_ip, destination_hostname? }`.
+  useSeedHostnamesOnResponse(query.data, (pairs) =>
+    pairs.map((p) => ({ ip: p.destination_ip, hostname: p.destination_hostname })),
+  );
+  return query;
 }
 
 /**

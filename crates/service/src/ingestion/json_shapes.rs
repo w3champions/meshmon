@@ -30,6 +30,14 @@ pub struct HopIpJson {
     pub ip: String,
     /// Fraction of probes that observed this IP at this hop.
     pub freq: f64,
+    /// Reverse-DNS hostname for this IP, populated server-side at
+    /// response-serialize time only; never written to the
+    /// `route_snapshots.hops` / `mtr_traces.hops` JSONB (guarded by
+    /// `skip_serializing_if = "Option::is_none"`). Existing stored rows
+    /// deserialize with `hostname: None` without a migration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub hostname: Option<String>,
 }
 
 /// JSON representation of the aggregated path summary stored in
@@ -54,6 +62,9 @@ impl From<&crate::ingestion::validator::ValidHop> for HopJson {
                 .map(|o| HopIpJson {
                     ip: o.ip.to_string(),
                     freq: o.frequency,
+                    // Populated server-side at response-serialize time only;
+                    // never written to JSONB storage.
+                    hostname: None,
                 })
                 .collect(),
             avg_rtt_micros: h.avg_rtt_micros,

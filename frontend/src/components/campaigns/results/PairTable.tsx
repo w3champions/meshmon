@@ -13,6 +13,7 @@
 import { useMemo, useState } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { CampaignPair, PairResolutionState, ProbeProtocol } from "@/api/hooks/campaigns";
+import { IpHostname } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -292,7 +293,9 @@ export function PairTable({
                     </span>
                   </div>
                 </TableCell>
-                <TableCell className="font-mono text-xs">{pair.destination_ip}</TableCell>
+                <TableCell className="text-xs">
+                  <IpHostname ip={pair.destination_ip} />
+                </TableCell>
                 <TableCell>
                   <Badge
                     className={cn(STATE_BADGE_CLASS[pair.resolution_state])}

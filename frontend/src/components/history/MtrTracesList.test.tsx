@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import "@/test/cytoscape-mock";
 import type { HistoryMeasurement } from "@/api/hooks/history";
 import type { components } from "@/api/schema.gen";
+import { IpHostnameProvider } from "@/components/ip-hostname/IpHostnameProvider";
 import { instances } from "@/test/cytoscape-mock";
 import { MtrTracesList } from "./MtrTracesList";
 
@@ -48,11 +49,13 @@ describe("MtrTracesList", () => {
   test("renders a status line when no measurements carry MTR hops", () => {
     instances.length = 0;
     render(
-      <MtrTracesList
-        measurements={[
-          measurement({ id: 1, kind: "detail_ping", mtr_captured_at: null, mtr_hops: null }),
-        ]}
-      />,
+      <IpHostnameProvider>
+        <MtrTracesList
+          measurements={[
+            measurement({ id: 1, kind: "detail_ping", mtr_captured_at: null, mtr_hops: null }),
+          ]}
+        />
+      </IpHostnameProvider>,
     );
     expect(screen.getByRole("status")).toHaveTextContent(/no mtr traces/i);
   });
@@ -60,25 +63,27 @@ describe("MtrTracesList", () => {
   test("renders newest-first and mounts RouteTopology only when expanded", () => {
     instances.length = 0;
     render(
-      <MtrTracesList
-        measurements={[
-          measurement({
-            id: 1,
-            protocol: "icmp",
-            mtr_captured_at: "2026-04-20T00:00:00.000Z",
-          }),
-          measurement({
-            id: 2,
-            protocol: "tcp",
-            mtr_captured_at: "2026-04-20T02:00:00.000Z",
-          }),
-          measurement({
-            id: 3,
-            protocol: "udp",
-            mtr_captured_at: "2026-04-20T01:00:00.000Z",
-          }),
-        ]}
-      />,
+      <IpHostnameProvider>
+        <MtrTracesList
+          measurements={[
+            measurement({
+              id: 1,
+              protocol: "icmp",
+              mtr_captured_at: "2026-04-20T00:00:00.000Z",
+            }),
+            measurement({
+              id: 2,
+              protocol: "tcp",
+              mtr_captured_at: "2026-04-20T02:00:00.000Z",
+            }),
+            measurement({
+              id: 3,
+              protocol: "udp",
+              mtr_captured_at: "2026-04-20T01:00:00.000Z",
+            }),
+          ]}
+        />
+      </IpHostnameProvider>,
     );
 
     const list = screen.getByRole("list", { name: /mtr traces/i });
@@ -110,15 +115,17 @@ describe("MtrTracesList", () => {
   test("falls back to measured_at when mtr_captured_at is null", () => {
     instances.length = 0;
     render(
-      <MtrTracesList
-        measurements={[
-          measurement({
-            id: 1,
-            measured_at: "2026-04-20T00:00:00.000Z",
-            mtr_captured_at: null,
-          }),
-        ]}
-      />,
+      <IpHostnameProvider>
+        <MtrTracesList
+          measurements={[
+            measurement({
+              id: 1,
+              measured_at: "2026-04-20T00:00:00.000Z",
+              mtr_captured_at: null,
+            }),
+          ]}
+        />
+      </IpHostnameProvider>,
     );
     expect(screen.getByRole("list", { name: /mtr traces/i })).toBeInTheDocument();
   });

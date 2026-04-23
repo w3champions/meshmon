@@ -1,5 +1,6 @@
 import { formatDistanceToNowStrict } from "date-fns";
 import type { AlertSummary } from "@/api/hooks/alerts";
+import { hostnameDisplay } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { buildAlertmanagerUrl } from "@/lib/alertmanager-link";
@@ -45,13 +46,27 @@ export function AlertRow({ alert, className }: AlertRowProps) {
           {labels.source && (
             <Badge variant="outline">
               <span className="mr-1 text-muted-foreground">source:</span>
-              {labels.source}
+              <span className="flex flex-col gap-0.5">
+                <span>{labels.source}</span>
+                {alert.source_hostname && (
+                  <span className="text-muted-foreground font-normal" title={alert.source_hostname}>
+                    {hostnameDisplay(alert.source_hostname)}
+                  </span>
+                )}
+              </span>
             </Badge>
           )}
           {labels.target && (
             <Badge variant="outline">
               <span className="mr-1 text-muted-foreground">target:</span>
-              {labels.target}
+              <span className="flex flex-col gap-0.5">
+                <span>{labels.target}</span>
+                {alert.target_hostname && (
+                  <span className="text-muted-foreground font-normal" title={alert.target_hostname}>
+                    {hostnameDisplay(alert.target_hostname)}
+                  </span>
+                )}
+              </span>
             </Badge>
           )}
           {labels.protocol && (

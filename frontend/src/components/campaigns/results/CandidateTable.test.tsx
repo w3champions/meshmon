@@ -1,13 +1,30 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import type React from "react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Evaluation } from "@/api/hooks/evaluation";
 import {
   CandidateTable,
   type CandidateTableSort,
 } from "@/components/campaigns/results/CandidateTable";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
-afterEach(() => cleanup());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -53,6 +70,10 @@ function makeEvaluation(candidates: Candidate[], overrides?: Partial<Evaluation>
 
 const DEFAULT_SORT: CandidateTableSort = { col: "composite_score", dir: "desc" };
 
+function wrap(ui: React.ReactElement) {
+  return render(<IpHostnameProvider>{ui}</IpHostnameProvider>);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -72,7 +93,7 @@ describe("CandidateTable", () => {
       },
     );
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={() => {}}
@@ -105,7 +126,7 @@ describe("CandidateTable", () => {
       }),
     ]);
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={() => {}}
@@ -128,7 +149,7 @@ describe("CandidateTable", () => {
       makeCandidate({ destination_ip: "10.0.0.1", composite_score: 1 }),
     ]);
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={() => {}}
@@ -146,7 +167,7 @@ describe("CandidateTable", () => {
       makeCandidate({ destination_ip: "10.0.0.9", composite_score: 3 }),
     ]);
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={onSelect}
@@ -166,7 +187,7 @@ describe("CandidateTable", () => {
       makeCandidate({ destination_ip: "10.0.0.2", composite_score: 2 }),
     ]);
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={() => {}}
@@ -188,12 +209,14 @@ describe("CandidateTable", () => {
     ]);
 
     const { rerender } = render(
-      <CandidateTable
-        evaluation={evaluation}
-        onSelectCandidate={() => {}}
-        sort={{ col: "composite_score", dir: "desc" }}
-        onSortChange={() => {}}
-      />,
+      <IpHostnameProvider>
+        <CandidateTable
+          evaluation={evaluation}
+          onSelectCandidate={() => {}}
+          sort={{ col: "composite_score", dir: "desc" }}
+          onSortChange={() => {}}
+        />
+      </IpHostnameProvider>,
     );
 
     let rowIps = screen
@@ -206,12 +229,14 @@ describe("CandidateTable", () => {
     ]);
 
     rerender(
-      <CandidateTable
-        evaluation={evaluation}
-        onSelectCandidate={() => {}}
-        sort={{ col: "composite_score", dir: "asc" }}
-        onSortChange={() => {}}
-      />,
+      <IpHostnameProvider>
+        <CandidateTable
+          evaluation={evaluation}
+          onSelectCandidate={() => {}}
+          sort={{ col: "composite_score", dir: "asc" }}
+          onSortChange={() => {}}
+        />
+      </IpHostnameProvider>,
     );
 
     rowIps = screen.getAllByTestId(/candidate-row-/).map((row) => row.getAttribute("data-testid"));
@@ -227,7 +252,7 @@ describe("CandidateTable", () => {
       makeCandidate({ destination_ip: "10.0.0.1", composite_score: 1 }),
     ]);
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={() => {}}
@@ -247,7 +272,7 @@ describe("CandidateTable", () => {
   test("renders the empty state when no candidates are present", () => {
     const evaluation = makeEvaluation([]);
 
-    render(
+    wrap(
       <CandidateTable
         evaluation={evaluation}
         onSelectCandidate={() => {}}
@@ -257,5 +282,30 @@ describe("CandidateTable", () => {
     );
 
     expect(screen.getByText(/no candidates matched/i)).toBeInTheDocument();
+  });
+
+  test("destination IP column renders via IpHostname (bare IP when provider has no hostname)", () => {
+    const evaluation = makeEvaluation([
+      makeCandidate({ destination_ip: "10.0.0.7", composite_score: 1 }),
+    ]);
+
+    wrap(
+      <CandidateTable
+        evaluation={evaluation}
+        onSelectCandidate={() => {}}
+        sort={DEFAULT_SORT}
+        onSortChange={() => {}}
+      />,
+    );
+
+    // IpHostname falls back to the bare IP when the provider has no hostname
+    // for this IP (cold miss) — the row is still readable. The IP appears in
+    // both the Candidate column (display_name fallback) and the IP column.
+    expect(screen.getAllByText("10.0.0.7").length).toBeGreaterThanOrEqual(1);
+    // The IP column specifically renders via IpHostname (font-mono span).
+    const ipSpans = screen
+      .getAllByText("10.0.0.7")
+      .filter((el) => el.className.includes("font-mono"));
+    expect(ipSpans.length).toBeGreaterThan(0);
   });
 });

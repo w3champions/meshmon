@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type HistoryDestination,
   type HistoryMeasurement,
@@ -10,6 +10,7 @@ import {
   useHistoryMeasurements,
   useHistorySources,
 } from "@/api/hooks/history";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 const SOURCE: HistorySource = {
   source_agent_id: "agent-a",
@@ -33,13 +34,22 @@ const MEASUREMENT: HistoryMeasurement = {
   loss_pct: 0,
 };
 
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
 function makeQueryClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
 
 function wrapWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>{children}</IpHostnameProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -47,7 +57,14 @@ function wrap() {
   return wrapWith(makeQueryClient());
 }
 
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("useHistorySources", () => {
   test("returns the list on 200", async () => {

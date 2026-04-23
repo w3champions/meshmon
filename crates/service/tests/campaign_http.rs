@@ -227,3 +227,269 @@ async fn patch_rejects_blank_title() {
     assert_eq!(patched["notes"], "updated");
     assert_eq!(patched["title"], "http-patch-title", "body = {patched}");
 }
+
+// ---------------------------------------------------------------------------
+// T53c: hostname stamping on campaign pair endpoints (three-state)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pairs_endpoint_stamps_destination_hostname_from_positive_cache() {
+    use meshmon_service::hostname::record_positive;
+
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let dest_str = "198.51.100.250";
+    let dest_ip: std::net::IpAddr = dest_str.parse().unwrap();
+
+    // Create a campaign with one pair at the destination.
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "hn-pairs-pos",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-hn-pairs"],
+                "destination_ips": [dest_str],
+            }),
+        )
+        .await;
+    let id = created["id"].as_str().expect("id is string");
+
+    // Seed positive hostname cache.
+    record_positive(pool, dest_ip, "pairs-dest.example.com")
+        .await
+        .expect("seed pairs dest hostname");
+
+    let pairs: Vec<serde_json::Value> = h.get_json(&format!("/api/campaigns/{id}/pairs")).await;
+    assert!(!pairs.is_empty(), "expected at least one pair");
+
+    let pair = pairs
+        .iter()
+        .find(|p| p["destination_ip"].as_str() == Some(dest_str))
+        .expect("pair with destination 198.51.100.250 not found");
+    assert_eq!(
+        pair["destination_hostname"], "pairs-dest.example.com",
+        "positive-cached destination_hostname missing in pairs: {pair}"
+    );
+}
+
+#[tokio::test]
+async fn pairs_endpoint_omits_destination_hostname_on_negative_cache() {
+    use meshmon_service::hostname::record_negative;
+
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let dest_str = "198.51.100.251";
+    let dest_ip: std::net::IpAddr = dest_str.parse().unwrap();
+
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "hn-pairs-neg",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-hn-pairs-neg"],
+                "destination_ips": [dest_str],
+            }),
+        )
+        .await;
+    let id = created["id"].as_str().expect("id is string");
+
+    // Seed negative hostname cache.
+    record_negative(pool, dest_ip)
+        .await
+        .expect("seed pairs dest negative hostname");
+
+    let pairs: Vec<serde_json::Value> = h.get_json(&format!("/api/campaigns/{id}/pairs")).await;
+    assert!(!pairs.is_empty(), "expected at least one pair");
+
+    let pair = pairs
+        .iter()
+        .find(|p| p["destination_ip"].as_str() == Some(dest_str))
+        .expect("pair with destination 198.51.100.251 not found");
+    assert!(
+        pair.get("destination_hostname").is_none(),
+        "negative-cached pair must omit destination_hostname: {pair}"
+    );
+}
+
+#[tokio::test]
+async fn pairs_endpoint_cold_miss_omits_destination_hostname_and_enqueues_resolver() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let dest_str = "198.51.100.252";
+    let dest_ip: std::net::IpAddr = dest_str.parse().unwrap();
+
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "hn-pairs-cold",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-hn-pairs-cold"],
+                "destination_ips": [dest_str],
+            }),
+        )
+        .await;
+    let id = created["id"].as_str().expect("id is string");
+    // No cache seed → cold miss.
+
+    let pairs: Vec<serde_json::Value> = h.get_json(&format!("/api/campaigns/{id}/pairs")).await;
+    assert!(!pairs.is_empty(), "expected at least one pair");
+
+    let pair = pairs
+        .iter()
+        .find(|p| p["destination_ip"].as_str() == Some(dest_str))
+        .expect("pair with destination 198.51.100.252 not found");
+    assert!(
+        pair.get("destination_hostname").is_none(),
+        "cold-miss pair must omit destination_hostname: {pair}"
+    );
+
+    // The resolver should have been enqueued.
+    assert!(
+        common::wait_for_cache_row(pool, dest_ip).await,
+        "resolver never wrote a cache row for {dest_ip} — enqueue was skipped"
+    );
+}
+
+#[tokio::test]
+async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
+    // Verifies both nested stamp paths on `/api/campaigns/{id}/evaluation`:
+    //   - `results.candidates[*].hostname`            (candidate IP)
+    //   - `results.candidates[*].pair_details[*].destination_hostname`
+    //     (pair-detail destination IP)
+    //
+    // Also proves the stamp is response-time only: after the response
+    // comes back, the stored JSONB (`campaign_evaluations.results`) is
+    // re-read directly and asserted to carry NO hostname fields at all.
+    use meshmon_service::hostname::record_positive;
+
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // Create a campaign so the FK from `campaign_evaluations.campaign_id`
+    // resolves, and transition it to `completed` so `state IN
+    // ('completed','evaluated')` — the only states `/evaluation` can be
+    // read from. (The handler surfaces 404 `not_evaluated` for other
+    // states, but `get_evaluation` reads the row directly regardless of
+    // state, so the transition is only strictly required for
+    // `POST /evaluate`. Left here for symmetry with the end-to-end flow.)
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "hn-get-eval",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-hn-eval"],
+                "destination_ips": ["198.51.100.253"],
+            }),
+        )
+        .await;
+    let campaign_id_str = created["id"].as_str().expect("id is string").to_owned();
+    let campaign_id: uuid::Uuid = campaign_id_str.parse().expect("parse campaign id");
+
+    // Candidate IP and pair-detail destination IP. Distinct so the two
+    // stamp paths can be asserted independently.
+    let cand_ip_str = "198.51.100.254";
+    let cand_ip: std::net::IpAddr = cand_ip_str.parse().unwrap();
+    let pd_ip_str = "198.51.100.255";
+    let pd_ip: std::net::IpAddr = pd_ip_str.parse().unwrap();
+
+    // Craft a raw `EvaluationResultsDto` JSONB with one candidate + one
+    // nested pair_detail. No hostname fields are included — they are
+    // skip-none, so the stored JSON must never carry them. The handler
+    // populates both via response-time stamping.
+    let results = serde_json::json!({
+        "candidates": [{
+            "destination_ip": cand_ip_str,
+            "is_mesh_member": false,
+            "pairs_improved": 1,
+            "pairs_total_considered": 1,
+            "avg_improvement_ms": 2.0,
+            "avg_loss_pct": 0.0,
+            "composite_score": 1.5,
+            "pair_details": [{
+                "source_agent_id": "agent-a",
+                "destination_agent_id": "agent-b",
+                "destination_ip": pd_ip_str,
+                "direct_rtt_ms": 10.0,
+                "direct_stddev_ms": 1.0,
+                "direct_loss_pct": 0.0,
+                "transit_rtt_ms": 8.0,
+                "transit_stddev_ms": 1.0,
+                "transit_loss_pct": 0.0,
+                "improvement_ms": 2.0,
+                "qualifies": true
+            }]
+        }],
+        "unqualified_reasons": {}
+    });
+    sqlx::query(
+        "INSERT INTO campaign_evaluations \
+             (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode, \
+              baseline_pair_count, candidates_total, candidates_good, \
+              avg_improvement_ms, results, evaluated_at) \
+         VALUES ($1, 10.0, 1.0, 'optimization', 1, 1, 1, 2.0, $2::jsonb, now())",
+    )
+    .bind(campaign_id)
+    .bind(&results)
+    .execute(pool)
+    .await
+    .expect("seed campaign_evaluations row");
+
+    // Seed positive-cached hostnames for both the candidate and the
+    // pair-detail destination — covers both nested stamp paths.
+    record_positive(pool, cand_ip, "candidate.example.com")
+        .await
+        .expect("seed candidate hostname");
+    record_positive(pool, pd_ip, "pair-detail.example.com")
+        .await
+        .expect("seed pair_detail hostname");
+
+    let body: serde_json::Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id_str}/evaluation"))
+        .await;
+
+    let cand = &body["results"]["candidates"][0];
+    assert_eq!(
+        cand["destination_ip"], cand_ip_str,
+        "candidate ip mismatch: {body}"
+    );
+    assert_eq!(
+        cand["hostname"], "candidate.example.com",
+        "candidate hostname must be stamped from positive cache: {body}"
+    );
+    let pd = &cand["pair_details"][0];
+    assert_eq!(
+        pd["destination_ip"], pd_ip_str,
+        "pair_detail ip mismatch: {body}"
+    );
+    assert_eq!(
+        pd["destination_hostname"], "pair-detail.example.com",
+        "pair_detail destination_hostname must be stamped from positive cache: {body}"
+    );
+
+    // Stamp-invariant: the stored JSONB must NEVER carry hostname fields
+    // — the stamp is a response-time join only. Re-read the row and
+    // assert both keys are absent from the serialised document.
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT results FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(campaign_id)
+            .fetch_one(pool)
+            .await
+            .expect("read back campaign_evaluations row");
+    let stored_cand = &stored["candidates"][0];
+    assert!(
+        stored_cand.get("hostname").is_none(),
+        "stored JSONB must NOT carry candidates[*].hostname: {stored}"
+    );
+    let stored_pd = &stored_cand["pair_details"][0];
+    assert!(
+        stored_pd.get("destination_hostname").is_none(),
+        "stored JSONB must NOT carry pair_details[*].destination_hostname: {stored}"
+    );
+}

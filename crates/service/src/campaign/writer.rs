@@ -86,6 +86,7 @@ fn hops_to_jsonb(hops: &[HopSummary]) -> Result<JsonValue, serde_json::Error> {
                         .map(|addr| HopIpJson {
                             ip: addr.to_string(),
                             freq: ip.frequency,
+                            hostname: None,
                         })
                 })
                 .collect(),

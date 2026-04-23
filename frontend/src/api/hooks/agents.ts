@@ -26,6 +26,11 @@ export function useAgents() {
 export function useAgent(id: string) {
   const query = useQuery({
     queryKey: ["agent", id],
+    // Skip the fetch for empty-string ids so callers that pass a possibly-
+    // absent url/search param (e.g. `useAgent(search.source ?? "")`) don't
+    // hit `GET /api/agents/` and 404. Mirrors the guard in `useRouteSnapshot`,
+    // `useCampaign`, `useCampaignDetail`, `useCatalogueEntry`.
+    enabled: !!id,
     queryFn: async () => {
       const { data, error, response } = await api.GET("/api/agents/{id}", {
         params: { path: { id } },

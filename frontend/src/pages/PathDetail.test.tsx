@@ -9,12 +9,27 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { type ReactNode, useEffect } from "react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import "@/test/cytoscape-mock";
-import { IpHostnameProvider } from "@/components/ip-hostname";
+import { IpHostnameProvider, useSeedHostnames } from "@/components/ip-hostname";
 import PathDetail from "@/pages/PathDetail";
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const now = new Date();
 const freshSnapshot = {
@@ -147,6 +162,78 @@ function renderPage(initialUrl = "/paths/a/b?range=24h"): {
   return { rendered, router };
 }
 
+// ---------------------------------------------------------------------------
+// Provider-warmth helper: seeds the IpHostnameProvider map before the page
+// renders, so the test exercises the seed → first-paint hostname path without
+// waiting for a SSE event.
+// ---------------------------------------------------------------------------
+interface SeedEntry {
+  ip: string;
+  hostname?: string | null;
+}
+
+function Seeder({ seed, children }: { seed: SeedEntry[]; children: ReactNode }) {
+  const seedFromResponse = useSeedHostnames();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    if (seed.length > 0) seedFromResponse(seed);
+  }, []);
+  return <>{children}</>;
+}
+
+function renderPagePreSeeded(
+  seed: SeedEntry[],
+  initialUrl = "/paths/a/b?range=24h",
+): ReturnType<typeof renderPage> {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const rootRoute = createRootRoute({ component: Outlet });
+  const testRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/paths/$source/$target",
+    component: PathDetail,
+    validateSearch: (s: Record<string, unknown>) => {
+      const from = typeof s.from === "string" ? s.from : undefined;
+      const to = typeof s.to === "string" ? s.to : undefined;
+      return {
+        range: (s.range ?? "24h") as "1h" | "6h" | "24h" | "7d" | "30d" | "2y" | "custom",
+        from,
+        to,
+        protocol:
+          s.protocol === "icmp" || s.protocol === "udp" || s.protocol === "tcp"
+            ? s.protocol
+            : undefined,
+      };
+    },
+  });
+  const compareRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/paths/$source/$target/routes/compare",
+    component: () => null,
+  });
+  const reportRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/reports/path",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([testRoute, compareRoute, reportRoute]),
+    history: createMemoryHistory({ initialEntries: [initialUrl] }),
+  });
+  const rendered = render(
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>
+        <Seeder seed={seed}>
+          <RouterProvider router={router} />
+        </Seeder>
+      </IpHostnameProvider>
+    </QueryClientProvider>,
+  );
+  return {
+    rendered,
+    router: router as ReturnType<typeof renderPage>["router"],
+  };
+}
+
 describe("PathDetail", () => {
   test("renders source + target cards, Grafana iframes, sparklines", async () => {
     mockEndpoints(overview());
@@ -179,6 +266,35 @@ describe("PathDetail", () => {
     expect(href).toContain("protocol=icmp");
     expect(href).not.toContain("source_ip=");
     expect(href).not.toContain("target_ip=");
+  });
+
+  test("renders the Hostname column header in the current route hops table", async () => {
+    mockEndpoints(overview());
+    renderPage();
+    // The "Current route hops" section is rendered when latest has hops.
+    // freshSnapshot has one hop, so the RouteTable is mounted and should show
+    // a Hostname column header.
+    expect(await screen.findByRole("columnheader", { name: /hostname/i })).toBeInTheDocument();
+  });
+
+  test("renders hop IP in the Hostname column (cold miss → bare IP)", async () => {
+    mockEndpoints(overview());
+    renderPage();
+    // The hop IP "10.0.0.1" is the dominant IP from freshSnapshot. IpHostname
+    // renders it as the bare IP on a cold miss (no provider seeding yet).
+    expect(await screen.findByText("10.0.0.1")).toBeInTheDocument();
+  });
+
+  test("renders hostname alongside hop IP when provider map is pre-seeded (warmth)", async () => {
+    // Provider-warmth test: verifies the seed → first-paint pipeline.
+    // The hop IP "10.0.0.1" is seeded with a hostname before the page mounts,
+    // so IpHostname should display it without waiting for a SSE event.
+    mockEndpoints(overview());
+    renderPagePreSeeded([{ ip: "10.0.0.1", hostname: "router.example.com" }]);
+    // IpHostname renders "ip (hostname)" as accessible text: the visible text is
+    // "10.0.0.1" with a muted "(router.example.com)" suffix. The accessible name
+    // combines them, so checking for the hostname string is sufficient.
+    expect(await screen.findByText("(router.example.com)")).toBeInTheDocument();
   });
 
   test("renders empty-state when no snapshots exist in window", async () => {

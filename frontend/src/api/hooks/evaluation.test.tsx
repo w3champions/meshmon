@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   campaignEvaluationKey,
   campaignKey,
@@ -15,6 +15,7 @@ import {
   useEvaluation,
   useTriggerDetail,
 } from "@/api/hooks/evaluation";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 const CAMPAIGN_ID = "11111111-1111-1111-1111-111111111111";
 
@@ -34,13 +35,22 @@ const EVALUATION: Evaluation = {
   },
 };
 
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
 function makeQueryClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
 
 function wrapWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <QueryClientProvider client={qc}>
+      <IpHostnameProvider>{children}</IpHostnameProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -48,7 +58,14 @@ function wrap() {
   return wrapWith(makeQueryClient());
 }
 
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("useEvaluation", () => {
   test("returns null on 404 (campaign not evaluated)", async () => {

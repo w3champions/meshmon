@@ -10,13 +10,28 @@ import {
 } from "@tanstack/react-router";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import "@/test/cytoscape-mock";
 import type { HistoryMeasurement } from "@/api/hooks/history";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import HistoryPair, { HISTORY_MEASUREMENTS_CAP } from "@/pages/HistoryPair";
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const SOURCES = [
   { source_agent_id: "agent-a", display_name: "Agent A" },
@@ -68,6 +83,15 @@ interface MockFixture {
   measurements?: HistoryMeasurement[];
 }
 
+const AGENT_A = {
+  id: "agent-a",
+  display_name: "Agent A",
+  ip: "10.1.2.3",
+  hostname: "agent-a.example.com",
+  registered_at: "2026-01-01T00:00:00Z",
+  last_seen_at: new Date().toISOString(),
+};
+
 function installFetchMock(fixture: MockFixture): void {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : (input as Request).url;
@@ -81,6 +105,13 @@ function installFetchMock(fixture: MockFixture): void {
     }
     if (url.includes("/api/history/measurements")) {
       return new Response(JSON.stringify(fixture.measurements ?? []), { status: 200 });
+    }
+    // Single-agent fetch — used by useAgent(source) in HistoryPair.
+    if (url.match(/\/api\/agents\/[^/]+$/)) {
+      return new Response(JSON.stringify(AGENT_A), { status: 200 });
+    }
+    if (url.includes("/api/agents")) {
+      return new Response(JSON.stringify([AGENT_A]), { status: 200 });
     }
     return new Response("nf", { status: 404 });
   });
@@ -119,7 +150,9 @@ function renderHistoryPair(initialUrl: string) {
   });
   const rendered = render(
     <QueryClientProvider client={qc}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
   return { rendered, router };
@@ -221,6 +254,23 @@ describe("HistoryPair", () => {
     // The option without catalogue metadata surfaces the raw IP plus the
     // "no metadata" tag instead of a formatted display name.
     expect(await screen.findByText(/— no metadata/i)).toBeInTheDocument();
+  });
+
+  test("pair heading renders source agent IP and destination IP via IpHostname", async () => {
+    installFetchMock({ measurements: [measurement()] });
+    renderHistoryPair("/history/pair?source=agent-a&destination=10.0.0.1");
+
+    // Wait for measurements to load so the results section (including the
+    // pair heading) is mounted.
+    await screen.findByRole("img", { name: /latency over time/i });
+
+    // Source agent IP (from useAgent("agent-a") → AGENT_A.ip = "10.1.2.3").
+    const heading = await screen.findByTestId("history-pair-heading");
+    expect(heading).toBeInTheDocument();
+    // Both IPs render inside the heading (bare IP fallback when provider
+    // has no hostname seeded in the test environment).
+    expect(heading).toHaveTextContent("10.1.2.3");
+    expect(heading).toHaveTextContent("10.0.0.1");
   });
 });
 

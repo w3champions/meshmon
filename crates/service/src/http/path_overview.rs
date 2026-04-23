@@ -29,6 +29,8 @@
 //! response — the UI then renders "metrics unavailable" without breaking
 //! the page.
 
+use crate::hostname::{bulk_hostnames_and_enqueue, session_id_from_auth};
+use crate::http::auth::AuthSession;
 use crate::http::http_client::proxy_client;
 use crate::http::user_api::{
     invalid_protocol, AgentSummary, RouteSnapshotDetail, RouteSnapshotSummary,
@@ -43,6 +45,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 use sqlx::PgPool;
+use std::net::IpAddr;
 use utoipa::{IntoParams, ToSchema};
 
 // ---------------------------------------------------------------------------
@@ -548,6 +551,7 @@ async fn fetch_metrics(
 )]
 pub async fn path_overview(
     State(state): State<AppState>,
+    auth_session: AuthSession,
     Path((src, tgt)): Path<(String, String)>,
     Query(params): Query<PathOverviewParams>,
 ) -> Response {
@@ -575,7 +579,7 @@ pub async fn path_overview(
     // 3. Registry lookup — the source/target must exist. 404 keeps the
     //    response shape consistent with the other `/api/agents` endpoints.
     let snap = state.registry.snapshot();
-    let source = match snap.get(&src).cloned() {
+    let mut source = match snap.get(&src).cloned() {
         Some(info) => AgentSummary::from(info),
         None => {
             return (
@@ -585,7 +589,7 @@ pub async fn path_overview(
                 .into_response()
         }
     };
-    let target = match snap.get(&tgt).cloned() {
+    let mut target = match snap.get(&tgt).cloned() {
         Some(info) => AgentSummary::from(info),
         None => {
             return (
@@ -600,14 +604,14 @@ pub async fn path_overview(
     // 4. Fetch latest-per-protocol first — we need the resolved primary
     //    protocol before we can kick off the protocol-scoped recent
     //    snapshots query (T32).
-    let latest_by_protocol = match fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to).await
-    {
-        Ok(latest) => latest,
-        Err(e) => {
-            tracing::error!(error = %e, %src, %tgt, "path_overview: latest fetch failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let mut latest_by_protocol =
+        match fetch_latest_by_protocol(&state.pool, &src, &tgt, from, to).await {
+            Ok(latest) => latest,
+            Err(e) => {
+                tracing::error!(error = %e, %src, %tgt, "path_overview: latest fetch failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     // 5. Pick the primary protocol. Without one, there is nothing to
     //    query for recent snapshots or metrics; we short-circuit to
@@ -643,6 +647,82 @@ pub async fn path_overview(
     let recent_snapshots_truncated = recent_snapshots.len() as i64 > RECENT_LIMIT;
     if recent_snapshots_truncated {
         recent_snapshots.truncate(RECENT_LIMIT as usize);
+    }
+
+    // 7. Stamp reverse-DNS hostnames on source/target agent IPs and on all
+    //    hop IPs across the three protocol variants — all in one DB
+    //    round-trip. Source/target hostnames are stamped alongside hop IPs
+    //    in this single bulk lookup (they are NOT already set via the
+    //    AgentSummary path; that path only runs in list_agents / get_agent).
+    {
+        // Flatten source/target agent IPs + all hop IPs across icmp / udp /
+        // tcp into one Vec for a single bulk lookup.
+        let mut all_ips: Vec<IpAddr> = Vec::new();
+        if let Ok(ip) = source.ip.parse::<IpAddr>() {
+            all_ips.push(ip);
+        }
+        if let Ok(ip) = target.ip.parse::<IpAddr>() {
+            all_ips.push(ip);
+        }
+        for hop_ip in [
+            latest_by_protocol.icmp.as_ref(),
+            latest_by_protocol.udp.as_ref(),
+            latest_by_protocol.tcp.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|snap| snap.hops.iter().flat_map(|h| h.observed_ips.iter()))
+        {
+            if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                all_ips.push(ip);
+            }
+        }
+
+        if !all_ips.is_empty() {
+            let session = session_id_from_auth(&auth_session);
+            match bulk_hostnames_and_enqueue(&state, &session, &all_ips).await {
+                Ok(map) => {
+                    // Stamp source/target hostnames.
+                    if let Ok(ip) = source.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            source.hostname = Some(h.clone());
+                        }
+                    }
+                    if let Ok(ip) = target.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            target.hostname = Some(h.clone());
+                        }
+                    }
+                    // Walk each present protocol variant and apply hop hostnames.
+                    for snap in [
+                        latest_by_protocol.icmp.as_mut(),
+                        latest_by_protocol.udp.as_mut(),
+                        latest_by_protocol.tcp.as_mut(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        for hop in snap.hops.iter_mut() {
+                            for hop_ip in hop.observed_ips.iter_mut() {
+                                if let Ok(ip) = hop_ip.ip.parse::<IpAddr>() {
+                                    if let Some(Some(h)) = map.get(&ip) {
+                                        hop_ip.hostname = Some(h.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Hostname stamping failure is non-fatal: log and
+                    // continue — the rest of the response is complete.
+                    tracing::warn!(
+                        error = %e,
+                        "path_overview: hostname stamp failed, returning unhostnamed response"
+                    );
+                }
+            }
+        }
     }
 
     Json(PathOverviewResponse {

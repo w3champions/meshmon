@@ -1,7 +1,8 @@
 import cytoscape, { type LayoutOptions } from "cytoscape";
 import dagre from "cytoscape-dagre";
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useMemo, useRef } from "react";
 import type { components } from "@/api/schema.gen";
+import { useIpHostnames } from "@/components/ip-hostname";
 import type { RouteDiff } from "@/lib/route-diff";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +41,27 @@ function dominantIp(hop: HopJson): string {
   return best.ip;
 }
 
+/**
+ * Middle-truncate a hostname for Cytoscape canvas nodes (which have limited
+ * horizontal space). Full value remains available in the hop-detail card panel.
+ *
+ * - ≤ 24 code points → returned as-is.
+ * - > 24 code points → first 10 + `…` + last 10 code points.
+ *
+ * Iterates by Unicode code point (not UTF-16 code units) so a non-BMP
+ * character (emoji, technical symbol) straddling the cut boundary is
+ * never split across its surrogate pair — a lone surrogate would render
+ * as U+FFFD and can break downstream consumers such as
+ * `encodeURIComponent` / `JSON.stringify`. PTR records are ASCII-
+ * compatible today, but hostnames arrive via IDN clients and operator
+ * annotations, so robustness matters.
+ */
+export function truncateHostname(name: string): string {
+  const codePoints = [...name];
+  if (codePoints.length <= 24) return name;
+  return `${codePoints.slice(0, 10).join("")}…${codePoints.slice(-10).join("")}`;
+}
+
 function baseClass(hop: HopJson, colorBy: ColorBy): string {
   if (colorBy === "loss") {
     if (hop.loss_pct >= 0.2) return "state-unreachable";
@@ -66,6 +88,13 @@ function diffClass(kind?: string): string | null {
   }
 }
 
+const dagreOptions: DagreLayoutOptions = {
+  name: "dagre",
+  rankDir: "LR",
+  nodeSep: 28,
+  rankSep: 120,
+};
+
 export function RouteTopology({
   hops,
   highlightChanges,
@@ -74,17 +103,40 @@ export function RouteTopology({
   ariaLabel,
   className,
 }: RouteTopologyProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const cyRef = useRef<cytoscape.Core | null>(null);
 
+  const hopIps = useMemo(() => hops.map(dominantIp).filter((ip) => ip !== "?"), [hops]);
+  const hostnames = useIpHostnames(hopIps);
+  const hostnamesRef = useRef(hostnames);
+  hostnamesRef.current = hostnames;
+
+  // Label builder reads the latest hostnames via ref so the build
+  // effect's dep list does NOT include hostnames. Rationale (keep
+  // this comment in the source code): adding `hostnames` to the build
+  // effect's deps would rebuild Cytoscape on every hostname arrival
+  // and violate the T38-class in-place-update contract. The ref
+  // always points at the latest map; the initial build uses whatever
+  // is already seeded; late arrivals ride the second effect below.
+  const labelFor = (h: HopJson): string => {
+    const ip = dominantIp(h);
+    const hn = hostnamesRef.current.get(ip);
+    return typeof hn === "string" && hn.length > 0
+      ? `#${h.position}\n${ip}\n${truncateHostname(hn)}`
+      : `#${h.position}\n${ip}`;
+  };
+
+  // Build / rebuild on structural changes only.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `labelFor` reads `hostnamesRef.current` (always latest) intentionally — adding `hostnames` here would rebuild Cy on every hostname arrival, violating the T38-class in-place-update contract.
   useEffect(() => {
-    if (!ref.current || hops.length === 0) return;
+    if (!containerRef.current || hops.length === 0) return;
     const elements = [
       ...hops.map((h) => {
         const classes = [baseClass(h, colorBy), diffClass(highlightChanges?.get(h.position)?.kind)]
           .filter((c): c is string => Boolean(c))
           .join(" ");
         return {
-          data: { id: String(h.position), label: `#${h.position}\n${dominantIp(h)}` },
+          data: { id: String(h.position), label: labelFor(h) },
           classes,
         };
       }),
@@ -97,14 +149,9 @@ export function RouteTopology({
       })),
     ];
     const cy = cytoscape({
-      container: ref.current,
+      container: containerRef.current,
       elements,
-      layout: {
-        name: "dagre",
-        rankDir: "LR",
-        nodeSep: 28,
-        rankSep: 120,
-      } satisfies DagreLayoutOptions as unknown as LayoutOptions,
+      layout: dagreOptions as unknown as LayoutOptions,
       style: [
         {
           selector: "node",
@@ -157,8 +204,31 @@ export function RouteTopology({
         if (hop) onNodeClick(hop);
       });
     }
-    return () => cy.destroy();
+    cyRef.current = cy;
+    return () => {
+      cy.destroy();
+      cyRef.current = null;
+    };
   }, [hops, highlightChanges, onNodeClick, colorBy]);
+
+  // In-place label update on hostname events — no rebuild, no layout.
+  // Guard on `!cy` handles the impossible mount-race (build effect
+  // runs on the same render tick that sets cyRef.current, so this
+  // effect only needs to handle subsequent updates; the initial
+  // labels already reflect the latest hostnames from the build
+  // effect's labelFor call).
+  //
+  // `labelFor` reads `hostnamesRef.current` (the ref pattern) and is
+  // intentionally excluded from the dep list. `hostnames` identity change
+  // is the signal; `labelFor` is a stable renderer that reads the ref.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `labelFor` uses `hostnamesRef` ref-pattern; `hostnames` identity change is the correct trigger, not `labelFor` reference equality.
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    for (const h of hops) {
+      cy.getElementById(String(h.position)).data("label", labelFor(h));
+    }
+  }, [hops, hostnames]);
 
   const reactId = useId();
 
@@ -182,7 +252,7 @@ export function RouteTopology({
   return (
     <>
       <div
-        ref={ref}
+        ref={containerRef}
         role="img"
         aria-label={ariaLabel}
         aria-describedby={descId}

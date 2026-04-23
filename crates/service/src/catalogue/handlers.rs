@@ -39,7 +39,7 @@ use super::model::{CatalogueSource, Field};
 use super::parse::{parse_ip_tokens, ParseReason};
 use super::repo;
 use super::repo::FacetsResponse;
-use crate::hostname::{hostnames_for, session_id_from_auth, SessionId};
+use crate::hostname::{session_id_from_auth, stamp_hostnames};
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -50,50 +50,6 @@ use serde_json::json;
 use std::net::IpAddr;
 use std::str::FromStr;
 use uuid::Uuid;
-
-/// Stamp `dto.hostname` on every row whose IP the cache already knows
-/// about, and enqueue a background resolution for every cold miss.
-///
-/// - Positive cache hit: sets `dto.hostname = Some(h)`.
-/// - Negative cache hit: leaves `dto.hostname = None` (skip-none on the
-///   wire so the client sees an absent key, not `null`).
-/// - Cold miss: leaves `dto.hostname = None` and calls
-///   [`crate::hostname::Resolver::enqueue`] with the caller's
-///   [`SessionId`] so the resolution lands on that session's SSE stream
-///   when it completes.
-///
-/// Unparseable IP strings on a DTO are skipped — every DTO's `ip` comes
-/// from [`std::net::IpAddr::to_string`] so this branch is defensive only.
-/// A DB error is propagated; the caller maps it to a 500. The function
-/// is idempotent: running it twice leaves the DTO identical because
-/// the stamp is a simple assignment keyed on the cache contents.
-async fn stamp_hostnames(
-    state: &AppState,
-    session: &SessionId,
-    dtos: &mut [CatalogueEntryDto],
-) -> sqlx::Result<()> {
-    if dtos.is_empty() {
-        return Ok(());
-    }
-    let ips: Vec<IpAddr> = dtos.iter().filter_map(|d| d.ip.parse().ok()).collect();
-    if ips.is_empty() {
-        return Ok(());
-    }
-    let cache = hostnames_for(&state.pool, &ips).await?;
-    for dto in dtos.iter_mut() {
-        let Ok(ip): Result<IpAddr, _> = dto.ip.parse() else {
-            continue;
-        };
-        match cache.get(&ip) {
-            Some(Some(h)) => dto.hostname = Some(h.clone()),
-            Some(None) => {}
-            None => {
-                state.hostname_resolver.enqueue(ip, session.clone()).await;
-            }
-        }
-    }
-    Ok(())
-}
 
 /// Render a repo error as an HTTP 500 with a stable JSON error body.
 ///
@@ -375,10 +331,38 @@ pub async fn paste(
     };
 
     let session = session_id_from_auth(&auth_session);
-    if let Err(e) = stamp_hostnames(&state, &session, &mut response.created).await {
+    if let Err(e) = stamp_hostnames(
+        &state,
+        &session,
+        &mut response.created,
+        |d| d.ip.parse::<IpAddr>().ok().into_iter().collect(),
+        |d, map| {
+            if let Ok(ip) = d.ip.parse::<IpAddr>() {
+                if let Some(Some(h)) = map.get(&ip) {
+                    d.hostname = Some(h.clone());
+                }
+            }
+        },
+    )
+    .await
+    {
         return db_error("catalogue paste: stamp_hostnames failed", e);
     }
-    if let Err(e) = stamp_hostnames(&state, &session, &mut response.existing).await {
+    if let Err(e) = stamp_hostnames(
+        &state,
+        &session,
+        &mut response.existing,
+        |d| d.ip.parse::<IpAddr>().ok().into_iter().collect(),
+        |d, map| {
+            if let Ok(ip) = d.ip.parse::<IpAddr>() {
+                if let Some(Some(h)) = map.get(&ip) {
+                    d.hostname = Some(h.clone());
+                }
+            }
+        },
+    )
+    .await
+    {
         return db_error("catalogue paste: stamp_hostnames failed", e);
     }
 
@@ -465,7 +449,21 @@ pub async fn list(
                 next_cursor: next_cursor.map(|c| c.encode()),
             };
             let session = session_id_from_auth(&auth_session);
-            if let Err(e) = stamp_hostnames(&state, &session, &mut body.entries).await {
+            if let Err(e) = stamp_hostnames(
+                &state,
+                &session,
+                &mut body.entries,
+                |d| d.ip.parse::<IpAddr>().ok().into_iter().collect(),
+                |d, map| {
+                    if let Ok(ip) = d.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            d.hostname = Some(h.clone());
+                        }
+                    }
+                },
+            )
+            .await
+            {
                 return db_error("catalogue list: stamp_hostnames failed", e);
             }
             (StatusCode::OK, Json(body)).into_response()
@@ -502,7 +500,20 @@ pub async fn get_one(
         Ok(Some(row)) => {
             let mut dto = CatalogueEntryDto::from(row);
             let session = session_id_from_auth(&auth_session);
-            if let Err(e) = stamp_hostnames(&state, &session, std::slice::from_mut(&mut dto)).await
+            if let Err(e) = stamp_hostnames(
+                &state,
+                &session,
+                std::slice::from_mut(&mut dto),
+                |d| d.ip.parse::<IpAddr>().ok().into_iter().collect(),
+                |d, map| {
+                    if let Ok(ip) = d.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            d.hostname = Some(h.clone());
+                        }
+                    }
+                },
+            )
+            .await
             {
                 return db_error("catalogue get_one: stamp_hostnames failed", e);
             }
@@ -654,7 +665,20 @@ pub async fn patch(
             state.facets_cache.invalidate().await;
             let mut dto = CatalogueEntryDto::from(entry);
             let session = session_id_from_auth(&auth_session);
-            if let Err(e) = stamp_hostnames(&state, &session, std::slice::from_mut(&mut dto)).await
+            if let Err(e) = stamp_hostnames(
+                &state,
+                &session,
+                std::slice::from_mut(&mut dto),
+                |d| d.ip.parse::<IpAddr>().ok().into_iter().collect(),
+                |d, map| {
+                    if let Ok(ip) = d.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            d.hostname = Some(h.clone());
+                        }
+                    }
+                },
+            )
+            .await
             {
                 return db_error("catalogue patch: stamp_hostnames failed", e);
             }
@@ -874,7 +898,21 @@ pub async fn map(
             let mut dtos: Vec<CatalogueEntryDto> =
                 rows.into_iter().map(CatalogueEntryDto::from).collect();
             let session = session_id_from_auth(&auth_session);
-            if let Err(e) = stamp_hostnames(&state, &session, &mut dtos).await {
+            if let Err(e) = stamp_hostnames(
+                &state,
+                &session,
+                &mut dtos,
+                |d| d.ip.parse::<IpAddr>().ok().into_iter().collect(),
+                |d, map| {
+                    if let Ok(ip) = d.ip.parse::<IpAddr>() {
+                        if let Some(Some(h)) = map.get(&ip) {
+                            d.hostname = Some(h.clone());
+                        }
+                    }
+                },
+            )
+            .await
+            {
                 return db_error("catalogue map: stamp_hostnames failed", e);
             }
             let body = MapResponse::Detail { rows: dtos, total };

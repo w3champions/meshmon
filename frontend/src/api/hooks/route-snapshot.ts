@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 
 export type RouteSnapshotDetail = components["schemas"]["RouteSnapshotDetail"];
 
@@ -12,7 +13,7 @@ export interface UseRouteSnapshotOpts {
 
 export function useRouteSnapshot(opts: UseRouteSnapshotOpts) {
   const { source, target, id } = opts;
-  return useQuery({
+  const query = useQuery({
     queryKey: ["route-snapshot", source, target, id],
     enabled: id !== undefined,
     queryFn: async (): Promise<RouteSnapshotDetail | null> => {
@@ -30,4 +31,16 @@ export function useRouteSnapshot(opts: UseRouteSnapshotOpts) {
       return data;
     },
   });
+  // Seed the shared hostname map from every response. Seeds hop-level IPs
+  // from `RouteSnapshotDetail.hops[*].observed_ips[*]`. Null (404 / not-found)
+  // produces no entries — the guard in `useSeedHostnamesOnResponse` handles it.
+  useSeedHostnamesOnResponse(query.data, function* (snap) {
+    if (!snap) return;
+    for (const hop of snap.hops) {
+      for (const o of hop.observed_ips) {
+        yield { ip: o.ip, hostname: o.hostname };
+      }
+    }
+  });
+  return query;
 }

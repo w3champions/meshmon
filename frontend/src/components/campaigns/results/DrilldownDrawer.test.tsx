@@ -1,9 +1,41 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  type RenderOptions,
+  type RenderResult,
+  render as rtlRender,
+  screen,
+} from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
+import { IpHostnameProvider } from "@/components/ip-hostname";
+
+// ---------------------------------------------------------------------------
+// EventSource stub — IpHostnameProvider opens an SSE connection on mount;
+// jsdom has no native EventSource so we replace it with a no-op.
+// ---------------------------------------------------------------------------
+
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+/**
+ * `render` wrapper that mounts `IpHostnameProvider` — DrilldownDrawer
+ * renders `<IpHostname>` inside, so the provider must be present.
+ */
+function render(ui: ReactElement, options?: RenderOptions): RenderResult {
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <IpHostnameProvider>{children}</IpHostnameProvider>
+  );
+  return rtlRender(ui, { wrapper: Wrapper, ...options });
+}
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -138,11 +170,14 @@ function wireMeasurements(
 }
 
 beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
   wireAgents([makeAgent("agent-a", "alpha", "10.0.0.1"), makeAgent("agent-b", "beta", "10.0.0.2")]);
   wireMeasurements(null);
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   cleanup();
   vi.clearAllMocks();
 });
@@ -169,8 +204,12 @@ describe("DrilldownDrawer", () => {
     expect(screen.getByText("alpha")).toBeInTheDocument();
     expect(screen.getByText("beta")).toBeInTheDocument();
     // The dest IP shown next to the labels should be the agent roster's IP
-    // (10.0.0.2), not the transit-X IP (10.0.99.1).
-    expect(screen.getByText("(10.0.0.2)")).toBeInTheDocument();
+    // (10.0.0.2), not the transit-X IP (10.0.99.1). Rendered via `<IpHostname>`
+    // so the bare IP appears inside a nested span without the surrounding
+    // parentheses in its textContent. (The transit-X IP 10.0.99.1 still
+    // appears elsewhere in the drawer — in the SheetDescription and
+    // "Transit via ..." labels — so we only assert 10.0.0.2 is present.)
+    expect(screen.getByText("10.0.0.2")).toBeInTheDocument();
   });
 
   test("renders positive improvement green, negative red", () => {

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { Campaign, CampaignState } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -186,19 +187,29 @@ function setupMocks(evaluation: Evaluation | null, opts?: { isLoading?: boolean 
   } as unknown as ReturnType<typeof useCampaignMeasurements>);
 }
 
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
 function renderTab(campaign: Campaign) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <CandidatesTab campaign={campaign} />
-      <Toaster />
+      <IpHostnameProvider>
+        <CandidatesTab campaign={campaign} />
+        <Toaster />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
 
 beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
   forcePairStub.mutate.mockReset();
   triggerDetailStub.mutate.mockReset();
   navigate.mockReset();
@@ -208,6 +219,7 @@ afterEach(() => {
   cleanup();
   toast.dismiss();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ---------------------------------------------------------------------------
@@ -258,8 +270,21 @@ describe("CandidatesTab — happy path", () => {
 
     // Drawer description is drawer-unique — the candidate row shows the
     // display name, but only the drawer prints the baseline-pair summary.
+    // The IP is rendered via `<IpHostname>`, which splits the text across
+    // nested spans — match on concatenated textContent, scoped to the
+    // leaf-ish node that owns the full string (i.e. the rendered element
+    // whose `textContent` matches AND whose children don't individually
+    // satisfy the match).
     expect(
-      screen.getByText(/transit candidate 10\.0\.0\.1 — 2 of 3 baseline pairs improved/i),
+      screen.getByText((_, node) => {
+        if (node === null) return false;
+        const re = /transit candidate 10\.0\.0\.1 — 2 of 3 baseline pairs improved/i;
+        if (!re.test(node.textContent ?? "")) return false;
+        const childMatches = Array.from(node.children).some((child) =>
+          re.test(child.textContent ?? ""),
+        );
+        return !childMatches;
+      }),
     ).toBeInTheDocument();
     // Pair-scoring list mounts when pair_details is non-empty.
     expect(screen.getByText(/per-pair scoring/i)).toBeInTheDocument();

@@ -9,10 +9,25 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import RouteCompare from "@/pages/RouteCompare";
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 function detail(id: number, observed_at: string, hops: unknown[] = []) {
   return {
@@ -96,7 +111,9 @@ describe("RouteCompare (redesigned)", () => {
     const { qc, router } = makeRouter("/paths/fra-01/nyc-02/routes/compare?a=101&b=102");
     render(
       <QueryClientProvider client={qc}>
-        <RouterProvider router={router} />
+        <IpHostnameProvider>
+          <RouterProvider router={router} />
+        </IpHostnameProvider>
       </QueryClientProvider>,
     );
 
@@ -116,7 +133,9 @@ describe("RouteCompare (redesigned)", () => {
     const { qc, router } = makeRouter("/paths/fra-01/nyc-02/routes/compare?a=1&b=2");
     render(
       <QueryClientProvider client={qc}>
-        <RouterProvider router={router} />
+        <IpHostnameProvider>
+          <RouterProvider router={router} />
+        </IpHostnameProvider>
       </QueryClientProvider>,
     );
     expect(
@@ -152,7 +171,9 @@ describe("RouteCompare (redesigned)", () => {
     const user = userEvent.setup();
     render(
       <QueryClientProvider client={qc}>
-        <RouterProvider router={router} />
+        <IpHostnameProvider>
+          <RouterProvider router={router} />
+        </IpHostnameProvider>
       </QueryClientProvider>,
     );
     await screen.findAllByRole("button", { name: /jump/i });
@@ -204,7 +225,9 @@ describe("RouteCompare (redesigned)", () => {
     const user = userEvent.setup();
     render(
       <QueryClientProvider client={qc}>
-        <RouterProvider router={router} />
+        <IpHostnameProvider>
+          <RouterProvider router={router} />
+        </IpHostnameProvider>
       </QueryClientProvider>,
     );
     // Wait for nearby to load and populate a "step A … later" label on the
@@ -248,7 +271,9 @@ describe("RouteCompare (redesigned)", () => {
     const user = userEvent.setup();
     render(
       <QueryClientProvider client={qc}>
-        <RouterProvider router={router} />
+        <IpHostnameProvider>
+          <RouterProvider router={router} />
+        </IpHostnameProvider>
       </QueryClientProvider>,
     );
     const triggers = await screen.findAllByRole("button", { name: /jump/i });
