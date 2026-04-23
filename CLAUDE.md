@@ -18,13 +18,13 @@ a central service ingests, stores, and alerts on regressions and route changes.
 
 ```sh
 cargo build --workspace
-cargo xtask test            # canonical test command — auto-provisions TimescaleDB and runs nextest
+cargo xtask test            # canonical test command — spawns a per-invocation TimescaleDB container, runs nextest, tears it down
 cargo xtask test-e2e        # end-to-end: brings up deploy/docker-compose.yml and runs cargo e2e
-cargo xtask test-db down    # stop the shared test database when finished
+cargo xtask test-db down    # reap leftover meshmon-test-pg-* / meshmon-sqlx-prep-* containers from crashed runs
 cargo clippy --workspace -- -D warnings
 ```
 
-`cargo test` still works as a zero-setup fallback (spawns a TimescaleDB container per integration-test binary via testcontainers). `cargo nextest run` directly is not supported — use `cargo xtask test`, which provisions a single shared Postgres and sets `DATABASE_URL` so every test connects to it. `cargo xtask test` excludes `xtask` and `meshmon-e2e` — run those via `cargo test -p xtask` and `cargo xtask test-e2e` respectively. See `crates/service/tests/common/mod.rs` for the three-tier isolation contract used by the test harness.
+`cargo test` still works as a zero-setup fallback (spawns a TimescaleDB container per integration-test binary via testcontainers). `cargo nextest run` directly is not supported — use `cargo xtask test`, which provisions a per-invocation Postgres (`meshmon-test-pg-<uuid>` on a kernel-assigned host port) and sets `DATABASE_URL` so every nextest process in that invocation connects to it. Two concurrent `cargo xtask test` runs are safe — each owns its own container. `cargo xtask test` excludes `xtask` and `meshmon-e2e` — run those via `cargo test -p xtask` and `cargo xtask test-e2e` respectively. See `crates/service/tests/common/mod.rs` for the three-tier isolation contract used by the test harness.
 
 `deploy/docker-compose.yml` is the local-dev-safe compose file; `deploy/docker-compose.ci-cache.yml` is a CI-only overlay that adds the GHA buildx cache backend (requires `ACTIONS_RUNTIME_TOKEN`) and is wired in via `MESHMON_E2E_CACHE_OVERLAY` in the workflow — do not pass it locally.
 
@@ -44,8 +44,10 @@ Produce a deployable binary with:
 
 Postgres + TimescaleDB. Migrations in `crates/service/migrations/`.
 Compile-time-checked queries via `sqlx::query!` with a committed `.sqlx/`
-offline cache. After changing any query macro, regenerate the cache (see
-README for steps).
+offline cache. After changing any query macro, regenerate via
+`cargo xtask sqlx-prepare` (spawns a throwaway
+`meshmon-sqlx-prep-<uuid>` container, applies migrations, runs
+`cargo sqlx prepare`, tears down) and `git add .sqlx`.
 
 ## Agent
 

@@ -269,8 +269,8 @@ container. This is the canonical path for local dev and CI.
 
 `cargo xtask test` excludes the `xtask` and `meshmon-e2e` packages —
 they run in separate invocations. Verify xtask's own lifecycle commands
-with `cargo test -p xtask` (does not need `DATABASE_URL`; the test
-drives its own `meshmon-test-pg` container). Run end-to-end tests with
+with `cargo test -p xtask` (does not need `DATABASE_URL`; the tests
+drive their own `meshmon-test-pg-<uuid>` containers). Run end-to-end tests with
 `cargo xtask test-e2e`.
 
 `cargo test --workspace --all-targets` still works as a zero-setup

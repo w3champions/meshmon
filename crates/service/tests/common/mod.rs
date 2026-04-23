@@ -54,8 +54,8 @@
 //! `cargo xtask test` excludes the `xtask` and `meshmon-e2e` packages —
 //! they run in separate invocations. Verify xtask's own lifecycle
 //! commands with `cargo test -p xtask` (does not need `DATABASE_URL`;
-//! spawns its own `meshmon-test-pg` as part of the test). Run
-//! end-to-end tests with `cargo xtask test-e2e`.
+//! spawns its own `meshmon-test-pg-<uuid>` containers as part of the
+//! test). Run end-to-end tests with `cargo xtask test-e2e`.
 //!
 //! # What transaction rollback does NOT cover
 //!
