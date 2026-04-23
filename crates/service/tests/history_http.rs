@@ -1184,7 +1184,17 @@ async fn campaign_measurements_stamps_destination_and_hop_hostnames_three_state(
         "resolver never wrote a cache row for {cold_dest_ip} — enqueue was skipped"
     );
 
-    // Cleanup seeded MTR trace.
+    // Cleanup: FK ordering — campaign_pairs → measurements → mtr_traces.
+    sqlx::query("DELETE FROM campaign_pairs WHERE measurement_id = $1")
+        .bind(measurement_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM measurements WHERE id = $1")
+        .bind(measurement_id)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM mtr_traces WHERE id = $1")
         .bind(mtr_id)
         .execute(pool)

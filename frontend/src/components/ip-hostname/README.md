@@ -100,7 +100,11 @@ Every page and component that renders an IP address goes through this module.
 | `AlertRow` | See "Convention exceptions" below. |
 | `CandidateTable` | Destination IP column. |
 | `DestinationPanel` | Source and destination IPs. |
+| `DrilldownDrawer` | Transit-candidate IP in heading + description, dest IP in each pair row. |
+| `HistoryPairFilters` | Destination picker rows render IP via `<IpHostname>`. |
 | `HopDetailCard` | Hop IP set via `<IpHostname>`. |
+| `PairTable` | Destination IP column. |
+| `RawTab` | Virtualized row destination IP via `<IpHostname>`. |
 | `RouteHistoryTable` | No IP cells — lists snapshot timestamps only. Not applicable. |
 | `RouteTable` | Per-hop IP via `<IpHostname>` in the Hostname column. |
 | `RouteTopology` | Node labels updated in-place via `useIpHostname` + Cytoscape `element.data()`. |

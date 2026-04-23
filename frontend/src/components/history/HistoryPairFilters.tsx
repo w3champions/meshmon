@@ -7,6 +7,7 @@ import {
   useHistorySources,
 } from "@/api/hooks/history";
 import { CustomRangeInputs } from "@/components/CustomRangeInputs";
+import { IpHostname } from "@/components/ip-hostname";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -540,7 +541,7 @@ function DestinationOption({
       <span className="font-medium">
         {catalogueMissing ? (
           <>
-            <span className="font-mono">{destination.destination_ip}</span>
+            <IpHostname ip={destination.destination_ip} />
             <span className="ml-2 text-xs text-muted-foreground">— no metadata</span>
           </>
         ) : (
@@ -548,8 +549,8 @@ function DestinationOption({
         )}
       </span>
       {!catalogueMissing && (
-        <span className="font-mono text-xs text-muted-foreground">
-          {destination.destination_ip}
+        <span className="text-xs text-muted-foreground">
+          <IpHostname ip={destination.destination_ip} />
           {destination.city ? ` · ${destination.city}` : ""}
           {destination.country_code ? ` · ${destination.country_code}` : ""}
           {destination.asn != null ? ` · AS${destination.asn}` : ""}
