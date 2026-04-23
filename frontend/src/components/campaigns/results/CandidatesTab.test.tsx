@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { Campaign, CampaignState } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -186,19 +187,29 @@ function setupMocks(evaluation: Evaluation | null, opts?: { isLoading?: boolean 
   } as unknown as ReturnType<typeof useCampaignMeasurements>);
 }
 
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
 function renderTab(campaign: Campaign) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <CandidatesTab campaign={campaign} />
-      <Toaster />
+      <IpHostnameProvider>
+        <CandidatesTab campaign={campaign} />
+        <Toaster />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
 
 beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
   forcePairStub.mutate.mockReset();
   triggerDetailStub.mutate.mockReset();
   navigate.mockReset();
@@ -208,6 +219,7 @@ afterEach(() => {
   cleanup();
   toast.dismiss();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ---------------------------------------------------------------------------

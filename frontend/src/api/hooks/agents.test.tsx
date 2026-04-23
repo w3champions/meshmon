@@ -114,4 +114,21 @@ describe("useAgent", () => {
     act(() => {});
     expect(result.current.hostname).toBeUndefined();
   });
+
+  test("empty id does not fire a fetch", async () => {
+    // Callers sometimes pass a possibly-undefined search param via
+    // `useAgent(search.source ?? "")`. Without the `enabled: !!id` guard this
+    // hits `GET /api/agents/` and 404s on every render — a wasted request.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ error: "nf" }), { status: 404 }));
+    const { result } = renderHook(() => useAgent(""), { wrapper: wrap() });
+
+    // Query starts in the `pending` / `disabled` state and never resolves,
+    // because the queryFn is never invoked.
+    act(() => {});
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(result.current.data).toBeUndefined();
+  });
 });

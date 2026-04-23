@@ -83,6 +83,15 @@ interface MockFixture {
   measurements?: HistoryMeasurement[];
 }
 
+const AGENT_A = {
+  id: "agent-a",
+  display_name: "Agent A",
+  ip: "10.1.2.3",
+  hostname: "agent-a.example.com",
+  registered_at: "2026-01-01T00:00:00Z",
+  last_seen_at: new Date().toISOString(),
+};
+
 function installFetchMock(fixture: MockFixture): void {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : (input as Request).url;
@@ -96,6 +105,13 @@ function installFetchMock(fixture: MockFixture): void {
     }
     if (url.includes("/api/history/measurements")) {
       return new Response(JSON.stringify(fixture.measurements ?? []), { status: 200 });
+    }
+    // Single-agent fetch — used by useAgent(source) in HistoryPair.
+    if (url.match(/\/api\/agents\/[^/]+$/)) {
+      return new Response(JSON.stringify(AGENT_A), { status: 200 });
+    }
+    if (url.includes("/api/agents")) {
+      return new Response(JSON.stringify([AGENT_A]), { status: 200 });
     }
     return new Response("nf", { status: 404 });
   });
@@ -238,6 +254,23 @@ describe("HistoryPair", () => {
     // The option without catalogue metadata surfaces the raw IP plus the
     // "no metadata" tag instead of a formatted display name.
     expect(await screen.findByText(/— no metadata/i)).toBeInTheDocument();
+  });
+
+  test("pair heading renders source agent IP and destination IP via IpHostname", async () => {
+    installFetchMock({ measurements: [measurement()] });
+    renderHistoryPair("/history/pair?source=agent-a&destination=10.0.0.1");
+
+    // Wait for measurements to load so the results section (including the
+    // pair heading) is mounted.
+    await screen.findByRole("img", { name: /latency over time/i });
+
+    // Source agent IP (from useAgent("agent-a") → AGENT_A.ip = "10.1.2.3").
+    const heading = await screen.findByTestId("history-pair-heading");
+    expect(heading).toBeInTheDocument();
+    // Both IPs render inside the heading (bare IP fallback when provider
+    // has no hostname seeded in the test environment).
+    expect(heading).toHaveTextContent("10.1.2.3");
+    expect(heading).toHaveTextContent("10.0.0.1");
   });
 });
 

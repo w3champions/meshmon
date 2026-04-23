@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { usePathOverview } from "@/api/hooks/path-overview";
 import { useRouteSnapshot } from "@/api/hooks/route-snapshot";
 import { GrafanaPanel } from "@/components/GrafanaPanel";
+import { IpHostname } from "@/components/ip-hostname";
 import { RouteTable, type RouteTableDiff } from "@/components/RouteTable";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -171,9 +172,9 @@ export default function Report() {
 
       <section className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <span className="text-muted-foreground">From:</span>
-        <span className="font-mono">{data.source.ip}</span>
+        <IpHostname ip={data.source.ip} />
         <span className="text-muted-foreground">To:</span>
-        <span className="font-mono">{data.target.ip}</span>
+        <IpHostname ip={data.target.ip} />
         <span className="text-muted-foreground">Protocol:</span>
         <span className="font-semibold uppercase">{primary ?? "—"}</span>
         <span className="text-muted-foreground">Window:</span>

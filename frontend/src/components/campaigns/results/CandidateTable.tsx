@@ -13,6 +13,7 @@
 
 import { useMemo } from "react";
 import type { Evaluation } from "@/api/hooks/evaluation";
+import { IpHostname } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import {
@@ -294,7 +295,9 @@ export function CandidateTable({
                         ) : null}
                       </div>
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{candidate.destination_ip}</TableCell>
+                    <TableCell className="text-xs">
+                      <IpHostname ip={candidate.destination_ip} />
+                    </TableCell>
                     <TableCell className="text-sm">{cityLabel(candidate)}</TableCell>
                     <TableCell className="text-sm">
                       {candidate.asn === null || candidate.asn === undefined ? (

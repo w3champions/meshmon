@@ -210,4 +210,15 @@ body {
   article td {
     padding: 4px 8px !important;
   }
+
+  /* Keep IpHostname spans inline on paper — long reverse-DNS names must not
+     wrap mid-cell. The `.font-mono` utility class is the stable root applied
+     by IpHostname on every render path (positive hit or bare-IP fallback).
+     `title` carries the full untruncated value so operators can read it in
+     PDF viewer tooltip on hover. */
+  article .font-mono {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
