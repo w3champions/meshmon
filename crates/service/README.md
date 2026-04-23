@@ -93,16 +93,15 @@ The service uses `sqlx::query!` / `sqlx::query_as!` macros. The macros validate 
 # One-time setup:
 cargo install sqlx-cli --no-default-features --features rustls,postgres --version ~0.8
 
-# Bring up Postgres + apply migrations + regenerate the cache:
-docker run -d --rm --name meshmon-prep -p 55432:5432 \
-    -e POSTGRES_PASSWORD=meshmon timescale/timescaledb:2.26.3-pg16
-sleep 3
-export DATABASE_URL=postgres://postgres:meshmon@127.0.0.1:55432/postgres
-sqlx migrate run --source crates/service/migrations
-cargo sqlx prepare --workspace -- --all-targets --all-features
+# After changing any query!/query_as! macro:
+cargo xtask sqlx-prepare
 git add .sqlx
-docker stop meshmon-prep
 ```
+
+`cargo xtask sqlx-prepare` spawns a throwaway `meshmon-sqlx-prep-<uuid>`
+TimescaleDB container on a kernel-assigned host port, applies migrations,
+runs `cargo sqlx prepare --workspace -- --all-targets --all-features`,
+then tears the container down. Concurrent invocations are safe.
 
 Without `DATABASE_URL`, set `SQLX_OFFLINE=true` (CI will).
 
