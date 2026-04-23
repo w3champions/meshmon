@@ -23,21 +23,33 @@
 //! and ends with a trailing newline. Deterministic output keeps `git diff`
 //! clean across regenerations.
 //!
-//! ## `test-db <up|down|status>`
+//! ## `test-db <up|down [--name <n>]|status>`
 //!
-//! Manage a shared TimescaleDB container for integration tests.
-//! See `src/test_db.rs` for details.
+//! Manage per-invocation TimescaleDB containers for integration tests.
+//! `up` mints a fresh `meshmon-test-pg-<uuid>` container and prints the
+//! export line; `down` (no name) reaps every leftover with that prefix;
+//! `down --name <n>` targets one container; `status` lists running
+//! containers with their connect URLs.
 //!
 //! ## `test [-- <nextest-args>]`
 //!
-//! Provision the shared DB and run the full workspace test suite via
-//! `cargo nextest`. Requires `cargo-nextest` to be installed.
+//! Spawn a per-invocation TimescaleDB container, run the full workspace
+//! test suite via `cargo nextest`, then tear the container down.
+//! Requires `cargo-nextest` to be installed.
+//!
+//! ## `sqlx-prepare`
+//!
+//! Spawn a per-invocation TimescaleDB container, apply migrations, run
+//! `cargo sqlx prepare --workspace -- --all-targets --all-features`,
+//! tear the container down. Leaves `.sqlx/` updated for the developer
+//! to commit. Requires `sqlx-cli` to be installed.
 //!
 //! ## `test-e2e [-- <cargo-test-args>]`
 //!
 //! Bring up the compose stack and run the `meshmon-e2e` test package.
 
 mod signal;
+mod sqlx_prepare;
 mod test_cmd;
 mod test_db;
 
@@ -49,7 +61,6 @@ use std::path::PathBuf;
 const OPENAPI_RELATIVE_PATH: &str = "frontend/src/api/openapi.gen.json";
 
 fn main() -> Result<()> {
-    signal::install_once();
     let mut args = env::args().skip(1);
     let Some(cmd) = args.next() else {
         print_usage();
@@ -60,18 +71,31 @@ fn main() -> Result<()> {
         "test-db" => {
             let subcmd = args.next().unwrap_or_default();
             match subcmd.as_str() {
-                "up" => test_db::up(),
-                "down" => test_db::down(),
-                "status" => test_db::status(),
+                "up" => test_db::cmd_up(),
+                "down" => {
+                    // Optional `--name <n>` flag.
+                    let mut name: Option<String> = None;
+                    while let Some(arg) = args.next() {
+                        match arg.as_str() {
+                            "--name" => {
+                                name =
+                                    Some(args.next().ok_or_else(|| {
+                                        anyhow::anyhow!("--name requires a value")
+                                    })?);
+                            }
+                            other => bail!("unknown flag for test-db down: {other}"),
+                        }
+                    }
+                    test_db::cmd_down(name)
+                }
+                "status" => test_db::cmd_status(),
                 other => {
-                    eprintln!("usage: cargo xtask test-db <up|down|status>");
+                    eprintln!("usage: cargo xtask test-db <up|down [--name <n>]|status>");
                     bail!("unknown test-db subcommand: {other}");
                 }
             }
         }
         "test" => {
-            // Collect everything after an optional `--` separator as extra
-            // args forwarded to nextest.
             let extra: Vec<String> = args.collect();
             let extra = strip_separator(extra);
             test_cmd::test(extra)
@@ -80,6 +104,11 @@ fn main() -> Result<()> {
             let extra: Vec<String> = args.collect();
             let extra = strip_separator(extra);
             test_cmd::test_e2e(extra)
+        }
+        "sqlx-prepare" => {
+            let extra: Vec<String> = args.collect();
+            let extra = strip_separator(extra);
+            sqlx_prepare::run(extra)
         }
         other => {
             print_usage();
@@ -140,10 +169,11 @@ fn print_usage() {
     eprintln!("usage: cargo xtask <subcommand>");
     eprintln!();
     eprintln!("subcommands:");
-    eprintln!("  openapi              regenerate {OPENAPI_RELATIVE_PATH}");
-    eprintln!("  test-db up           start shared TimescaleDB container");
-    eprintln!("  test-db down         stop and remove shared TimescaleDB container");
-    eprintln!("  test-db status       report container state and DATABASE_URL");
-    eprintln!("  test [-- <args>]     provision DB + run workspace tests via nextest");
-    eprintln!("  test-e2e [-- <args>] bring up compose stack + run meshmon-e2e");
+    eprintln!("  openapi                    regenerate {OPENAPI_RELATIVE_PATH}");
+    eprintln!("  test-db up                 spawn fresh per-invocation TimescaleDB container");
+    eprintln!("  test-db down [--name <n>]  remove one (or all) test containers");
+    eprintln!("  test-db status             list running test containers + DATABASE_URLs");
+    eprintln!("  test [-- <args>]           per-invocation DB + workspace nextest run");
+    eprintln!("  sqlx-prepare               per-invocation DB + cargo sqlx prepare");
+    eprintln!("  test-e2e [-- <args>]       bring up compose stack + run meshmon-e2e");
 }

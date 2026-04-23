@@ -40,7 +40,6 @@ pub fn install_once() {
 /// Register a teardown closure invoked on SIGINT/SIGTERM. Returns
 /// nothing — there is no deregistration: the process is exiting.
 // Called by resource-owning modules (test_db, etc.) that are wired in later.
-#[allow(dead_code)]
 pub fn on_signal<F>(f: F)
 where
     F: Fn() + Send + Sync + 'static,
