@@ -170,9 +170,13 @@ async fn hostnames_for_empty_input_returns_empty_map() {
 
 #[tokio::test]
 async fn retention_policy_drops_expired_rows() {
-    // Retention drops whole chunks. Seed one row at -91 days; give
-    // it its own chunk by keeping all other rows in this test out
-    // of the same 7-day window.
+    // Retention drops whole chunks. Seed one row at -100 days so the
+    // 7-day chunk containing it always ends before the 90-day cutoff
+    // (chunk end ≤ -93d < -90d), regardless of calendar alignment with
+    // TimescaleDB's epoch-based chunk boundaries. Anything in the
+    // [-91d, -97d] range is calendar-flaky — chunks containing those
+    // points may end inside the 90-day keep window depending on the
+    // date the test is run.
     //
     // `shared_migrated_pool` creates its database from `template0`, which
     // means the `timescaledb` extension is not installed there. This test
@@ -190,7 +194,7 @@ async fn retention_policy_drops_expired_rows() {
 
     sqlx::query(
         "INSERT INTO ip_hostname_cache (ip, hostname, resolved_at) \
-         VALUES ($1, 'to-be-dropped.example.com', NOW() - INTERVAL '91 days')",
+         VALUES ($1, 'to-be-dropped.example.com', NOW() - INTERVAL '100 days')",
     )
     .bind(ip)
     .execute(pool)
