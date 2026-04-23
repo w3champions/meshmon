@@ -10,6 +10,7 @@ import {
 } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components, operations } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 
 export type Campaign = components["schemas"]["CampaignDto"];
 export type CreateCampaignBody = components["schemas"]["CreateCampaignRequest"];
@@ -405,7 +406,7 @@ export function useCampaignPairs(
   id: string | undefined,
   filter: CampaignPairsFilter = {},
 ): UseQueryResult<CampaignPair[], Error> {
-  return useQuery({
+  const query = useQuery({
     queryKey: id
       ? [...campaignPairsKey(id), filter]
       : ["campaigns", "entry", "__disabled__", "pairs"],
@@ -428,6 +429,12 @@ export function useCampaignPairs(
       return data as CampaignPair[];
     },
   });
+  // Seed the shared hostname map from every response. Each `PairDto` carries
+  // `{ destination_ip, destination_hostname? }`.
+  useSeedHostnamesOnResponse(query.data, (pairs) =>
+    pairs.map((p) => ({ ip: p.destination_ip, hostname: p.destination_hostname })),
+  );
+  return query;
 }
 
 /**

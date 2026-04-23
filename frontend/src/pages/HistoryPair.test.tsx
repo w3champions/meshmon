@@ -10,13 +10,28 @@ import {
 } from "@tanstack/react-router";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import "@/test/cytoscape-mock";
 import type { HistoryMeasurement } from "@/api/hooks/history";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import HistoryPair, { HISTORY_MEASUREMENTS_CAP } from "@/pages/HistoryPair";
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const SOURCES = [
   { source_agent_id: "agent-a", display_name: "Agent A" },
@@ -119,7 +134,9 @@ function renderHistoryPair(initialUrl: string) {
   });
   const rendered = render(
     <QueryClientProvider client={qc}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
   return { rendered, router };

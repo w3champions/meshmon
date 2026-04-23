@@ -21,6 +21,7 @@ import { type UseQueryResult, useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { ProbeProtocol } from "@/api/hooks/campaigns";
 import type { components } from "@/api/schema.gen";
+import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
 
 export type HistorySource = components["schemas"]["HistorySourceDto"];
 export type HistoryDestination = components["schemas"]["HistoryDestinationDto"];
@@ -73,7 +74,7 @@ export function useHistoryDestinations(
   source: string | undefined,
   q: string | undefined,
 ): UseQueryResult<HistoryDestination[], Error> {
-  return useQuery({
+  const query = useQuery({
     queryKey: historyDestinationsKey(source ?? "", q),
     enabled: !!source,
     queryFn: async (): Promise<HistoryDestination[]> => {
@@ -91,6 +92,12 @@ export function useHistoryDestinations(
       return (data ?? []) as HistoryDestination[];
     },
   });
+  // Seed the shared hostname map from every response. Each destination row
+  // carries `{ destination_ip, hostname? }`.
+  useSeedHostnamesOnResponse(query.data, (destinations) =>
+    destinations.map((d) => ({ ip: d.destination_ip, hostname: d.hostname })),
+  );
+  return query;
 }
 
 export interface HistoryMeasurementsFilter {
@@ -107,7 +114,7 @@ export interface HistoryMeasurementsFilter {
 export function useHistoryMeasurements(
   filter: HistoryMeasurementsFilter | null,
 ): UseQueryResult<HistoryMeasurement[], Error> {
-  return useQuery({
+  const query = useQuery({
     queryKey: filter
       ? historyMeasurementsKey(
           filter.source,
@@ -135,4 +142,19 @@ export function useHistoryMeasurements(
       return (data ?? []) as HistoryMeasurement[];
     },
   });
+  // Seed the shared hostname map from every response. Seeds destination
+  // IP + hostname per row, plus every hop IP when `mtr_hops` is present.
+  useSeedHostnamesOnResponse(query.data, function* (measurements) {
+    for (const m of measurements) {
+      yield { ip: m.destination_ip, hostname: m.destination_hostname };
+      if (m.mtr_hops) {
+        for (const hop of m.mtr_hops) {
+          for (const o of hop.observed_ips) {
+            yield { ip: o.ip, hostname: o.hostname };
+          }
+        }
+      }
+    }
+  });
+  return query;
 }

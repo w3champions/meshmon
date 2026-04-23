@@ -8,6 +8,7 @@ import { GrafanaPanel } from "@/components/GrafanaPanel";
 import { HopDetailCard } from "@/components/HopDetailCard";
 import { ProtocolToggle } from "@/components/ProtocolToggle";
 import { RouteHistoryTable } from "@/components/RouteHistoryTable";
+import { RouteTable } from "@/components/RouteTable";
 import { RouteTopology } from "@/components/RouteTopology";
 import { Sparkline } from "@/components/Sparkline";
 import { TimeRangePicker } from "@/components/TimeRangePicker";
@@ -249,6 +250,13 @@ export default function PathDetail() {
           />
         )}
       </section>
+
+      {latest && latest.hops.length > 0 && (
+        <section>
+          <h2 className="mb-2 text-lg font-semibold">Current route hops</h2>
+          <RouteTable hops={latest.hops} />
+        </section>
+      )}
 
       <section>
         <h2 className="mb-2 text-lg font-semibold">Route change history</h2>

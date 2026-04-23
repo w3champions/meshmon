@@ -1,3 +1,8 @@
+/**
+ * IP→hostname provider seeding: intentionally absent from this hook.
+ * `RouteSnapshotSummary` carries no `hops` field on the wire (summary-only
+ * shape), so there are no hop IPs to seed into the provider.
+ */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema.gen";

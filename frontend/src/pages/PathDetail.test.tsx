@@ -9,12 +9,26 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import "@/test/cytoscape-mock";
 import { IpHostnameProvider } from "@/components/ip-hostname";
 import PathDetail from "@/pages/PathDetail";
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const now = new Date();
 const freshSnapshot = {
@@ -179,6 +193,23 @@ describe("PathDetail", () => {
     expect(href).toContain("protocol=icmp");
     expect(href).not.toContain("source_ip=");
     expect(href).not.toContain("target_ip=");
+  });
+
+  test("renders the Hostname column header in the current route hops table", async () => {
+    mockEndpoints(overview());
+    renderPage();
+    // The "Current route hops" section is rendered when latest has hops.
+    // freshSnapshot has one hop, so the RouteTable is mounted and should show
+    // a Hostname column header.
+    expect(await screen.findByRole("columnheader", { name: /hostname/i })).toBeInTheDocument();
+  });
+
+  test("renders hop IP in the Hostname column (cold miss → bare IP)", async () => {
+    mockEndpoints(overview());
+    renderPage();
+    // The hop IP "10.0.0.1" is the dominant IP from freshSnapshot. IpHostname
+    // renders it as the bare IP on a cold miss (no provider seeding yet).
+    expect(await screen.findByText("10.0.0.1")).toBeInTheDocument();
   });
 
   test("renders empty-state when no snapshots exist in window", async () => {

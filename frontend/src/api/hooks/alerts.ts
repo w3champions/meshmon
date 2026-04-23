@@ -1,3 +1,13 @@
+/**
+ * IP→hostname provider seeding: intentionally absent from this hook.
+ *
+ * Alerts carry `source_hostname` / `target_hostname` as flat sidecars on
+ * agent-id labels; the wire does not carry source or target IPs, so the
+ * IP→hostname provider cannot be seeded from this hook. Alert rows render
+ * the flat hostname fields directly via the documented `AlertRow` convention
+ * exception — no `useSeedHostnamesOnResponse` call is needed or appropriate
+ * here.
+ */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema.gen";

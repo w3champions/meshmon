@@ -9,7 +9,8 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IpHostnameProvider } from "@/components/ip-hostname";
 import Report from "./Report";
 
 interface MockResponse {
@@ -56,12 +57,28 @@ function renderReport(search: string) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <RouterProvider router={router} />
+      <IpHostnameProvider>
+        <RouterProvider router={router} />
+      </IpHostnameProvider>
     </QueryClientProvider>,
   );
 }
 
-afterEach(() => vi.restoreAllMocks());
+class NoopEventSource {
+  constructor(public url: string) {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  close(): void {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("EventSource", NoopEventSource);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const defaultSearch =
   "?source_id=br&target_id=fr&from=2026-04-13T10:00:00.000Z&to=2026-04-13T14:00:00.000Z";
