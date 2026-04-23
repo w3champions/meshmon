@@ -167,4 +167,3 @@ async fn hostnames_for_empty_input_returns_empty_map() {
     assert!(map.is_empty());
     tx.rollback().await.unwrap();
 }
-
