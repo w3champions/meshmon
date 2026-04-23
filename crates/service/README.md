@@ -144,31 +144,30 @@ IP-carrying DTOs consume the cache via `hostname::hostnames_for`
 and enqueue cold misses through `AppState::hostname_resolver`. See
 `src/hostname/README.md` for the full contract.
 
-IP-carrying response DTOs — `CatalogueEntryDto` (in
-`src/catalogue/dto.rs`) and `AgentSummary` (in `src/http/user_api.rs`,
-reused by both `GET /api/agents` and `GET /api/agents/{id}`) —
-carry a server-joined `hostname: Option<String>` field. The catalogue
-and agent handlers build the DTOs from their data source, then call
-a `stamp_hostnames` helper that runs one batched `hostnames_for`
-lookup per response: positive cache hits set `Some(h)`, negative
-hits leave `None`, and cold misses enqueue a background resolution
-against the caller's `SessionId` so the completion lands on that
-session's SSE stream. The field is `#[serde(skip_serializing_if =
+Every IP-carrying response DTO ships a resolved hostname. DTOs with
+a single IP carry `hostname: Option<String>`; flat-keyed shapes with
+two IPs carry `source_hostname` / `target_hostname` (alerts), and
+route-pair or campaign shapes carry `destination_hostname` alongside
+hop-level `hostname` fields. All fields are stamped server-side by the
+shared `stamp_hostnames` helper via one batched `hostnames_for` call
+per response: positive hits set `Some(h)`, negative hits leave `None`,
+cold misses enqueue a background resolution against the caller's
+`SessionId`. Every field is `#[serde(skip_serializing_if =
 "Option::is_none")]` — absent on the wire rather than `null` — and
-the registry itself never stores hostname state.
+no hostname state is written to persistent storage.
 
 The frontend `frontend/src/components/ip-hostname/` module is the
 sole consumer of these wire surfaces. It maintains a client-side
-`Map<ip, Option<string>>` seeded from DTO `hostname` fields via the
+`Map<ip, Option<string>>` seeded from DTO hostname fields via the
 `useSeedHostnamesOnResponse` hook, subscribes to
 `/api/hostnames/stream` through an `EventSource` to receive
 resolution completions, and calls `POST /api/hostnames/:ip/refresh`
-from the operator-facing refresh action. Render sites (catalogue
-table, entry card, entry drawer, agents table, agent card, and the
-campaign composer source and destination panels) read from the
-module through `<IpHostname />` and the `useIpHostname` /
+from the operator-facing refresh action. All render sites read from
+the module through `<IpHostname />` and the `useIpHostname` /
 `useIpHostnames` hooks; no other code path touches the stream, the
-refresh endpoint, or the hostname DTO field directly.
+refresh endpoint, or hostname DTO fields directly (see
+`frontend/src/components/ip-hostname/README.md` for the full
+render-site list and sanctioned exceptions).
 
 ## Agent API (gRPC)
 

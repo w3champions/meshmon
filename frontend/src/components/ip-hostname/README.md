@@ -76,3 +76,46 @@ toast, no exponential-backoff wrapper.
 (differentiating "not present on this DTO" from an intentional negative)
 so a cold-miss response can't overwrite a positive value that arrived
 earlier via SSE.
+
+## Render sites
+
+Every page and component that renders an IP address goes through this module.
+
+**Pages**
+
+| Page | Entry point |
+|---|---|
+| `CampaignDetail` | `DestinationPanel` + `CandidateTable` |
+| `HistoryPair` | pair heading IPs, `RouteTable` via `PathDetail` sub-view |
+| `Overview` | `AgentCard` per-node card |
+| `PathDetail` | `RouteTable` (hops) + `RouteTopology` (graph), `HopDetailCard` |
+| `Report` | `RouteTable` (hops) + `RouteTopology` (graph) |
+| `RouteCompare` | shared `RouteTable` |
+
+**Components**
+
+| Component | Notes |
+|---|---|
+| `AgentCard` | Agent IP via `<IpHostname>`. |
+| `AlertRow` | See "Convention exceptions" below. |
+| `CandidateTable` | Destination IP column. |
+| `DestinationPanel` | Source and destination IPs. |
+| `HopDetailCard` | Hop IP set via `<IpHostname>`. |
+| `RouteHistoryTable` | No IP cells — lists snapshot timestamps only. Not applicable. |
+| `RouteTable` | Per-hop IP via `<IpHostname>` in the Hostname column. |
+| `RouteTopology` | Node labels updated in-place via `useIpHostname` + Cytoscape `element.data()`. |
+
+## Convention exceptions
+
+### `AlertRow.tsx`
+
+`AlertRow` reads `alert.source_hostname` and `alert.target_hostname` as plain
+strings and formats them with `hostnameDisplay()`. It does **not** call
+`<IpHostname>` or seed the provider.
+
+Reason: the alerts wire shape carries no bare IP fields, only pre-resolved
+hostname sidecars stamped by the backend. There is no IP to seed the provider
+from, so the standard `<IpHostname ip={...} />` pattern cannot be applied. The
+backend has already resolved the hostname; the component just formats it. This
+is the only sanctioned exception to the "only `components/ip-hostname/` reads
+`.hostname`" rule.
