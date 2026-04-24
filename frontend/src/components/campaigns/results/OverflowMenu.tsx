@@ -99,7 +99,7 @@ export function OverflowMenu({ campaign, evaluation }: OverflowMenuProps) {
           pushToast({
             kind: "error",
             message:
-              "No agent-to-agent baselines from VictoriaMetrics in the last 15 minutes — wait for continuous-mesh data to accrue, or verify agents are online.",
+              "No agent-to-agent baseline measurements exist for this campaign yet. Add a pair or wait for in-flight measurements to settle, then retry.",
           });
           return;
         }

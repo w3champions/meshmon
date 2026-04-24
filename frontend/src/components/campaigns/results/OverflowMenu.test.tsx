@@ -236,7 +236,7 @@ describe("OverflowMenu — re-evaluate", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/no agent-to-agent baselines from victoriametrics/i),
+        screen.getByText(/no agent-to-agent baseline measurements exist/i),
       ).toBeInTheDocument();
     });
   });

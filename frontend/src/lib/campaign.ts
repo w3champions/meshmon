@@ -57,17 +57,17 @@ export function isNoBaselinePairs(err: unknown): boolean {
 }
 
 /**
- * 503 from `POST /evaluate` when `[upstream.vm_url]` is unset and the
- * evaluator therefore cannot pull continuous-mesh baselines from
- * VictoriaMetrics.
+ * Matches the `vm_not_configured` error code the backend returns when
+ * `[upstream.vm_url]` is unset. Helper parked for reuse in T54-03.
  */
 export function isVmNotConfigured(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "vm_not_configured";
 }
 
 /**
- * 503 from `POST /evaluate` when VictoriaMetrics is configured but the
- * query failed (unreachable, 5xx, malformed response).
+ * Matches the `vm_upstream` error code the backend returns when a VM
+ * query fails (unreachable, 5xx, malformed). Helper parked for reuse
+ * in T54-03.
  */
 export function isVmUpstream(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "vm_upstream";

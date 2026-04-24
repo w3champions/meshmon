@@ -288,7 +288,7 @@ describe("SettingsTab — submit flow", () => {
     await waitFor(() => {
       // Sonner renders into the Toaster; the operator copy lands there.
       expect(
-        screen.getByText(/no agent-to-agent baselines from victoriametrics/i),
+        screen.getByText(/no agent-to-agent baseline measurements exist/i),
       ).toBeInTheDocument();
     });
     // The form is intact — inputs kept their values.

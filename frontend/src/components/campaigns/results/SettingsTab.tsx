@@ -133,7 +133,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
     }
     if (isNoBaselinePairs(err)) {
       toastError(
-        "No agent-to-agent baselines from VictoriaMetrics in the last 15 minutes — wait for continuous-mesh data to accrue, or verify agents are online.",
+        "No agent-to-agent baseline measurements exist for this campaign yet. Add a pair or wait for in-flight measurements to settle, then retry.",
       );
       return;
     }
@@ -179,9 +179,8 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       <header className="flex flex-col gap-1">
         <h2 className="text-base font-semibold">Evaluation settings</h2>
         <p className="text-sm text-muted-foreground">
-          Persist new threshold / mode values and re-run the evaluator against the VictoriaMetrics
-          continuous-mesh baselines plus any active-probe measurements on this campaign. Available
-          once the campaign is Completed or Evaluated.
+          Persist new threshold / mode values and re-run the evaluator against this campaign's
+          measurements. Available once the campaign is Completed or Evaluated.
         </p>
       </header>
 
