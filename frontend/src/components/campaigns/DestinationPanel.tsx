@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { useCatalogueListInfinite } from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
@@ -11,13 +11,22 @@ import { Button } from "@/components/ui/button";
 import { destinationFilterToQuery } from "@/lib/catalogue-query";
 import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
+import { useToastStore } from "@/stores/toast";
 
 type FacetsResponse = components["schemas"]["FacetsResponse"];
 
 const ROW_HEIGHT = 44;
 const SCROLL_MAX_HEIGHT = "60vh";
 const INITIAL_SCROLL_RECT = { width: 1024, height: 600 };
-const PAGE_SIZE = 100;
+
+/**
+ * Catalogue page size. Matches the server-side `1..=500` clamp so the
+ * panel issues one fetch per batch of destinations that crosses the
+ * wire. The exhaustive "Add all" walk (`handleAddAllExhaustive`) drains
+ * subsequent pages through the same hook, so a single page size serves
+ * both browse and walk flows.
+ */
+const PAGE_SIZE = 500;
 
 /**
  * Shared CSS grid track expression for the header + virtualized body.
@@ -39,10 +48,10 @@ export interface DestinationPanelProps {
   facets: FacetsResponse | undefined;
   onOpenMap(): void;
   /**
-   * When true, every mutation button (Add all / Add matching / Remove all /
-   * Add IPs / Map view) is disabled and row-click no-ops. Filter rail stays
-   * live so the operator can still inspect matches. Composer sets this
-   * after a draft campaign has been created so further destination edits
+   * When true, every mutation button (Add all / Remove all / Add IPs /
+   * Map view) is disabled and row-click no-ops. Filter rail stays live
+   * so the operator can still inspect matches. Composer sets this after
+   * a draft campaign has been created so further destination edits
    * don't silently diverge from the persisted draft.
    */
   disabled?: boolean;
@@ -61,6 +70,26 @@ export function DestinationPanel({
   const listQuery = useCatalogueListInfinite(query, { pageSize: PAGE_SIZE });
   const [pasteOpen, setPasteOpen] = useState(false);
 
+  // Mirror the live `query` and `selected` props into refs so the walk
+  // handler — whose closure is frozen at click time — can observe
+  // mid-walk mutations. `useLayoutEffect` runs synchronously after
+  // commit, before any microtask can drain; plain `useEffect` is
+  // deferred until after paint, which leaves a window where a
+  // post-commit resolved Promise could still read the old value.
+  const queryRef = useRef(query);
+  useLayoutEffect(() => {
+    queryRef.current = query;
+    // A prior walk's error belonged to a previous filter and has no
+    // meaning under the new one — clear the banner on every filter
+    // change.
+    setWalkError(null);
+  }, [query]);
+
+  const selectedRef = useRef(selected);
+  useLayoutEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
   const rows: CatalogueEntry[] = useMemo(
     () => listQuery.data?.pages.flatMap((p) => p.entries) ?? [],
     [listQuery.data],
@@ -68,6 +97,17 @@ export function DestinationPanel({
 
   const total = listQuery.data?.pages[0]?.total ?? 0;
   const shapesActive = filter.shapes.length > 0;
+
+  // --- Exhaustive-walk state -------------------------------------------
+  // "Add all" drains the cursor chain under the current filter and merges
+  // every returned IP into `selected`. The walk owns state private to
+  // the panel — the composer does not need to know about progress.
+  const [walkProgress, setWalkProgress] = useState<{ collected: number; total: number } | null>(
+    null,
+  );
+  const [walkError, setWalkError] = useState<Error | null>(null);
+  // Ref (not state) so rapid double-clicks are guarded in the same tick.
+  const walkRunningRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -85,12 +125,101 @@ export function DestinationPanel({
     onSelectedChange(next);
   };
 
-  const handleAddVisible = () => {
-    if (disabled) return;
-    // F1 scope: snapshot IPs from already-loaded pages only.
-    // The catalogue-walk fallback that covers the "total > loaded rows" case
-    // lives in F2's CampaignComposer page (plan T47 F.7 §608).
-    addIps(rows.map((r) => r.ip));
+  const handleAddAllExhaustive = async () => {
+    if (disabled || walkRunningRef.current) return;
+
+    // Guard against a pre-first-page click. Seeding from an empty
+    // snapshot would emit `collectedIps.size === 0` and bail into the
+    // "no matching rows" path — that toast is correct but misleading
+    // when the real state is "catalogue hasn't returned yet". Nudge the
+    // operator to retry once the first page lands.
+    const initialPages = listQuery.data?.pages ?? [];
+    if (initialPages.length === 0) {
+      useToastStore.getState().pushToast({
+        kind: "error",
+        message: "Catalogue still loading — try again in a moment.",
+      });
+      return;
+    }
+
+    // Snapshot the active filter query. If the operator mutates the
+    // filter mid-walk, the infinite query key changes and subsequent
+    // `fetchNextPage` calls route to a different cursor chain — the
+    // aggregation would Frankenstein-union pages from two filters. The
+    // FilterRail stays live during the walk on purpose, so this check
+    // is the only defence against that race. Read via the ref — the
+    // handler closure is frozen at click time so a stale `query`
+    // wouldn't detect the change.
+    const startKey = JSON.stringify(queryRef.current);
+
+    walkRunningRef.current = true;
+    setWalkError(null);
+
+    try {
+      const seedTotal = initialPages[0]?.total ?? 0;
+      let collectedCount = initialPages.reduce((n, p) => n + p.entries.length, 0);
+      setWalkProgress({ collected: collectedCount, total: seedTotal });
+
+      // Drain remaining pages. `throwOnError: true` is load-bearing —
+      // without it, TanStack Query's `fetchNextPage` resolves with an
+      // error-carrying result (never rejects), so the walk would spin
+      // on a page-fetch failure with `result.hasNextPage` still true.
+      let hasNext = listQuery.hasNextPage;
+      let latestPages = initialPages;
+      while (hasNext) {
+        const result = await listQuery.fetchNextPage({ throwOnError: true });
+
+        // Filter changed since walk start — abort instead of mixing
+        // pages from different queries.
+        if (JSON.stringify(queryRef.current) !== startKey) {
+          useToastStore.getState().pushToast({
+            kind: "error",
+            message: "Filter changed — Add all aborted. Re-click to rerun under the new filter.",
+          });
+          setWalkProgress(null);
+          return;
+        }
+
+        latestPages = result.data?.pages ?? latestPages;
+        collectedCount = latestPages.reduce((n, p) => n + p.entries.length, 0);
+        const pageTotal = latestPages[0]?.total ?? seedTotal;
+        setWalkProgress({ collected: collectedCount, total: pageTotal });
+        hasNext = result.hasNextPage ?? false;
+      }
+
+      const collectedIps = new Set<string>();
+      for (const page of latestPages) {
+        for (const entry of page.entries) collectedIps.add(entry.ip);
+      }
+
+      // Defence-in-depth: if the walk aggregated zero IPs (pages arrived
+      // but carried no entries), don't emit a no-op set-swap.
+      if (collectedIps.size === 0) {
+        useToastStore.getState().pushToast({
+          kind: "error",
+          message: "Catalogue returned no matching rows — selection left unchanged.",
+        });
+        setWalkProgress(null);
+        return;
+      }
+
+      // Additive merge — prior manual row-clicks and IPs from a
+      // narrower filter survive a subsequent "Add all" pass. Read via
+      // `selectedRef` so row-click toggles that landed mid-walk are
+      // preserved; the closure-captured `selected` is frozen at click
+      // time and would silently clobber those edits.
+      const merged = new Set(selectedRef.current);
+      for (const ip of collectedIps) merged.add(ip);
+      onSelectedChange(merged);
+      setWalkProgress(null);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setWalkError(error);
+      useToastStore.getState().pushToast({ kind: "error", message: error.message });
+      setWalkProgress(null);
+    } finally {
+      walkRunningRef.current = false;
+    }
   };
 
   const handleRemoveAll = () => {
@@ -117,6 +246,25 @@ export function DestinationPanel({
 
   const estimatedTotal = shapesActive ? `~${total}` : `${total}`;
 
+  const walking = walkProgress !== null;
+  // "Add all" re-uses the display hook, so clicking before the first
+  // page lands races the empty-snapshot guard above. Gate on
+  // `isLoading` for the no-cache first-fetch case and on
+  // `pagesLoaded === 0` for the post-filter-change refetch case.
+  //
+  // Gate on pages-loaded, NOT on `rows.length`: shape filters apply
+  // point-in-polygon AFTER the SQL-bbox-limited page, so a first page
+  // can arrive with `entries: []` and `next_cursor != null` — the
+  // walk still has work to do. Gating on empty entries would lock the
+  // button for those filters even though later cursor pages may match.
+  //
+  // Do NOT gate on `isFetching` — the campaign-stream subscription
+  // triggers background refetches of the same query on every
+  // lifecycle event, which would flicker the button on a stable
+  // filter.
+  const pagesLoaded = listQuery.data?.pages.length ?? 0;
+  const addAllDisabled = disabled || walking || listQuery.isLoading || pagesLoaded === 0;
+
   return (
     <section aria-label="Destinations" className="flex h-full min-h-0 gap-3">
       <aside className="w-64 shrink-0 overflow-y-auto">
@@ -135,29 +283,14 @@ export function DestinationPanel({
             {selected.size} destinations selected
           </Badge>
           <div className="ml-auto flex items-center gap-2">
-            {/*
-              Plan F.3 §527: "Add all" and "Add matching" share the same handler
-              in F1 — both snapshot the currently loaded rows. Split if F2
-              changes semantics (e.g. when the catalogue-walk fallback at F.7
-              §608 lands).
-            */}
             <Button
               type="button"
               size="sm"
               variant="outline"
-              onClick={handleAddVisible}
-              disabled={disabled || rows.length === 0}
+              onClick={handleAddAllExhaustive}
+              disabled={addAllDisabled}
             >
-              Add all
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={handleAddVisible}
-              disabled={disabled || rows.length === 0}
-            >
-              Add matching
+              {walking ? `Adding ${walkProgress.collected}…` : "Add all"}
             </Button>
             <Button
               type="button"
@@ -182,6 +315,26 @@ export function DestinationPanel({
             </Button>
           </div>
         </header>
+
+        {walkProgress !== null ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm"
+          >
+            Collecting {walkProgress.collected} of {shapesActive ? "~" : ""}
+            {walkProgress.total} destinations…
+          </p>
+        ) : null}
+
+        {walkError !== null ? (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            Walk failed: {walkError.message}
+          </div>
+        ) : null}
 
         {/*
           Real `<table>` can't carry `fr` tracks (table-layout needs

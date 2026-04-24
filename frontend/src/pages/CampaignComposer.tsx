@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignStream } from "@/api/hooks/campaign-stream";
 import {
@@ -10,11 +10,7 @@ import {
   usePreviewDispatchCount,
   useStartCampaign,
 } from "@/api/hooks/campaigns";
-import {
-  useCatalogueFacets,
-  useCatalogueListInfinite,
-  useCatalogueMap,
-} from "@/api/hooks/catalogue";
+import { useCatalogueFacets, useCatalogueMap } from "@/api/hooks/catalogue";
 import { DestinationPanel } from "@/components/campaigns/DestinationPanel";
 import { KnobPanel } from "@/components/campaigns/KnobPanel";
 import { SizePreview } from "@/components/campaigns/SizePreview";
@@ -36,7 +32,6 @@ import { useToastStore } from "@/stores/toast";
 // Constants
 // ---------------------------------------------------------------------------
 
-const WALK_PAGE_SIZE = 500;
 const DEFAULT_MAP_ZOOM = 2;
 
 const EMPTY_FILTER: FilterValue = {
@@ -97,18 +92,6 @@ export default function CampaignComposer() {
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
   const [autoStartAfterCreate, setAutoStartAfterCreate] = useState(false);
 
-  // --- Destination-walk state -------------------------------------------
-  const [walkProgress, setWalkProgress] = useState<{ collected: number; total: number } | null>(
-    null,
-  );
-  // The last walk failure, persisted so the UI can render an inline alert
-  // in addition to the one-shot toast. Cleared on every new walk.
-  const [walkError, setWalkError] = useState<Error | null>(null);
-  // Tracks whether a walk is already running so rapid double-clicks are
-  // ignored. Must be a ref (not state) so the guard fires in the same tick
-  // as the first click — a state update is queued for the next render.
-  const walkRunningRef = useRef(false);
-
   // --- Hooks --------------------------------------------------------------
   const createMutation = useCreateCampaign();
   const startMutation = useStartCampaign();
@@ -120,12 +103,6 @@ export default function CampaignComposer() {
   // at Start time. The operator must Back out (which deletes the draft)
   // and start a new composer if they need to change anything.
   const draftLocked = draftCampaignId !== null;
-
-  // Pre-submit approximate destination total: uses the first page's `total`
-  // exactly like `DestinationPanel` so the SizePreview stays consistent
-  // with what the panel footer already advertises. Once the operator has
-  // pasted IPs or explicitly selected some, that count wins.
-  const destQuery = useMemo(() => destinationFilterToQuery(destFilter), [destFilter]);
 
   // --- Map pins (gated on which panel opened the dialog) ----------------
 
@@ -142,9 +119,9 @@ export default function CampaignComposer() {
   }, [mapOpenFor, agentsQuery.data]);
 
   const destMapQuery = useMemo(() => {
+    // The map endpoint does not carry `shapes` or `city` — mirror
+    // Catalogue.tsx. Those two keys stay out of the projection below.
     const q = destinationFilterToQuery(destFilter);
-    // The map endpoint does not carry `shapes` or `city` — mirror Catalogue.tsx.
-    // Those two keys stay out of the projection below.
     const { shapes: _shapes, city: _city, ...rest } = q;
     return rest;
   }, [destFilter]);
@@ -179,93 +156,6 @@ export default function CampaignComposer() {
   const handleViewportChange = useCallback((bbox: Bbox, zoom: number) => {
     setMapViewport({ bbox, zoom });
   }, []);
-
-  // --- Destination-walk ("Add all across all pages") ---------------------
-  //
-  // The composer owns a secondary `useCatalogueListInfinite` for the
-  // exhaustive walk so the DestinationPanel's shipped "Add all (loaded
-  // pages only)" semantics stay intact (plan F.7 §608). Driving the walk
-  // through the same hook the panel uses means tests mock one place
-  // (the hook) instead of reaching into the openapi-fetch client.
-
-  const walkInfinite = useCatalogueListInfinite(destQuery, {
-    pageSize: WALK_PAGE_SIZE,
-  });
-
-  // Plain function (no `useCallback`) — `walkInfinite` is the full hook
-  // result, which TanStack Query reshapes every render, so memoizing on
-  // it defeats the point. The handler isn't threaded through a prop, so
-  // referential stability doesn't matter here.
-  const handleAddAllDestinationsExhaustive = async () => {
-    if (walkRunningRef.current) return;
-
-    // Guard against an empty catalogue snapshot. If the hook hasn't
-    // returned even the first page yet (clicked before initial load, or
-    // during a refetch), seeding `latestPages=[]` and passing an empty
-    // Set into `setDestSet` would silently wipe the operator's existing
-    // destination selection. Leave `destSet` untouched and nudge the
-    // operator to retry once the catalogue lands.
-    const initialPages = walkInfinite.data?.pages ?? [];
-    if (initialPages.length === 0) {
-      useToastStore.getState().pushToast({
-        kind: "error",
-        message: "Catalogue still loading — try again in a moment.",
-      });
-      return;
-    }
-
-    walkRunningRef.current = true;
-    // Clear any prior failure so a retry starts from a clean slate.
-    setWalkError(null);
-
-    try {
-      // Seed progress from whatever's already loaded by the hook.
-      const seedTotal = initialPages[0]?.total ?? 0;
-      let collectedCount = initialPages.reduce((n, p) => n + p.entries.length, 0);
-      setWalkProgress({ collected: collectedCount, total: seedTotal });
-
-      // Drain remaining pages via `fetchNextPage`. Each call returns the
-      // updated InfiniteData snapshot, so we read the cumulative page
-      // list off the result rather than racing the hook's state.
-      let hasNext = walkInfinite.hasNextPage;
-      let latestPages = initialPages;
-      while (hasNext) {
-        const result = await walkInfinite.fetchNextPage();
-        latestPages = result.data?.pages ?? latestPages;
-        collectedCount = latestPages.reduce((n, p) => n + p.entries.length, 0);
-        const total = latestPages[0]?.total ?? seedTotal;
-        setWalkProgress({ collected: collectedCount, total });
-        hasNext = result.hasNextPage ?? false;
-      }
-
-      const collectedIps = new Set<string>();
-      for (const page of latestPages) {
-        for (const entry of page.entries) collectedIps.add(entry.ip);
-      }
-      // Defence-in-depth: if the walk aggregated zero IPs (pages arrived
-      // but carried no entries), don't nuke the operator's current set.
-      if (collectedIps.size === 0) {
-        useToastStore.getState().pushToast({
-          kind: "error",
-          message: "Catalogue returned no matching rows — selection left unchanged.",
-        });
-        setWalkProgress(null);
-        return;
-      }
-      setDestSet(collectedIps);
-      setWalkProgress(null);
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      // Persisted `walkError` drives an inline alert; the toast is the
-      // noisier UX notification. Both surface the same failure, never
-      // one without the other.
-      setWalkError(error);
-      useToastStore.getState().pushToast({ kind: "error", message: error.message });
-      setWalkProgress(null);
-    } finally {
-      walkRunningRef.current = false;
-    }
-  };
 
   // --- Start flow --------------------------------------------------------
 
@@ -508,27 +398,10 @@ export default function CampaignComposer() {
   // showing the full filter total.
   const approxDestTotal = destSet.size;
 
-  // The exhaustive-walk action is disabled while the catalogue hook is
-  // mid-initial-fetch (clicking before the first page lands would race the
-  // empty-snapshot guard inside `handleAddAllDestinationsExhaustive`) and
-  // during subsequent background refetches that haven't produced a page
-  // yet. `isLoading` covers the first load; `isFetching` covers manual
-  // refetches and filter-triggered reloads.
-  const walkButtonDisabled =
-    walkProgress !== null || draftLocked || walkInfinite.isLoading || walkInfinite.isFetching;
-
   return (
     <form onSubmit={handleStart} aria-label="Create campaign" className="flex flex-col gap-4">
       <header className="flex flex-wrap items-baseline justify-between gap-3">
         <h1 className="text-2xl font-semibold">Create campaign</h1>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={handleAddAllDestinationsExhaustive}
-          disabled={walkButtonDisabled}
-        >
-          Add all destinations (all pages)
-        </Button>
       </header>
 
       {draftLocked ? (
@@ -539,26 +412,6 @@ export default function CampaignComposer() {
         >
           Draft created — further edits require starting a new campaign. Use Back to discard this
           draft and restart.
-        </div>
-      ) : null}
-
-      {walkProgress !== null ? (
-        <p
-          role="status"
-          aria-live="polite"
-          className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm"
-        >
-          Collecting {walkProgress.collected} of {destFilter.shapes.length > 0 ? "~" : ""}
-          {walkProgress.total} destinations…
-        </p>
-      ) : null}
-
-      {walkError !== null ? (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          Walk failed: {walkError.message}
         </div>
       ) : null}
 

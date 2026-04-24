@@ -532,9 +532,16 @@ their pairs after 3 dispatch attempts.
 The destination panel uses the same **FilterRail** surface as the
 catalogue (country, ASN, network, city, shapes). An inline paste flow
 accepts newline-separated IPs; duplicates are reconciled against the
-catalogue silently. **Add all** and **Add matching** snapshot the
-current filter's IPs at click time — a later filter change does not
-alter the selection.
+catalogue silently.
+
+**Add all** walks every catalogue page that matches the current filter
+(or the whole catalogue when no filter is active) and merges every IP
+into the selection. An inline strip reports progress while the walk
+runs; the button disables until the initial catalogue fetch lands so
+the walk never races a pre-first-page snapshot. Prior manual picks and
+earlier filtered walks survive the merge — operators can layer passes
+to build a selection without losing previous choices. **Remove all**
+is the only action that clears the set.
 
 ### Knobs
 

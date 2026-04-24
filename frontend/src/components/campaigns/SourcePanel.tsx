@@ -48,9 +48,9 @@ export interface SourcePanelProps {
   facets: FacetsResponse | undefined;
   onOpenMap(): void;
   /**
-   * When true, every mutation button (Add all / Add matching / Remove all /
-   * Map view) is disabled and row-click no-ops. The filter rail stays live
-   * so the operator can still inspect matches, but selection is frozen —
+   * When true, every mutation button (Add all / Remove all / Map view)
+   * is disabled and row-click no-ops. The filter rail stays live so the
+   * operator can still inspect matches, but selection is frozen —
    * composer sets this after a draft campaign has been created so further
    * source edits don't silently diverge from the persisted draft.
    */
@@ -228,11 +228,6 @@ export function SourcePanel({
         <header className="flex flex-wrap items-center gap-2">
           <h2 className="text-base font-semibold">Sources</h2>
           <div className="ml-auto flex items-center gap-2">
-            {/*
-              Plan F.2 §506: "Add all" and "Add matching" share the same handler
-              in F1 — both snapshot the currently filtered rows. Split if F2
-              changes semantics.
-            */}
             <Button
               type="button"
               size="sm"
@@ -241,15 +236,6 @@ export function SourcePanel({
               disabled={disabled || filteredRows.length === 0}
             >
               Add all
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={handleAddVisible}
-              disabled={disabled || filteredRows.length === 0}
-            >
-              Add matching
             </Button>
             <Button
               type="button"
