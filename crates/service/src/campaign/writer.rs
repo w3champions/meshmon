@@ -54,11 +54,22 @@ pub fn map_failure_code(code: MeasurementFailureCode) -> &'static str {
 
 /// Returns the target terminal `resolution_state` for a given failure tag.
 ///
-/// `unreachable` is a dedicated state; everything else funnels into
-/// `skipped` with the tag preserved in `last_error`.
+/// Real measurement failures map to `Unreachable`; non-measurement
+/// terminations map to `Skipped`. The tag is preserved in `last_error`
+/// either way so operators keep the origin signal.
+///
+/// Tag vocabulary (from [`map_failure_code`]):
+/// * `"unreachable"`, `"timeout"`, `"refused"` — the probe ran and the
+///   destination failed to answer (no route, silent drops, active
+///   refuse). These are valid datapoints; packet loss is a signal.
+/// * `"cancelled"`, `"agent_rejected"` — the agent aborted before or
+///   during the probe (scheduler shutdown, agent-side protocol error).
+///   No measurement was attempted.
+/// * Any unknown tag defaults to `Skipped` so a future writer-side
+///   classification bug can't silently inflate unreachability.
 fn state_for_failure_tag(tag: &str) -> PairResolutionState {
     match tag {
-        "unreachable" => PairResolutionState::Unreachable,
+        "unreachable" | "timeout" | "refused" => PairResolutionState::Unreachable,
         _ => PairResolutionState::Skipped,
     }
 }
@@ -328,23 +339,40 @@ mod tests {
     fn no_route_targets_unreachable_state() {
         let tag = map_failure_code(MeasurementFailureCode::NoRoute);
         assert_eq!(tag, "unreachable");
-        assert_eq!(state_for_failure_tag(tag), PairResolutionState::Unreachable,);
+        assert_eq!(state_for_failure_tag(tag), PairResolutionState::Unreachable);
     }
 
+    /// Exhaustive regression barrier: every `MeasurementFailureCode`
+    /// variant must round-trip through `map_failure_code` →
+    /// `state_for_failure_tag` to the documented resolution state.
+    ///
+    /// This is load-bearing — per spec §3.2/§3.3, `timeout` / `refused`
+    /// / `unreachable` are real measurement failures (resolve to
+    /// `Unreachable`, 100% loss is a signal), while `cancelled` /
+    /// `agent_rejected` are non-measurement terminations (resolve to
+    /// `Skipped`, no attempt made). A single refactor of the match arm
+    /// could silently invert the mapping; this test fails if it does.
     #[test]
-    fn every_other_failure_funnels_into_skipped() {
-        for code in [
-            MeasurementFailureCode::Unspecified,
-            MeasurementFailureCode::Refused,
-            MeasurementFailureCode::Timeout,
-            MeasurementFailureCode::Cancelled,
-            MeasurementFailureCode::AgentError,
-        ] {
+    fn failure_code_resolves_to_expected_state() {
+        use MeasurementFailureCode::*;
+        use PairResolutionState::{Skipped, Unreachable};
+
+        let cases: &[(MeasurementFailureCode, &str, PairResolutionState)] = &[
+            (Unspecified, "agent_rejected", Skipped),
+            (NoRoute, "unreachable", Unreachable),
+            (Refused, "refused", Unreachable),
+            (Timeout, "timeout", Unreachable),
+            (Cancelled, "cancelled", Skipped),
+            (AgentError, "agent_rejected", Skipped),
+        ];
+
+        for &(code, expected_tag, expected_state) in cases {
             let tag = map_failure_code(code);
+            assert_eq!(tag, expected_tag, "{code:?} tag regressed");
             assert_eq!(
                 state_for_failure_tag(tag),
-                PairResolutionState::Skipped,
-                "{code:?} should map to skipped",
+                expected_state,
+                "{code:?} (tag {tag:?}) resolution state regressed",
             );
         }
     }
