@@ -41,6 +41,16 @@ use uuid::Uuid;
 /// target for every child row. No UPSERT semantics — each call
 /// appends, preserving the history that the
 /// `campaign_evaluations_campaign_evaluated_idx` index is tuned for.
+///
+/// Consistency contract: the parent row's `candidates_total` /
+/// `candidates_good` counters always match the child-row counts the
+/// caller sees after commit. If any `destination_ip` string on the
+/// evaluator output fails to parse back into an [`IpAddr`] — an
+/// unreachable case in normal operation because the evaluator builds
+/// those strings from `IpAddr` — the function returns
+/// [`sqlx::Error::Protocol`] so the caller's tx rolls back the
+/// already-inserted parent row rather than persisting skewed
+/// counters.
 pub async fn insert_evaluation(
     tx: &mut Transaction<'_, Postgres>,
     campaign_id: Uuid,
@@ -74,19 +84,26 @@ pub async fn insert_evaluation(
     // Candidates — keyed on `(evaluation_id, destination_ip)` so the
     // child `pair_details` FK can chain off the same tuple.
     for cand in &outputs.results.candidates {
-        let Some(ip) = IpAddr::from_str(&cand.destination_ip).ok() else {
-            // The evaluator owns `destination_ip` string formatting so
-            // an unparseable value would be a bug in this service, not
-            // operator input. Skipping is safer than panicking a tokio
-            // worker — the candidate simply never persists.
+        // The evaluator owns `destination_ip` string formatting so an
+        // unparseable value would be a bug in this service, not
+        // operator input. Abort the transaction rather than silently
+        // drop the row — a skip would leave the parent row's
+        // `candidates_total` counter disagreeing with the actual
+        // child-row count, violating the function's consistency
+        // contract documented above.
+        let ip = IpAddr::from_str(&cand.destination_ip).map_err(|err| {
             tracing::error!(
                 %campaign_id,
                 %evaluation_id,
                 destination_ip = %cand.destination_ip,
-                "candidate destination_ip failed to parse; skipping row",
+                %err,
+                "candidate destination_ip failed to parse; aborting tx",
             );
-            continue;
-        };
+            sqlx::Error::Protocol(format!(
+                "unparseable candidate destination_ip {:?}",
+                cand.destination_ip
+            ))
+        })?;
         let destination_ip = IpNetwork::from(ip);
         sqlx::query!(
             r#"INSERT INTO campaign_evaluation_candidates
@@ -149,15 +166,22 @@ pub async fn insert_evaluation(
     // a destination can be flagged unqualified without ever producing
     // a candidate row.
     for (raw_ip, reason) in &outputs.results.unqualified_reasons {
-        let Some(ip) = IpAddr::from_str(raw_ip).ok() else {
+        // Same consistency contract as the candidate loop above: a
+        // parse failure here is a writer-side bug, not operator
+        // input, so abort the whole tx rather than persisting a row
+        // with an unreachable destination key.
+        let ip = IpAddr::from_str(raw_ip).map_err(|err| {
             tracing::error!(
                 %campaign_id,
                 %evaluation_id,
                 destination_ip = %raw_ip,
-                "unqualified_reasons destination_ip failed to parse; skipping row",
+                %err,
+                "unqualified_reasons destination_ip failed to parse; aborting tx",
             );
-            continue;
-        };
+            sqlx::Error::Protocol(format!(
+                "unparseable unqualified_reasons destination_ip {raw_ip:?}"
+            ))
+        })?;
         sqlx::query!(
             r#"INSERT INTO campaign_evaluation_unqualified_reasons
                   (evaluation_id, destination_ip, reason)

@@ -1604,6 +1604,103 @@ async fn persist_evaluation_rejects_running_campaign() {
 }
 
 #[tokio::test]
+async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
+    // Consistency contract: the parent row's `candidates_total`
+    // counter must never disagree with the child-row count after
+    // commit. The writer guarantees this by aborting the tx when any
+    // evaluator-provided `destination_ip` fails to round-trip through
+    // IpAddr — an unreachable case in normal operation, but cheap to
+    // guard against and cheap to verify.
+    use meshmon_service::campaign::dto::{
+        EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto,
+    };
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
+    use meshmon_service::campaign::model::DirectSource;
+    let pool = common::shared_migrated_pool().await;
+
+    let row = repo::create(&pool, make_input("t-eval-rollback"))
+        .await
+        .unwrap();
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    // Craft an EvaluationOutputs whose candidate carries a garbage
+    // destination_ip string. Every other field is valid.
+    let garbage_candidate = EvaluationCandidateDto {
+        destination_ip: "not-an-ip".to_string(),
+        display_name: None,
+        city: None,
+        country_code: None,
+        asn: None,
+        network_operator: None,
+        is_mesh_member: false,
+        pairs_improved: 0,
+        pairs_total_considered: 1,
+        avg_improvement_ms: Some(0.0),
+        avg_loss_ratio: Some(0.0),
+        composite_score: 0.0,
+        pair_details: vec![EvaluationPairDetailDto {
+            source_agent_id: "a".into(),
+            destination_agent_id: "b".into(),
+            destination_ip: "not-an-ip".into(),
+            direct_rtt_ms: 1.0,
+            direct_stddev_ms: 0.0,
+            direct_loss_ratio: 0.0,
+            direct_source: DirectSource::ActiveProbe,
+            transit_rtt_ms: 1.0,
+            transit_stddev_ms: 0.0,
+            transit_loss_ratio: 0.0,
+            improvement_ms: 0.0,
+            qualifies: false,
+            mtr_measurement_id_ax: None,
+            mtr_measurement_id_xb: None,
+            destination_hostname: None,
+        }],
+        hostname: None,
+    };
+    let outputs = EvaluationOutputs {
+        baseline_pair_count: 1,
+        candidates_total: 1,
+        candidates_good: 0,
+        avg_improvement_ms: None,
+        results: EvaluationResultsDto {
+            candidates: vec![garbage_candidate],
+            unqualified_reasons: Default::default(),
+        },
+    };
+
+    let err = evaluation_repo::persist_evaluation(
+        &pool,
+        row.id,
+        &outputs,
+        0.05,
+        1.0,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .expect_err("unparseable candidate destination_ip must abort the tx");
+    match err {
+        RepoError::Sqlx(sqlx::Error::Protocol(_)) => {}
+        other => panic!("expected sqlx::Error::Protocol, got {other:?}"),
+    }
+
+    // Parent row must not exist — the abort happened after the parent
+    // INSERT but before commit, so the rollback must drop it.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 0,
+        "tx rollback must drop the parent row so counters can never skew"
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn insert_detail_pairs_flips_running_and_skips_duplicates() {
     // A completed campaign re-enters `running` when detail pairs land,
     // the same pair inserted twice produces no new rows on the second

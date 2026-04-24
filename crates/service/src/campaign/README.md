@@ -57,11 +57,25 @@ the first two; the SSE listener listens on all three via
 - `dto.rs` — wire DTOs; `utoipa::ToSchema` on every public type.
 - `eval.rs` — pure-function evaluator core. Builds the (A,B,X) triple
   matrix from attributed measurements, applies the mode-specific
-  predicate (diversity / optimization), serialises to the JSONB shape
-  persisted in `campaign_evaluations`.
+  predicate (diversity / optimization), returns the result payload
+  for `evaluation_repo` to persist across the relational child tables.
+- `evaluation_repo.rs` — owns the `campaign_evaluations` family:
+  `insert_evaluation` (atomic writer primitive that fans the evaluator
+  output across `campaign_evaluations` + `campaign_evaluation_candidates`
+  + `campaign_evaluation_pair_details` +
+  `campaign_evaluation_unqualified_reasons` inside the caller's tx),
+  `persist_evaluation` (the orchestrator that locks the campaign row,
+  inserts, and promotes `completed → evaluated` in one tx), and
+  `latest_evaluation_for_campaign` (the read-path that assembles the
+  wire DTO from the four tables).
 - `handlers.rs` — axum handlers for every campaign HTTP endpoint.
 
 ## Evaluation flow
+
+Every `/evaluate` call appends a fresh `campaign_evaluations` row —
+the per-campaign UNIQUE is gone, so history accumulates and
+`GET /evaluation` picks the latest via `(campaign_id, evaluated_at
+DESC)`.
 
 `POST /api/campaigns/{id}/evaluate` drives:
 
@@ -69,8 +83,17 @@ the first two; the SSE listener listens on all three via
 2. `repo::measurements_for_campaign` — assembles the pure evaluator's
    input from the tables.
 3. `eval::evaluate` — scores transit candidates against the baselines.
-4. `repo::write_evaluation` — persists the DTO + flips state to
+4. `evaluation_repo::persist_evaluation` — inserts the parent row +
+   every candidate, pair_detail, and unqualified_reason child row
+   atomically inside one tx, then promotes campaign state to
    `evaluated`.
+5. `evaluation_repo::latest_evaluation_for_campaign` — read-back that
+   supplies the handler's response DTO.
+
+Every pair_detail carries a `direct_source` provenance enum
+(`active_probe` | `vm_continuous`). Today the evaluator stamps every
+row with `active_probe`; the VM-continuous branch lands in a
+follow-up.
 
 ## SSE event stream
 
