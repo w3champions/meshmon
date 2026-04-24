@@ -782,7 +782,7 @@
           "campaigns"
         ],
         "summary": "`POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.",
-        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_ratio` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nReturns 422 (`no_baseline_pairs`) when no active-probe baseline rows\nexist. Operator remedy: verify the campaign actually probed agent\ndestinations, or wait for in-flight dispatches to settle.",
+        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_ratio` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nBefore the evaluator runs, the handler augments the active-probe\nbaseline set with VictoriaMetrics continuous-mesh samples for every\nagent→agent pair the campaign's `measurements` rows didn't already\ncover. VM-sourced rows carry `direct_source='vm_continuous'` on the\nresulting `campaign_evaluation_pair_details`. When `upstream.vm_url`\nisn't configured the handler silently falls back to active-probe\ndata only.\n\nReturns:\n* 422 (`no_baseline_pairs`) — no agent→agent baseline available,\n  even after the VM fallback (or VM wasn't configured).\n* 503 (`vm_upstream`) — VM was configured but the query failed\n  (unreachable, non-2xx, malformed response).",
         "operationId": "evaluate",
         "parameters": [
           {
@@ -842,6 +842,16 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "VictoriaMetrics upstream unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -4077,7 +4087,7 @@
       },
       "EvaluationDto": {
         "type": "object",
-        "description": "Wire shape for `GET /api/campaigns/{id}/evaluation`.\n\nAlso the exact JSON persisted into `campaign_evaluations.results` —\nthe evaluator serialises [`EvaluationResultsDto`] directly into the\nJSONB column so the read handler can hand the stored document back\nto the client without rehydrating through a domain model.",
+        "description": "Wire shape for `GET /api/campaigns/{id}/evaluation`.\n\nAssembled from the relational `campaign_evaluations` parent row\nplus its child tables (`campaign_evaluation_candidates`,\n`campaign_evaluation_pair_details`,\n`campaign_evaluation_unqualified_reasons`) by\n[`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].\nThe read-path joins in Rust so the wire DTO stays unchanged\ncompared to the pre-T54-02 JSONB layout, modulo the new\n`direct_source` field on every `pair_detail`.",
         "required": [
           "campaign_id",
           "evaluated_at",
@@ -4251,7 +4261,7 @@
       },
       "EvaluationResultsDto": {
         "type": "object",
-        "description": "Candidate breakdown persisted in `campaign_evaluations.results`.",
+        "description": "Candidate breakdown assembled from\n`campaign_evaluation_candidates` and\n`campaign_evaluation_unqualified_reasons`.",
         "required": [
           "candidates"
         ],

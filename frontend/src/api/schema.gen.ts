@@ -312,9 +312,19 @@ export interface paths {
          *     `evaluated`; a concurrent transition that loses the gate still leaves
          *     the evaluation row written and the SSE event fired.
          *
-         *     Returns 422 (`no_baseline_pairs`) when no active-probe baseline rows
-         *     exist. Operator remedy: verify the campaign actually probed agent
-         *     destinations, or wait for in-flight dispatches to settle.
+         *     Before the evaluator runs, the handler augments the active-probe
+         *     baseline set with VictoriaMetrics continuous-mesh samples for every
+         *     agent→agent pair the campaign's `measurements` rows didn't already
+         *     cover. VM-sourced rows carry `direct_source='vm_continuous'` on the
+         *     resulting `campaign_evaluation_pair_details`. When `upstream.vm_url`
+         *     isn't configured the handler silently falls back to active-probe
+         *     data only.
+         *
+         *     Returns:
+         *     * 422 (`no_baseline_pairs`) — no agent→agent baseline available,
+         *       even after the VM fallback (or VM wasn't configured).
+         *     * 503 (`vm_upstream`) — VM was configured but the query failed
+         *       (unreachable, non-2xx, malformed response).
          */
         post: operations["evaluate"];
         delete?: never;
@@ -1693,10 +1703,14 @@ export interface components {
         /**
          * @description Wire shape for `GET /api/campaigns/{id}/evaluation`.
          *
-         *     Also the exact JSON persisted into `campaign_evaluations.results` —
-         *     the evaluator serialises [`EvaluationResultsDto`] directly into the
-         *     JSONB column so the read handler can hand the stored document back
-         *     to the client without rehydrating through a domain model.
+         *     Assembled from the relational `campaign_evaluations` parent row
+         *     plus its child tables (`campaign_evaluation_candidates`,
+         *     `campaign_evaluation_pair_details`,
+         *     `campaign_evaluation_unqualified_reasons`) by
+         *     [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
+         *     The read-path joins in Rust so the wire DTO stays unchanged
+         *     compared to the pre-T54-02 JSONB layout, modulo the new
+         *     `direct_source` field on every `pair_detail`.
          */
         EvaluationDto: {
             /**
@@ -1825,7 +1839,11 @@ export interface components {
              */
             transit_stddev_ms: number;
         };
-        /** @description Candidate breakdown persisted in `campaign_evaluations.results`. */
+        /**
+         * @description Candidate breakdown assembled from
+         *     `campaign_evaluation_candidates` and
+         *     `campaign_evaluation_unqualified_reasons`.
+         */
         EvaluationResultsDto: {
             /** @description Per-candidate scoring rows, ordered by composite score. */
             candidates: components["schemas"]["EvaluationCandidateDto"][];
@@ -3365,6 +3383,15 @@ export interface operations {
             };
             /** @description Internal error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description VictoriaMetrics upstream unreachable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -13,9 +13,16 @@ use crate::campaign::model::{DirectSource, EvaluationMode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 
-/// One row from `measurements` attributed to the campaign. Only the
-/// columns the evaluator reads are carried here — the DB layer filters
-/// to `kind='campaign'` pairs before constructing this.
+/// One row attributed to the campaign for evaluation purposes.
+///
+/// Two provenances share this shape:
+///
+/// * `DirectSource::ActiveProbe` — a `measurements` row settled by the
+///   campaign dispatcher, joined in via `campaign_pairs.measurement_id`.
+/// * `DirectSource::VmContinuous` — a synthetic row the `/evaluate`
+///   handler built from VictoriaMetrics continuous-mesh baselines for
+///   agent→agent pairs the active-probe data did not cover. Never
+///   persisted to `measurements`.
 #[derive(Debug, Clone)]
 pub struct AttributedMeasurement {
     /// Agent id of the probing source (`measurements.source_agent_id`).
@@ -29,7 +36,12 @@ pub struct AttributedMeasurement {
     /// Observed loss fraction on this leg (0.0–1.0).
     pub loss_ratio: f32,
     /// FK into `measurements.id` for the MTR-bearing row, when available.
+    /// `None` for VM-synthesized rows — they have no `measurements.id`.
     pub mtr_measurement_id: Option<i64>,
+    /// Provenance of this row. Stamped onto
+    /// [`EvaluationPairDetailDto::direct_source`] whenever the evaluator
+    /// uses this row as the direct A→B baseline.
+    pub direct_source: DirectSource,
 }
 
 /// Agent identity row used to build the baseline pair list.
@@ -292,11 +304,13 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                 direct_rtt_ms: direct_rtt,
                 direct_stddev_ms: direct_stddev,
                 direct_loss_ratio,
-                // Today every baseline row comes from the active-probe
-                // `measurements` join. T54-03 will source a subset of
-                // these from VictoriaMetrics and flip them to
-                // [`DirectSource::VmContinuous`].
-                direct_source: DirectSource::ActiveProbe,
+                // Provenance of the direct A→B baseline row. The transit
+                // legs (A→X, X→B) are always active-probe measurements;
+                // only this A→B row can be VM-sourced, per the T54-03
+                // handler that synthesizes a [`DirectSource::VmContinuous`]
+                // `AttributedMeasurement` for agent→agent pairs missing
+                // from the active-probe join.
+                direct_source: direct.direct_source,
                 transit_rtt_ms: transit_rtt,
                 transit_stddev_ms: transit_stddev,
                 transit_loss_ratio: compound_loss_ratio,
@@ -425,6 +439,7 @@ mod tests {
             latency_stddev_ms: Some(stddev),
             loss_ratio: loss,
             mtr_measurement_id: None,
+            direct_source: DirectSource::ActiveProbe,
         }
     }
 
@@ -485,6 +500,7 @@ mod tests {
                 latency_stddev_ms: None,
                 loss_ratio: 1.0,
                 mtr_measurement_id: None,
+                direct_source: DirectSource::ActiveProbe,
             }],
             agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
             enrichment: Default::default(),
@@ -592,6 +608,48 @@ mod tests {
         assert_eq!(
             x_cand.pairs_improved, 0,
             "X must not be counted as an improvement under optimization mode"
+        );
+    }
+
+    #[test]
+    fn pair_detail_stamps_direct_source_from_baseline_row() {
+        // When the A→B baseline row carries `VmContinuous` provenance,
+        // the evaluator must propagate that onto every pair_detail it
+        // emits using that baseline. Transit legs (A→X, X→B) being
+        // active-probe is irrelevant here — only the direct A→B
+        // baseline's provenance lands on the DTO.
+        let a_b_baseline = AttributedMeasurement {
+            source_agent_id: "a".into(),
+            destination_ip: ip("10.0.0.2"),
+            latency_avg_ms: Some(318.0),
+            latency_stddev_ms: Some(24.0),
+            loss_ratio: 0.0,
+            mtr_measurement_id: None,
+            direct_source: DirectSource::VmContinuous,
+        };
+        let inputs = EvaluationInputs {
+            measurements: vec![
+                a_b_baseline,
+                m("a", "203.0.113.7", 120.0, 8.0, 0.0),
+                m("b", "203.0.113.7", 121.0, 8.0, 0.0),
+            ],
+            agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            enrichment: Default::default(),
+            loss_threshold_ratio: 0.02,
+            stddev_weight: 1.0,
+            mode: EvaluationMode::Diversity,
+        };
+        let out = evaluate(inputs).unwrap();
+        let cand = out
+            .results
+            .candidates
+            .iter()
+            .find(|c| c.destination_ip == "203.0.113.7")
+            .expect("candidate present");
+        assert_eq!(
+            cand.pair_details[0].direct_source,
+            DirectSource::VmContinuous,
+            "pair_detail must carry the baseline row's direct_source"
         );
     }
 

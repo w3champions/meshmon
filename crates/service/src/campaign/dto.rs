@@ -455,10 +455,13 @@ pub struct EvaluationPairDetailDto {
     pub direct_stddev_ms: f32,
     /// Direct A→B observed loss (fraction 0.0–1.0).
     pub direct_loss_ratio: f32,
-    /// Provenance of the direct A→B baseline figures. Today the
-    /// evaluator stamps every row with [`DirectSource::ActiveProbe`];
-    /// T54-03 will flip this to [`DirectSource::VmContinuous`] when a
-    /// VM-continuous baseline replaces an active probe sample.
+    /// Provenance of the direct A→B baseline figures:
+    /// [`DirectSource::ActiveProbe`] for rows that came from the
+    /// campaign's own `measurements`, or [`DirectSource::VmContinuous`]
+    /// when the evaluator pulled the A→B baseline from VictoriaMetrics
+    /// continuous-mesh data at `/evaluate` time. Transit legs (A→X,
+    /// X→B) are always active-probe; only the direct A→B baseline can
+    /// be VM-sourced.
     pub direct_source: DirectSource,
     /// Composed A→X→B transit RTT (ms).
     pub transit_rtt_ms: f32,

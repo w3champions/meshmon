@@ -15,6 +15,12 @@
 //! | `evaluate_empty_baseline_422`                         | `eval-t3-a`                              | `192.0.2.33`                     |
 //! | `get_evaluation_404_before_evaluate`                  | `eval-t4-a`                              | `192.0.2.41`                     |
 //! | `reused_pair_surfaces_in_baseline`                    | `eval-t5-a`, `eval-t5-b`                | `192.0.2.51`, `.52`, `.59`       |
+//! | `vm_fills_missing_baselines`                          | `eval-t7-a`, `eval-t7-b`                | `192.0.2.131`, `.132`, `.139`    |
+//! | `vm_unreachable_returns_503_vm_upstream`              | `eval-t8-a`, `eval-t8-b`                | `192.0.2.141`, `.142`, `.149`    |
+//! | `vm_not_configured_falls_back_to_active`              | `eval-t9-a`, `eval-t9-b`                | `192.0.2.151`, `.152`, `.159`    |
+//! | `vm_not_configured_still_422_without_active`          | `eval-t10-a`                             | `192.0.2.161`                    |
+//! | `active_probe_wins_over_vm`                           | `eval-t11-a`, `eval-t11-b`              | `192.0.2.171`, `.172`, `.179`    |
+//! | `malformed_vm_response_returns_503`                   | `eval-t12-a`, `eval-t12-b`              | `192.0.2.181`, `.182`, `.189`    |
 //!
 //! The campaign scheduler is not spawned in the test harness, so
 //! `AppState.campaign_cancel` is a no-op token; state transitions
@@ -483,4 +489,481 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
         fetched["evaluated_at"], second_evaluated_at,
         "GET /evaluation must surface the latest row: {fetched}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T54-03: VM continuous-mesh baselines at /evaluate time
+// ---------------------------------------------------------------------------
+
+/// Assemble a VictoriaMetrics `resultType: "vector"` response body whose
+/// `result` contains one sample per `(source, target, value)` tuple.
+/// Shape matches the one `vm_query::run_instant_query` parses.
+fn vm_vector_body(samples: &[(&str, &str, &str)]) -> serde_json::Value {
+    let result: Vec<serde_json::Value> = samples
+        .iter()
+        .map(|(src, tgt, val)| {
+            json!({
+                "metric": {
+                    "source": src,
+                    "target": tgt,
+                },
+                "value": [1_700_000_000i64, *val],
+            })
+        })
+        .collect();
+    json!({
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": result,
+        },
+    })
+}
+
+/// Mount three mocks on `server` — one per VM query (rtt / stddev /
+/// failure_rate) — each returning its own vector response. Keeps the
+/// happy-path tests terse without inventing a per-test DSL.
+async fn mount_vm_baselines(
+    server: &wiremock::MockServer,
+    rtt_samples: &[(&str, &str, &str)],
+    stddev_samples: &[(&str, &str, &str)],
+    loss_samples: &[(&str, &str, &str)],
+) {
+    use wiremock::matchers::{method, path, query_param_contains};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/query"))
+        .and(query_param_contains("query", "meshmon_path_rtt_avg_micros"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vm_vector_body(rtt_samples)))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/query"))
+        .and(query_param_contains(
+            "query",
+            "meshmon_path_rtt_stddev_micros",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vm_vector_body(stddev_samples)))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/query"))
+        .and(query_param_contains("query", "meshmon_path_failure_rate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vm_vector_body(loss_samples)))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn vm_fills_missing_baselines() {
+    use wiremock::MockServer;
+
+    // Campaign has no `measurements` rows for the A→B agent pair, but
+    // VM exposes continuous-mesh baselines. The evaluator must pick up
+    // the VM baseline and stamp `direct_source='vm_continuous'` on
+    // every pair_detail using it (both in the response DTO and in the
+    // persisted `campaign_evaluation_pair_details` row).
+    let vm = MockServer::start().await;
+    mount_vm_baselines(
+        &vm,
+        &[
+            // A→B (and B→A, for completeness; the evaluator only reads
+            // A→B given the outer baseline scan, but VM labels both
+            // directions).
+            ("eval-t7-a", "eval-t7-b", "318.0"),
+            ("eval-t7-b", "eval-t7-a", "315.0"),
+        ],
+        &[
+            ("eval-t7-a", "eval-t7-b", "24.0"),
+            ("eval-t7-b", "eval-t7-a", "22.0"),
+        ],
+        &[
+            ("eval-t7-a", "eval-t7-b", "0.0"),
+            ("eval-t7-b", "eval-t7-a", "0.0"),
+        ],
+    )
+    .await;
+
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
+
+    let a_ip: IpAddr = "192.0.2.131".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.132".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t7-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t7-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t7-vm-fill",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t7-a", "eval-t7-b"],
+                "destination_ips": ["192.0.2.132", "192.0.2.131", "192.0.2.139"],
+                "loss_threshold_ratio": 0.02,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "diversity",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+
+    // Only transit legs have active-probe data. The A→B direct
+    // baseline is missing from `measurements` — VM must fill it.
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("eval-t7-a", "192.0.2.139", 120.0, 8.0, 0.0),
+            ("eval-t7-b", "192.0.2.139", 121.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    assert!(
+        eval["baseline_pair_count"].as_i64().unwrap_or(0) >= 1,
+        "VM-sourced A→B baseline must register: {eval}"
+    );
+
+    let candidates = eval["results"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates missing: {eval}"));
+    let cand = candidates
+        .iter()
+        .find(|c| c["destination_ip"] == "192.0.2.139")
+        .unwrap_or_else(|| panic!("transit candidate missing: {eval}"));
+    let pair_details = cand["pair_details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pair_details missing: {cand}"));
+    let vm_leg = pair_details
+        .iter()
+        .find(|pd| {
+            pd["source_agent_id"] == "eval-t7-a" && pd["destination_agent_id"] == "eval-t7-b"
+        })
+        .unwrap_or_else(|| panic!("A→B VM-backed pair_detail missing: {cand}"));
+    assert_eq!(
+        vm_leg["direct_source"], "vm_continuous",
+        "VM-filled A→B baseline must carry direct_source=vm_continuous"
+    );
+
+    // Persisted row carries the enum too.
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().unwrap();
+    let persisted: Vec<String> = sqlx::query_scalar(
+        "SELECT direct_source::text \
+           FROM campaign_evaluation_pair_details pd \
+           JOIN campaign_evaluations e ON e.id = pd.evaluation_id \
+          WHERE e.campaign_id = $1 \
+            AND pd.source_agent_id = 'eval-t7-a' \
+            AND pd.destination_agent_id = 'eval-t7-b'",
+    )
+    .bind(campaign_uuid)
+    .fetch_all(&h.state.pool)
+    .await
+    .expect("read persisted direct_source");
+    assert!(
+        !persisted.is_empty(),
+        "at least one persisted pair_detail for (A,B)"
+    );
+    for row in &persisted {
+        assert_eq!(row, "vm_continuous", "persisted enum must be vm_continuous");
+    }
+}
+
+#[tokio::test]
+async fn vm_unreachable_returns_503_vm_upstream() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // VM is configured but returns 5xx on every query. The evaluator
+    // must abort with 503 `vm_upstream` rather than silently falling
+    // back to the (potentially incomplete) active-probe set.
+    let vm = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/query"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&vm)
+        .await;
+
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
+
+    let a_ip: IpAddr = "192.0.2.141".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.142".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t8-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t8-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t8-vm-down",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t8-a", "eval-t8-b"],
+                "destination_ips": ["192.0.2.142", "192.0.2.141", "192.0.2.149"],
+                "loss_threshold_ratio": 0.02,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "diversity",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let res = h
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluate"),
+            &json!({}),
+            503,
+        )
+        .await;
+    assert_eq!(res["error"], "vm_upstream", "body = {res}");
+
+    // And no `campaign_evaluations` row landed — the 503 must rollback
+    // before `persist_evaluation` fires.
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(campaign_uuid)
+            .fetch_one(&h.state.pool)
+            .await
+            .expect("count evaluations");
+    assert_eq!(count, 0, "no evaluation row may persist on VM failure");
+}
+
+#[tokio::test]
+async fn vm_not_configured_falls_back_to_active() {
+    // When `upstream.vm_url` is unset, the evaluator silently degrades
+    // to active-probe data. If active-probe data covers the agent→agent
+    // pair, /evaluate succeeds with `direct_source='active_probe'` on
+    // every pair_detail — no `vm_not_configured` surface.
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "192.0.2.151".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.152".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t9-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t9-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t9-no-vm",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t9-a", "eval-t9-b"],
+                "destination_ips": ["192.0.2.152", "192.0.2.151", "192.0.2.159"],
+                "loss_threshold_ratio": 0.05,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "diversity",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("eval-t9-a", "192.0.2.152", 318.0, 24.0, 0.0),
+            ("eval-t9-a", "192.0.2.159", 120.0, 8.0, 0.0),
+            ("eval-t9-b", "192.0.2.159", 121.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+    let candidates = eval["results"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates missing: {eval}"));
+    let cand = candidates
+        .iter()
+        .find(|c| c["destination_ip"] == "192.0.2.159")
+        .unwrap_or_else(|| panic!("transit candidate missing: {eval}"));
+    for pd in cand["pair_details"].as_array().expect("pair_details") {
+        assert_eq!(
+            pd["direct_source"], "active_probe",
+            "VM-unset path must stamp every pair_detail with active_probe: {pd}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn vm_not_configured_still_422_without_active() {
+    // With VM unset AND no agent→agent active-probe row, /evaluate
+    // surfaces 422 `no_baseline_pairs` — the same contract as before
+    // T54-03, confirming the VM fallback doesn't mask the error.
+    let h = common::HttpHarness::start().await;
+
+    // Single agent → no agent→agent pair is even possible. /evaluate
+    // cannot baseline and must 422.
+    let a_ip: IpAddr = "192.0.2.161".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t10-a", a_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t10-no-vm-no-active",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t10-a"],
+                "destination_ips": ["192.0.2.161"],
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[("eval-t10-a", "192.0.2.161", 120.0, 8.0, 0.0)],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let res = h
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluate"),
+            &json!({}),
+            422,
+        )
+        .await;
+    assert_eq!(res["error"], "no_baseline_pairs", "body = {res}");
+}
+
+#[tokio::test]
+async fn active_probe_wins_over_vm() {
+    use wiremock::MockServer;
+
+    // Both active-probe data AND a VM sample exist for the same A→B
+    // pair. The evaluator must prefer active-probe (since it's per-
+    // campaign, freshly measured) and stamp `direct_source=active_probe`.
+    // Exists to pin the "last-write-wins" insertion order invariant in
+    // `eval::evaluate`'s `by_pair` loop against regression.
+    let vm = MockServer::start().await;
+    mount_vm_baselines(
+        &vm,
+        &[
+            // VM value clearly distinct (987 ms) from the active-probe
+            // value (318 ms) so a tiebreaker mistake would surface.
+            ("eval-t11-a", "eval-t11-b", "987.0"),
+        ],
+        &[("eval-t11-a", "eval-t11-b", "99.0")],
+        &[("eval-t11-a", "eval-t11-b", "0.5")],
+    )
+    .await;
+
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
+
+    let a_ip: IpAddr = "192.0.2.171".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.172".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t11-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t11-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t11-active-wins",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t11-a", "eval-t11-b"],
+                "destination_ips": ["192.0.2.172", "192.0.2.171", "192.0.2.179"],
+                "loss_threshold_ratio": 0.05,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "diversity",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            // Active-probe A→B row — should win over the VM sample.
+            ("eval-t11-a", "192.0.2.172", 318.0, 24.0, 0.0),
+            ("eval-t11-a", "192.0.2.179", 120.0, 8.0, 0.0),
+            ("eval-t11-b", "192.0.2.179", 121.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+    let cand = eval["results"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["destination_ip"] == "192.0.2.179")
+        .expect("transit candidate present")
+        .clone();
+    let leg = cand["pair_details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pd| {
+            pd["source_agent_id"] == "eval-t11-a" && pd["destination_agent_id"] == "eval-t11-b"
+        })
+        .expect("A→B pair_detail present")
+        .clone();
+    assert_eq!(
+        leg["direct_source"], "active_probe",
+        "active-probe row must win when both sources have A→B data: {leg}"
+    );
+    let rtt = leg["direct_rtt_ms"].as_f64().expect("direct_rtt_ms");
+    assert!(
+        (rtt - 318.0).abs() < 1e-3,
+        "direct_rtt_ms must match the active-probe value (318.0), got {rtt}"
+    );
+}
+
+#[tokio::test]
+async fn malformed_vm_response_returns_503() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // VM returns 2xx but the body isn't a valid instant-query envelope.
+    // The evaluator must abort with 503 `vm_upstream` (routed through
+    // `VmQueryError::MalformedResponse` / `VmQueryError::Request`), not
+    // 500.
+    let vm = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json at all"))
+        .mount(&vm)
+        .await;
+
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
+
+    let a_ip: IpAddr = "192.0.2.181".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.182".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t12-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t12-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t12-vm-malformed",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t12-a", "eval-t12-b"],
+                "destination_ips": ["192.0.2.182", "192.0.2.181", "192.0.2.189"],
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let res = h
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluate"),
+            &json!({}),
+            503,
+        )
+        .await;
+    assert_eq!(res["error"], "vm_upstream", "body = {res}");
 }

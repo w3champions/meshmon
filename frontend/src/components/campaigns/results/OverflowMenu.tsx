@@ -90,8 +90,8 @@ export function OverflowMenu({ campaign, evaluation }: OverflowMenuProps) {
           pushToast({
             kind: "error",
             message: detail
-              ? `VictoriaMetrics is unreachable: ${detail}`
-              : "VictoriaMetrics is unreachable.",
+              ? `VictoriaMetrics couldn't be reached for baseline data (${detail}). Check service config and retry.`
+              : "VictoriaMetrics couldn't be reached for baseline data. Check service config and retry.",
           });
           return;
         }

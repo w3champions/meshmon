@@ -1357,6 +1357,7 @@ impl From<PairRowRaw> for PairRow {
 use crate::campaign::eval::{
     AgentRow as EvalAgentRow, AttributedMeasurement, CatalogueLookup, EvaluationInputs,
 };
+use crate::campaign::model::DirectSource;
 use std::collections::HashMap;
 
 /// Agent roster for a campaign.
@@ -1452,6 +1453,11 @@ pub async fn measurements_for_campaign(
             latency_stddev_ms: r.latency_stddev_ms,
             loss_ratio: r.loss_ratio,
             mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
+            // Every row here joins through `campaign_pairs.measurement_id`
+            // into the `measurements` table — by construction an active-
+            // probe settlement. The T54-03 handler layers VM-continuous
+            // rows on top in-memory; those never reach this loader.
+            direct_source: DirectSource::ActiveProbe,
         })
         .collect();
 

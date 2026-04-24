@@ -127,7 +127,9 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
     if (isVmUpstream(err)) {
       const detail = extractCampaignErrorDetail(err);
       toastError(
-        detail ? `VictoriaMetrics is unreachable: ${detail}` : "VictoriaMetrics is unreachable.",
+        detail
+          ? `VictoriaMetrics couldn't be reached for baseline data (${detail}). Check service config and retry.`
+          : "VictoriaMetrics couldn't be reached for baseline data. Check service config and retry.",
       );
       return;
     }

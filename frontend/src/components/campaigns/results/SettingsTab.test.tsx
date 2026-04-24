@@ -340,7 +340,9 @@ describe("SettingsTab — submit flow", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/victoriametrics is unreachable: connect: connection refused/i),
+        screen.getByText(
+          /victoriametrics couldn't be reached for baseline data \(connect: connection refused\)/i,
+        ),
       ).toBeInTheDocument();
     });
   });

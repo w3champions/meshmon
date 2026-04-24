@@ -58,16 +58,20 @@ export function isNoBaselinePairs(err: unknown): boolean {
 
 /**
  * Matches the `vm_not_configured` error code the backend returns when
- * `[upstream.vm_url]` is unset. Helper parked for reuse in T54-03.
+ * `[upstream.vm_url]` is unset. `/evaluate` does NOT emit this — when
+ * VM is absent the handler silently degrades to active-probe data and
+ * surfaces 422 `no_baseline_pairs` only if that data is also empty.
+ * Kept as defensive coverage for other endpoints that may still emit it.
  */
 export function isVmNotConfigured(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "vm_not_configured";
 }
 
 /**
- * Matches the `vm_upstream` error code the backend returns when a VM
- * query fails (unreachable, 5xx, malformed). Helper parked for reuse
- * in T54-03.
+ * Matches the `vm_upstream` error code the backend returns from
+ * `/evaluate` when VictoriaMetrics is configured but a baseline fetch
+ * fails (unreachable, non-2xx, malformed response). Surfaced as a
+ * 503 — operator can retry once VM is back.
  */
 export function isVmUpstream(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "vm_upstream";
