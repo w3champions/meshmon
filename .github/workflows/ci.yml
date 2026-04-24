@@ -13,28 +13,29 @@ permissions:
   contents: read
   packages: read
 
-# Cargo + sccache tuning shared by every Rust job.
+# Cargo tuning shared by every Rust job.
 #
-# - RUSTC_WRAPPER=sccache routes every rustc invocation through sccache,
-#   which keys cache entries by (source + dep rmeta + flags + rustc
-#   version). Hits survive Cargo.lock churn, profile changes, and
-#   cross-branch context. Backed by GHA cache via SCCACHE_GHA_ENABLED.
-# - CARGO_INCREMENTAL=0 because (a) incremental metadata is invalidated
-#   on every restored cache (different source state), (b) it bloats
-#   artifacts 2-5x, and (c) it produces non-deterministic rustc output
-#   that defeats sccache's content-hash keys.
+# - CARGO_INCREMENTAL=0 because incremental metadata is invalidated on
+#   every restored cache (different source state) and bloats the
+#   tarball 2-5x for zero CI benefit.
 # - CARGO_PROFILE_DEV_DEBUG=line-tables-only and CODEGEN_UNITS=256
-#   shrink dev artifacts and parallelize codegen — wins are bandwidth
-#   (cache transfer) and link parallelism, both CI-relevant.
+#   shrink dev artifacts and parallelize codegen — wins are tarball
+#   transfer time and link parallelism, both CI-relevant.
 # - RUSTFLAGS routes the linker through mold (installed per job below).
 #   mold is ~3-5x faster than ld for the workspace's larger binaries
 #   (meshmon-service, integration test bins).
+#
+# Compiler caching strategy: Swatinem/rust-cache writes a single tarball
+# per shared-key per workflow run, well below GHA's 200 cache-writes/
+# minute rate limit. sccache's per-rustc-invocation model was tried and
+# regressed against that limit (sccache#2593 + GHA cache rate-limit
+# changes from 2026-01-16) — every parallel rustc fan-out tripped the
+# limit and silently failed ~40% of writes. Tarball mode trades the
+# theoretical per-invocation hit rate for actual writes that land.
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
   CARGO_PROFILE_DEV_CODEGEN_UNITS: "256"
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
   RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
@@ -54,18 +55,17 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # Registry/index only — sccache owns target/ caching at the rustc
-      # invocation level (much higher hit rate, no tarball repackaging).
-      # shared-key: meshmon-debug is shared with rust-test + rust-e2e so
-      # the registry cache is populated once across all three.
-      - name: Cache cargo registry
+      # shared-key meshmon-debug is shared with rust-test + rust-e2e so
+      # the workspace's debug-profile target/ is restored once and reused
+      # across all three. prefix-key v1 invalidates the registry-only
+      # tarballs left behind by an earlier sccache experiment whose key
+      # collided with this one (GHA cache entries are immutable, so a
+      # write under the same key would be silently rejected).
+      - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: meshmon-debug
-          cache-targets: false
           cache-on-failure: true
 
       - name: cargo fmt --check
@@ -87,10 +87,6 @@ jobs:
             exit 1
           fi
 
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats
-
   rust-test:
     name: Rust test (cargo xtask test)
     runs-on: ubuntu-latest
@@ -107,14 +103,11 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Cache cargo registry
+      - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: meshmon-debug
-          cache-targets: false
           cache-on-failure: true
 
       - name: Install cargo-nextest (prebuilt)
@@ -122,10 +115,6 @@ jobs:
 
       - name: cargo xtask test
         run: cargo xtask test
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats
 
   actionlint:
     name: actionlint (workflow YAML)
@@ -239,18 +228,14 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
       # Release-profile artifacts are disjoint from the debug-profile
       # graph (rustc keys include opt-level), so a separate shared-key
-      # keeps the registry cache narrow and avoids debug/release
-      # tarball cross-contamination.
-      - name: Cache cargo registry
+      # avoids debug/release tarball cross-contamination.
+      - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: meshmon-release
-          cache-targets: false
           cache-on-failure: true
 
       - name: cargo build --release
@@ -281,10 +266,6 @@ jobs:
           path: target/release/meshmon-service
           retention-days: 14
 
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats
-
   rust-e2e:
     name: Rust E2E (bundled compose smoke)
     runs-on: ubuntu-latest
@@ -302,14 +283,11 @@ jobs:
       - name: Install system deps (mold linker, argon2 CLI)
         run: sudo apt-get update && sudo apt-get install -y mold argon2
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Cache cargo registry
+      - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: meshmon-debug
-          cache-targets: false
           cache-on-failure: true
 
       - name: Stage deploy/.env
@@ -373,7 +351,3 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose down -v
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats
