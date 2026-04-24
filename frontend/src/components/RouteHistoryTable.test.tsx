@@ -14,7 +14,7 @@ const rows: Row[] = [
     target_id: "b",
     protocol: "icmp",
     observed_at: "2026-04-13T10:10:00Z",
-    path_summary: { avg_rtt_micros: 185_000, loss_pct: 0, hop_count: 5 },
+    path_summary: { avg_rtt_micros: 185_000, loss_ratio: 0, hop_count: 5 },
   },
   {
     id: 1,
@@ -22,7 +22,7 @@ const rows: Row[] = [
     target_id: "b",
     protocol: "icmp",
     observed_at: "2026-04-13T09:30:00Z",
-    path_summary: { avg_rtt_micros: 290_000, loss_pct: 0.038, hop_count: 6 },
+    path_summary: { avg_rtt_micros: 290_000, loss_ratio: 0.038, hop_count: 6 },
   },
 ];
 

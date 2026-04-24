@@ -44,7 +44,7 @@ function makeCandidate(overrides: Partial<Candidate> & { destination_ip: string 
     pairs_improved: overrides.pairs_improved ?? 0,
     pairs_total_considered: overrides.pairs_total_considered ?? 3,
     avg_improvement_ms: overrides.avg_improvement_ms ?? null,
-    avg_loss_pct: overrides.avg_loss_pct ?? null,
+    avg_loss_ratio: overrides.avg_loss_ratio ?? null,
     composite_score: overrides.composite_score ?? 0,
     pair_details: overrides.pair_details ?? [],
   };
@@ -54,7 +54,8 @@ function makeEvaluation(candidates: Candidate[], overrides?: Partial<Evaluation>
   return {
     campaign_id: overrides?.campaign_id ?? "cccccccc-cccc-cccc-cccc-cccccccccccc",
     evaluated_at: overrides?.evaluated_at ?? "2026-04-21T10:00:00Z",
-    loss_threshold_pct: overrides?.loss_threshold_pct ?? 2,
+    // Ratio 0.02 == 2 % (wire convention).
+    loss_threshold_ratio: overrides?.loss_threshold_ratio ?? 0.02,
     stddev_weight: overrides?.stddev_weight ?? 1,
     evaluation_mode: overrides?.evaluation_mode ?? "optimization",
     baseline_pair_count: overrides?.baseline_pair_count ?? 6,

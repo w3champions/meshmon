@@ -22,7 +22,7 @@ const CAMPAIGN_ID = "11111111-1111-1111-1111-111111111111";
 const EVALUATION: Evaluation = {
   campaign_id: CAMPAIGN_ID,
   evaluated_at: "2026-04-20T00:00:00Z",
-  loss_threshold_pct: 5,
+  loss_threshold_ratio: 0.05,
   stddev_weight: 1,
   evaluation_mode: "diversity",
   baseline_pair_count: 4,

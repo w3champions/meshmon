@@ -307,7 +307,7 @@ export interface paths {
          * `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
          * @description Gated on `state IN ('completed','evaluated')`: re-running on an
          *     already-evaluated campaign is allowed so operators can retune
-         *     `loss_threshold_pct` / `stddev_weight` without editing the row. When
+         *     `loss_threshold_ratio` / `stddev_weight` without editing the row. When
          *     the campaign was in `completed`, a best-effort transition flips it to
          *     `evaluated`; a concurrent transition that loses the gate still leaves
          *     the evaluation row written and the SSE event fired.
@@ -1168,9 +1168,9 @@ export interface components {
             id: string;
             /**
              * Format: float
-             * @description Loss-rate threshold (percent) used by the evaluator.
+             * @description Loss-rate threshold (fraction 0.0–1.0) used by the evaluator.
              */
-            loss_threshold_pct: number;
+            loss_threshold_ratio: number;
             /** @description Free-form operator notes. */
             notes: string;
             /** @description Per-state pair counts. Empty on list responses; populated on single-row GET. */
@@ -1250,9 +1250,9 @@ export interface components {
             latency_avg_ms?: number | null;
             /**
              * Format: float
-             * @description Observed loss percentage ([0, 100]) (nullable).
+             * @description Observed loss fraction ([0.0, 1.0]) (nullable).
              */
-            loss_pct?: number | null;
+            loss_ratio?: number | null;
             /**
              * Format: date-time
              * @description When the measurement was produced (null when pending/dispatched).
@@ -1522,9 +1522,9 @@ export interface components {
             force_measurement?: boolean;
             /**
              * Format: float
-             * @description Optional loss-rate threshold for the evaluator.
+             * @description Optional loss-rate threshold for the evaluator (fraction 0.0–1.0).
              */
-            loss_threshold_pct?: number | null;
+            loss_threshold_ratio?: number | null;
             /** @description Optional free-form notes. */
             notes?: string | null;
             /**
@@ -1636,10 +1636,10 @@ export interface components {
             avg_improvement_ms?: number | null;
             /**
              * Format: float
-             * @description Average compound loss (percent) across transit triples that
-             *     cleared the loss gate during scoring.
+             * @description Average compound loss (fraction 0.0–1.0) across transit triples
+             *     that cleared the loss gate during scoring.
              */
-            avg_loss_pct?: number | null;
+            avg_loss_ratio?: number | null;
             /** @description Catalogue city, when present. */
             city?: string | null;
             /**
@@ -1727,9 +1727,9 @@ export interface components {
             evaluation_mode: components["schemas"]["EvaluationMode"];
             /**
              * Format: float
-             * @description Loss-rate threshold (percent) that was applied.
+             * @description Loss-rate threshold (fraction 0.0–1.0) that was applied.
              */
-            loss_threshold_pct: number;
+            loss_threshold_ratio: number;
             /** @description Full candidate breakdown + unqualified-reason map. */
             results: components["schemas"]["EvaluationResultsDto"];
             /**
@@ -1757,9 +1757,9 @@ export interface components {
             destination_ip: string;
             /**
              * Format: float
-             * @description Direct A→B observed loss (percent).
+             * @description Direct A→B observed loss (fraction 0.0–1.0).
              */
-            direct_loss_pct: number;
+            direct_loss_ratio: number;
             /**
              * Format: float
              * @description Direct A→B RTT (ms).
@@ -1794,9 +1794,9 @@ export interface components {
             source_agent_id: string;
             /**
              * Format: float
-             * @description Composed A→X→B transit observed loss (percent).
+             * @description Composed A→X→B transit observed loss (fraction 0.0–1.0).
              */
-            transit_loss_pct: number;
+            transit_loss_ratio: number;
             /**
              * Format: float
              * @description Composed A→X→B transit RTT (ms).
@@ -1919,9 +1919,9 @@ export interface components {
             latency_stddev_ms?: number | null;
             /**
              * Format: float
-             * @description Observed loss percentage ([0, 100]).
+             * @description Observed loss fraction ([0.0, 1.0]).
              */
-            loss_pct: number;
+            loss_ratio: number;
             /**
              * Format: date-time
              * @description When the row was produced (UTC).
@@ -1986,7 +1986,7 @@ export interface components {
              * Format: double
              * @description Fraction of probes with no response at this hop.
              */
-            loss_pct: number;
+            loss_ratio: number;
             /** @description IP addresses observed at this hop and their frequencies. */
             observed_ips: components["schemas"]["HopIpJson"][];
             /**
@@ -2353,9 +2353,9 @@ export interface components {
             evaluation_mode?: null | components["schemas"]["EvaluationMode"];
             /**
              * Format: float
-             * @description Replacement loss-rate threshold.
+             * @description Replacement loss-rate threshold (fraction 0.0–1.0).
              */
-            loss_threshold_pct?: number | null;
+            loss_threshold_ratio?: number | null;
             /** @description Replacement notes (when present). */
             notes?: string | null;
             /**
@@ -2482,7 +2482,7 @@ export interface components {
              * Format: double
              * @description Overall path loss fraction.
              */
-            loss_pct: number;
+            loss_ratio: number;
         };
         /**
          * @description GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.

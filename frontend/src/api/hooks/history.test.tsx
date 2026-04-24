@@ -31,7 +31,7 @@ const MEASUREMENT: HistoryMeasurement = {
   measured_at: "2026-04-20T00:00:00Z",
   probe_count: 60,
   protocol: "icmp",
-  loss_pct: 0,
+  loss_ratio: 0,
 };
 
 class NoopEventSource {

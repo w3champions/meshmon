@@ -2,7 +2,7 @@
  * Raw tab — virtualized feed over `GET /api/campaigns/:id/measurements`.
  *
  * Columns: source (agent display name), destination (IP), protocol, kind,
- * measured_at (relative + absolute via `title`), latency_avg_ms, loss_pct
+ * measured_at (relative + absolute via `title`), loss_ratio
  * (color-chipped), MTR link. Pending / dispatched rows land here alongside
  * settled measurements so the operator can watch in-flight detail work.
  *
@@ -35,6 +35,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { extractCampaignErrorCode, isIllegalStateTransition, isMissingPair } from "@/lib/campaign";
+import { formatLossRatio, LOSS_RATIO_THRESHOLDS } from "@/lib/format-loss";
 import { formatRelativeAgo } from "@/lib/time-format";
 import { cn } from "@/lib/utils";
 import type { CampaignDetailSearch } from "@/router/index";
@@ -444,7 +445,7 @@ function MeasurementRow({
       </Cell>
       <Cell className="text-right tabular-nums">{formatLatency(row.latency_avg_ms)}</Cell>
       <Cell className="text-right">
-        <LossChip value={row.loss_pct} />
+        <LossChip value={row.loss_ratio} />
       </Cell>
       <Cell>
         {row.mtr_id ? (
@@ -532,15 +533,18 @@ function LossChip({ value }: { value: number | null | undefined }) {
   if (value === null || value === undefined) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
+  // `value` is wire-format ratio (0.0–1.0); thresholds are expressed in the
+  // same units (0.5% → 0.005, 2% → 0.02). `formatLossRatio` multiplies by
+  // 100 at display.
   const klass =
-    value < 0.5
+    value < LOSS_RATIO_THRESHOLDS.healthy
       ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-      : value < 2
+      : value < LOSS_RATIO_THRESHOLDS.degraded
         ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
         : "bg-destructive/15 text-destructive";
   return (
     <Badge variant="outline" className={cn("font-mono text-[10px]", klass)}>
-      {value.toFixed(2)}%
+      {formatLossRatio(value)}
     </Badge>
   );
 }

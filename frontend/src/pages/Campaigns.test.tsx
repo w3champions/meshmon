@@ -62,7 +62,7 @@ function makeCampaign(
     protocol: overrides.protocol ?? "icmp",
     evaluation_mode: overrides.evaluation_mode ?? "diversity",
     force_measurement: overrides.force_measurement ?? false,
-    loss_threshold_pct: overrides.loss_threshold_pct ?? 5,
+    loss_threshold_ratio: overrides.loss_threshold_ratio ?? 0.05,
     stddev_weight: overrides.stddev_weight ?? 1,
     probe_count: overrides.probe_count ?? 10,
     probe_count_detail: overrides.probe_count_detail ?? 10,

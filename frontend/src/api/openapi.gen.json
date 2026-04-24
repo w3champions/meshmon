@@ -782,7 +782,7 @@
           "campaigns"
         ],
         "summary": "`POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.",
-        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_pct` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nReturns 422 (`no_baseline_pairs`) when the evaluator finds no\nagent→agent baseline — the campaign must include at least one pair\nwhose destination IP belongs to a registered agent.",
+        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_ratio` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nReturns 422 (`no_baseline_pairs`) when the evaluator finds no\nagent→agent baseline — the campaign must include at least one pair\nwhose destination IP belongs to a registered agent.",
         "operationId": "evaluate",
         "parameters": [
           {
@@ -3069,7 +3069,7 @@
           "timeout_ms",
           "probe_stagger_ms",
           "force_measurement",
-          "loss_threshold_pct",
+          "loss_threshold_ratio",
           "stddev_weight",
           "evaluation_mode",
           "created_at"
@@ -3116,10 +3116,10 @@
             "format": "uuid",
             "description": "Primary key."
           },
-          "loss_threshold_pct": {
+          "loss_threshold_ratio": {
             "type": "number",
             "format": "float",
-            "description": "Loss-rate threshold (percent) used by the evaluator."
+            "description": "Loss-rate threshold (fraction 0.0–1.0) used by the evaluator."
           },
           "notes": {
             "type": "string",
@@ -3236,13 +3236,13 @@
             "format": "float",
             "description": "Average round-trip latency in ms (nullable)."
           },
-          "loss_pct": {
+          "loss_ratio": {
             "type": [
               "number",
               "null"
             ],
             "format": "float",
-            "description": "Observed loss percentage ([0, 100]) (nullable)."
+            "description": "Observed loss fraction ([0.0, 1.0]) (nullable)."
           },
           "measured_at": {
             "type": [
@@ -3755,13 +3755,13 @@
             "type": "boolean",
             "description": "When `true`, the scheduler ignores the 24 h reuse cache."
           },
-          "loss_threshold_pct": {
+          "loss_threshold_ratio": {
             "type": [
               "number",
               "null"
             ],
             "format": "float",
-            "description": "Optional loss-rate threshold for the evaluator."
+            "description": "Optional loss-rate threshold for the evaluator (fraction 0.0–1.0)."
           },
           "notes": {
             "type": [
@@ -3992,13 +3992,13 @@
             "format": "float",
             "description": "Average improvement (ms) across considered pairs. Defined as\n`direct_rtt − transit_rtt − (transit_stddev_penalty − direct_stddev_penalty)`,\nso a positive value means the transit candidate is faster than\nthe direct A→B baseline."
           },
-          "avg_loss_pct": {
+          "avg_loss_ratio": {
             "type": [
               "number",
               "null"
             ],
             "format": "float",
-            "description": "Average compound loss (percent) across transit triples that\ncleared the loss gate during scoring."
+            "description": "Average compound loss (fraction 0.0–1.0) across transit triples\nthat cleared the loss gate during scoring."
           },
           "city": {
             "type": [
@@ -4073,7 +4073,7 @@
         "required": [
           "campaign_id",
           "evaluated_at",
-          "loss_threshold_pct",
+          "loss_threshold_ratio",
           "stddev_weight",
           "evaluation_mode",
           "baseline_pair_count",
@@ -4119,10 +4119,10 @@
             "$ref": "#/components/schemas/EvaluationMode",
             "description": "Evaluation strategy that produced this result."
           },
-          "loss_threshold_pct": {
+          "loss_threshold_ratio": {
             "type": "number",
             "format": "float",
-            "description": "Loss-rate threshold (percent) that was applied."
+            "description": "Loss-rate threshold (fraction 0.0–1.0) that was applied."
           },
           "results": {
             "$ref": "#/components/schemas/EvaluationResultsDto",
@@ -4152,10 +4152,10 @@
           "destination_ip",
           "direct_rtt_ms",
           "direct_stddev_ms",
-          "direct_loss_pct",
+          "direct_loss_ratio",
           "transit_rtt_ms",
           "transit_stddev_ms",
-          "transit_loss_pct",
+          "transit_loss_ratio",
           "improvement_ms",
           "qualifies"
         ],
@@ -4175,10 +4175,10 @@
             "type": "string",
             "description": "Transit destination IP (also a candidate key)."
           },
-          "direct_loss_pct": {
+          "direct_loss_ratio": {
             "type": "number",
             "format": "float",
-            "description": "Direct A→B observed loss (percent)."
+            "description": "Direct A→B observed loss (fraction 0.0–1.0)."
           },
           "direct_rtt_ms": {
             "type": "number",
@@ -4219,10 +4219,10 @@
             "type": "string",
             "description": "Source agent id of the baseline pair."
           },
-          "transit_loss_pct": {
+          "transit_loss_ratio": {
             "type": "number",
             "format": "float",
-            "description": "Composed A→X→B transit observed loss (percent)."
+            "description": "Composed A→X→B transit observed loss (fraction 0.0–1.0)."
           },
           "transit_rtt_ms": {
             "type": "number",
@@ -4383,7 +4383,7 @@
           "kind",
           "probe_count",
           "measured_at",
-          "loss_pct"
+          "loss_ratio"
         ],
         "properties": {
           "destination_hostname": {
@@ -4446,10 +4446,10 @@
             "format": "float",
             "description": "Latency standard deviation in ms."
           },
-          "loss_pct": {
+          "loss_ratio": {
             "type": "number",
             "format": "float",
-            "description": "Observed loss percentage ([0, 100])."
+            "description": "Observed loss fraction ([0.0, 1.0])."
           },
           "measured_at": {
             "type": "string",
@@ -4541,7 +4541,7 @@
           "observed_ips",
           "avg_rtt_micros",
           "stddev_rtt_micros",
-          "loss_pct"
+          "loss_ratio"
         ],
         "properties": {
           "avg_rtt_micros": {
@@ -4550,7 +4550,7 @@
             "description": "Mean RTT to this hop, in microseconds.",
             "minimum": 0
           },
-          "loss_pct": {
+          "loss_ratio": {
             "type": "number",
             "format": "double",
             "description": "Fraction of probes with no response at this hop."
@@ -5149,13 +5149,13 @@
               }
             ]
           },
-          "loss_threshold_pct": {
+          "loss_threshold_ratio": {
             "type": [
               "number",
               "null"
             ],
             "format": "float",
-            "description": "Replacement loss-rate threshold."
+            "description": "Replacement loss-rate threshold (fraction 0.0–1.0)."
           },
           "notes": {
             "type": [
@@ -5384,7 +5384,7 @@
         "description": "JSON representation of the aggregated path summary stored in\n`route_snapshots.path_summary`.",
         "required": [
           "avg_rtt_micros",
-          "loss_pct",
+          "loss_ratio",
           "hop_count"
         ],
         "properties": {
@@ -5400,7 +5400,7 @@
             "description": "Total number of hops in the route.",
             "minimum": 0
           },
-          "loss_pct": {
+          "loss_ratio": {
             "type": "number",
             "format": "double",
             "description": "Overall path loss fraction."

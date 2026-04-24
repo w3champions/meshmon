@@ -24,6 +24,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { isIllegalStateTransition } from "@/lib/campaign";
+import { ratioToPercentInput } from "@/lib/campaign-config";
 import { useToastStore } from "@/stores/toast";
 
 interface EditMetadataSheetProps {
@@ -42,6 +43,9 @@ export function EditMetadataSheet({ campaign, open, onOpenChange }: EditMetadata
 
   const [title, setTitle] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
+  // UX convention: the input is percent-facing ("2" means 2%). The
+  // campaign stores the same value as a ratio on `loss_threshold_ratio`,
+  // so we convert both at seed-time and on submit.
   const [lossThresholdPct, setLossThresholdPct] = useState<string>("");
   const [stddevWeight, setStddevWeight] = useState<string>("");
   const [evaluationMode, setEvaluationMode] = useState<EvaluationMode | "unchanged">("unchanged");
@@ -51,7 +55,7 @@ export function EditMetadataSheet({ campaign, open, onOpenChange }: EditMetadata
     if (campaign && open) {
       setTitle(campaign.title);
       setNotes(campaign.notes);
-      setLossThresholdPct(String(campaign.loss_threshold_pct));
+      setLossThresholdPct(String(ratioToPercentInput(campaign.loss_threshold_ratio)));
       setStddevWeight(String(campaign.stddev_weight));
       setEvaluationMode(campaign.evaluation_mode);
       setError(null);
@@ -83,13 +87,14 @@ export function EditMetadataSheet({ campaign, open, onOpenChange }: EditMetadata
     if (notes !== campaign.notes) {
       body.notes = notes;
     }
-    if (lossThresholdPct !== String(campaign.loss_threshold_pct)) {
+    if (lossThresholdPct !== String(ratioToPercentInput(campaign.loss_threshold_ratio))) {
       const parsed = Number.parseFloat(lossThresholdPct);
       if (!Number.isFinite(parsed)) {
         setError("Loss threshold must be a number.");
         return;
       }
-      body.loss_threshold_pct = parsed;
+      // Input is percent, wire is ratio.
+      body.loss_threshold_ratio = parsed / 100;
     }
     if (stddevWeight !== String(campaign.stddev_weight)) {
       const parsed = Number.parseFloat(stddevWeight);

@@ -16,7 +16,7 @@ function hop(over: Partial<HopJson>): HopJson {
     observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
     avg_rtt_micros: 1_000,
     stddev_rtt_micros: 100,
-    loss_pct: 0,
+    loss_ratio: 0,
     ...over,
   };
 }
@@ -30,7 +30,7 @@ function measurement(over: Partial<HistoryMeasurement>): HistoryMeasurement {
     kind: "detail_mtr",
     measured_at: "2026-04-20T00:00:00.000Z",
     probe_count: 10,
-    loss_pct: 0,
+    loss_ratio: 0,
     latency_avg_ms: 1.2,
     latency_min_ms: 1.0,
     latency_max_ms: 1.5,

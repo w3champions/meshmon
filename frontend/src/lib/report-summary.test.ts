@@ -16,7 +16,7 @@ function snap(
     hops: hops.map((h) => ({
       position: h.position,
       avg_rtt_micros: h.rtt_us,
-      loss_pct: h.loss,
+      loss_ratio: h.loss,
       observed_ips: [{ ip: h.ip, freq: 1 }],
       stddev_rtt_micros: 0,
     })),

@@ -24,6 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { formatLossRatio, LOSS_RATIO_THRESHOLDS } from "@/lib/format-loss";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ export type CandidateSortColumn =
   | "asn"
   | "pairs_improved"
   | "avg_improvement_ms"
-  | "avg_loss_pct"
+  | "avg_loss_ratio"
   | "composite_score";
 
 export type SortDirection = "asc" | "desc";
@@ -79,14 +80,15 @@ function improvementClass(value: number | null | undefined): string {
   return "text-muted-foreground";
 }
 
-function formatLoss(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return `${value.toFixed(2)}%`;
-}
-
+/**
+ * Class for a candidate's `avg_loss_ratio` badge. Both `value` and `threshold`
+ * are wire-format ratios (0.0–1.0) — the per-campaign `loss_threshold_ratio`
+ * is directly comparable without rescaling.
+ */
 function lossClass(value: number | null | undefined, threshold: number): string {
   if (value === null || value === undefined) return "";
-  if (value < 0.5) return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300";
+  if (value < LOSS_RATIO_THRESHOLDS.healthy)
+    return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300";
   if (value < threshold) return "bg-amber-500/15 text-amber-700 dark:text-amber-300";
   return "bg-destructive/15 text-destructive";
 }
@@ -128,8 +130,8 @@ function compareByColumn(a: Candidate, b: Candidate, col: CandidateSortColumn): 
       return a.pairs_improved - b.pairs_improved;
     case "avg_improvement_ms":
       return (a.avg_improvement_ms ?? -Infinity) - (b.avg_improvement_ms ?? -Infinity);
-    case "avg_loss_pct":
-      return (a.avg_loss_pct ?? Infinity) - (b.avg_loss_pct ?? Infinity);
+    case "avg_loss_ratio":
+      return (a.avg_loss_ratio ?? Infinity) - (b.avg_loss_ratio ?? Infinity);
   }
 }
 
@@ -190,7 +192,7 @@ export function CandidateTable({
     [evaluation.results.candidates, sort],
   );
 
-  const threshold = evaluation.loss_threshold_pct;
+  const threshold = evaluation.loss_threshold_ratio;
 
   return (
     <div className="flex flex-col gap-3">
@@ -254,7 +256,7 @@ export function CandidateTable({
                   onSortChange={onSortChange}
                 />
                 <SortableHead
-                  column="avg_loss_pct"
+                  column="avg_loss_ratio"
                   label="Loss"
                   sort={sort}
                   onSortChange={onSortChange}
@@ -322,10 +324,10 @@ export function CandidateTable({
                         variant="outline"
                         className={cn(
                           "font-mono text-xs",
-                          lossClass(candidate.avg_loss_pct, threshold),
+                          lossClass(candidate.avg_loss_ratio, threshold),
                         )}
                       >
-                        {formatLoss(candidate.avg_loss_pct)}
+                        {formatLossRatio(candidate.avg_loss_ratio)}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-sm tabular-nums">

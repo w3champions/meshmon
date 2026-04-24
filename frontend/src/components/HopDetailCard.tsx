@@ -45,7 +45,7 @@ export function HopDetailCard({ hop, onClose, className }: HopDetailCardProps) {
         </section>
         <section>
           <span className="text-muted-foreground">Loss: </span>
-          {(hop.loss_pct * 100).toFixed(1)}%
+          {(hop.loss_ratio * 100).toFixed(1)}%
         </section>
       </CardContent>
     </Card>

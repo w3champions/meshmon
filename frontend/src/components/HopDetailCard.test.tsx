@@ -16,7 +16,7 @@ const HOP: HopJson = {
   ],
   avg_rtt_micros: 12_345,
   stddev_rtt_micros: 678,
-  loss_pct: 0.017,
+  loss_ratio: 0.017,
 };
 
 describe("HopDetailCard", () => {

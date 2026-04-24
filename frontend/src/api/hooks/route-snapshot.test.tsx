@@ -17,7 +17,7 @@ const DETAIL = {
       observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
       avg_rtt_micros: 1_000,
       stddev_rtt_micros: 100,
-      loss_pct: 0,
+      loss_ratio: 0,
     },
   ],
 };

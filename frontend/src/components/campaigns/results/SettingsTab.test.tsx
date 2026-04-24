@@ -46,7 +46,7 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     protocol: overrides.protocol ?? "icmp",
     evaluation_mode: overrides.evaluation_mode ?? "optimization",
     force_measurement: overrides.force_measurement ?? false,
-    loss_threshold_pct: overrides.loss_threshold_pct ?? 2,
+    loss_threshold_ratio: overrides.loss_threshold_ratio ?? 0.02,
     stddev_weight: overrides.stddev_weight ?? 1,
     probe_count: overrides.probe_count ?? 10,
     probe_count_detail: overrides.probe_count_detail ?? 250,
@@ -125,7 +125,8 @@ describe("SettingsTab — form seeding", () => {
     renderTab(
       makeCampaign({
         state: "completed",
-        loss_threshold_pct: 7.5,
+        // Wire ratio 0.075 renders as "7.5" in the percent-facing input.
+        loss_threshold_ratio: 0.075,
         stddev_weight: 1.75,
         evaluation_mode: "diversity",
       }),
@@ -145,7 +146,8 @@ describe("SettingsTab — form seeding", () => {
         id: "eval-1",
         campaign_id: CAMPAIGN_ID,
         evaluated_at: "2026-04-10T12:00:00Z",
-        loss_threshold_pct: 3.25,
+        // Wire ratio 0.0325 renders as "3.25" in the percent-facing input.
+        loss_threshold_ratio: 0.0325,
         stddev_weight: 0.5,
         evaluation_mode: "diversity",
         baseline_pair_count: 4,
@@ -161,7 +163,9 @@ describe("SettingsTab — form seeding", () => {
     renderTab(
       makeCampaign({
         state: "evaluated",
-        loss_threshold_pct: 9,
+        // Wire ratio 0.09 renders as "9" in the percent-facing input —
+        // but the evaluation-row snapshot takes precedence and shows "3.25".
+        loss_threshold_ratio: 0.09,
         stddev_weight: 9,
         evaluation_mode: "optimization",
       }),
@@ -239,7 +243,8 @@ describe("SettingsTab — submit flow", () => {
     expect(patchVars).toEqual({
       id: CAMPAIGN_ID,
       body: {
-        loss_threshold_pct: 4.5,
+        // Form input "4.5" percent → 0.045 ratio on the wire.
+        loss_threshold_ratio: 0.045,
         stddev_weight: 1,
         evaluation_mode: "diversity",
       },
@@ -325,7 +330,7 @@ describe("SettingsTab — submit flow", () => {
       ) => {
         opts?.onSuccess?.({
           id: CAMPAIGN_ID,
-          loss_threshold_pct: 4.5,
+          loss_threshold_ratio: 0.045,
           stddev_weight: 1,
           evaluation_mode: "diversity",
         });
@@ -343,7 +348,7 @@ describe("SettingsTab — submit flow", () => {
           id: "eval-2",
           campaign_id: CAMPAIGN_ID,
           evaluated_at: "2026-04-21T10:00:00Z",
-          loss_threshold_pct: 4.5,
+          loss_threshold_ratio: 0.045,
           stddev_weight: 1,
           evaluation_mode: "diversity",
           baseline_pair_count: 3,

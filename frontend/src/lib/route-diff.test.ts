@@ -16,7 +16,7 @@ function hop(
     observed_ips: [{ ip, freq: 1 }],
     avg_rtt_micros: avgRttMicros,
     stddev_rtt_micros: stddevRttMicros,
-    loss_pct: lossPct,
+    loss_ratio: lossPct,
   };
 }
 
@@ -88,7 +88,7 @@ describe("computeRouteDiff", () => {
       ],
       avg_rtt_micros: 1_000,
       stddev_rtt_micros: 100,
-      loss_pct: 0,
+      loss_ratio: 0,
     };
     const a = [twoIps];
     const b = [{ ...twoIps, observed_ips: [{ ip: "10.0.0.1", freq: 10 }] }];

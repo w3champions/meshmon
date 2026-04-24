@@ -11,7 +11,7 @@ function measurement(over: Partial<HistoryMeasurement>): HistoryMeasurement {
     kind: "campaign",
     measured_at: "2026-04-20T00:00:00.000Z",
     probe_count: 10,
-    loss_pct: 0,
+    loss_ratio: 0,
     latency_avg_ms: null,
     latency_min_ms: null,
     latency_max_ms: null,
@@ -37,7 +37,9 @@ describe("reshapeForChart", () => {
         latency_avg_ms: 12,
         latency_min_ms: 10,
         latency_max_ms: 15,
-        loss_pct: 0.5,
+        // 0.5% as ratio. The reshape helper multiplies by 100 so the chart
+        // reads `icmp_loss: 0.5` on a `[0, 100]`-scaled axis.
+        loss_ratio: 0.005,
       }),
       measurement({
         id: 2,
@@ -46,7 +48,8 @@ describe("reshapeForChart", () => {
         latency_avg_ms: 30,
         latency_min_ms: 20,
         latency_max_ms: 40,
-        loss_pct: 1.0,
+        // 1% as ratio.
+        loss_ratio: 0.01,
       }),
     ]);
     expect(rows).toHaveLength(1);
@@ -86,14 +89,16 @@ describe("reshapeForChart", () => {
         latency_avg_ms: null,
         latency_min_ms: null,
         latency_max_ms: null,
-        loss_pct: 2.5,
+        // 2.5% as ratio.
+        loss_ratio: 0.025,
       }),
     ]);
     expect(rows[0].udp_avg).toBeUndefined();
     expect(rows[0].udp_min).toBeUndefined();
     expect(rows[0].udp_max).toBeUndefined();
     expect(rows[0].udp_range_delta).toBeUndefined();
-    // loss_pct is non-nullable so it always lands in the row
+    // loss_ratio is non-nullable and is scaled to percent at reshape time so
+    // the chart's [0, 100] axis reads the same units across rows.
     expect(rows[0].udp_loss).toBe(2.5);
   });
 
@@ -125,14 +130,15 @@ describe("reshapeForChart", () => {
         protocol: "icmp",
         measured_at: "2026-04-20T00:00:00.000Z",
         latency_avg_ms: 10,
-        loss_pct: 0,
+        loss_ratio: 0,
       }),
       measurement({
         id: 2,
         protocol: "icmp",
         measured_at: "2026-04-20T00:00:00.000Z",
         latency_avg_ms: 99,
-        loss_pct: 3,
+        // 3% as ratio.
+        loss_ratio: 0.03,
       }),
     ]);
     expect(rows).toHaveLength(1);
@@ -160,7 +166,8 @@ describe("protocolsPresent", () => {
       measurement({
         protocol: "udp",
         latency_avg_ms: null,
-        loss_pct: 4.2,
+        // 4.2% as ratio.
+        loss_ratio: 0.042,
       }),
     ]);
     expect(protocolsPresent(rows)).toEqual(["udp"]);
