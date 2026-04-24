@@ -394,9 +394,29 @@ Shows the three evaluator knobs (`loss_threshold_ratio`, `stddev_weight`,
 and `evaluated` states enable Re-evaluate; it's hidden on `draft`,
 `running`, and `stopped` campaigns.
 
-Re-evaluate re-scores the campaign against the active-probe
-measurements attributed to it. Surfaces 422 `no_baseline_pairs` when
-no agent-to-agent baseline measurements exist for the campaign.
+Re-evaluate re-scores the campaign against every agent→agent
+baseline it can find: first the active-probe measurements attributed
+to the campaign, then — for any agent→agent pair the active probes
+didn't cover — samples pulled from VictoriaMetrics continuous-mesh
+data at evaluate time. Active-probe data wins when both sources cover
+the same pair; VM-sourced rows never land in `measurements`, they only
+feed the evaluator for that single call.
+
+Each pair in the result carries a `direct_source` field
+(`active_probe` | `vm_continuous`) so operators can tell whether a
+given baseline came from the campaign's own probes or from the
+continuous mesh.
+
+Error responses:
+
+- 422 `no_baseline_pairs` — both sources were empty for every
+  agent→agent pair in the campaign's source/destination agent roster.
+  When the deployment has no VictoriaMetrics configured
+  (`[upstream] vm_url` unset), only the active-probe set is consulted
+  before this error fires.
+- 503 `vm_upstream` — `[upstream] vm_url` is configured but the VM
+  query failed (unreachable, non-2xx, or malformed response).
+  Retry-safe: no evaluation row is written.
 
 ### Switching modes
 
@@ -442,9 +462,15 @@ measurements into the candidate scoring.
 ## Running Evaluate
 
 Evaluate is manual. Finish a campaign, press **Evaluate**, and the
-scoring runs against every measurement attributed to the campaign.
-The result is a single row in `campaign_evaluations`, overwritten on
-every re-evaluate — no history, no audit trail.
+scoring runs against the campaign's attributed measurements plus —
+when `[upstream] vm_url` is configured — any agent→agent pair the
+campaign didn't cover itself, pulled from VictoriaMetrics
+continuous-mesh data at evaluate time.
+
+Each call appends a fresh row to `campaign_evaluations` (with
+per-candidate and per-pair rows in the child tables); older rows
+stay immutable. `GET /api/campaigns/{id}/evaluation` always returns
+the latest.
 
 ## History
 

@@ -80,20 +80,35 @@ DESC)`.
 `POST /api/campaigns/{id}/evaluate` drives:
 
 1. Gate: state is `completed` or `evaluated`.
-2. `repo::measurements_for_campaign` — assembles the pure evaluator's
-   input from the tables.
-3. `eval::evaluate` — scores transit candidates against the baselines.
-4. `evaluation_repo::persist_evaluation` — inserts the parent row +
+2. `repo::measurements_for_campaign` — assembles the active-probe
+   baseline set (declared pairs + `measurements` rows) stamped with
+   `DirectSource::ActiveProbe`.
+3. `fetch_and_synthesize_vm_baselines` — for every agent→agent pair
+   the active-probe set didn't cover, query VictoriaMetrics via
+   `vm_query::fetch_agent_baselines` and synthesize
+   `AttributedMeasurement` rows stamped `DirectSource::VmContinuous`.
+   Silent no-op when `[upstream] vm_url` is unset; any reachable-but-
+   failed VM query surfaces as 503 `vm_upstream`.
+4. Concatenate synthesized rows **first**, then the active-probe rows,
+   so the evaluator's `by_pair` `HashMap::insert` keeps the
+   active-probe row when both sources cover the same
+   `(source_agent_id, destination_ip)`. The synthesis step additionally
+   filters out pairs already covered by active probes, so
+   active-probe-wins is enforced at both layers.
+5. `eval::evaluate` — scores transit candidates against the combined
+   baseline set and stamps each `pair_detail` with the
+   `direct_source` from the baseline row it actually used.
+6. `evaluation_repo::persist_evaluation` — inserts the parent row +
    every candidate, pair_detail, and unqualified_reason child row
    atomically inside one tx, then promotes campaign state to
    `evaluated`.
-5. `evaluation_repo::latest_evaluation_for_campaign` — read-back that
+7. `evaluation_repo::latest_evaluation_for_campaign` — read-back that
    supplies the handler's response DTO.
 
-Every pair_detail carries a `direct_source` provenance enum
-(`active_probe` | `vm_continuous`). Today the evaluator stamps every
-row with `active_probe`; the VM-continuous branch lands in a
-follow-up.
+VM-sourced rows are ephemeral: they never land in `measurements` and
+only live inside the `/evaluate` handler's in-memory input. Only the
+`direct_source` enum on every persisted `pair_detail` records which
+source fed the baseline.
 
 ## SSE event stream
 
