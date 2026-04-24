@@ -18,8 +18,15 @@ Measurement-campaign subsystem.
   `moka::future::Cache<IpAddr, Bucket>` (60 s idle TTL). Bucket-rejected
   pairs flow back to the scheduler via `DispatchOutcome::rate_limited_ids`
   so the scheduler reverts them with `attempt_count--`.
-- Fair round-robin cursor is preserved across ticks and only advances
-  when a batch actually dispatches (empty passes leave it where it was).
+- Each tick snapshots the round-robin cursor once, then fans out one
+  async dispatch per active agent via `FuturesUnordered`. Every fan-out
+  future independently walks the campaign ring from the shared snapshot
+  and breaks on the first campaign with pending work for that agent.
+  Ticks do not overlap — a tick completes when its fan-out drains. The
+  cursor advances by exactly one slot per tick if any agent dispatched;
+  it does not follow the last campaign any individual agent settled on,
+  because concurrent agents may resolve different campaigns within the
+  same tick. Empty passes leave it where it was.
 
 ## NOTIFY channels
 

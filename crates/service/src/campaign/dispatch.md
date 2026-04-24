@@ -18,10 +18,12 @@ clone (interior state is `Arc`-owned) and holds references to:
 2. **Acquire a per-agent semaphore permit (non-blocking).** Effective
    concurrency is `registry.snapshot().get(agent).campaign_max_concurrency
      .unwrap_or(default_agent_concurrency).max(1)`. Uses
-   `try_acquire_owned` so a saturated agent never stalls the scheduler
-   loop: scheduler dispatches agents serially per tick, so awaiting
-   the permit here would queue every other agent behind the
-   bottlenecked one. On saturation the batch returns with
+   `try_acquire_owned` so a saturated agent never stalls the tick's
+   fan-out: awaiting the permit here would hold the agent's slot in
+   the current fan-out until one freed — a pointless wait since the
+   same pairs get re-claimed on the next tick. Fast-failing lets the
+   fan-out drain promptly and the revert path re-queues the pairs
+   immediately. On saturation the batch returns with
    `skipped_reason = "agent_busy"` and all pairs in `rate_limited_ids`
    (not `rejected_ids`) — saturating the cap is the same "pre-RPC
    throttling" category as losing the per-destination bucket, so the
