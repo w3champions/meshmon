@@ -9,7 +9,8 @@
 //! rendered as a bare IP string).
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, PairResolutionState, PairRow, ProbeProtocol,
+    CampaignRow, CampaignState, DirectSource, EvaluationMode, PairResolutionState, PairRow,
+    ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -340,10 +341,14 @@ where
 
 /// Wire shape for `GET /api/campaigns/{id}/evaluation`.
 ///
-/// Also the exact JSON persisted into `campaign_evaluations.results` —
-/// the evaluator serialises [`EvaluationResultsDto`] directly into the
-/// JSONB column so the read handler can hand the stored document back
-/// to the client without rehydrating through a domain model.
+/// Assembled from the relational `campaign_evaluations` parent row
+/// plus its child tables (`campaign_evaluation_candidates`,
+/// `campaign_evaluation_pair_details`,
+/// `campaign_evaluation_unqualified_reasons`) by
+/// [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
+/// The read-path joins in Rust so the wire DTO stays unchanged
+/// compared to the pre-T54-02 JSONB layout, modulo the new
+/// `direct_source` field on every `pair_detail`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationDto {
     /// Owning campaign.
@@ -373,7 +378,9 @@ pub struct EvaluationDto {
     pub results: EvaluationResultsDto,
 }
 
-/// Candidate breakdown persisted in `campaign_evaluations.results`.
+/// Candidate breakdown assembled from
+/// `campaign_evaluation_candidates` and
+/// `campaign_evaluation_unqualified_reasons`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationResultsDto {
     /// Per-candidate scoring rows, ordered by composite score.
@@ -448,6 +455,11 @@ pub struct EvaluationPairDetailDto {
     pub direct_stddev_ms: f32,
     /// Direct A→B observed loss (fraction 0.0–1.0).
     pub direct_loss_ratio: f32,
+    /// Provenance of the direct A→B baseline figures. Today the
+    /// evaluator stamps every row with [`DirectSource::ActiveProbe`];
+    /// T54-03 will flip this to [`DirectSource::VmContinuous`] when a
+    /// VM-continuous baseline replaces an active probe sample.
+    pub direct_source: DirectSource,
     /// Composed A→X→B transit RTT (ms).
     pub transit_rtt_ms: f32,
     /// Composed A→X→B transit RTT stddev (ms).

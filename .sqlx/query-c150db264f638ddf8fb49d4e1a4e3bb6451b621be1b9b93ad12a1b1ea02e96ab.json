@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_evaluation_candidates\n                  (evaluation_id, destination_ip, display_name, city,\n                   country_code, asn, network_operator, is_mesh_member,\n                   pairs_improved, pairs_total_considered, avg_improvement_ms)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Inet",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Bool",
+        "Int4",
+        "Int4",
+        "Float4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c150db264f638ddf8fb49d4e1a4e3bb6451b621be1b9b93ad12a1b1ea02e96ab"
+}

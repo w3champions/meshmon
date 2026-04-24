@@ -119,6 +119,7 @@ function makeEvaluation(): Evaluation {
               direct_rtt_ms: 50,
               direct_stddev_ms: 2,
               direct_loss_ratio: 0.001,
+              direct_source: "active_probe",
               transit_rtt_ms: 20,
               transit_stddev_ms: 1,
               transit_loss_ratio: 0.0005,

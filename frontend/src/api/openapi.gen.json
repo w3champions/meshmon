@@ -3897,6 +3897,14 @@
           "pair"
         ]
       },
+      "DirectSource": {
+        "type": "string",
+        "description": "Where an evaluation pair-detail's \"direct A→B\" baseline came from.\n\nMirrors the `pair_detail_direct_source` Postgres enum. The\ncurrent evaluator only stamps [`Self::ActiveProbe`]; the\nVM-continuous provenance slot is reserved for T54-03 when the\nevaluator grows a VictoriaMetrics baseline fallback.",
+        "enum": [
+          "active_probe",
+          "vm_continuous"
+        ]
+      },
       "EditCampaignRequest": {
         "type": "object",
         "description": "Body for `POST /api/campaigns/{id}/edit`.",
@@ -4153,6 +4161,7 @@
           "direct_rtt_ms",
           "direct_stddev_ms",
           "direct_loss_ratio",
+          "direct_source",
           "transit_rtt_ms",
           "transit_stddev_ms",
           "transit_loss_ratio",
@@ -4184,6 +4193,10 @@
             "type": "number",
             "format": "float",
             "description": "Direct A→B RTT (ms)."
+          },
+          "direct_source": {
+            "$ref": "#/components/schemas/DirectSource",
+            "description": "Provenance of the direct A→B baseline figures. Today the\nevaluator stamps every row with [`DirectSource::ActiveProbe`];\nT54-03 will flip this to [`DirectSource::VmContinuous`] when a\nVM-continuous baseline replaces an active probe sample."
           },
           "direct_stddev_ms": {
             "type": "number",

@@ -2,10 +2,14 @@
 //!
 //! `evaluate()` is the single entry point. Its caller (repo.rs) builds
 //! `EvaluationInputs` from DB queries and persists the returned
-//! `EvaluationOutputs` into the `campaign_evaluations` table.
+//! `EvaluationOutputs` through
+//! [`crate::campaign::evaluation_repo::persist_evaluation`], which
+//! fans the structure out across `campaign_evaluations` +
+//! `campaign_evaluation_{candidates, pair_details,
+//! unqualified_reasons}`.
 
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
-use crate::campaign::model::EvaluationMode;
+use crate::campaign::model::{DirectSource, EvaluationMode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 
@@ -82,8 +86,11 @@ pub struct EvaluationOutputs {
     pub candidates_good: i32,
     /// Mean improvement (ms) across all qualifying pair details.
     pub avg_improvement_ms: Option<f32>,
-    /// Serialisable results payload, persisted verbatim into
-    /// `campaign_evaluations.results`.
+    /// Serialisable results payload. Persisted by
+    /// [`crate::campaign::evaluation_repo::insert_evaluation`] into the
+    /// `campaign_evaluation_candidates`,
+    /// `campaign_evaluation_pair_details`, and
+    /// `campaign_evaluation_unqualified_reasons` child tables.
     pub results: EvaluationResultsDto,
 }
 
@@ -285,6 +292,11 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                 direct_rtt_ms: direct_rtt,
                 direct_stddev_ms: direct_stddev,
                 direct_loss_ratio,
+                // Today every baseline row comes from the active-probe
+                // `measurements` join. T54-03 will source a subset of
+                // these from VictoriaMetrics and flip them to
+                // [`DirectSource::VmContinuous`].
+                direct_source: DirectSource::ActiveProbe,
                 transit_rtt_ms: transit_rtt,
                 transit_stddev_ms: transit_stddev,
                 transit_loss_ratio: compound_loss_ratio,

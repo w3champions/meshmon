@@ -1405,16 +1405,18 @@ async fn measurements_for_campaign_filters_detail_kind() {
 }
 
 #[tokio::test]
-async fn write_then_read_evaluation_round_trip() {
-    // Write a synthetic evaluation, read it back, then UPSERT a second
-    // time with a different mode and verify the old row is gone and the
-    // timestamp did not regress.
+async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
+    // Write a synthetic evaluation, read it back, then persist a
+    // second one with a different mode. The new schema dropped the
+    // per-campaign UNIQUE constraint, so two rows must coexist and
+    // the read-path must surface the freshest.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
     use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
     let row = repo::create(&pool, make_input("t-eval-rt")).await.unwrap();
-    // `write_evaluation` now locks the row and rechecks state inside
+    // `persist_evaluation` locks the row and rechecks state inside
     // its transaction — drafts are rejected. Force completed so the
     // persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
@@ -1429,7 +1431,7 @@ async fn write_then_read_evaluation_round_trip() {
             unqualified_reasons: Default::default(),
         },
     };
-    let persisted_first = repo::write_evaluation(
+    let first_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &first,
@@ -1439,22 +1441,30 @@ async fn write_then_read_evaluation_round_trip() {
     )
     .await
     .unwrap();
-    assert_eq!(persisted_first.campaign_id, row.id);
-    assert_eq!(persisted_first.baseline_pair_count, 3);
-    assert_eq!(persisted_first.candidates_good, 1);
-    assert_eq!(persisted_first.evaluation_mode, EvaluationMode::Diversity);
 
-    let read_first = repo::read_evaluation(&pool, row.id)
+    let read_first = evaluation_repo::latest_evaluation_for_campaign(&pool, row.id)
         .await
         .unwrap()
-        .expect("row present after first UPSERT");
-    assert_eq!(read_first.id, persisted_first.id);
+        .expect("row present after first persist");
+    assert_eq!(read_first.baseline_pair_count, 3);
+    assert_eq!(read_first.candidates_good, 1);
+    assert_eq!(read_first.evaluation_mode, EvaluationMode::Diversity);
     assert_eq!(read_first.avg_improvement_ms, Some(12.5));
     assert_eq!(read_first.loss_threshold_ratio, 0.025);
     assert_eq!(read_first.stddev_weight, 1.25);
 
-    // Force a clock delta so evaluated_at is strictly greater on the
-    // second write regardless of platform timestamp resolution.
+    // Capture the first row's evaluated_at so we can assert the
+    // insert below appends a distinct row rather than mutating the
+    // existing one.
+    let first_evaluated_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT evaluated_at FROM campaign_evaluations WHERE id = $1")
+            .bind(first_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Force a clock delta so evaluated_at on the second row is
+    // strictly greater regardless of platform timestamp resolution.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
     let second = EvaluationOutputs {
@@ -1467,7 +1477,7 @@ async fn write_then_read_evaluation_round_trip() {
             unqualified_reasons: Default::default(),
         },
     };
-    let persisted_second = repo::write_evaluation(
+    let second_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &second,
@@ -1477,26 +1487,45 @@ async fn write_then_read_evaluation_round_trip() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        persisted_second.id, persisted_first.id,
-        "UPSERT keeps the same row id (unique on campaign_id)"
-    );
-    assert!(
-        persisted_second.evaluated_at >= persisted_first.evaluated_at,
-        "evaluated_at must not regress: {:?} vs {:?}",
-        persisted_first.evaluated_at,
-        persisted_second.evaluated_at
+    assert_ne!(
+        second_id, first_id,
+        "INSERT-history: every /evaluate produces a new id"
     );
 
-    let read_second = repo::read_evaluation(&pool, row.id)
+    // The first row must be untouched after the second insert —
+    // history, not UPSERT.
+    let first_still: (EvaluationMode, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT evaluation_mode, evaluated_at FROM campaign_evaluations WHERE id = $1",
+    )
+    .bind(first_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        first_still.0,
+        EvaluationMode::Diversity,
+        "first row's evaluation_mode must remain untouched"
+    );
+    assert_eq!(
+        first_still.1, first_evaluated_at,
+        "first row's evaluated_at must remain untouched"
+    );
+
+    let read_second = evaluation_repo::latest_evaluation_for_campaign(&pool, row.id)
         .await
         .unwrap()
-        .expect("row present after second UPSERT");
+        .expect("row present after second persist");
     assert_eq!(read_second.evaluation_mode, EvaluationMode::Optimization);
     assert_eq!(read_second.baseline_pair_count, 7);
     assert_eq!(read_second.candidates_good, 4);
     assert_eq!(read_second.loss_threshold_ratio, 0.03);
     assert_eq!(read_second.stddev_weight, 0.5);
+    assert!(
+        read_second.evaluated_at >= read_first.evaluated_at,
+        "latest-by-evaluated_at must not regress: {:?} vs {:?}",
+        read_first.evaluated_at,
+        read_second.evaluated_at
+    );
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
@@ -1504,20 +1533,24 @@ async fn write_then_read_evaluation_round_trip() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(count, 1, "UPSERT collapses into a single row per campaign");
+    assert_eq!(
+        count, 2,
+        "INSERT-history preserves both rows; latest-pick happens on read"
+    );
 
     repo::delete(&pool, row.id).await.unwrap();
 }
 
 #[tokio::test]
-async fn write_evaluation_rejects_running_campaign() {
-    // Race guard: `write_evaluation` must recheck state under the row
+async fn persist_evaluation_rejects_running_campaign() {
+    // Race guard: `persist_evaluation` must recheck state under the row
     // lock. If a concurrent `/detail` flipped the campaign to `running`
-    // between the handler's initial gate and our UPSERT, persistence
+    // between the handler's initial gate and our insert, persistence
     // must abort with IllegalTransition rather than silently writing a
     // fresh evaluation against a now-running campaign.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
     use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
     let row = repo::create(&pool, make_input("t-eval-gate"))
@@ -1537,7 +1570,7 @@ async fn write_evaluation_rejects_running_campaign() {
         },
     };
 
-    let err = repo::write_evaluation(
+    let err = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &outputs,
@@ -1546,7 +1579,7 @@ async fn write_evaluation_rejects_running_campaign() {
         EvaluationMode::Optimization,
     )
     .await
-    .expect_err("write_evaluation must reject running state");
+    .expect_err("persist_evaluation must reject running state");
     match err {
         RepoError::IllegalTransition { from, .. } => {
             assert_eq!(
@@ -1895,19 +1928,21 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
 #[tokio::test]
 async fn campaign_evaluations_cascade_on_campaign_delete() {
     // `campaign_evaluations.campaign_id` has an `ON DELETE CASCADE` FK
-    // to `measurement_campaigns.id`. Deleting the parent must drop the
-    // evaluation row in the same transaction — otherwise orphan rows
-    // would accumulate and the `UNIQUE (campaign_id)` constraint would
-    // block a future re-creation of a campaign reusing the same UUID
-    // (tests and disaster-recovery paths both rely on reusable ids).
+    // to `measurement_campaigns.id`. Deleting the parent must drop
+    // every historical evaluation row (plus its children via the
+    // second cascade chain) in the same transaction — orphan rows
+    // would otherwise accumulate and clutter `/evaluation` read
+    // attempts on a recreated campaign reusing the same UUID (tests
+    // and disaster-recovery paths both rely on reusable ids).
     use meshmon_service::campaign::dto::EvaluationResultsDto;
     use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
 
     let pool = common::shared_migrated_pool().await;
     let row = repo::create(&pool, make_input("t-eval-cascade"))
         .await
         .unwrap();
-    // `write_evaluation` locks the row and rechecks state — force
+    // `persist_evaluation` locks the row and rechecks state — force
     // completed so the persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
@@ -1921,7 +1956,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
             unqualified_reasons: Default::default(),
         },
     };
-    repo::write_evaluation(
+    evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &outputs,

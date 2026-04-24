@@ -9,13 +9,13 @@
 
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
-    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
-    EvaluationResultsDto, ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest,
-    PreviewDispatchResponse,
+    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto, ForcePairRequest,
+    PairDto, PairListQuery, PatchCampaignRequest, PreviewDispatchResponse,
 };
 use super::eval::{self, EvalError};
+use super::evaluation_repo;
 use super::model::{CampaignState, PairResolutionState};
-use super::repo::{self, CreateInput, EditInput, EvaluationRow, RepoError};
+use super::repo::{self, CreateInput, EditInput, RepoError};
 use crate::hostname::session_id_from_auth;
 use crate::hostname::stamp::bulk_hostnames_and_enqueue;
 use crate::http::auth::AuthSession;
@@ -637,43 +637,6 @@ pub async fn preview_dispatch_count(
     }
 }
 
-/// Convert an [`EvaluationRow`] into the wire DTO.
-///
-/// The stored `results` column is owned by this service (written by
-/// [`repo::write_evaluation`] as a serialised [`EvaluationResultsDto`]),
-/// so a deserialisation failure here signals data corruption from outside
-/// the normal write path. Returns `Err` so the caller can map it to a
-/// `500 invalid_evaluation_payload` response instead of panicking a tokio
-/// worker.
-fn to_evaluation_dto(row: EvaluationRow) -> Result<EvaluationDto, serde_json::Error> {
-    let results: EvaluationResultsDto = serde_json::from_value(row.results)?;
-    Ok(EvaluationDto {
-        campaign_id: row.campaign_id,
-        evaluated_at: row.evaluated_at,
-        loss_threshold_ratio: row.loss_threshold_ratio,
-        stddev_weight: row.stddev_weight,
-        evaluation_mode: row.evaluation_mode,
-        baseline_pair_count: row.baseline_pair_count,
-        candidates_total: row.candidates_total,
-        candidates_good: row.candidates_good,
-        avg_improvement_ms: row.avg_improvement_ms,
-        results,
-    })
-}
-
-fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Response {
-    tracing::error!(
-        %campaign_id,
-        error = %err,
-        "campaign_evaluations.results failed to deserialise"
-    );
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": "invalid_evaluation_payload" })),
-    )
-        .into_response()
-}
-
 /// `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
 ///
 /// Gated on `state IN ('completed','evaluated')`: re-running on an
@@ -746,11 +709,14 @@ pub async fn evaluate(
         }
     };
 
-    // `write_evaluation` writes the evaluation row AND promotes
-    // `completed → evaluated` in the same transaction. A crash between
-    // the UPSERT and the state flip would otherwise leave the campaign
-    // stuck in `completed` with a written evaluation row (inconsistent).
-    let row = match repo::write_evaluation(
+    // `persist_evaluation` writes the parent `campaign_evaluations`
+    // row and every child `campaign_evaluation_{candidates,
+    // pair_details, unqualified_reasons}` row inside one transaction,
+    // then promotes `completed → evaluated`. A crash between the
+    // insert and the state flip would otherwise leave the campaign
+    // stuck in `completed` with a written evaluation history row —
+    // inconsistent for UI consumers keyed off `state`.
+    if let Err(e) = evaluation_repo::persist_evaluation(
         &state.pool,
         id,
         &outputs,
@@ -760,8 +726,25 @@ pub async fn evaluate(
     )
     .await
     {
-        Ok(r) => r,
-        Err(e) => return repo_error("campaign::evaluate::write", e),
+        return repo_error("campaign::evaluate::persist", e);
+    }
+
+    // Re-read the latest row so the response carries the exact
+    // relational shape the read-path assembles (ordering, composite
+    // score recompute, hostname stamp surface). The cost is one extra
+    // index lookup; the alternative is threading the just-written
+    // parent row through the orchestrator, duplicating assembly
+    // logic.
+    let mut dto = match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
+        Ok(Some(dto)) => dto,
+        Ok(None) => {
+            tracing::error!(
+                %id,
+                "campaign::evaluate: freshly written row missing on read-back"
+            );
+            return db_error("campaign::evaluate::readback", sqlx::Error::RowNotFound);
+        }
+        Err(e) => return db_error("campaign::evaluate::readback", e),
     };
 
     // No in-process broker publish here. The `campaign_evaluations_notify`
@@ -770,14 +753,9 @@ pub async fn evaluate(
     // instance's and its peers') — a direct publish here would cause
     // same-instance clients to receive a duplicate `evaluated` frame.
 
-    match to_evaluation_dto(row) {
-        Ok(mut dto) => {
-            let session = session_id_from_auth(&auth);
-            stamp_evaluation_dto(&state, &session, &mut dto).await;
-            (StatusCode::OK, Json(dto)).into_response()
-        }
-        Err(e) => invalid_evaluation_payload(id, e),
-    }
+    let session = session_id_from_auth(&auth);
+    stamp_evaluation_dto(&state, &session, &mut dto).await;
+    (StatusCode::OK, Json(dto)).into_response()
 }
 
 /// `GET /api/campaigns/{id}/evaluation` — read-through on the persisted
@@ -804,21 +782,18 @@ pub async fn get_evaluation(
     auth: AuthSession,
     Path(id): Path<Uuid>,
 ) -> Response {
-    match repo::read_evaluation(&state.pool, id).await {
-        Ok(Some(row)) => match to_evaluation_dto(row) {
-            Ok(mut dto) => {
-                let session = session_id_from_auth(&auth);
-                stamp_evaluation_dto(&state, &session, &mut dto).await;
-                (StatusCode::OK, Json(dto)).into_response()
-            }
-            Err(e) => invalid_evaluation_payload(id, e),
-        },
+    match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
+        Ok(Some(mut dto)) => {
+            let session = session_id_from_auth(&auth);
+            stamp_evaluation_dto(&state, &session, &mut dto).await;
+            (StatusCode::OK, Json(dto)).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "not_evaluated" })),
         )
             .into_response(),
-        Err(e) => repo_error("campaign::get_evaluation", e),
+        Err(e) => db_error("campaign::get_evaluation", e),
     }
 }
 
@@ -922,11 +897,11 @@ pub async fn detail(
                 )
                     .into_response();
             }
-            let row = match repo::read_evaluation(&state.pool, id).await {
+            let dto = match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
                 Ok(Some(r)) => r,
                 Ok(None) => {
                     // Defensive: `state=evaluated` implies a row exists
-                    // (write_evaluation is the only writer that sets
+                    // (persist_evaluation is the only writer that sets
                     // that state). Reaching this arm would mean a
                     // concurrent DELETE raced the read; treat as
                     // missing evaluation.
@@ -936,25 +911,15 @@ pub async fn detail(
                     )
                         .into_response();
                 }
-                Err(e) => return repo_error("campaign::detail::eval", e),
-            };
-            let results: EvaluationResultsDto = match serde_json::from_value(row.results) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        campaign_id = %id,
-                        "campaign::detail: stored evaluation row failed to deserialise"
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "invalid_evaluation_payload" })),
-                    )
-                        .into_response();
-                }
+                Err(e) => return db_error("campaign::detail::eval", e),
             };
             let mut acc: Vec<(String, IpAddr)> = Vec::new();
-            for cand in results.candidates.iter().filter(|c| c.pairs_improved >= 1) {
+            for cand in dto
+                .results
+                .candidates
+                .iter()
+                .filter(|c| c.pairs_improved >= 1)
+            {
                 let Ok(transit_ip) = IpAddr::from_str(&cand.destination_ip) else {
                     tracing::warn!(
                         campaign_id = %id,

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms, results\n             FROM campaign_evaluations WHERE campaign_id = $1",
+  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms\n             FROM campaign_evaluations\n            WHERE campaign_id = $1\n            ORDER BY evaluated_at DESC\n            LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -62,11 +62,6 @@
         "ordinal": 9,
         "name": "avg_improvement_ms",
         "type_info": "Float4"
-      },
-      {
-        "ordinal": 10,
-        "name": "results",
-        "type_info": "Jsonb"
       }
     ],
     "parameters": {
@@ -84,9 +79,8 @@
       false,
       false,
       false,
-      true,
-      false
+      true
     ]
   },
-  "hash": "5b3efb242974bd8379933fb2302f7971364d276cf75da9cbcf8d003610c0ff22"
+  "hash": "1e089257b831d69eec309700fbfa0ee13ef22adb7a01062577df3ce915f14e81"
 }

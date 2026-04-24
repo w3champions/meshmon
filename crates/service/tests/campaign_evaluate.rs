@@ -327,6 +327,14 @@ async fn reused_pair_surfaces_in_baseline() {
         has_reused_leg,
         "reused measurement's source/destination must appear in pair_details: {candidate}"
     );
+    // T54-02: every pair_detail stamps `direct_source='active_probe'`
+    // today. T54-03 will introduce `vm_continuous` rows.
+    for pd in pair_details {
+        assert_eq!(
+            pd["direct_source"], "active_probe",
+            "every pair_detail should carry direct_source=active_probe: {pd}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -351,4 +359,128 @@ async fn get_evaluation_404_before_evaluate() {
         .get_expect_status(&format!("/api/campaigns/{campaign_id}/evaluation"), 404)
         .await;
     assert_eq!(res["error"], "not_evaluated", "body = {res}");
+}
+
+#[tokio::test]
+async fn second_evaluate_appends_new_row_without_mutating_first() {
+    // T54-02 dropped the per-campaign UNIQUE constraint so every
+    // `/evaluate` call appends a fresh `campaign_evaluations` row.
+    // Guards: two rows exist after two calls, the first row's id +
+    // evaluated_at + evaluation_mode + candidate count are all
+    // untouched, and the read-path surfaces the second (newer) row.
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "192.0.2.71".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.72".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t6-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t6-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t6-history",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t6-a", "eval-t6-b"],
+                "destination_ips": ["192.0.2.72", "192.0.2.71", "192.0.2.79"],
+                "loss_threshold_ratio": 0.05,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "optimization",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().unwrap();
+
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("eval-t6-a", "192.0.2.72", 300.0, 20.0, 0.0),
+            ("eval-t6-a", "192.0.2.79", 120.0, 8.0, 0.0),
+            ("eval-t6-b", "192.0.2.79", 120.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    // First /evaluate — `optimization` mode.
+    let eval1: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+    let first_evaluated_at = eval1["evaluated_at"]
+        .as_str()
+        .expect("evaluated_at on first evaluate")
+        .to_owned();
+    let first_mode = eval1["evaluation_mode"].as_str().expect("mode").to_owned();
+    assert_eq!(first_mode, "optimization");
+
+    // Snapshot the first row's (id, evaluated_at) directly out of the
+    // DB so we can assert it remains untouched after the second call.
+    let (first_id, first_ts): (uuid::Uuid, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT id, evaluated_at FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(campaign_uuid)
+            .fetch_one(&h.state.pool)
+            .await
+            .expect("read first evaluation row");
+
+    // Force a measurable clock delta before the second call.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Switch evaluation mode and re-evaluate — a distinct row should
+    // land in `campaign_evaluations` rather than overwriting the first.
+    let _patch: Value = h
+        .patch_json(
+            &format!("/api/campaigns/{campaign_id}"),
+            &json!({ "evaluation_mode": "diversity" }),
+        )
+        .await;
+    let eval2: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+    assert_eq!(eval2["evaluation_mode"], "diversity", "body = {eval2}");
+
+    // Two rows exist, the first is untouched, the second is newer.
+    let row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(campaign_uuid)
+            .fetch_one(&h.state.pool)
+            .await
+            .expect("count evaluations");
+    assert_eq!(
+        row_count, 2,
+        "every /evaluate must append a row (not UPSERT)"
+    );
+
+    let first_still: (uuid::Uuid, chrono::DateTime<chrono::Utc>, String) = sqlx::query_as(
+        "SELECT id, evaluated_at, evaluation_mode::text \
+           FROM campaign_evaluations WHERE id = $1",
+    )
+    .bind(first_id)
+    .fetch_one(&h.state.pool)
+    .await
+    .expect("re-read first evaluation row");
+    assert_eq!(first_still.0, first_id, "first row id unchanged");
+    assert_eq!(first_still.1, first_ts, "first row evaluated_at unchanged");
+    assert_eq!(
+        first_still.2, "optimization",
+        "first row evaluation_mode unchanged (no UPSERT leak)"
+    );
+
+    // Read-through on GET /evaluation must return the latest row.
+    let second_evaluated_at = eval2["evaluated_at"]
+        .as_str()
+        .expect("evaluated_at on second evaluate");
+    assert_ne!(
+        first_evaluated_at, second_evaluated_at,
+        "second evaluate must stamp a distinct evaluated_at"
+    );
+    let fetched: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+    assert_eq!(fetched["evaluation_mode"], "diversity");
+    assert_eq!(
+        fetched["evaluated_at"], second_evaluated_at,
+        "GET /evaluation must surface the latest row: {fetched}"
+    );
 }

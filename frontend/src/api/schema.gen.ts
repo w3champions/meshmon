@@ -1587,6 +1587,16 @@ export interface components {
          * @enum {string}
          */
         DetailScope: "all" | "good_candidates" | "pair";
+        /**
+         * @description Where an evaluation pair-detail's "direct A→B" baseline came from.
+         *
+         *     Mirrors the `pair_detail_direct_source` Postgres enum. The
+         *     current evaluator only stamps [`Self::ActiveProbe`]; the
+         *     VM-continuous provenance slot is reserved for T54-03 when the
+         *     evaluator grows a VictoriaMetrics baseline fallback.
+         * @enum {string}
+         */
+        DirectSource: "active_probe" | "vm_continuous";
         /** @description Body for `POST /api/campaigns/{id}/edit`. */
         EditCampaignRequest: {
             /** @description Pairs to add (or reset to `pending` if they already exist). */
@@ -1765,6 +1775,13 @@ export interface components {
              * @description Direct A→B RTT (ms).
              */
             direct_rtt_ms: number;
+            /**
+             * @description Provenance of the direct A→B baseline figures. Today the
+             *     evaluator stamps every row with [`DirectSource::ActiveProbe`];
+             *     T54-03 will flip this to [`DirectSource::VmContinuous`] when a
+             *     VM-continuous baseline replaces an active probe sample.
+             */
+            direct_source: components["schemas"]["DirectSource"];
             /**
              * Format: float
              * @description Direct A→B RTT stddev (ms).

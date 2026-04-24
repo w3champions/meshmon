@@ -82,6 +82,7 @@ function makePair(overrides: Partial<PairDetail> = {}): PairDetail {
     direct_rtt_ms: overrides.direct_rtt_ms ?? 42,
     direct_stddev_ms: overrides.direct_stddev_ms ?? 1,
     direct_loss_ratio: overrides.direct_loss_ratio ?? 0.001,
+    direct_source: overrides.direct_source ?? "active_probe",
     transit_rtt_ms: overrides.transit_rtt_ms ?? 20,
     transit_stddev_ms: overrides.transit_stddev_ms ?? 0.5,
     transit_loss_ratio: overrides.transit_loss_ratio ?? 0.0005,

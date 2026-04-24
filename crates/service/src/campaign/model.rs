@@ -128,6 +128,24 @@ pub enum EvaluationMode {
     Optimization,
 }
 
+/// Where an evaluation pair-detail's "direct A→B" baseline came from.
+///
+/// Mirrors the `pair_detail_direct_source` Postgres enum. The
+/// current evaluator only stamps [`Self::ActiveProbe`]; the
+/// VM-continuous provenance slot is reserved for T54-03 when the
+/// evaluator grows a VictoriaMetrics baseline fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[sqlx(type_name = "pair_detail_direct_source", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum DirectSource {
+    /// Baseline derived from a per-campaign active probe measurement
+    /// (i.e. the `measurements` row joined in via `campaign_pairs`).
+    ActiveProbe,
+    /// Baseline derived from the VictoriaMetrics continuous-monitoring
+    /// feed. T54-03 wires this in; never written today.
+    VmContinuous,
+}
+
 /// Kind of measurement row stored in `measurements`. `campaign` is the
 /// default; T44 never writes anything else (T45/T48 do).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]

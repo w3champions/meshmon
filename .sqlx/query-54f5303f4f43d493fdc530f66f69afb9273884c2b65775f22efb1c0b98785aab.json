@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT destination_ip, reason\n             FROM campaign_evaluation_unqualified_reasons\n            WHERE evaluation_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 1,
+        "name": "reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "54f5303f4f43d493fdc530f66f69afb9273884c2b65775f22efb1c0b98785aab"
+}
