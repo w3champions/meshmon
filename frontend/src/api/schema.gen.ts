@@ -312,22 +312,9 @@ export interface paths {
          *     `evaluated`; a concurrent transition that loses the gate still leaves
          *     the evaluation row written and the SSE event fired.
          *
-         *     Before evaluation, the handler pulls agent-to-agent baselines from
-         *     VictoriaMetrics continuous-mesh data and archives them as raw
-         *     `measurements` rows tagged `source = 'archived_vm_continuous'`. The
-         *     evaluator's existing join-by-measurement-id path then surfaces the
-         *     archival rows alongside any active-probe measurements. This is why
-         *     the evaluate endpoint now depends on `[upstream.vm_url]`.
-         *
-         *     Returns 422 (`no_baseline_pairs`) when the VM fetch produced no
-         *     agent→agent samples inside the 15-minute lookback window and no
-         *     active-probe baseline rows exist either. Operator remedy: verify
-         *     the agent mesh is actually probing, wait until continuous data
-         *     accumulates, or add an active-probe fallback.
-         *
-         *     Returns 503 (`vm_not_configured`) when `[upstream.vm_url]` is not
-         *     set, and 503 (`vm_upstream`) when VM is configured but the query
-         *     failed (unreachable, 5xx, malformed response).
+         *     Returns 422 (`no_baseline_pairs`) when no active-probe baseline rows
+         *     exist. Operator remedy: verify the campaign actually probed agent
+         *     destinations, or wait for in-flight dispatches to settle.
          */
         post: operations["evaluate"];
         delete?: never;
@@ -1299,8 +1286,6 @@ export interface components {
             protocol?: null | components["schemas"]["ProbeProtocol"];
             /** @description Current lifecycle of the pair. */
             resolution_state: components["schemas"]["PairResolutionState"];
-            /** @description How this measurement was produced — active campaign probe vs. archived VM baseline. */
-            source: components["schemas"]["MeasurementSource"];
             /** @description Source agent id from the pair envelope. */
             source_agent_id: string;
         };
@@ -2163,17 +2148,6 @@ export interface components {
          * @enum {string}
          */
         MeasurementKind: "campaign" | "detail_ping" | "detail_mtr";
-        /**
-         * @description Provenance of a `measurements` row.
-         *
-         *     Distinguishes rows an agent actively measured from rows the evaluator
-         *     archived out of VictoriaMetrics continuous-mesh data so the agent
-         *     mesh doesn't have to re-probe itself at evaluation time.
-         *
-         *     Mirrors the `measurement_source` Postgres enum.
-         * @enum {string}
-         */
-        MeasurementSource: "active_probe" | "archived_vm_continuous";
         /** @description Per-network-operator occurrence count. */
         NetworkFacet: {
             /**
@@ -2227,11 +2201,6 @@ export interface components {
              * @description When the pair reached a terminal state.
              */
             settled_at?: string | null;
-            /**
-             * @description How this measurement was produced — active campaign probe vs. archived VM baseline.
-             *     Defaults to `active_probe` for pairs without a joined measurement (e.g. pending rows).
-             */
-            source: components["schemas"]["MeasurementSource"];
             /** @description Source agent (the prober). */
             source_agent_id: string;
         };
@@ -3379,15 +3348,6 @@ export interface operations {
             };
             /** @description Internal error */
             500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description VictoriaMetrics unconfigured or unreachable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };

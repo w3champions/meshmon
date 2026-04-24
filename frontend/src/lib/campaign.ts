@@ -47,11 +47,10 @@ export function isNoPairsSelected(err: unknown): boolean {
 }
 
 /**
- * 422 from `POST /evaluate` when the VictoriaMetrics fetch produced no
- * agent→agent samples inside the 15-minute lookback window and no
- * active-probe baseline rows exist either. Signals the operator to verify
- * the agent mesh is actually probing, wait for continuous-mesh data to
- * accumulate, or add an active-probe fallback.
+ * 422 from `POST /evaluate` when no agent→agent baseline measurements
+ * exist for the campaign. Signals the operator to verify the campaign
+ * actually probed agent destinations or wait for in-flight dispatches to
+ * settle.
  */
 export function isNoBaselinePairs(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "no_baseline_pairs";

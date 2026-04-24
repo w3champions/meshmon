@@ -404,7 +404,6 @@ describe("CampaignDetail — Clone action", () => {
       settled_at: overrides.settled_at ?? null,
       attempt_count: overrides.attempt_count ?? 1,
       last_error: overrides.last_error ?? null,
-      source: overrides.source ?? "active_probe",
     };
   }
 

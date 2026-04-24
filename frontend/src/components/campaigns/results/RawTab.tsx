@@ -36,12 +36,6 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { extractCampaignErrorCode, isIllegalStateTransition, isMissingPair } from "@/lib/campaign";
 import { formatLossRatio, LOSS_RATIO_THRESHOLDS } from "@/lib/format-loss";
-import {
-  type MeasurementSource,
-  measurementSourceBadgeClass,
-  measurementSourceLabel,
-  normaliseSource,
-} from "@/lib/measurement-source";
 import { formatRelativeAgo } from "@/lib/time-format";
 import { cn } from "@/lib/utils";
 import type { CampaignDetailSearch } from "@/router/index";
@@ -52,10 +46,10 @@ import { useToastStore } from "@/stores/toast";
 // ---------------------------------------------------------------------------
 
 /** Row height estimate in px — keep in sync with the grid row class. The
- * Kind cell stacks three lines (kind, state, source badge); the virtualizer
- * re-measures every row after layout, so the estimate just needs to be close
- * enough that the first render's overscan stays correct. */
-const ROW_HEIGHT_ESTIMATE = 56;
+ * Kind cell stacks two lines (kind, state); the virtualizer re-measures
+ * every row after layout, so the estimate just needs to be close enough
+ * that the first render's overscan stays correct. */
+const ROW_HEIGHT_ESTIMATE = 48;
 
 /** Max height of the virtualized scroll container. */
 const SCROLL_MAX_HEIGHT = "60vh";
@@ -442,7 +436,7 @@ function MeasurementRow({
       </Cell>
       <Cell>{row.protocol ? <ProtocolBadge protocol={row.protocol} /> : "—"}</Cell>
       <Cell>
-        <KindBadge kind={row.pair_kind} state={row.resolution_state} source={row.source} />
+        <KindBadge kind={row.pair_kind} state={row.resolution_state} />
       </Cell>
       <Cell>
         <span
@@ -529,31 +523,11 @@ function ProtocolBadge({ protocol }: { protocol: ProbeProtocol }) {
   );
 }
 
-function KindBadge({
-  kind,
-  state,
-  source,
-}: {
-  kind: MeasurementKind;
-  state: PairResolutionState;
-  source: MeasurementSource | null | undefined;
-}) {
-  const resolvedSource = normaliseSource(source);
+function KindBadge({ kind, state }: { kind: MeasurementKind; state: PairResolutionState }) {
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-xs">{kind}</span>
       <span className="text-[10px] text-muted-foreground">{state}</span>
-      <Badge
-        variant="outline"
-        className={cn(
-          "w-fit px-1 py-0 font-mono text-[9px] uppercase tracking-wide",
-          measurementSourceBadgeClass(resolvedSource),
-        )}
-        data-testid={`raw-source-badge-${resolvedSource}`}
-        aria-label={`Source: ${measurementSourceLabel(resolvedSource)}`}
-      >
-        {measurementSourceLabel(resolvedSource)}
-      </Badge>
     </div>
   );
 }

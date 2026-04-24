@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT cp.id                     AS \"id!\",\n               cp.campaign_id            AS \"campaign_id!\",\n               cp.source_agent_id        AS \"source_agent_id!\",\n               cp.destination_ip         AS \"destination_ip!\",\n               cp.resolution_state       AS \"resolution_state!: PairResolutionState\",\n               cp.measurement_id         AS \"measurement_id?\",\n               cp.dispatched_at          AS \"dispatched_at?\",\n               cp.settled_at             AS \"settled_at?\",\n               cp.attempt_count          AS \"attempt_count!\",\n               cp.last_error             AS \"last_error?\",\n               cp.kind                   AS \"kind!: MeasurementKind\",\n               COALESCE(m.source, 'active_probe'::measurement_source)\n                                         AS \"source!: MeasurementSource\"\n          FROM campaign_pairs cp\n          LEFT JOIN measurements m ON m.id = cp.measurement_id\n         WHERE cp.campaign_id = $1\n           AND cp.kind = 'campaign'\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR cp.resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY cp.id\n         LIMIT $3\n        ",
+  "query": "\n        SELECT cp.id                     AS \"id!\",\n               cp.campaign_id            AS \"campaign_id!\",\n               cp.source_agent_id        AS \"source_agent_id!\",\n               cp.destination_ip         AS \"destination_ip!\",\n               cp.resolution_state       AS \"resolution_state!: PairResolutionState\",\n               cp.measurement_id         AS \"measurement_id?\",\n               cp.dispatched_at          AS \"dispatched_at?\",\n               cp.settled_at             AS \"settled_at?\",\n               cp.attempt_count          AS \"attempt_count!\",\n               cp.last_error             AS \"last_error?\",\n               cp.kind                   AS \"kind!: MeasurementKind\"\n          FROM campaign_pairs cp\n         WHERE cp.campaign_id = $1\n           AND cp.kind = 'campaign'\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR cp.resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY cp.id\n         LIMIT $3\n        ",
   "describe": {
     "columns": [
       {
@@ -82,21 +82,6 @@
             }
           }
         }
-      },
-      {
-        "ordinal": 11,
-        "name": "source!: MeasurementSource",
-        "type_info": {
-          "Custom": {
-            "name": "measurement_source",
-            "kind": {
-              "Enum": [
-                "active_probe",
-                "archived_vm_continuous"
-              ]
-            }
-          }
-        }
       }
     ],
     "parameters": {
@@ -138,9 +123,8 @@
       true,
       false,
       true,
-      false,
-      null
+      false
     ]
   },
-  "hash": "a4513611c834e22cb7586ec3f8e0dbfc94e880941cd753ea8ecd15601f01aa23"
+  "hash": "eabb7bfc5b946ad6a0a73d267f67375ae323895d8e41669f3a93375ad82211bf"
 }

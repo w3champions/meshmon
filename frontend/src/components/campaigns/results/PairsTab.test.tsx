@@ -93,9 +93,6 @@ function makePair(overrides: Partial<CampaignPair> & { id: number }): CampaignPa
     dispatched_at: overrides.dispatched_at ?? "2026-04-21T10:00:00Z",
     settled_at: overrides.settled_at ?? "2026-04-21T10:01:00Z",
     last_error: overrides.last_error ?? null,
-    // Default to active_probe — backend default for pairs without a
-    // VM-archived measurement join.
-    source: overrides.source ?? "active_probe",
   };
 }
 
@@ -282,43 +279,6 @@ describe("PairsTab — happy path", () => {
       .getAllByTestId(/pair-row-\d/)
       .map((row) => row.getAttribute("data-pair-destination"));
     expect(rowOrder).toEqual(["10.0.0.1", "10.0.0.9"]);
-  });
-});
-
-describe("PairsTab — source badge", () => {
-  test("renders the VM-baseline badge for archived_vm_continuous pairs", () => {
-    setupMocks([
-      makePair({
-        id: 1,
-        source_agent_id: "agent-a",
-        destination_ip: "10.0.0.1",
-        source: "archived_vm_continuous",
-      }),
-    ]);
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    const badge = screen.getByTestId("pair-source-badge-archived_vm_continuous");
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent(/baseline \(VM\)/i);
-    expect(badge.className).toMatch(/sky/);
-  });
-
-  test("renders the active-probe badge for active_probe pairs", () => {
-    setupMocks([
-      makePair({
-        id: 1,
-        source_agent_id: "agent-a",
-        destination_ip: "10.0.0.1",
-        source: "active_probe",
-      }),
-    ]);
-    renderTab(makeCampaign({ state: "running" }));
-
-    const badge = screen.getByTestId("pair-source-badge-active_probe");
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent(/active probe/i);
-    expect(badge.className).toMatch(/muted/);
-    expect(badge.className).not.toMatch(/sky/);
   });
 });
 

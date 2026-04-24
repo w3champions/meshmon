@@ -108,9 +108,6 @@ function makeMeasurement(
     loss_ratio: overrides.loss_ratio ?? 0.005,
     mtr_id: overrides.mtr_id ?? null,
     mtr_hops: overrides.mtr_hops ?? null,
-    // Default to active_probe — matches the backend default and keeps the
-    // bulk of rows in the muted visual bucket.
-    source: overrides.source ?? "active_probe",
   };
 }
 
@@ -327,35 +324,6 @@ describe("RawTab — pagination", () => {
     });
     renderTab(makeCampaign({ state: "running" }));
     expect(screen.getByText(/^end of feed —/i)).toBeInTheDocument();
-  });
-});
-
-describe("RawTab — source badge", () => {
-  test("renders the VM-baseline badge for archived_vm_continuous rows", () => {
-    setupMocks({
-      entries: [makeMeasurement({ pair_id: 1, source: "archived_vm_continuous" })],
-    });
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    const badge = screen.getByTestId("raw-source-badge-archived_vm_continuous");
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent(/baseline \(VM\)/i);
-    // Sky/blue tone keys the VM-baseline visual contrast.
-    expect(badge.className).toMatch(/sky/);
-  });
-
-  test("renders the active-probe badge for active_probe rows", () => {
-    setupMocks({
-      entries: [makeMeasurement({ pair_id: 1, source: "active_probe" })],
-    });
-    renderTab(makeCampaign({ state: "running" }));
-
-    const badge = screen.getByTestId("raw-source-badge-active_probe");
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent(/active probe/i);
-    // Muted tone matches the default case; no sky/blue bleed.
-    expect(badge.className).toMatch(/muted/);
-    expect(badge.className).not.toMatch(/sky/);
   });
 });
 

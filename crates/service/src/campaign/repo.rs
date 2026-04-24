@@ -7,8 +7,8 @@
 //! into HTTP 409 without a second SELECT.
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, MeasurementKind, MeasurementSource,
-    PairResolutionState, PairRow, ProbeProtocol,
+    CampaignRow, CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, PairRow,
+    ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{types::ipnetwork::IpNetwork, PgPool, Postgres, Transaction};
@@ -579,11 +579,8 @@ pub async fn list_pairs(
                cp.settled_at             AS "settled_at?",
                cp.attempt_count          AS "attempt_count!",
                cp.last_error             AS "last_error?",
-               cp.kind                   AS "kind!: MeasurementKind",
-               COALESCE(m.source, 'active_probe'::measurement_source)
-                                         AS "source!: MeasurementSource"
+               cp.kind                   AS "kind!: MeasurementKind"
           FROM campaign_pairs cp
-          LEFT JOIN measurements m ON m.id = cp.measurement_id
          WHERE cp.campaign_id = $1
            AND cp.kind = 'campaign'
            AND (cardinality($2::pair_resolution_state[]) = 0
@@ -822,12 +819,7 @@ pub async fn take_pending_batch(
                    campaign_pairs.settled_at,
                    campaign_pairs.attempt_count,
                    campaign_pairs.last_error,
-                   campaign_pairs.kind AS "kind: MeasurementKind",
-                   -- Pending pairs have no joined measurement yet; default
-                   -- to active_probe so `PairRow.source` is always typed.
-                   -- Scheduler callers do not read this field.
-                   'active_probe'::measurement_source
-                       AS "source!: MeasurementSource"
+                   campaign_pairs.kind AS "kind: MeasurementKind"
         "#,
         campaign_id,
         source_agent_id,
@@ -1340,7 +1332,6 @@ struct PairRowRaw {
     attempt_count: i16,
     last_error: Option<String>,
     kind: MeasurementKind,
-    source: MeasurementSource,
 }
 
 impl From<PairRowRaw> for PairRow {
@@ -1357,7 +1348,6 @@ impl From<PairRowRaw> for PairRow {
             attempt_count: r.attempt_count,
             last_error: r.last_error,
             kind: r.kind,
-            source: r.source,
         }
     }
 }
@@ -1375,9 +1365,7 @@ use std::collections::HashMap;
 /// Returns every agent whose ID is a source in the campaign's
 /// `campaign_pairs` rows **and** every agent whose IP is one of the
 /// campaign's destinations (so agents-as-destinations are part of the
-/// baseline lookup). Used by the VM baseline fetch to know which
-/// `(source, target)` pairs to probe for in VM and to resolve `target`
-/// labels back to IPs for the archival write.
+/// baseline lookup).
 ///
 /// Read-only; shares the same source-of-truth (`agents_with_catalogue`)
 /// as the evaluator's own agent pull so the two sets agree.

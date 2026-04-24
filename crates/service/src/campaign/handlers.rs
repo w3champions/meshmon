@@ -7,7 +7,6 @@
 //! (snake_case `error` key) so the SPA's shared error-handling layer
 //! applies without extra branching.
 
-use super::baseline_vm::{self, BaselineError, DEFAULT_BASELINE_LOOKBACK};
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
     DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
@@ -21,7 +20,6 @@ use crate::hostname::session_id_from_auth;
 use crate::hostname::stamp::bulk_hostnames_and_enqueue;
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
-use crate::vm_query::VmQueryError;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -41,44 +39,6 @@ fn db_error(context: &'static str, err: sqlx::Error) -> Response {
         Json(json!({ "error": "database_error" })),
     )
         .into_response()
-}
-
-/// Map a [`BaselineError`] onto the evaluate endpoint's HTTP error
-/// shape:
-/// - `Vm(NotConfigured)` → 503 `{"error":"vm_not_configured", ...}`
-///   (operator forgot to set `[upstream.vm_url]` in `meshmon.toml`).
-/// - `Vm(...)` (other)    → 503 `{"error":"vm_upstream", "detail": ...}`
-///   (VM is configured but the query didn't land — unreachable, 5xx,
-///   malformed).
-/// - `Sqlx(...)`          → 500 (via [`db_error`]).
-fn baseline_error(err: BaselineError) -> Response {
-    match err {
-        BaselineError::Vm(VmQueryError::NotConfigured) => {
-            tracing::warn!(
-                "campaign::evaluate: VM URL not configured; cannot fetch agent baselines"
-            );
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": "vm_not_configured",
-                    "detail": "[upstream.vm_url] must be set for campaign evaluation",
-                })),
-            )
-                .into_response()
-        }
-        BaselineError::Vm(e) => {
-            tracing::warn!(error = %e, "campaign::evaluate: VM baseline fetch failed");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": "vm_upstream",
-                    "detail": e.to_string(),
-                })),
-            )
-                .into_response()
-        }
-        BaselineError::Sqlx(e) => db_error("campaign::evaluate::baseline", e),
-    }
 }
 
 /// Map a domain [`RepoError`] onto the canonical HTTP shape:
@@ -723,22 +683,9 @@ fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Resp
 /// `evaluated`; a concurrent transition that loses the gate still leaves
 /// the evaluation row written and the SSE event fired.
 ///
-/// Before evaluation, the handler pulls agent-to-agent baselines from
-/// VictoriaMetrics continuous-mesh data and archives them as raw
-/// `measurements` rows tagged `source = 'archived_vm_continuous'`. The
-/// evaluator's existing join-by-measurement-id path then surfaces the
-/// archival rows alongside any active-probe measurements. This is why
-/// the evaluate endpoint now depends on `[upstream.vm_url]`.
-///
-/// Returns 422 (`no_baseline_pairs`) when the VM fetch produced no
-/// agent→agent samples inside the 15-minute lookback window and no
-/// active-probe baseline rows exist either. Operator remedy: verify
-/// the agent mesh is actually probing, wait until continuous data
-/// accumulates, or add an active-probe fallback.
-///
-/// Returns 503 (`vm_not_configured`) when `[upstream.vm_url]` is not
-/// set, and 503 (`vm_upstream`) when VM is configured but the query
-/// failed (unreachable, 5xx, malformed response).
+/// Returns 422 (`no_baseline_pairs`) when no active-probe baseline rows
+/// exist. Operator remedy: verify the campaign actually probed agent
+/// destinations, or wait for in-flight dispatches to settle.
 #[utoipa::path(
     post,
     path = "/api/campaigns/{id}/evaluate",
@@ -751,7 +698,6 @@ fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Resp
         (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
         (status = 422, description = "No baseline (agent→agent) pairs", body = ErrorEnvelope),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
-        (status = 503, description = "VictoriaMetrics unconfigured or unreachable", body = ErrorEnvelope),
     ),
 )]
 pub async fn evaluate(
@@ -776,39 +722,6 @@ pub async fn evaluate(
         )
             .into_response();
     }
-
-    // Fetch + archive agent-to-agent baselines from VictoriaMetrics so
-    // the evaluator finds them alongside any active-probe measurements.
-    // The evaluator doesn't actively probe agents anymore — continuous
-    // mesh data is authoritative.
-    let vm_url = match state.config().upstream.vm_url.as_deref() {
-        Some(u) => u.trim_end_matches('/').to_owned(),
-        None => return baseline_error(BaselineError::Vm(VmQueryError::NotConfigured)),
-    };
-    let agents = match repo::agents_for_campaign(&state.pool, id).await {
-        Ok(a) => a,
-        Err(e) => return repo_error("campaign::evaluate::agents", e),
-    };
-    let baseline_outcome = match baseline_vm::fetch_and_archive_vm_baselines(
-        &state.pool,
-        &vm_url,
-        id,
-        campaign.protocol,
-        &agents,
-        DEFAULT_BASELINE_LOOKBACK,
-    )
-    .await
-    {
-        Ok(o) => o,
-        Err(e) => return baseline_error(e),
-    };
-    tracing::info!(
-        campaign_id = %id,
-        fetched = baseline_outcome.pairs_fetched,
-        archived = baseline_outcome.pairs_archived,
-        skipped = baseline_outcome.pairs_skipped_no_vm_data,
-        "campaign baseline fetch from VM complete",
-    );
 
     let inputs = match repo::measurements_for_campaign(&state.pool, id).await {
         Ok(i) => i,

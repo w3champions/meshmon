@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        WITH chosen AS (\n            SELECT id\n              FROM campaign_pairs\n             WHERE campaign_id = $1\n               AND source_agent_id = $2\n               AND resolution_state = 'pending'\n             ORDER BY id\n             LIMIT $3\n             FOR UPDATE SKIP LOCKED\n        )\n        UPDATE campaign_pairs\n           SET resolution_state = 'dispatched',\n               dispatched_at    = now(),\n               attempt_count    = campaign_pairs.attempt_count + 1\n          FROM chosen\n         WHERE campaign_pairs.id = chosen.id\n         RETURNING campaign_pairs.id,\n                   campaign_pairs.campaign_id,\n                   campaign_pairs.source_agent_id,\n                   campaign_pairs.destination_ip,\n                   campaign_pairs.resolution_state AS \"resolution_state: PairResolutionState\",\n                   campaign_pairs.measurement_id,\n                   campaign_pairs.dispatched_at,\n                   campaign_pairs.settled_at,\n                   campaign_pairs.attempt_count,\n                   campaign_pairs.last_error,\n                   campaign_pairs.kind AS \"kind: MeasurementKind\",\n                   -- Pending pairs have no joined measurement yet; default\n                   -- to active_probe so `PairRow.source` is always typed.\n                   -- Scheduler callers do not read this field.\n                   'active_probe'::measurement_source\n                       AS \"source!: MeasurementSource\"\n        ",
+  "query": "\n        WITH chosen AS (\n            SELECT id\n              FROM campaign_pairs\n             WHERE campaign_id = $1\n               AND source_agent_id = $2\n               AND resolution_state = 'pending'\n             ORDER BY id\n             LIMIT $3\n             FOR UPDATE SKIP LOCKED\n        )\n        UPDATE campaign_pairs\n           SET resolution_state = 'dispatched',\n               dispatched_at    = now(),\n               attempt_count    = campaign_pairs.attempt_count + 1\n          FROM chosen\n         WHERE campaign_pairs.id = chosen.id\n         RETURNING campaign_pairs.id,\n                   campaign_pairs.campaign_id,\n                   campaign_pairs.source_agent_id,\n                   campaign_pairs.destination_ip,\n                   campaign_pairs.resolution_state AS \"resolution_state: PairResolutionState\",\n                   campaign_pairs.measurement_id,\n                   campaign_pairs.dispatched_at,\n                   campaign_pairs.settled_at,\n                   campaign_pairs.attempt_count,\n                   campaign_pairs.last_error,\n                   campaign_pairs.kind AS \"kind: MeasurementKind\"\n        ",
   "describe": {
     "columns": [
       {
@@ -82,21 +82,6 @@
             }
           }
         }
-      },
-      {
-        "ordinal": 11,
-        "name": "source!: MeasurementSource",
-        "type_info": {
-          "Custom": {
-            "name": "measurement_source",
-            "kind": {
-              "Enum": [
-                "active_probe",
-                "archived_vm_continuous"
-              ]
-            }
-          }
-        }
       }
     ],
     "parameters": {
@@ -117,9 +102,8 @@
       true,
       false,
       true,
-      false,
-      null
+      false
     ]
   },
-  "hash": "c68aaae27f8ecf606b8bc4f0ae1870ce873588c2c565712d00d531a54b7f10a9"
+  "hash": "c1ab2e7a9f68e2d78ba2a5bdbaa794d0c3eaa0dde692825c433b52abb6562530"
 }
