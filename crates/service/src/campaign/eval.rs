@@ -133,6 +133,16 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
         .map(|a| (a.agent_id.clone(), a.ip))
         .collect();
 
+    // Last-write-wins on pair key: callers place higher-priority
+    // sources LATER in `measurements`. The T54-03 `/evaluate` handler
+    // relies on this — it prepends VM-synthesized rows and appends
+    // active-probe rows so an active-probe measurement always
+    // overwrites a VM baseline for the same `(source_agent_id,
+    // destination_ip)` tuple. See
+    // `campaign::handlers::fetch_and_synthesize_vm_baselines` for the
+    // caller-side contract; any refactor here (pre-sort, dedupe,
+    // filter) must preserve this ordering invariant or move the
+    // tie-break logic to the caller.
     let mut by_pair: HashMap<(String, IpAddr), &AttributedMeasurement> = HashMap::new();
     for meas in &inputs.measurements {
         by_pair.insert((meas.source_agent_id.clone(), meas.destination_ip), meas);

@@ -295,29 +295,6 @@ describe("SettingsTab — submit flow", () => {
     expect(screen.getByLabelText(/loss threshold/i)).toBeInTheDocument();
   });
 
-  test("surfaces a vm_not_configured toast when the deployment lacks VM", async () => {
-    const user = userEvent.setup();
-    renderTab(makeCampaign({ state: "completed" }));
-
-    patchStub.mutate.mockImplementation(
-      (_vars: unknown, opts?: { onSuccess?: (result: unknown) => void }) => {
-        opts?.onSuccess?.({});
-      },
-    );
-    const err = new Error("failed", { cause: { error: "vm_not_configured" } });
-    evaluateStub.mutate.mockImplementation(
-      (_id: string, opts?: { onError?: (err: Error) => void }) => {
-        opts?.onError?.(err);
-      },
-    );
-
-    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/victoriametrics isn't configured/i)).toBeInTheDocument();
-    });
-  });
-
   test("surfaces a vm_upstream toast with the detail reason when VM is unreachable", async () => {
     const user = userEvent.setup();
     renderTab(makeCampaign({ state: "completed" }));

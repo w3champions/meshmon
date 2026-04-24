@@ -864,11 +864,16 @@ pub async fn evaluate(
             }
         }
         Err(VmQueryError::NotConfigured) => {
-            // Unreachable: we only called the inner fetch when vm_url
-            // was Some. Kept as a defence-in-depth arm.
-            tracing::debug!(
-                campaign_id = %id,
-                "evaluate: VM fetch surfaced NotConfigured despite Some(vm_url)"
+            // `fetch_and_synthesize_vm_baselines` short-circuits to
+            // `Ok(Vec::new())` when `vm_url_opt` is `None` and
+            // `vm_query::fetch_agent_baselines` itself never produces
+            // `NotConfigured` (see `crates/service/src/vm_query.rs`).
+            // Panic so any future refactor that lets this variant
+            // escape fails loudly in tests rather than being silently
+            // dropped and masking a regression.
+            unreachable!(
+                "VmQueryError::NotConfigured is structurally unreachable here: \
+                 caller gates on Some(vm_url) before dispatching the fetch"
             );
         }
         Err(

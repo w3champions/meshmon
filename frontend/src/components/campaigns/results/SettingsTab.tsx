@@ -12,7 +12,6 @@ import {
   extractCampaignErrorDetail,
   isIllegalStateTransition,
   isNoBaselinePairs,
-  isVmNotConfigured,
   isVmUpstream,
 } from "@/lib/campaign";
 import { clampKnob, KNOB_BOUNDS, ratioToPercentInput } from "@/lib/campaign-config";
@@ -118,12 +117,6 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   };
 
   const handleEvaluateError = (err: Error): void => {
-    if (isVmNotConfigured(err)) {
-      toastError(
-        "VictoriaMetrics isn't configured for this deployment — set `[upstream.vm_url]` and retry.",
-      );
-      return;
-    }
     if (isVmUpstream(err)) {
       const detail = extractCampaignErrorDetail(err);
       toastError(

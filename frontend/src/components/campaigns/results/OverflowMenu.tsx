@@ -37,7 +37,6 @@ import {
   extractCampaignErrorDetail,
   isIllegalStateTransition,
   isNoBaselinePairs,
-  isVmNotConfigured,
   isVmUpstream,
 } from "@/lib/campaign";
 import { useToastStore } from "@/stores/toast";
@@ -77,14 +76,6 @@ export function OverflowMenu({ campaign, evaluation }: OverflowMenuProps) {
         pushToast({ kind: "success", message: "Re-evaluation complete." });
       },
       onError: (err) => {
-        if (isVmNotConfigured(err)) {
-          pushToast({
-            kind: "error",
-            message:
-              "VictoriaMetrics isn't configured for this deployment — set `[upstream.vm_url]` and retry.",
-          });
-          return;
-        }
         if (isVmUpstream(err)) {
           const detail = extractCampaignErrorDetail(err);
           pushToast({
