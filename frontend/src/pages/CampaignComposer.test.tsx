@@ -349,11 +349,9 @@ async function selectAllSources(user: ReturnType<typeof userEvent.setup>) {
   await user.click(addAll);
 }
 
-async function clickAddAllDestinationsAllPages(user: ReturnType<typeof userEvent.setup>) {
-  const btn = await screen.findByRole("button", {
-    name: /add all destinations \(all pages\)/i,
-  });
-  await user.click(btn);
+async function clickAddAllDestinations(user: ReturnType<typeof userEvent.setup>) {
+  const section = await screen.findByRole("region", { name: /destinations/i });
+  await user.click(within(section).getByRole("button", { name: /^add all$/i }));
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +402,7 @@ describe("CampaignComposer — happy path", () => {
 
     await fillTitle(user, "Global sweep");
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     await waitFor(() => {
       expect(fetchNextPage).toHaveBeenCalled();
@@ -466,7 +464,7 @@ describe("CampaignComposer — force_measurement in body", () => {
 
     // Snapshot currently-loaded destinations via the composer's
     // exhaustive action — default setup fixture has a single IP.
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const forceToggle = await screen.findByRole("button", { name: /force measurement/i });
     await user.click(forceToggle);
@@ -490,7 +488,7 @@ describe("CampaignComposer — threshold triggers confirm dialog", () => {
 
     await fillTitle(user, "Huge");
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -521,35 +519,10 @@ describe("CampaignComposer — threshold triggers confirm dialog", () => {
   });
 });
 
-describe("CampaignComposer — destination walk error", () => {
-  test("fetchNextPage rejection surfaces toast + resets walk strip, dest set unchanged", async () => {
-    const page1 = makeListResponse({
-      entries: [makeEntry("x", "10.0.0.1")],
-      total: 100,
-      next_cursor: "cursor-1",
-    });
-    const fetchNextPage = vi.fn().mockRejectedValueOnce(new Error("boom"));
-
-    setupHooks({ pages: [page1], fetchNextPage, hasNextPage: true });
-
-    const user = userEvent.setup();
-    renderComposer();
-
-    await clickAddAllDestinationsAllPages(user);
-
-    await waitFor(() => {
-      expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
-    });
-
-    // Walk strip clears.
-    await waitFor(() => {
-      expect(screen.queryByText(/collecting \d+/i)).not.toBeInTheDocument();
-    });
-
-    // The composer never advanced to Start — create.mutate is quiet.
-    expect(createStub.mutate).not.toHaveBeenCalled();
-  });
-});
+// Destination walk error semantics live in the DestinationPanel — when
+// the walk rejects the panel never emits onSelectedChange, so destSet
+// stays empty and the composer's Start gate covers the user-facing
+// consequence.
 
 describe("CampaignComposer — navigate on start success", () => {
   test("navigate is called with /campaigns/$id when the start mutation resolves", async () => {
@@ -563,7 +536,7 @@ describe("CampaignComposer — navigate on start success", () => {
 
     await fillTitle(user, "Nav Test");
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -596,7 +569,7 @@ describe("CampaignComposer — offline sources", () => {
 
     await fillTitle(user, "Offline-inclusive");
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -620,7 +593,7 @@ describe("CampaignComposer — client-side validation gate", () => {
     // Skip fillTitle — keep title empty. Sources + destinations must be
     // populated so the title check is the one that fires.
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -638,7 +611,7 @@ describe("CampaignComposer — client-side validation gate", () => {
 
     await fillTitle(user, "No sources");
     // Skip selectAllSources. Populate destinations so the source gate fires.
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -656,7 +629,7 @@ describe("CampaignComposer — client-side validation gate", () => {
 
     await fillTitle(user, "No dests");
     await selectAllSources(user);
-    // Skip clickAddAllDestinationsAllPages so destSet stays empty.
+    // Skip clickAddAllDestinations so destSet stays empty.
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -683,7 +656,7 @@ describe("CampaignComposer — draft lock after create", () => {
 
     await fillTitle(user, "Soon-to-be-abandoned");
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
     await user.click(startButton);
@@ -737,7 +710,7 @@ describe("CampaignComposer — draft lock after create", () => {
 
     await fillTitle(user, "Locked");
     await selectAllSources(user);
-    await clickAddAllDestinationsAllPages(user);
+    await clickAddAllDestinations(user);
 
     await user.click(screen.getByRole("button", { name: /^start(ing…)?$/i }));
     await screen.findByRole("dialog", { name: /confirm large dispatch/i });
@@ -751,65 +724,9 @@ describe("CampaignComposer — draft lock after create", () => {
   });
 });
 
-describe("CampaignComposer — exhaustive walk guards", () => {
-  test("button is disabled while the catalogue is still loading", async () => {
-    // `useCatalogueListInfinite` mocked to a pre-first-page state: no
-    // pages, `isLoading=true`. The exhaustive-walk button must be
-    // disabled so the empty-snapshot race can't fire.
-    vi.mocked(useCatalogueListInfinite).mockReturnValue({
-      data: undefined,
-      isLoading: true,
-      isError: false,
-      isFetching: true,
-      hasNextPage: false,
-      fetchNextPage: vi.fn(),
-    } as unknown as ReturnType<typeof useCatalogueListInfinite>);
-
-    const user = userEvent.setup();
-    renderComposer();
-
-    const btn = await screen.findByRole("button", {
-      name: /add all destinations \(all pages\)/i,
-    });
-    expect(btn).toBeDisabled();
-    await user.click(btn);
-
-    // Nothing happens — destSet untouched, no toast, no fetchNextPage call.
-    expect(pushToast).not.toHaveBeenCalled();
-  });
-
-  test("empty-catalogue snapshot guard toasts and leaves destSet untouched", async () => {
-    // This path is reached if the click somehow lands with an empty
-    // `pages` array even though the button is enabled — e.g. a filter
-    // change flips `isFetching` false between render and click. The
-    // guard is defence-in-depth beyond the button-disabled gate.
-    const fetchNextPage = vi.fn();
-    vi.mocked(useCatalogueListInfinite).mockReturnValue({
-      data: { pages: [], pageParams: [] },
-      isLoading: false,
-      isError: false,
-      isFetching: false,
-      hasNextPage: false,
-      fetchNextPage,
-    } as unknown as ReturnType<typeof useCatalogueListInfinite>);
-
-    const user = userEvent.setup();
-    renderComposer();
-
-    const btn = await screen.findByRole("button", {
-      name: /add all destinations \(all pages\)/i,
-    });
-    await user.click(btn);
-
-    expect(pushToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "error",
-        message: expect.stringMatching(/catalogue still loading/i),
-      }),
-    );
-    expect(fetchNextPage).not.toHaveBeenCalled();
-  });
-});
+// "Add all" loading/empty-snapshot guards live in DestinationPanel —
+// see DestinationPanel.test.tsx for the disabled-during-load and
+// empty-catalogue coverage.
 
 describe("CampaignComposer — composer-seed consume on mount", () => {
   test("hydrates title, knobs, source/destination sets from a staged seed", async () => {

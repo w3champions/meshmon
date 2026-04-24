@@ -28,14 +28,22 @@ filter state, and the knob draft. The composer only POSTs to
 `/api/campaigns` once **Start** fires; until then nothing leaves the
 browser.
 
-## Selection invariant — snapshot-at-click, not filter-bound
+## Selection invariant — snapshot-at-click, additive merge
 
-`SourcePanel` and `DestinationPanel` expose **Add all** / **Add
-matching** buttons that capture the current filter's id/ip list at the
-moment of the click. A later filter change does not mutate the
-committed selection. This matches the composer's "edit, then commit"
-model — operators narrow the filter to find the set, click to commit,
-then relax the filter without losing what they already picked.
+Both panels expose a single **Add all** action. It captures the full
+filter match at click time — a later filter change does not mutate the
+committed selection.
+
+`SourcePanel` reads the complete agent list from `/api/agents`
+client-side and adds every row that matches the rail. `DestinationPanel`
+walks the `/api/catalogue` cursor chain at 500 rows per page,
+streaming progress inline next to the table, then merges every
+returned IP into the existing selection. Prior manual row-clicks or a
+narrower previous walk survive the merge, so operators can layer
+multiple filtered "Add all" passes to build up a selection.
+
+**Remove all** is the only action that clears state. There is no "Add
+matching" sibling — `Add all` already commits every filter match.
 
 ## Cache keys and invalidation
 

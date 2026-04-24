@@ -11,13 +11,22 @@ import { Button } from "@/components/ui/button";
 import { destinationFilterToQuery } from "@/lib/catalogue-query";
 import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
+import { useToastStore } from "@/stores/toast";
 
 type FacetsResponse = components["schemas"]["FacetsResponse"];
 
 const ROW_HEIGHT = 44;
 const SCROLL_MAX_HEIGHT = "60vh";
 const INITIAL_SCROLL_RECT = { width: 1024, height: 600 };
-const PAGE_SIZE = 100;
+
+/**
+ * Catalogue page size. Matches the server-side `1..=500` clamp so the
+ * panel issues one fetch per batch of destinations that crosses the
+ * wire. The exhaustive "Add all" walk (`handleAddAllExhaustive`) drains
+ * subsequent pages through the same hook, so a single page size serves
+ * both browse and walk flows.
+ */
+const PAGE_SIZE = 500;
 
 /**
  * Shared CSS grid track expression for the header + virtualized body.
@@ -39,10 +48,10 @@ export interface DestinationPanelProps {
   facets: FacetsResponse | undefined;
   onOpenMap(): void;
   /**
-   * When true, every mutation button (Add all / Add matching / Remove all /
-   * Add IPs / Map view) is disabled and row-click no-ops. Filter rail stays
-   * live so the operator can still inspect matches. Composer sets this
-   * after a draft campaign has been created so further destination edits
+   * When true, every mutation button (Add all / Remove all / Add IPs /
+   * Map view) is disabled and row-click no-ops. Filter rail stays live
+   * so the operator can still inspect matches. Composer sets this after
+   * a draft campaign has been created so further destination edits
    * don't silently diverge from the persisted draft.
    */
   disabled?: boolean;
@@ -69,6 +78,17 @@ export function DestinationPanel({
   const total = listQuery.data?.pages[0]?.total ?? 0;
   const shapesActive = filter.shapes.length > 0;
 
+  // --- Exhaustive-walk state -------------------------------------------
+  // "Add all" drains the cursor chain under the current filter and merges
+  // every returned IP into `selected`. The walk owns state private to
+  // the panel — the composer does not need to know about progress.
+  const [walkProgress, setWalkProgress] = useState<{ collected: number; total: number } | null>(
+    null,
+  );
+  const [walkError, setWalkError] = useState<Error | null>(null);
+  // Ref (not state) so rapid double-clicks are guarded in the same tick.
+  const walkRunningRef = useRef(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -85,12 +105,75 @@ export function DestinationPanel({
     onSelectedChange(next);
   };
 
-  const handleAddVisible = () => {
-    if (disabled) return;
-    // F1 scope: snapshot IPs from already-loaded pages only.
-    // The catalogue-walk fallback that covers the "total > loaded rows" case
-    // lives in F2's CampaignComposer page (plan T47 F.7 §608).
-    addIps(rows.map((r) => r.ip));
+  const handleAddAllExhaustive = async () => {
+    if (disabled || walkRunningRef.current) return;
+
+    // Guard against a pre-first-page click. Seeding from an empty
+    // snapshot would emit `collectedIps.size === 0` and bail into the
+    // "no matching rows" path — that toast is correct but misleading
+    // when the real state is "catalogue hasn't returned yet". Nudge the
+    // operator to retry once the first page lands.
+    const initialPages = listQuery.data?.pages ?? [];
+    if (initialPages.length === 0) {
+      useToastStore.getState().pushToast({
+        kind: "error",
+        message: "Catalogue still loading — try again in a moment.",
+      });
+      return;
+    }
+
+    walkRunningRef.current = true;
+    setWalkError(null);
+
+    try {
+      const seedTotal = initialPages[0]?.total ?? 0;
+      let collectedCount = initialPages.reduce((n, p) => n + p.entries.length, 0);
+      setWalkProgress({ collected: collectedCount, total: seedTotal });
+
+      // Drain remaining pages. Each `fetchNextPage` resolves with the
+      // updated InfiniteData snapshot; read the cumulative page list off
+      // that result rather than racing the hook's state.
+      let hasNext = listQuery.hasNextPage;
+      let latestPages = initialPages;
+      while (hasNext) {
+        const result = await listQuery.fetchNextPage();
+        latestPages = result.data?.pages ?? latestPages;
+        collectedCount = latestPages.reduce((n, p) => n + p.entries.length, 0);
+        const pageTotal = latestPages[0]?.total ?? seedTotal;
+        setWalkProgress({ collected: collectedCount, total: pageTotal });
+        hasNext = result.hasNextPage ?? false;
+      }
+
+      const collectedIps = new Set<string>();
+      for (const page of latestPages) {
+        for (const entry of page.entries) collectedIps.add(entry.ip);
+      }
+
+      // Defence-in-depth: if the walk aggregated zero IPs (pages arrived
+      // but carried no entries), don't emit a no-op set-swap.
+      if (collectedIps.size === 0) {
+        useToastStore.getState().pushToast({
+          kind: "error",
+          message: "Catalogue returned no matching rows — selection left unchanged.",
+        });
+        setWalkProgress(null);
+        return;
+      }
+
+      // Additive merge — prior manual row-clicks and IPs from a
+      // narrower filter survive a subsequent "Add all" pass.
+      const merged = new Set(selected);
+      for (const ip of collectedIps) merged.add(ip);
+      onSelectedChange(merged);
+      setWalkProgress(null);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setWalkError(error);
+      useToastStore.getState().pushToast({ kind: "error", message: error.message });
+      setWalkProgress(null);
+    } finally {
+      walkRunningRef.current = false;
+    }
   };
 
   const handleRemoveAll = () => {
@@ -117,6 +200,14 @@ export function DestinationPanel({
 
   const estimatedTotal = shapesActive ? `~${total}` : `${total}`;
 
+  const walking = walkProgress !== null;
+  // "Add all" re-uses the display hook, so clicking before the first
+  // page lands races the empty-snapshot guard above. Also gate on the
+  // hook's own loading/fetching state so background refetches (e.g. a
+  // filter change) don't race an in-flight drain.
+  const addAllDisabled =
+    disabled || walking || listQuery.isLoading || listQuery.isFetching || rows.length === 0;
+
   return (
     <section aria-label="Destinations" className="flex h-full min-h-0 gap-3">
       <aside className="w-64 shrink-0 overflow-y-auto">
@@ -135,29 +226,14 @@ export function DestinationPanel({
             {selected.size} destinations selected
           </Badge>
           <div className="ml-auto flex items-center gap-2">
-            {/*
-              Plan F.3 §527: "Add all" and "Add matching" share the same handler
-              in F1 — both snapshot the currently loaded rows. Split if F2
-              changes semantics (e.g. when the catalogue-walk fallback at F.7
-              §608 lands).
-            */}
             <Button
               type="button"
               size="sm"
               variant="outline"
-              onClick={handleAddVisible}
-              disabled={disabled || rows.length === 0}
+              onClick={handleAddAllExhaustive}
+              disabled={addAllDisabled}
             >
-              Add all
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={handleAddVisible}
-              disabled={disabled || rows.length === 0}
-            >
-              Add matching
+              {walking ? `Adding ${walkProgress.collected}…` : "Add all"}
             </Button>
             <Button
               type="button"
@@ -182,6 +258,26 @@ export function DestinationPanel({
             </Button>
           </div>
         </header>
+
+        {walkProgress !== null ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm"
+          >
+            Collecting {walkProgress.collected} of {shapesActive ? "~" : ""}
+            {walkProgress.total} destinations…
+          </p>
+        ) : null}
+
+        {walkError !== null ? (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            Walk failed: {walkError.message}
+          </div>
+        ) : null}
 
         {/*
           Real `<table>` can't carry `fr` tracks (table-layout needs
