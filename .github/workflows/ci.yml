@@ -55,18 +55,38 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      # shared-key meshmon-debug is shared with rust-test + rust-e2e so
-      # the workspace's debug-profile target/ is restored once and reused
-      # across all three. prefix-key v1 invalidates the registry-only
-      # tarballs left behind by an earlier sccache experiment whose key
-      # collided with this one (GHA cache entries are immutable, so a
-      # write under the same key would be silently rejected).
+      # Per-job shared-key. rust-lint, rust-test, and rust-e2e each own a
+      # distinct cache slot because they build disjoint cargo profile
+      # graphs: lint runs `cargo check` + `cargo run -p xtask` (dev
+      # profile, mostly .rmeta + xtask-dep .rlib), test runs
+      # `cargo nextest run` (test profile, .rlib for every dep with
+      # --test), e2e additionally pulls in meshmon-e2e's dev-deps. Sharing
+      # a single key meant whichever job won the race-to-write (rust-lint,
+      # via `needs:`) seeded the canonical tarball with its own profile,
+      # and the other two restored a target/ that was missing the
+      # artifacts they actually needed — cargo then rebuilt 100+ deps
+      # under test profile every run, and the post-step couldn't update
+      # the cache because actions/cache keys are immutable. Splitting the
+      # key lets each job's tarball mature against its own build graph.
+      #
+      # cache-on-failure is intentionally left at the action's default
+      # (false): a cancelled or failed job that has only partly built
+      # target/ would otherwise become the canonical tarball under this
+      # key — and because actions/cache treats keys as immutable, every
+      # subsequent run inherits the half-baked state until the prefix-
+      # key is bumped or the entry is deleted. Only successful runs
+      # write the cache. prefix-key v2 evicts the v1 tarball that was
+      # poisoned exactly that way (cancelled main run on 8c89bf8 saved
+      # ~548 MB of half-built target/ via cache-on-failure: true; every
+      # subsequent run hit the immutable key and inherited the bad
+      # state). v1 itself superseded v0, which carried registry-only
+      # tarballs from an earlier sccache experiment whose key collided
+      # with this one.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: meshmon-debug
-          cache-on-failure: true
+          prefix-key: v2-rust
+          shared-key: meshmon-lint
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -106,9 +126,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: meshmon-debug
-          cache-on-failure: true
+          prefix-key: v2-rust
+          shared-key: meshmon-test
 
       - name: Install cargo-nextest (prebuilt)
         uses: taiki-e/install-action@nextest
@@ -234,9 +253,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: meshmon-release
-          cache-on-failure: true
 
       - name: cargo build --release
         run: cargo build --release -p meshmon-service
@@ -286,9 +304,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: meshmon-debug
-          cache-on-failure: true
+          prefix-key: v2-rust
+          shared-key: meshmon-e2e
 
       - name: Stage deploy/.env
         working-directory: deploy
