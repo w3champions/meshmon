@@ -55,9 +55,19 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      # shared-key meshmon-debug is shared with rust-test + rust-e2e so
-      # the workspace's debug-profile target/ is restored once and reused
-      # across all three.
+      # Per-job shared-key. rust-lint, rust-test, and rust-e2e each own a
+      # distinct cache slot because they build disjoint cargo profile
+      # graphs: lint runs `cargo check` + `cargo run -p xtask` (dev
+      # profile, mostly .rmeta + xtask-dep .rlib), test runs
+      # `cargo nextest run` (test profile, .rlib for every dep with
+      # --test), e2e additionally pulls in meshmon-e2e's dev-deps. Sharing
+      # a single key meant whichever job won the race-to-write (rust-lint,
+      # via `needs:`) seeded the canonical tarball with its own profile,
+      # and the other two restored a target/ that was missing the
+      # artifacts they actually needed — cargo then rebuilt 100+ deps
+      # under test profile every run, and the post-step couldn't update
+      # the cache because actions/cache keys are immutable. Splitting the
+      # key lets each job's tarball mature against its own build graph.
       #
       # cache-on-failure is intentionally left at the action's default
       # (false): a cancelled or failed job that has only partly built
@@ -76,7 +86,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-rust
-          shared-key: meshmon-debug
+          shared-key: meshmon-lint
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -117,7 +127,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-rust
-          shared-key: meshmon-debug
+          shared-key: meshmon-test
 
       - name: Install cargo-nextest (prebuilt)
         uses: taiki-e/install-action@nextest
@@ -295,7 +305,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-rust
-          shared-key: meshmon-debug
+          shared-key: meshmon-e2e
 
       - name: Stage deploy/.env
         working-directory: deploy
