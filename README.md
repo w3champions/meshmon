@@ -1,11 +1,11 @@
-# meshmon
+# Meshmon
 
 Continuous monitoring and alerting for the network paths between nodes in a
 fully-interconnected mesh. Agents probe every other node with TCP, UDP, and
 ICMP/MTR; a central service ingests, stores, and alerts on regressions and
 route changes.
 
-meshmon is self-contained and open-source. No hostnames, credentials, or node
+Meshmon is self-contained and open-source. No hostnames, credentials, or node
 lists specific to any deployment live in this repo.
 
 ## Repository layout
@@ -395,9 +395,8 @@ cargo run -p meshmon-agent
 
 ## Status
 
-This repo is under active initial construction. Feature work lands
-incrementally.
+This repo is under active initial construction. Feature work lands incrementally.
 
 ## License
 
-AGPL-3.0. See `LICENSE`.
+AGPL-3.0. See `LICENSE`
