@@ -6,6 +6,7 @@
 //! `crates/agent` + `crates/service/src/campaign/dispatch.rs`'s real
 //! implementation, to be shipped by T45.
 
+pub mod baseline_vm;
 pub mod broker;
 pub mod dispatch;
 pub mod dto;

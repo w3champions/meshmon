@@ -59,7 +59,31 @@ the first two; the SSE listener listens on all three via
   matrix from attributed measurements, applies the mode-specific
   predicate (diversity / optimization), serialises to the JSONB shape
   persisted in `campaign_evaluations`.
+- `baseline_vm.rs` — fetch-and-archive helper called by the evaluate
+  handler before the evaluator runs. Queries VictoriaMetrics for the
+  campaign's agent-to-agent RTT / loss baselines over a short lookback
+  window, archives the samples as `measurements` rows tagged
+  `source='archived_vm_continuous'`, and upserts the matching
+  `campaign_pairs` rows so the evaluator's existing
+  join-by-measurement-id machinery picks them up. The evaluator no
+  longer requires active campaign probes between agents — continuous
+  mesh data is authoritative.
 - `handlers.rs` — axum handlers for every campaign HTTP endpoint.
+
+## Evaluation flow
+
+`POST /api/campaigns/{id}/evaluate` drives:
+
+1. Gate: state is `completed` or `evaluated`.
+2. `baseline_vm::fetch_and_archive_vm_baselines` — pulls the
+   agent-mesh baselines from VM over a 15-minute lookback and archives
+   them as raw `measurements` rows. 503 on VM misconfig or upstream
+   failure.
+3. `repo::measurements_for_campaign` — assembles the pure evaluator's
+   input from the now-populated tables.
+4. `eval::evaluate` — scores transit candidates against the baselines.
+5. `repo::write_evaluation` — persists the DTO + flips state to
+   `evaluated`.
 
 ## SSE event stream
 

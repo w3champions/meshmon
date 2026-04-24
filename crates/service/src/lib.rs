@@ -16,6 +16,8 @@
 //! - [`registry`] — in-memory agent registry snapshot.
 //! - [`shutdown`] — cancellation token + OS signal handlers.
 //! - [`state`] — shared `AppState` handle.
+//! - [`vm_query`] — server-side PromQL read client for VictoriaMetrics,
+//!   used by the campaign evaluator to pull agent-mesh baselines.
 
 #![deny(rust_2018_idioms, unused_must_use)]
 #![warn(missing_docs)]
@@ -38,3 +40,4 @@ pub mod registry;
 pub mod shutdown;
 pub mod state;
 pub mod tls;
+pub mod vm_query;

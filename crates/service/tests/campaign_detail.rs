@@ -23,6 +23,24 @@
 mod common;
 
 use serde_json::{json, Value};
+use wiremock::matchers::{method as wm_method, path as wm_path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// VM instant-query mock that returns an empty `vector` for every
+/// `GET /api/v1/query`. Lets tests exercise the evaluator without the
+/// VM archival path writing any rows.
+async fn empty_vm_mock() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(wm_method("GET"))
+        .and(wm_path("/api/v1/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "data": { "resultType": "vector", "result": [] },
+        })))
+        .mount(&server)
+        .await;
+    server
+}
 
 #[tokio::test]
 async fn detail_scope_all_enqueues_settled_pairs_with_both_kinds() {
@@ -82,7 +100,8 @@ async fn detail_scope_all_enqueues_settled_pairs_with_both_kinds() {
 
 #[tokio::test]
 async fn detail_scope_good_candidates_filters_to_qualifying_triples() {
-    let h = common::HttpHarness::start().await;
+    let vm = empty_vm_mock().await;
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
 
     common::insert_agent_with_ip(&h.state.pool, "det-t2-a", "192.0.2.31".parse().unwrap()).await;
     common::insert_agent_with_ip(&h.state.pool, "det-t2-b", "192.0.2.32".parse().unwrap()).await;
@@ -272,7 +291,8 @@ async fn detail_scope_good_candidates_rejects_stale_evaluation() {
     //   3. /detail?scope=good_candidates must now refuse — the
     //      evaluation row is from an earlier run and expanding it
     //      into detail pairs would target a stale candidate set.
-    let h = common::HttpHarness::start().await;
+    let vm = empty_vm_mock().await;
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
 
     common::insert_agent_with_ip(&h.state.pool, "det-stale-a", "192.0.2.151".parse().unwrap())
         .await;
@@ -376,7 +396,8 @@ async fn detail_rejects_pair_payload_for_non_pair_scope() {
 /// stable.
 #[tokio::test]
 async fn detail_pairs_excluded_from_next_evaluate_baseline() {
-    let h = common::HttpHarness::start().await;
+    let vm = empty_vm_mock().await;
+    let h = common::HttpHarness::start_with_vm(&vm.uri()).await;
 
     common::insert_agent_with_ip(&h.state.pool, "det-t6-a", "192.0.2.71".parse().unwrap()).await;
     common::insert_agent_with_ip(&h.state.pool, "det-t6-b", "192.0.2.72".parse().unwrap()).await;

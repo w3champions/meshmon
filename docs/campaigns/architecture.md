@@ -1031,6 +1031,37 @@ using the measurements attributed to a campaign (joined via
 `campaign_pairs.measurement_id`). The algorithm runs entirely
 in-process; no worker, no queue.
 
+### Agent-to-agent baselines from VictoriaMetrics
+
+The evaluator does not require the campaign to actively probe the
+agent-to-agent legs. Before scoring, the `POST /api/campaigns/{id}/evaluate`
+handler calls `baseline_vm::fetch_and_archive_vm_baselines`, which:
+
+1. Queries VictoriaMetrics for
+   `avg_over_time(meshmon_path_rtt_avg_micros{source=~"<AGENTS>",target=~"<AGENTS>",protocol="<PROTO>"}[15m])`
+   plus the sibling `_stddev_micros` and `meshmon_path_failure_rate`
+   queries (continuous-mesh data already collected by the agent fleet).
+2. Archives every fetched `(source, target)` sample as a
+   `measurements` row tagged `source='archived_vm_continuous'`,
+   preserving raw provenance in the database.
+3. Upserts the matching `campaign_pairs` row so the evaluator's
+   join-by-measurement-id path naturally surfaces the baseline
+   alongside any active-probe measurements.
+
+The evaluator then proceeds unchanged. Re-evaluation is idempotent:
+each call fetches fresh VM data, inserts a new archival row, and
+replaces the `campaign_pairs.measurement_id` pointer via an upsert
+so only the freshest baseline feeds the scorer.
+
+Failure modes:
+
+- `[upstream.vm_url]` unset → 503 `vm_not_configured`.
+- VM upstream unreachable / 5xx / malformed → 503 `vm_upstream`.
+- VM returns no samples for any agent pair in the 15-minute window and
+  no fallback active-probe measurements exist → 422 `no_baseline_pairs`
+  with an operator-actionable message pointing at the VM window and
+  mesh coverage.
+
 ### Result aggregation
 
 The evaluator builds an in-memory matrix keyed by
@@ -1040,9 +1071,10 @@ the matrix — detail pairs are excluded so their high-fidelity
 measurements never poison the baseline.
 
 For every `(A, B)` where both endpoints are agents and a direct
-`A → B` measurement exists, the evaluator considers every candidate `X`
-with measurements `A → X` and `B → X` (the latter approximates
-`X → B` under the symmetric-latency assumption).
+`A → B` measurement exists (active-probe or archived-VM), the evaluator
+considers every candidate `X` with measurements `A → X` and `B → X`
+(the latter approximates `X → B` under the symmetric-latency
+assumption).
 
 A triple `(A, B, X)` qualifies iff:
 

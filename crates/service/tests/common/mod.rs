@@ -1245,6 +1245,22 @@ impl HttpHarness {
         }
     }
 
+    /// Same as [`Self::start`] but wires `[upstream.vm_url]` to
+    /// `vm_url`. Used by campaign-evaluate tests that need to mock VM
+    /// responses before the evaluator runs.
+    pub async fn start_with_vm(vm_url: &str) -> Self {
+        let pool = shared_migrated_pool().await.clone();
+        let state = state_with_admin_and_vm(pool, vm_url).await;
+        let app = meshmon_service::http::router(state.clone());
+        let cookie = login_as_admin(&app, "203.0.113.42").await;
+        Self {
+            app,
+            cookie,
+            state,
+            live: None,
+        }
+    }
+
     /// Start a harness that binds a real TCP listener, spawns an
     /// enrichment runner against `providers` with a **50 ms** sweep
     /// interval, and issues a session cookie for the default `admin`

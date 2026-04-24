@@ -392,9 +392,25 @@ the operator can compare campaign samples against the broader history.
 Shows the three evaluator knobs (`loss_threshold_ratio`, `stddev_weight`,
 `evaluation_mode`) along with a **Re-evaluate** button. Only `completed`
 and `evaluated` states enable Re-evaluate; it's hidden on `draft`,
-`running`, and `stopped` campaigns. Re-evaluating is free: it re-scores
-existing measurements against the new settings without dispatching
-anything.
+`running`, and `stopped` campaigns.
+
+Re-evaluate pulls the agent-to-agent baselines directly from the
+service's continuous-mesh VictoriaMetrics store (15-minute lookback)
+and archives the values as raw measurement rows tagged
+`archived_vm_continuous`. The evaluator then re-scores against the
+freshest baseline plus any active-probe measurements from the
+campaign itself. Two consequences for operators:
+
+- **No agent-to-agent probing is required.** Adding agents as sources
+  is still useful (the evaluator scores transits through non-agent
+  IPs), but pointing campaigns at other agents just to "seed" the
+  baseline is unnecessary.
+- **A brand-new agent mesh may evaluate to zero baselines.** Wait
+  until continuous mesh data accumulates (the evaluator looks at a
+  15-minute window) before re-running. The error message surfaces a
+  hint; `vm_not_configured` means the service has no
+  `[upstream.vm_url]` and needs operator config; `vm_upstream` means
+  VM is unreachable from the service.
 
 ### Switching modes
 

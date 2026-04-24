@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO campaign_pairs\n            (campaign_id, source_agent_id, destination_ip,\n             resolution_state, measurement_id, kind,\n             settled_at, dispatched_at, attempt_count)\n        VALUES ($1, $2, $3,\n                'succeeded'::pair_resolution_state, $4,\n                'campaign'::measurement_kind,\n                now(), NULL, 0)\n        ON CONFLICT (campaign_id, source_agent_id, destination_ip, kind)\n        DO UPDATE SET\n            resolution_state = 'succeeded'::pair_resolution_state,\n            measurement_id   = EXCLUDED.measurement_id,\n            settled_at       = now(),\n            dispatched_at    = NULL,\n            last_error       = NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Inet",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0d2d55644234c27191ffb707b2ed57cff6ad99f953bde6c6a483dd6a0200ed12"
+}

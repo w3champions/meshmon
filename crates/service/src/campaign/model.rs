@@ -142,6 +142,25 @@ pub enum MeasurementKind {
     DetailMtr,
 }
 
+/// Provenance of a `measurements` row.
+///
+/// Distinguishes rows an agent actively measured from rows the evaluator
+/// archived out of VictoriaMetrics continuous-mesh data so the agent
+/// mesh doesn't have to re-probe itself at evaluation time.
+///
+/// Mirrors the `measurement_source` Postgres enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[sqlx(type_name = "measurement_source", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementSource {
+    /// An agent actively probed the destination (campaign dispatch,
+    /// detail ping, detail MTR). Default for historical rows.
+    ActiveProbe,
+    /// The evaluator pulled this baseline from VictoriaMetrics
+    /// continuous-mesh metrics and archived the aggregated value.
+    ArchivedVmContinuous,
+}
+
 /// Allowed lifecycle transitions per spec 02 §3.1.
 ///
 /// Returns `true` when `from -> to` is permitted. Any DB UPDATE that

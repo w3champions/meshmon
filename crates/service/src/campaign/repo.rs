@@ -1353,6 +1353,43 @@ use crate::campaign::eval::{
 };
 use std::collections::HashMap;
 
+/// Agent roster for a campaign.
+///
+/// Returns every agent whose ID is a source in the campaign's
+/// `campaign_pairs` rows **and** every agent whose IP is one of the
+/// campaign's destinations (so agents-as-destinations are part of the
+/// baseline lookup). Used by the VM baseline fetch to know which
+/// `(source, target)` pairs to probe for in VM and to resolve `target`
+/// labels back to IPs for the archival write.
+///
+/// Read-only; shares the same source-of-truth (`agents_with_catalogue`)
+/// as the evaluator's own agent pull so the two sets agree.
+pub async fn agents_for_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Vec<EvalAgentRow>, RepoError> {
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+             FROM agents_with_catalogue
+            WHERE ip IN (
+                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )
+               OR agent_id IN (
+                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| EvalAgentRow {
+            agent_id: r.agent_id,
+            ip: r.ip.ip(),
+        })
+        .collect())
+}
+
 /// Builds the pure-function evaluator's inputs from DB state.
 ///
 /// - Reads only `campaign_pairs.kind='campaign'` rows — detail rows

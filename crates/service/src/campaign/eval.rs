@@ -91,8 +91,16 @@ pub struct EvaluationOutputs {
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
     /// No agent→agent baseline pair was present in `measurements`; the
-    /// evaluator has nothing to score against.
-    #[error("no baseline routes; include at least one agent→agent pair")]
+    /// evaluator has nothing to score against. Baselines now come from
+    /// VictoriaMetrics continuous-mesh data archived at evaluate-time
+    /// (see `baseline_vm::fetch_and_archive_vm_baselines`), so this
+    /// error usually indicates the 15-minute lookback window carries
+    /// no samples for the agents in this campaign — the mesh may be
+    /// new, idle, or misconfigured.
+    #[error(
+        "no agent-to-agent baselines available from VictoriaMetrics (check [upstream.vm_url], \
+         agent-mesh coverage, and the 15-minute lookback window)"
+    )]
     NoBaseline,
 }
 
