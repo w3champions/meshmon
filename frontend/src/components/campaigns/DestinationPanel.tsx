@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { useCatalogueListInfinite } from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
@@ -70,13 +70,25 @@ export function DestinationPanel({
   const listQuery = useCatalogueListInfinite(query, { pageSize: PAGE_SIZE });
   const [pasteOpen, setPasteOpen] = useState(false);
 
-  // Mirror the current query into a ref so the walk handler — whose
-  // closure is frozen at click time — can still observe mid-walk
-  // filter mutations and abort instead of mixing pages across queries.
+  // Mirror the live `query` and `selected` props into refs so the walk
+  // handler — whose closure is frozen at click time — can observe
+  // mid-walk mutations. `useLayoutEffect` runs synchronously after
+  // commit, before any microtask can drain; plain `useEffect` is
+  // deferred until after paint, which leaves a window where a
+  // post-commit resolved Promise could still read the old value.
   const queryRef = useRef(query);
-  useEffect(() => {
+  useLayoutEffect(() => {
     queryRef.current = query;
+    // A prior walk's error belonged to a previous filter and has no
+    // meaning under the new one — clear the banner on every filter
+    // change.
+    setWalkError(null);
   }, [query]);
+
+  const selectedRef = useRef(selected);
+  useLayoutEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
 
   const rows: CatalogueEntry[] = useMemo(
     () => listQuery.data?.pages.flatMap((p) => p.entries) ?? [],
@@ -192,8 +204,11 @@ export function DestinationPanel({
       }
 
       // Additive merge — prior manual row-clicks and IPs from a
-      // narrower filter survive a subsequent "Add all" pass.
-      const merged = new Set(selected);
+      // narrower filter survive a subsequent "Add all" pass. Read via
+      // `selectedRef` so row-click toggles that landed mid-walk are
+      // preserved; the closure-captured `selected` is frozen at click
+      // time and would silently clobber those edits.
+      const merged = new Set(selectedRef.current);
       for (const ip of collectedIps) merged.add(ip);
       onSelectedChange(merged);
       setWalkProgress(null);
@@ -234,13 +249,21 @@ export function DestinationPanel({
   const walking = walkProgress !== null;
   // "Add all" re-uses the display hook, so clicking before the first
   // page lands races the empty-snapshot guard above. Gate on
-  // `isLoading` for the no-cache first-fetch case and on an empty
-  // row snapshot for the post-filter-change refetch case. Do NOT gate
-  // on `isFetching` — the campaign-stream subscription triggers
-  // background refetches of the same query on every lifecycle event,
-  // which would disable the button for milliseconds at a time on a
-  // stable filter.
-  const addAllDisabled = disabled || walking || listQuery.isLoading || rows.length === 0;
+  // `isLoading` for the no-cache first-fetch case and on
+  // `pagesLoaded === 0` for the post-filter-change refetch case.
+  //
+  // Gate on pages-loaded, NOT on `rows.length`: shape filters apply
+  // point-in-polygon AFTER the SQL-bbox-limited page, so a first page
+  // can arrive with `entries: []` and `next_cursor != null` — the
+  // walk still has work to do. Gating on empty entries would lock the
+  // button for those filters even though later cursor pages may match.
+  //
+  // Do NOT gate on `isFetching` — the campaign-stream subscription
+  // triggers background refetches of the same query on every
+  // lifecycle event, which would flicker the button on a stable
+  // filter.
+  const pagesLoaded = listQuery.data?.pages.length ?? 0;
+  const addAllDisabled = disabled || walking || listQuery.isLoading || pagesLoaded === 0;
 
   return (
     <section aria-label="Destinations" className="flex h-full min-h-0 gap-3">

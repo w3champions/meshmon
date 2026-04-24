@@ -421,6 +421,121 @@ describe("DestinationPanel", () => {
     expect(onSelectedChange).not.toHaveBeenCalled();
   });
 
+  test("mid-walk manual toggles are preserved in the final merge", async () => {
+    // Simulate a row-click that narrows `selected` mid-walk. The walk
+    // handler closes over `selected` at click time, but must read the
+    // live value via the selectedRef when emitting the merged set so
+    // concurrent manual edits aren't silently clobbered.
+    const page1 = pagesOf([[ENTRY_A, ENTRY_B]], 2)[0];
+    page1.next_cursor = "cursor-1";
+
+    let resolvePage2: (value: unknown) => void = () => {};
+    const fetchNextPage = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePage2 = resolve;
+        }),
+    );
+
+    mockList({ pages: [page1], hasNextPage: true, fetchNextPage });
+
+    // Parent owns the selection state so a rerender with a narrower
+    // set propagates through props — mirrors the real composer flow.
+    const onSelectedChange = vi.fn<(next: Set<string>) => void>();
+    const user = userEvent.setup();
+
+    const { rerender } = renderWithQuery(
+      <DestinationPanel
+        selected={new Set(["192.168.1.1"])}
+        onSelectedChange={onSelectedChange}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^add all$/i }));
+    await waitFor(() => expect(fetchNextPage).toHaveBeenCalled());
+
+    // Parent deselects the prior manual pick mid-walk.
+    rerender(
+      <DestinationPanel
+        selected={new Set()}
+        onSelectedChange={onSelectedChange}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    // Resolve page 2 so the walk completes.
+    const page2 = pagesOf([[ENTRY_C]], 2)[0];
+    page2.next_cursor = null;
+    resolvePage2({
+      data: { pages: [page1, page2], pageParams: [undefined, "cursor-1"] },
+      hasNextPage: false,
+    });
+
+    await waitFor(() => {
+      expect(onSelectedChange).toHaveBeenCalled();
+    });
+    const snapshot = onSelectedChange.mock.calls.at(-1)?.[0];
+    // 192.168.1.1 was deselected mid-walk — it must not reappear. The
+    // walk contributes A, B, C.
+    expect(Array.from(snapshot ?? []).sort()).toEqual(["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
+  });
+
+  test("walks when the first page is empty but carries a cursor (shape filter case)", async () => {
+    // Shape filters apply point-in-polygon AFTER the SQL-limited bbox
+    // page. The first page can land with `entries: []` and a cursor
+    // pointing to further bbox pages that DO contain matches. The
+    // button must stay clickable so the walk drains those pages.
+    const emptyPage: CatalogueListResponse = {
+      entries: [],
+      total: 1,
+      next_cursor: "cursor-1",
+    };
+    const matchPage = pagesOf([[ENTRY_A]], 1)[0];
+    matchPage.next_cursor = null;
+
+    const fetchNextPage = vi.fn().mockResolvedValueOnce({
+      data: { pages: [emptyPage, matchPage], pageParams: [undefined, "cursor-1"] },
+      hasNextPage: false,
+    });
+
+    mockList({ pages: [emptyPage], hasNextPage: true, fetchNextPage });
+
+    const onSelectedChange = vi.fn<(next: Set<string>) => void>();
+    const user = userEvent.setup();
+    const shapeFilter: FilterValue = {
+      ...EMPTY_FILTER,
+      shapes: [{ kind: "rectangle", sw: [10, 50], ne: [15, 55] }],
+    };
+
+    renderWithQuery(
+      <DestinationPanel
+        selected={new Set()}
+        onSelectedChange={onSelectedChange}
+        filter={shapeFilter}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    const btn = screen.getByRole("button", { name: /^add all$/i });
+    expect(btn).not.toBeDisabled();
+    await user.click(btn);
+
+    await waitFor(() => {
+      expect(onSelectedChange).toHaveBeenCalled();
+    });
+    const snapshot = onSelectedChange.mock.calls.at(-1)?.[0];
+    expect(Array.from(snapshot ?? [])).toEqual(["10.0.0.1"]);
+  });
+
   test("requests catalogue pages at the 500-row server clamp max", () => {
     renderWithQuery(
       <DestinationPanel
