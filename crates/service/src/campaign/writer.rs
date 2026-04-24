@@ -70,6 +70,12 @@ pub fn map_failure_code(code: MeasurementFailureCode) -> &'static str {
 fn state_for_failure_tag(tag: &str) -> PairResolutionState {
     match tag {
         "unreachable" | "timeout" | "refused" => PairResolutionState::Unreachable,
+        "cancelled" | "agent_rejected" => PairResolutionState::Skipped,
+        // Unknown tags default to Skipped so a future MeasurementFailureCode
+        // variant added to `map_failure_code` but not listed here can't
+        // silently inflate the Unreachable metric — the exhaustive test in
+        // this module (`failure_code_resolves_to_expected_state`) will still
+        // catch it before release.
         _ => PairResolutionState::Skipped,
     }
 }
@@ -333,13 +339,6 @@ mod tests {
                 "writer tag {tag:?} collides with scheduler-origin vocabulary",
             );
         }
-    }
-
-    #[test]
-    fn no_route_targets_unreachable_state() {
-        let tag = map_failure_code(MeasurementFailureCode::NoRoute);
-        assert_eq!(tag, "unreachable");
-        assert_eq!(state_for_failure_tag(tag), PairResolutionState::Unreachable);
     }
 
     /// Exhaustive regression barrier: every `MeasurementFailureCode`
