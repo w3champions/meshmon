@@ -333,8 +333,8 @@ async fn reused_pair_surfaces_in_baseline() {
         has_reused_leg,
         "reused measurement's source/destination must appear in pair_details: {candidate}"
     );
-    // T54-02: every pair_detail stamps `direct_source='active_probe'`
-    // today. T54-03 will introduce `vm_continuous` rows.
+    // This test seeds only active-probe data and never contacts VM, so
+    // every pair_detail should stamp `direct_source='active_probe'`.
     for pd in pair_details {
         assert_eq!(
             pd["direct_source"], "active_probe",

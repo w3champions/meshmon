@@ -3909,7 +3909,7 @@
       },
       "DirectSource": {
         "type": "string",
-        "description": "Where an evaluation pair-detail's \"direct A→B\" baseline came from.\n\nMirrors the `pair_detail_direct_source` Postgres enum. The\ncurrent evaluator only stamps [`Self::ActiveProbe`]; the\nVM-continuous provenance slot is reserved for T54-03 when the\nevaluator grows a VictoriaMetrics baseline fallback.",
+        "description": "Where an evaluation pair-detail's \"direct A→B\" baseline came from.\n\nMirrors the `pair_detail_direct_source` Postgres enum. The `/evaluate`\nhandler layers VM continuous-mesh baselines on top of the active-probe\n`measurements` join for agent→agent pairs the campaign didn't cover\nitself, stamping [`Self::VmContinuous`] on the synthesized rows. When\nboth sources exist for the same pair, active-probe wins.",
         "enum": [
           "active_probe",
           "vm_continuous"
@@ -4206,7 +4206,7 @@
           },
           "direct_source": {
             "$ref": "#/components/schemas/DirectSource",
-            "description": "Provenance of the direct A→B baseline figures. Today the\nevaluator stamps every row with [`DirectSource::ActiveProbe`];\nT54-03 will flip this to [`DirectSource::VmContinuous`] when a\nVM-continuous baseline replaces an active probe sample."
+            "description": "Provenance of the direct A→B baseline figures:\n[`DirectSource::ActiveProbe`] for rows that came from the\ncampaign's own `measurements`, or [`DirectSource::VmContinuous`]\nwhen the evaluator pulled the A→B baseline from VictoriaMetrics\ncontinuous-mesh data at `/evaluate` time. Transit legs (A→X,\nX→B) are always active-probe; only the direct A→B baseline can\nbe VM-sourced."
           },
           "direct_stddev_ms": {
             "type": "number",

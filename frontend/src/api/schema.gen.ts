@@ -1600,10 +1600,11 @@ export interface components {
         /**
          * @description Where an evaluation pair-detail's "direct A→B" baseline came from.
          *
-         *     Mirrors the `pair_detail_direct_source` Postgres enum. The
-         *     current evaluator only stamps [`Self::ActiveProbe`]; the
-         *     VM-continuous provenance slot is reserved for T54-03 when the
-         *     evaluator grows a VictoriaMetrics baseline fallback.
+         *     Mirrors the `pair_detail_direct_source` Postgres enum. The `/evaluate`
+         *     handler layers VM continuous-mesh baselines on top of the active-probe
+         *     `measurements` join for agent→agent pairs the campaign didn't cover
+         *     itself, stamping [`Self::VmContinuous`] on the synthesized rows. When
+         *     both sources exist for the same pair, active-probe wins.
          * @enum {string}
          */
         DirectSource: "active_probe" | "vm_continuous";
@@ -1790,10 +1791,13 @@ export interface components {
              */
             direct_rtt_ms: number;
             /**
-             * @description Provenance of the direct A→B baseline figures. Today the
-             *     evaluator stamps every row with [`DirectSource::ActiveProbe`];
-             *     T54-03 will flip this to [`DirectSource::VmContinuous`] when a
-             *     VM-continuous baseline replaces an active probe sample.
+             * @description Provenance of the direct A→B baseline figures:
+             *     [`DirectSource::ActiveProbe`] for rows that came from the
+             *     campaign's own `measurements`, or [`DirectSource::VmContinuous`]
+             *     when the evaluator pulled the A→B baseline from VictoriaMetrics
+             *     continuous-mesh data at `/evaluate` time. Transit legs (A→X,
+             *     X→B) are always active-probe; only the direct A→B baseline can
+             *     be VM-sourced.
              */
             direct_source: components["schemas"]["DirectSource"];
             /**
