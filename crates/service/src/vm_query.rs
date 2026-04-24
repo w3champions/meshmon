@@ -253,11 +253,13 @@ fn merge_samples(
 }
 
 /// Escape a string so it is safe to embed inside a PromQL regex
-/// alternation. The set we escape is conservative: every ASCII
-/// metacharacter that regex-syntax recognises.
+/// alternation. VictoriaMetrics parses label regexes as RE2, which
+/// rejects escapes of non-metacharacters (e.g. `\-` → parse error).
+/// So this mirrors Go's `regexp.QuoteMeta`: only the true RE2
+/// metacharacters outside character classes are escaped.
 fn regex_escape(input: &str) -> String {
     const METACHARS: &[char] = &[
-        '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$', '#', '&', '-', '~',
+        '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$',
     ];
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -293,10 +295,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn regex_escape_escapes_pipe_and_braces() {
-        assert_eq!(regex_escape("agent-01"), "agent\\-01");
+    fn regex_escape_escapes_re2_metacharacters_only() {
+        // Hyphen is not a RE2 metacharacter outside a character class —
+        // escaping it produces `\-`, which RE2 rejects with a parse error.
+        assert_eq!(regex_escape("agent-01"), "agent-01");
+        assert_eq!(regex_escape("dev-agent-1"), "dev-agent-1");
+        // Real metacharacters still get the backslash.
         assert_eq!(regex_escape("a|b"), "a\\|b");
         assert_eq!(regex_escape("a.b{c}"), "a\\.b\\{c\\}");
+        assert_eq!(regex_escape("a(b)*"), "a\\(b\\)\\*");
     }
 
     #[test]
