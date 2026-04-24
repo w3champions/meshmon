@@ -16,3 +16,18 @@ vulnerabilities:
       release-13.0.2 tracked at grafana/grafana#123181. Remove this entry
       after GRAFANA_TAG is bumped to a fixed release (>= 13.0.2).
     expired_at: 2026-07-22
+
+  - id: CVE-2026-31789
+    statement: |
+      Not affected. CVE-2026-31789 is an OpenSSL heap buffer overflow
+      triggered only on 32-bit platforms when parsing an oversized X.509
+      certificate. Every meshmon-* image is built and deployed on 64-bit
+      platforms exclusively — see the linux/amd64 + linux/arm64 build
+      matrix in .github/workflows/release.yml. The vulnerable 32-bit
+      code path is not reachable at runtime.
+
+      Surfaces in meshmon-vmalert and meshmon-grafana via alpine 3.23.3's
+      libcrypto3 / libssl3 at 3.5.5-r0 (fixed in 3.5.6-r0). Remove this
+      entry after VMALERT_TAG and GRAFANA_TAG pick up base images with
+      libcrypto3/libssl3 >= 3.5.6-r0.
+    expired_at: 2026-07-24

@@ -1,20 +1,27 @@
 name: release
 
-# Production releases from main are gated on ci.yml passing first:
-# the workflow_run trigger fires when ci completes, and the build job
-# below requires conclusion == 'success'. Tag pushes (v*) keep the
-# direct push trigger because tags reference SHAs that already passed
-# ci on main. workflow_dispatch is the intentional emergency-bypass
-# path — it skips Trivy scan and produces dispatch-<sha> tags only
-# (no `latest` / `main-<sha>` promotion).
+# Production releases from main run as a reusable workflow invoked by
+# ci.yml after every CI job on main passes (see the `release` job in
+# ci.yml). Running under ci.yml means the release jobs attach to the
+# source commit as regular check statuses — the gating is still "tests
+# must pass first", enforced by `needs:` in the caller. Tag pushes keep
+# the direct `push: tags` trigger because tags reference SHAs that
+# already passed CI on main. workflow_dispatch is the intentional
+# emergency-bypass path — it skips Trivy scan and produces
+# dispatch-<sha> tags only (no `latest` / `main-<sha>` promotion).
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
-    branches: [main]
+  workflow_call:
+    inputs:
+      main_release:
+        description: >-
+          Set true when called from ci.yml after a main-branch push
+          passes. Gates Trivy scan, :latest / :main-<sha> tagging, and
+          the Azure DevOps release trigger.
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -30,11 +37,6 @@ jobs:
   # bytes before any tag is created by the merge job below.
   build:
     name: Build ${{ matrix.image.name }} (${{ matrix.platform }})
-    # Skip cleanly when ci.yml (the workflow_run upstream) failed —
-    # tag pushes and workflow_dispatch are unaffected.
-    if: |
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -61,14 +63,8 @@ jobs:
     env:
       REGISTRY_IMAGE: ghcr.io/w3champions/${{ matrix.image.name }}
     steps:
-      # Pin ref explicitly: under workflow_run the default checkout
-      # would resolve refs/heads/main HEAD, which can advance between
-      # ci finishing and release starting. head_sha is the exact SHA
-      # ci validated.
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Derive platform-pair slug
         env:
@@ -123,11 +119,11 @@ jobs:
   scan:
     name: Trivy scan ${{ matrix.image }}
     needs: build
-    # Production-promoted releases (workflow_run from main, or v* tag
-    # push) require a clean Trivy gate. workflow_dispatch is exempt by
-    # design — see merge job comment.
+    # Production-promoted releases (main_release via workflow_call, or
+    # v* tag push) require a clean Trivy gate. workflow_dispatch is
+    # exempt by design — see merge job comment.
     if: >-
-      github.event_name == 'workflow_run' ||
+      inputs.main_release ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     permissions:
       contents: read
@@ -141,12 +137,11 @@ jobs:
       # Checkout so Trivy can read `.trivyignore.yaml` from the workspace.
       # Without this the scan job runs with an empty $GITHUB_WORKSPACE and
       # the ignore file is silently absent (auto-discovery fails, VEX
-      # statements get ignored). Pin ref same as build job.
+      # statements get ignored).
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Download amd64 digest
         uses: actions/download-artifact@v4
@@ -259,18 +254,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
-          # The `:latest` and `:main-<sha>` raw tags are gated on the
-          # workflow_run trigger (i.e. ci.yml succeeded on main) so a
-          # workflow_dispatch run from main cannot bypass the scan
+          # The `:latest` and `:main-<sha>` raw tags are gated on
+          # inputs.main_release (set by ci.yml after tests pass on
+          # main) so a workflow_dispatch run cannot bypass the scan
           # gate and overwrite production tags — scan is skipped for
           # workflow_dispatch by design. Dispatch runs still emit
           # `dispatch-<short-sha>` as the non-production fallback.
-          # `main-<sha>` uses the ci-validated head_sha so the tag
-          # matches the SHA that ran through ci, even if main has
-          # advanced before release fires.
           tags: |
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' }}
-            type=raw,value=main-${{ github.event.workflow_run.head_sha || github.sha }},enable=${{ github.event_name == 'workflow_run' }}
+            type=raw,value=latest,enable=${{ inputs.main_release }}
+            type=raw,value=main-${{ github.sha }},enable=${{ inputs.main_release }}
             type=semver,pattern=v{{version}}
             type=sha,prefix=dispatch-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
 
@@ -301,25 +293,21 @@ jobs:
     name: Trigger Azure DevOps Release
     needs: [merge]
     runs-on: ubuntu-latest
-    # Fires for production-promoted releases only: workflow_run from
-    # main (the ci-passed path) and v* tag pushes. workflow_dispatch
-    # is excluded — those produce dispatch-<sha> images that should
-    # not enter the Azure release pipeline.
-    if: |
-      github.event_name == 'workflow_run' ||
+    # Fires for production-promoted releases only: main_release via
+    # workflow_call (the ci-passed path) and v* tag pushes.
+    # workflow_dispatch is excluded — those produce dispatch-<sha>
+    # images that should not enter the Azure release pipeline.
+    if: >-
+      inputs.main_release ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     steps:
       - name: Derive tag
         id: tag
-        env:
-          # head_sha is the ci-validated SHA when triggered by
-          # workflow_run; for tag pushes GITHUB_SHA is correct.
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           else
-            echo "value=main-${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+            echo "value=main-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: POST release creation to Azure DevOps
