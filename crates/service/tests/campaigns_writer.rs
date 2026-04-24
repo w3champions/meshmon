@@ -194,7 +194,7 @@ async fn settle_detail_ping_success_writes_detail_kind() {
 }
 
 #[tokio::test]
-async fn settle_failure_timeout_writes_skipped_with_timeout_tag() {
+async fn settle_failure_timeout_writes_unreachable_with_timeout_tag() {
     let pool = common::shared_migrated_pool().await.clone();
     let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
@@ -217,7 +217,7 @@ async fn settle_failure_timeout_writes_skipped_with_timeout_tag() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(state, "skipped");
+    assert_eq!(state, "unreachable");
     assert_eq!(last_error.as_deref(), Some("timeout"));
     // No measurement row for a failure outcome.
     assert!(measurement_id.is_none());
@@ -253,7 +253,7 @@ async fn settle_no_route_maps_to_unreachable_state() {
 }
 
 #[tokio::test]
-async fn settle_refused_maps_to_skipped_with_refused_tag() {
+async fn settle_refused_maps_to_unreachable_with_refused_tag() {
     let pool = common::shared_migrated_pool().await.clone();
     let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
@@ -273,7 +273,7 @@ async fn settle_refused_maps_to_skipped_with_refused_tag() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(state, "skipped");
+    assert_eq!(state, "unreachable");
     assert_eq!(last_error.as_deref(), Some("refused"));
 
     repo::delete(&pool, campaign_id).await.unwrap();
