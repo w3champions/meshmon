@@ -17,6 +17,7 @@ use super::model::{CampaignState, MeasurementKind, PairResolutionState};
 use super::repo::{self, RepoError};
 use crate::metrics;
 use crate::registry::AgentRegistry;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -240,18 +241,43 @@ impl Scheduler {
         let active_agents = active_snapshot.active_targets("", self.target_active_window);
 
         let len = active_campaigns.len();
-        for agent in &active_agents {
-            // Start one-past-cursor so the rotation advances between ticks
-            // even when the first campaign keeps returning work.
-            for step in 1..=len {
-                let c_idx = (*cursor + step) % len;
-                let c_id = active_campaigns[c_idx];
-                let dispatched = self.dispatch_for_campaign(c_id, &agent.id).await?;
-                if dispatched {
-                    *cursor = c_idx;
-                    break;
+        let cursor_start = *cursor;
+
+        let mut fanout: FuturesUnordered<_> = active_agents
+            .iter()
+            .map(|agent| {
+                let agent_id = agent.id.clone();
+                let campaigns = &active_campaigns;
+                async move {
+                    // Walk campaigns round-robin starting one-past the shared
+                    // cursor snapshot so the rotation advances between ticks
+                    // even when one campaign keeps returning work.
+                    for step in 1..=len {
+                        let c_idx = (cursor_start + step) % len;
+                        let c_id = campaigns[c_idx];
+                        if self.dispatch_for_campaign(c_id, &agent_id).await? {
+                            return Ok::<Option<usize>, RepoError>(Some(c_idx));
+                        }
+                    }
+                    Ok(None)
                 }
+            })
+            .collect();
+
+        let mut any_dispatched = false;
+        while let Some(res) = fanout.next().await {
+            if res?.is_some() {
+                any_dispatched = true;
             }
+        }
+
+        // Advance by exactly one slot per tick. Unlike the previous serial
+        // implementation, the cursor is not set to the last successful c_idx —
+        // because concurrent agents may settle on different c_idx values, there
+        // is no canonical "winner" to honour. A deterministic +1 preserves the
+        // existing round-robin fairness guarantee that no campaign starves.
+        if any_dispatched {
+            *cursor = (cursor_start + 1) % len;
         }
 
         // Skip pairs for source agents that are not currently active.
@@ -277,8 +303,8 @@ impl Scheduler {
 
         // After a batch settles (or agent-offline sweep skips), complete
         // any campaigns whose pairs are all terminal.
-        for c_id in active_campaigns {
-            let _ = repo::maybe_complete(&self.pool, c_id).await?;
+        for c_id in &active_campaigns {
+            let _ = repo::maybe_complete(&self.pool, *c_id).await?;
         }
 
         // Safety-net sweep for max-attempts-exceeded pairs.
