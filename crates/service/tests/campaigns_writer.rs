@@ -525,6 +525,64 @@ async fn settle_emits_campaign_pair_settled_notify() {
 }
 
 #[tokio::test]
+async fn settle_success_converts_agent_loss_fraction_to_percent() {
+    // Regression barrier for Bug 4a: the agent emits `loss_pct` as a
+    // fraction (0.0–1.0) while the rest of the service stack — the
+    // evaluator, the DTOs, and the frontend — treats
+    // `measurements.loss_pct` as a percentage (0.0–100.0). The writer is
+    // the boundary where that asymmetry is reconciled. A summary carrying
+    // `loss_pct = 0.75` must land in the DB column as `75.0`, so the
+    // evaluator's `loss_threshold_pct` (default 2.0 = 2 %) and the
+    // frontend's `${value.toFixed(2)}%` both render correctly without
+    // per-consumer scale fixups.
+    let pool = common::shared_migrated_pool().await.clone();
+    let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
+    let writer = SettleWriter::new(pool.clone());
+
+    let result = MeasurementResult {
+        pair_id: pair_id as u64,
+        outcome: Some(Outcome::Success(MeasurementSummary {
+            attempted: 10,
+            succeeded: 2,
+            latency_min_ms: 1.0,
+            latency_avg_ms: 1.5,
+            latency_median_ms: 1.4,
+            latency_p95_ms: 2.0,
+            latency_max_ms: 2.5,
+            latency_stddev_ms: 0.3,
+            // Agent-wire fraction: 75 % packet loss.
+            loss_pct: 0.75,
+        })),
+    };
+
+    let settled = writer
+        .settle(&mk_pair(campaign_id, pair_id, dest), &result)
+        .await
+        .expect("settle");
+    assert_eq!(settled, SettleOutcome::Settled);
+
+    let m_id: i64 = sqlx::query_scalar(
+        "SELECT measurement_id FROM campaign_pairs WHERE id = $1 AND measurement_id IS NOT NULL",
+    )
+    .bind(pair_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let stored_loss: f32 = sqlx::query_scalar("SELECT loss_pct FROM measurements WHERE id = $1")
+        .bind(m_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        (stored_loss - 75.0f32).abs() < 0.001,
+        "expected 75.0 (percent) stored for a 0.75 fraction, got {stored_loss}",
+    );
+
+    repo::delete(&pool, campaign_id).await.unwrap();
+}
+
+#[tokio::test]
 async fn settle_empty_outcome_returns_malformed_and_rolls_back() {
     let pool = common::shared_migrated_pool().await.clone();
     let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;

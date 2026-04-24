@@ -491,6 +491,9 @@ message MeasurementSummary {
   float  latency_p95_ms    = 6;
   float  latency_max_ms    = 7;
   float  latency_stddev_ms = 8;
+  // 0.0 .. 1.0 loss fraction across the batch. The service multiplies
+  // by 100 before storing in `measurements.loss_pct`; downstream
+  // consumers treat that column as percentage 0..100.
   float  loss_pct          = 9;
 
   reserved 15 to 31;

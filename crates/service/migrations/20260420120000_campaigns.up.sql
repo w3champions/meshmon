@@ -35,6 +35,11 @@ CREATE TABLE measurements (
     latency_p95_ms      REAL,
     latency_max_ms      REAL,
     latency_stddev_ms   REAL,
+    -- Percentage 0.0–100.0 (NOT fraction 0.0–1.0). Agent-wire values are
+    -- fraction; the campaign writer multiplies by 100 before insert so
+    -- evaluator loss-threshold comparisons (default 2.0 meaning 2 %)
+    -- and frontend rendering work end-to-end without per-consumer
+    -- scale conversion.
     loss_pct            REAL NOT NULL DEFAULT 0.0,
     kind                measurement_kind NOT NULL DEFAULT 'campaign'
 );

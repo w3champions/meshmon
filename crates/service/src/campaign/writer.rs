@@ -186,7 +186,12 @@ impl SettleWriter {
                     s.latency_p95_ms,
                     s.latency_max_ms,
                     s.latency_stddev_ms,
-                    s.loss_pct,
+                    // Agent-wire convention is fraction (0.0–1.0); the
+                    // `measurements.loss_pct` column stores percentage
+                    // (0.0–100.0) so the evaluator and FE — both of
+                    // which already assume percent — render correctly
+                    // without a per-consumer *100.
+                    s.loss_pct * 100.0f32,
                     pair.kind as MeasurementKind,
                 )
                 .fetch_one(&mut *tx)
