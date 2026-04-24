@@ -102,7 +102,7 @@ export function RouteTable({ hops, diff, className }: RouteTableProps) {
               </TableCell>
               <TableCell>{freq < 1 ? `${Math.round(freq * 100)}%` : "—"}</TableCell>
               <TableCell>{fmtMs(h.avg_rtt_micros)}</TableCell>
-              <TableCell>{fmtPct(h.loss_pct)}</TableCell>
+              <TableCell>{fmtPct(h.loss_ratio)}</TableCell>
               <TableCell className="text-xs">{status && <span>{status}</span>}</TableCell>
             </TableRow>
           );

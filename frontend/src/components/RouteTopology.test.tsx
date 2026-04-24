@@ -23,7 +23,7 @@ const HOPS: HopJson[] = [
     observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
     avg_rtt_micros: 1_000,
     stddev_rtt_micros: 100,
-    loss_pct: 0,
+    loss_ratio: 0,
   },
   {
     position: 2,
@@ -33,7 +33,7 @@ const HOPS: HopJson[] = [
     ],
     avg_rtt_micros: 2_000,
     stddev_rtt_micros: 200,
-    loss_pct: 0.1,
+    loss_ratio: 0.1,
   },
 ];
 
@@ -43,21 +43,21 @@ const THREE_HOPS: HopJson[] = [
     observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
     avg_rtt_micros: 1_000,
     stddev_rtt_micros: 100,
-    loss_pct: 0,
+    loss_ratio: 0,
   },
   {
     position: 2,
     observed_ips: [{ ip: "10.0.0.2", freq: 1 }],
     avg_rtt_micros: 2_000,
     stddev_rtt_micros: 200,
-    loss_pct: 0,
+    loss_ratio: 0,
   },
   {
     position: 3,
     observed_ips: [{ ip: "10.0.0.3", freq: 1 }],
     avg_rtt_micros: 3_000,
     stddev_rtt_micros: 300,
-    loss_pct: 0,
+    loss_ratio: 0,
   },
 ];
 

@@ -135,7 +135,7 @@ function makeCampaign(id: string, overrides: Partial<Campaign> = {}): Campaign {
     protocol: "icmp",
     evaluation_mode: "optimization",
     force_measurement: false,
-    loss_threshold_pct: 2,
+    loss_threshold_ratio: 0.02,
     stddev_weight: 1,
     probe_count: 10,
     probe_count_detail: 250,

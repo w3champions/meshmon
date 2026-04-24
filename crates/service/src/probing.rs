@@ -59,9 +59,9 @@ pub struct ProbingRate {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProtocolThresholds {
     /// Loss fraction that triggers the unhealthy state.
-    pub unhealthy_trigger_pct: f64,
+    pub unhealthy_trigger_ratio: f64,
     /// Loss fraction below which healthy recovery is allowed.
-    pub healthy_recovery_pct: f64,
+    pub healthy_recovery_ratio: f64,
     /// Seconds the unhealthy condition must persist before transitioning.
     pub unhealthy_hysteresis_sec: u32,
     /// Seconds the healthy condition must persist before recovering.
@@ -94,13 +94,13 @@ pub struct ProbingDiffDetection {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PathHealthThresholds {
     /// Loss fraction that triggers the degraded state.
-    pub degraded_trigger_pct: f64,
+    pub degraded_trigger_ratio: f64,
     /// Seconds the degraded condition must persist before transitioning.
     pub degraded_trigger_sec: u32,
     /// Minimum number of samples required to evaluate degraded state.
     pub degraded_min_samples: u32,
     /// Loss fraction below which normal recovery is allowed.
-    pub normal_recovery_pct: f64,
+    pub normal_recovery_ratio: f64,
     /// Seconds the normal condition must persist before recovering.
     pub normal_recovery_sec: u32,
 }
@@ -179,20 +179,20 @@ impl Default for ProbingSection {
             priority: vec![Icmp, Tcp, Udp],
             rates,
             icmp_thresholds: ProtocolThresholds {
-                unhealthy_trigger_pct: 0.90,
-                healthy_recovery_pct: 0.10,
+                unhealthy_trigger_ratio: 0.90,
+                healthy_recovery_ratio: 0.10,
                 unhealthy_hysteresis_sec: 30,
                 healthy_hysteresis_sec: 60,
             },
             tcp_thresholds: ProtocolThresholds {
-                unhealthy_trigger_pct: 0.50,
-                healthy_recovery_pct: 0.05,
+                unhealthy_trigger_ratio: 0.50,
+                healthy_recovery_ratio: 0.05,
                 unhealthy_hysteresis_sec: 30,
                 healthy_hysteresis_sec: 60,
             },
             udp_thresholds: ProtocolThresholds {
-                unhealthy_trigger_pct: 0.90,
-                healthy_recovery_pct: 0.10,
+                unhealthy_trigger_ratio: 0.90,
+                healthy_recovery_ratio: 0.10,
                 unhealthy_hysteresis_sec: 30,
                 healthy_hysteresis_sec: 60,
             },
@@ -205,10 +205,10 @@ impl Default for ProbingSection {
                 hop_count_change: 1,
             },
             path_health_thresholds: PathHealthThresholds {
-                degraded_trigger_pct: 0.05,
+                degraded_trigger_ratio: 0.05,
                 degraded_trigger_sec: 120,
                 degraded_min_samples: 30,
-                normal_recovery_pct: 0.02,
+                normal_recovery_ratio: 0.02,
                 normal_recovery_sec: 300,
             },
             udp_probe_secret: *b"mshmn-v1",
@@ -275,10 +275,16 @@ pub(crate) struct RawProbingRate {
 
 // On-disk override shape for `ProtocolThresholds`. Every field is optional;
 // absent fields keep the spec-02 default.
+//
+// `_pct` aliases preserve backward compatibility with deployed operator
+// configs written before the `_pct → _ratio` rename. Values are fractions
+// (0.0–1.0) either way.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct RawProtocolThresholds {
-    unhealthy_trigger_pct: Option<f64>,
-    healthy_recovery_pct: Option<f64>,
+    #[serde(alias = "unhealthy_trigger_pct")]
+    unhealthy_trigger_ratio: Option<f64>,
+    #[serde(alias = "healthy_recovery_pct")]
+    healthy_recovery_ratio: Option<f64>,
     unhealthy_hysteresis_sec: Option<u32>,
     healthy_hysteresis_sec: Option<u32>,
 }
@@ -301,12 +307,16 @@ pub(crate) struct RawProbingDiffDetection {
 }
 
 // On-disk override shape for `PathHealthThresholds`. Every field is optional.
+// `_pct` aliases preserve backward compatibility with pre-rename operator
+// configs; values are fractions (0.0–1.0) either way.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct RawPathHealthThresholds {
-    degraded_trigger_pct: Option<f64>,
+    #[serde(alias = "degraded_trigger_pct")]
+    degraded_trigger_ratio: Option<f64>,
     degraded_trigger_sec: Option<u32>,
     degraded_min_samples: Option<u32>,
-    normal_recovery_pct: Option<f64>,
+    #[serde(alias = "normal_recovery_pct")]
+    normal_recovery_ratio: Option<f64>,
     normal_recovery_sec: Option<u32>,
 }
 
@@ -470,12 +480,12 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             let d = defaults.icmp_thresholds;
             let ut = raw
                 .icmp_thresholds
-                .unhealthy_trigger_pct
-                .unwrap_or(d.unhealthy_trigger_pct);
+                .unhealthy_trigger_ratio
+                .unwrap_or(d.unhealthy_trigger_ratio);
             let hr = raw
                 .icmp_thresholds
-                .healthy_recovery_pct
-                .unwrap_or(d.healthy_recovery_pct);
+                .healthy_recovery_ratio
+                .unwrap_or(d.healthy_recovery_ratio);
             let uh = raw
                 .icmp_thresholds
                 .unhealthy_hysteresis_sec
@@ -484,13 +494,13 @@ impl TryFrom<RawProbingSection> for ProbingSection {
                 .icmp_thresholds
                 .healthy_hysteresis_sec
                 .unwrap_or(d.healthy_hysteresis_sec);
-            validate_fraction("icmp_thresholds.unhealthy_trigger_pct", ut)?;
-            validate_fraction("icmp_thresholds.healthy_recovery_pct", hr)?;
+            validate_fraction("icmp_thresholds.unhealthy_trigger_ratio", ut)?;
+            validate_fraction("icmp_thresholds.healthy_recovery_ratio", hr)?;
             validate_positive_u32("icmp_thresholds.unhealthy_hysteresis_sec", uh)?;
             validate_positive_u32("icmp_thresholds.healthy_hysteresis_sec", hh)?;
             ProtocolThresholds {
-                unhealthy_trigger_pct: ut,
-                healthy_recovery_pct: hr,
+                unhealthy_trigger_ratio: ut,
+                healthy_recovery_ratio: hr,
                 unhealthy_hysteresis_sec: uh,
                 healthy_hysteresis_sec: hh,
             }
@@ -501,12 +511,12 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             let d = defaults.tcp_thresholds;
             let ut = raw
                 .tcp_thresholds
-                .unhealthy_trigger_pct
-                .unwrap_or(d.unhealthy_trigger_pct);
+                .unhealthy_trigger_ratio
+                .unwrap_or(d.unhealthy_trigger_ratio);
             let hr = raw
                 .tcp_thresholds
-                .healthy_recovery_pct
-                .unwrap_or(d.healthy_recovery_pct);
+                .healthy_recovery_ratio
+                .unwrap_or(d.healthy_recovery_ratio);
             let uh = raw
                 .tcp_thresholds
                 .unhealthy_hysteresis_sec
@@ -515,13 +525,13 @@ impl TryFrom<RawProbingSection> for ProbingSection {
                 .tcp_thresholds
                 .healthy_hysteresis_sec
                 .unwrap_or(d.healthy_hysteresis_sec);
-            validate_fraction("tcp_thresholds.unhealthy_trigger_pct", ut)?;
-            validate_fraction("tcp_thresholds.healthy_recovery_pct", hr)?;
+            validate_fraction("tcp_thresholds.unhealthy_trigger_ratio", ut)?;
+            validate_fraction("tcp_thresholds.healthy_recovery_ratio", hr)?;
             validate_positive_u32("tcp_thresholds.unhealthy_hysteresis_sec", uh)?;
             validate_positive_u32("tcp_thresholds.healthy_hysteresis_sec", hh)?;
             ProtocolThresholds {
-                unhealthy_trigger_pct: ut,
-                healthy_recovery_pct: hr,
+                unhealthy_trigger_ratio: ut,
+                healthy_recovery_ratio: hr,
                 unhealthy_hysteresis_sec: uh,
                 healthy_hysteresis_sec: hh,
             }
@@ -532,12 +542,12 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             let d = defaults.udp_thresholds;
             let ut = raw
                 .udp_thresholds
-                .unhealthy_trigger_pct
-                .unwrap_or(d.unhealthy_trigger_pct);
+                .unhealthy_trigger_ratio
+                .unwrap_or(d.unhealthy_trigger_ratio);
             let hr = raw
                 .udp_thresholds
-                .healthy_recovery_pct
-                .unwrap_or(d.healthy_recovery_pct);
+                .healthy_recovery_ratio
+                .unwrap_or(d.healthy_recovery_ratio);
             let uh = raw
                 .udp_thresholds
                 .unhealthy_hysteresis_sec
@@ -546,13 +556,13 @@ impl TryFrom<RawProbingSection> for ProbingSection {
                 .udp_thresholds
                 .healthy_hysteresis_sec
                 .unwrap_or(d.healthy_hysteresis_sec);
-            validate_fraction("udp_thresholds.unhealthy_trigger_pct", ut)?;
-            validate_fraction("udp_thresholds.healthy_recovery_pct", hr)?;
+            validate_fraction("udp_thresholds.unhealthy_trigger_ratio", ut)?;
+            validate_fraction("udp_thresholds.healthy_recovery_ratio", hr)?;
             validate_positive_u32("udp_thresholds.unhealthy_hysteresis_sec", uh)?;
             validate_positive_u32("udp_thresholds.healthy_hysteresis_sec", hh)?;
             ProtocolThresholds {
-                unhealthy_trigger_pct: ut,
-                healthy_recovery_pct: hr,
+                unhealthy_trigger_ratio: ut,
+                healthy_recovery_ratio: hr,
                 unhealthy_hysteresis_sec: uh,
                 healthy_hysteresis_sec: hh,
             }
@@ -595,8 +605,8 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             let d = defaults.path_health_thresholds;
             let dtp = raw
                 .path_health_thresholds
-                .degraded_trigger_pct
-                .unwrap_or(d.degraded_trigger_pct);
+                .degraded_trigger_ratio
+                .unwrap_or(d.degraded_trigger_ratio);
             let dts = raw
                 .path_health_thresholds
                 .degraded_trigger_sec
@@ -607,14 +617,14 @@ impl TryFrom<RawProbingSection> for ProbingSection {
                 .unwrap_or(d.degraded_min_samples);
             let nrp = raw
                 .path_health_thresholds
-                .normal_recovery_pct
-                .unwrap_or(d.normal_recovery_pct);
+                .normal_recovery_ratio
+                .unwrap_or(d.normal_recovery_ratio);
             let nrs = raw
                 .path_health_thresholds
                 .normal_recovery_sec
                 .unwrap_or(d.normal_recovery_sec);
-            validate_fraction("path_health_thresholds.degraded_trigger_pct", dtp)?;
-            validate_fraction("path_health_thresholds.normal_recovery_pct", nrp)?;
+            validate_fraction("path_health_thresholds.degraded_trigger_ratio", dtp)?;
+            validate_fraction("path_health_thresholds.normal_recovery_ratio", nrp)?;
             validate_positive_u32("path_health_thresholds.degraded_trigger_sec", dts)?;
             validate_positive_u32("path_health_thresholds.normal_recovery_sec", nrs)?;
             // Match the agent state machine's hard floor (MIN_TRANSITION_SAMPLES
@@ -623,10 +633,10 @@ impl TryFrom<RawProbingSection> for ProbingSection {
             // that silently behaves differently than written.
             validate_min_u32("path_health_thresholds.degraded_min_samples", dms, 3)?;
             PathHealthThresholds {
-                degraded_trigger_pct: dtp,
+                degraded_trigger_ratio: dtp,
                 degraded_trigger_sec: dts,
                 degraded_min_samples: dms,
-                normal_recovery_pct: nrp,
+                normal_recovery_ratio: nrp,
                 normal_recovery_sec: nrs,
             }
         };
@@ -792,20 +802,23 @@ mod tests {
     fn defaults_fractions_in_range() {
         let cfg = ProbingSection::default();
         for (name, v) in [
-            ("icmp.unhealthy", cfg.icmp_thresholds.unhealthy_trigger_pct),
-            ("icmp.recovery", cfg.icmp_thresholds.healthy_recovery_pct),
-            ("tcp.unhealthy", cfg.tcp_thresholds.unhealthy_trigger_pct),
-            ("tcp.recovery", cfg.tcp_thresholds.healthy_recovery_pct),
-            ("udp.unhealthy", cfg.udp_thresholds.unhealthy_trigger_pct),
-            ("udp.recovery", cfg.udp_thresholds.healthy_recovery_pct),
+            (
+                "icmp.unhealthy",
+                cfg.icmp_thresholds.unhealthy_trigger_ratio,
+            ),
+            ("icmp.recovery", cfg.icmp_thresholds.healthy_recovery_ratio),
+            ("tcp.unhealthy", cfg.tcp_thresholds.unhealthy_trigger_ratio),
+            ("tcp.recovery", cfg.tcp_thresholds.healthy_recovery_ratio),
+            ("udp.unhealthy", cfg.udp_thresholds.unhealthy_trigger_ratio),
+            ("udp.recovery", cfg.udp_thresholds.healthy_recovery_ratio),
             ("diff.new_ip", cfg.diff_detection.new_ip_min_freq),
             (
                 "path.degraded",
-                cfg.path_health_thresholds.degraded_trigger_pct,
+                cfg.path_health_thresholds.degraded_trigger_ratio,
             ),
             (
                 "path.normal",
-                cfg.path_health_thresholds.normal_recovery_pct,
+                cfg.path_health_thresholds.normal_recovery_ratio,
             ),
         ] {
             assert!((0.0..=1.0).contains(&v), "{name} = {v} out of range");
@@ -884,14 +897,14 @@ mod tests {
         let raw: RawProbingSection = toml::from_str(
             r#"
             [icmp_thresholds]
-            unhealthy_trigger_pct = 1.5
+            unhealthy_trigger_ratio = 1.5
         "#,
         )
         .unwrap();
         let err = ProbingSection::try_from(raw).unwrap_err();
         assert!(
-            err.to_lowercase().contains("icmp") || err.to_lowercase().contains("pct"),
-            "expected 'icmp' or 'pct' in error, got: {err}"
+            err.to_lowercase().contains("icmp") || err.to_lowercase().contains("ratio"),
+            "expected 'icmp' or 'ratio' in error, got: {err}"
         );
     }
 

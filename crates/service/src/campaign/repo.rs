@@ -64,7 +64,7 @@ pub struct CreateInput {
     /// Optional inter-probe stagger (ms).
     pub probe_stagger_ms: Option<i32>,
     /// Optional loss-rate threshold for the evaluator.
-    pub loss_threshold_pct: Option<f32>,
+    pub loss_threshold_ratio: Option<f32>,
     /// Optional RTT-stddev weight for the evaluator.
     pub stddev_weight: Option<f32>,
     /// Optional evaluation strategy.
@@ -107,19 +107,19 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         r#"
         INSERT INTO measurement_campaigns
             (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,
-             probe_stagger_ms, force_measurement, loss_threshold_pct, stddev_weight,
+             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,
              evaluation_mode, created_by)
         VALUES ($1, $2, $3::probe_protocol,
                 COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),
                 COALESCE($6, 2000), COALESCE($7, 100),
-                $8, COALESCE($9, 2.0::real), COALESCE($10, 1.0::real),
+                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),
                 COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),
                 $12)
         RETURNING id, title, notes,
                   state AS "state: CampaignState",
                   protocol AS "protocol: ProbeProtocol",
                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                  force_measurement, loss_threshold_pct, stddev_weight,
+                  force_measurement, loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
@@ -131,7 +131,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         input.timeout_ms,
         input.probe_stagger_ms,
         input.force_measurement,
-        input.loss_threshold_pct,
+        input.loss_threshold_ratio,
         input.stddev_weight,
         input.evaluation_mode as _,
         input.created_by.as_deref(),
@@ -164,7 +164,7 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoErr
                state AS "state: CampaignState",
                protocol AS "protocol: ProbeProtocol",
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-               force_measurement, loss_threshold_pct, stddev_weight,
+               force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
@@ -198,7 +198,7 @@ pub async fn list(
                state AS "state: CampaignState",
                protocol AS "protocol: ProbeProtocol",
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-               force_measurement, loss_threshold_pct, stddev_weight,
+               force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
@@ -226,7 +226,7 @@ pub async fn patch(
     id: Uuid,
     title: Option<&str>,
     notes: Option<&str>,
-    loss_threshold_pct: Option<f32>,
+    loss_threshold_ratio: Option<f32>,
     stddev_weight: Option<f32>,
     evaluation_mode: Option<EvaluationMode>,
 ) -> Result<CampaignRow, RepoError> {
@@ -236,7 +236,7 @@ pub async fn patch(
         UPDATE measurement_campaigns
            SET title              = COALESCE($2, title),
                notes              = COALESCE($3, notes),
-               loss_threshold_pct = COALESCE($4, loss_threshold_pct),
+               loss_threshold_ratio = COALESCE($4, loss_threshold_ratio),
                stddev_weight      = COALESCE($5, stddev_weight),
                evaluation_mode    = COALESCE($6::evaluation_mode, evaluation_mode)
          WHERE id = $1
@@ -244,14 +244,14 @@ pub async fn patch(
                    state AS "state: CampaignState",
                    protocol AS "protocol: ProbeProtocol",
                    probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                   force_measurement, loss_threshold_pct, stddev_weight,
+                   force_measurement, loss_threshold_ratio, stddev_weight,
                    evaluation_mode AS "evaluation_mode: EvaluationMode",
                    created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         id,
         title,
         notes,
-        loss_threshold_pct,
+        loss_threshold_ratio,
         stddev_weight,
         evaluation_mode as Option<EvaluationMode>,
     )
@@ -569,16 +569,23 @@ pub async fn list_pairs(
     let raws = sqlx::query_as!(
         PairRowRaw,
         r#"
-        SELECT id, campaign_id, source_agent_id, destination_ip,
-               resolution_state AS "resolution_state: PairResolutionState",
-               measurement_id, dispatched_at, settled_at, attempt_count, last_error,
-               kind AS "kind: MeasurementKind"
-          FROM campaign_pairs
-         WHERE campaign_id = $1
-           AND kind = 'campaign'
+        SELECT cp.id                     AS "id!",
+               cp.campaign_id            AS "campaign_id!",
+               cp.source_agent_id        AS "source_agent_id!",
+               cp.destination_ip         AS "destination_ip!",
+               cp.resolution_state       AS "resolution_state!: PairResolutionState",
+               cp.measurement_id         AS "measurement_id?",
+               cp.dispatched_at          AS "dispatched_at?",
+               cp.settled_at             AS "settled_at?",
+               cp.attempt_count          AS "attempt_count!",
+               cp.last_error             AS "last_error?",
+               cp.kind                   AS "kind!: MeasurementKind"
+          FROM campaign_pairs cp
+         WHERE cp.campaign_id = $1
+           AND cp.kind = 'campaign'
            AND (cardinality($2::pair_resolution_state[]) = 0
-                OR resolution_state = ANY($2::pair_resolution_state[]))
-         ORDER BY id
+                OR cp.resolution_state = ANY($2::pair_resolution_state[]))
+         ORDER BY cp.id
          LIMIT $3
         "#,
         id,
@@ -748,7 +755,7 @@ pub async fn get_raw_for_scheduler(
                state AS "state: CampaignState",
                protocol AS "protocol: ProbeProtocol",
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-               force_measurement, loss_threshold_pct, stddev_weight,
+               force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
@@ -1110,7 +1117,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1131,7 +1138,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1152,7 +1159,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1173,7 +1180,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1194,7 +1201,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1275,7 +1282,7 @@ struct CampaignRowRaw {
     timeout_ms: i32,
     probe_stagger_ms: i32,
     force_measurement: bool,
-    loss_threshold_pct: f32,
+    loss_threshold_ratio: f32,
     stddev_weight: f32,
     evaluation_mode: EvaluationMode,
     created_by: Option<String>,
@@ -1299,7 +1306,7 @@ impl From<CampaignRowRaw> for CampaignRow {
             timeout_ms: r.timeout_ms,
             probe_stagger_ms: r.probe_stagger_ms,
             force_measurement: r.force_measurement,
-            loss_threshold_pct: r.loss_threshold_pct,
+            loss_threshold_ratio: r.loss_threshold_ratio,
             stddev_weight: r.stddev_weight,
             evaluation_mode: r.evaluation_mode,
             created_by: r.created_by,
@@ -1349,9 +1356,44 @@ impl From<PairRowRaw> for PairRow {
 
 use crate::campaign::eval::{
     AgentRow as EvalAgentRow, AttributedMeasurement, CatalogueLookup, EvaluationInputs,
-    EvaluationOutputs,
 };
+use crate::campaign::model::DirectSource;
 use std::collections::HashMap;
+
+/// Agent roster for a campaign.
+///
+/// Returns every agent whose ID is a source in the campaign's
+/// `campaign_pairs` rows **and** every agent whose IP is one of the
+/// campaign's destinations (so agents-as-destinations are part of the
+/// baseline lookup).
+///
+/// Read-only; shares the same source-of-truth (`agents_with_catalogue`)
+/// as the evaluator's own agent pull so the two sets agree.
+pub async fn agents_for_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Vec<EvalAgentRow>, RepoError> {
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+             FROM agents_with_catalogue
+            WHERE ip IN (
+                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )
+               OR agent_id IN (
+                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| EvalAgentRow {
+            agent_id: r.agent_id,
+            ip: r.ip.ip(),
+        })
+        .collect())
+}
 
 /// Builds the pure-function evaluator's inputs from DB state.
 ///
@@ -1365,7 +1407,7 @@ pub async fn measurements_for_campaign(
     campaign_id: Uuid,
 ) -> Result<EvaluationInputs, RepoError> {
     let campaign = sqlx::query!(
-        r#"SELECT loss_threshold_pct, stddev_weight,
+        r#"SELECT loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode"
              FROM measurement_campaigns WHERE id = $1"#,
         campaign_id,
@@ -1385,7 +1427,7 @@ pub async fn measurements_for_campaign(
                   m.destination_ip,
                   m.latency_avg_ms,
                   m.latency_stddev_ms,
-                  m.loss_pct,
+                  m.loss_ratio,
                   m.id AS measurement_id,
                   m.mtr_id
              FROM measurements m
@@ -1409,8 +1451,13 @@ pub async fn measurements_for_campaign(
             destination_ip: r.destination_ip.ip(),
             latency_avg_ms: r.latency_avg_ms,
             latency_stddev_ms: r.latency_stddev_ms,
-            loss_pct: r.loss_pct,
+            loss_ratio: r.loss_ratio,
             mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
+            // Every row here joins through `campaign_pairs.measurement_id`
+            // into the `measurements` table — by construction an active-
+            // probe settlement. The T54-03 handler layers VM-continuous
+            // rows on top in-memory; those never reach this loader.
+            direct_source: DirectSource::ActiveProbe,
         })
         .collect();
 
@@ -1472,209 +1519,10 @@ pub async fn measurements_for_campaign(
         measurements,
         agents,
         enrichment,
-        loss_threshold_pct: campaign.loss_threshold_pct,
+        loss_threshold_ratio: campaign.loss_threshold_ratio,
         stddev_weight: campaign.stddev_weight,
         mode: campaign.evaluation_mode,
     })
-}
-
-/// Persisted evaluation artefact, one row per campaign.
-#[derive(Debug, Clone)]
-pub struct EvaluationRow {
-    /// Primary key of the evaluation row.
-    pub id: Uuid,
-    /// Owning campaign.
-    pub campaign_id: Uuid,
-    /// Wall-clock stamp from the most recent UPSERT.
-    pub evaluated_at: DateTime<Utc>,
-    /// Loss threshold (percent) used during scoring.
-    pub loss_threshold_pct: f32,
-    /// RTT-stddev weight used during scoring.
-    pub stddev_weight: f32,
-    /// Evaluator strategy that produced this row.
-    pub evaluation_mode: EvaluationMode,
-    /// Baseline pair count from the evaluator pass.
-    pub baseline_pair_count: i32,
-    /// Total candidate transit destinations scored.
-    pub candidates_total: i32,
-    /// Candidates with at least one qualifying baseline pair.
-    pub candidates_good: i32,
-    /// Mean improvement (ms) across qualifying pair details; `None` when nothing qualified.
-    pub avg_improvement_ms: Option<f32>,
-    /// Serialised `EvaluationResultsDto` (persisted verbatim).
-    pub results: serde_json::Value,
-}
-
-/// UPSERT the evaluator's output into `campaign_evaluations` and return
-/// the freshly persisted row. Uniqueness is on `campaign_id`, so a
-/// second call for the same campaign replaces the previous result and
-/// restamps `evaluated_at`.
-///
-/// The state gate, UPSERT, and `completed → evaluated` promotion all
-/// run inside one transaction. A `SELECT ... FOR UPDATE` on the
-/// campaign row at the top holds a row-level lock until commit, so a
-/// concurrent `/detail` call cannot flip the row to `running` between
-/// the handler's initial state check and our persistence step — an
-/// illegal-transition race that would otherwise let `/evaluate` write
-/// a fresh evaluation against a now-running campaign. If the locked
-/// state is not `completed` or `evaluated`, returns
-/// `RepoError::IllegalTransition` so the handler maps to HTTP 409.
-pub async fn write_evaluation(
-    pool: &PgPool,
-    campaign_id: Uuid,
-    outputs: &EvaluationOutputs,
-    loss_threshold_pct: f32,
-    stddev_weight: f32,
-    mode: EvaluationMode,
-) -> Result<EvaluationRow, RepoError> {
-    let results_json = serde_json::to_value(&outputs.results)
-        .expect("EvaluationResultsDto is owned by this service and always serialises");
-
-    let mut tx = pool.begin().await?;
-
-    // Lock the campaign row and recheck state. The handler's gate is
-    // advisory only — without the lock, a concurrent `/detail` flip
-    // to `running` between read and write would still let us persist.
-    let locked_state: Option<CampaignState> = sqlx::query_scalar!(
-        r#"SELECT state AS "state: CampaignState"
-             FROM measurement_campaigns
-            WHERE id = $1
-              FOR UPDATE"#,
-        campaign_id,
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-    let locked_state = match locked_state {
-        Some(s) => s,
-        None => return Err(RepoError::NotFound(campaign_id)),
-    };
-    if !matches!(
-        locked_state,
-        CampaignState::Completed | CampaignState::Evaluated
-    ) {
-        return Err(RepoError::IllegalTransition {
-            campaign_id,
-            from: Some(locked_state),
-            expected: vec![CampaignState::Completed, CampaignState::Evaluated],
-        });
-    }
-
-    let row = sqlx::query!(
-        r#"INSERT INTO campaign_evaluations
-              (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,
-               baseline_pair_count, candidates_total, candidates_good,
-               avg_improvement_ms, results, evaluated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
-           ON CONFLICT (campaign_id) DO UPDATE SET
-               loss_threshold_pct   = EXCLUDED.loss_threshold_pct,
-               stddev_weight        = EXCLUDED.stddev_weight,
-               evaluation_mode      = EXCLUDED.evaluation_mode,
-               baseline_pair_count  = EXCLUDED.baseline_pair_count,
-               candidates_total     = EXCLUDED.candidates_total,
-               candidates_good      = EXCLUDED.candidates_good,
-               avg_improvement_ms   = EXCLUDED.avg_improvement_ms,
-               results              = EXCLUDED.results,
-               evaluated_at         = now()
-           RETURNING id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
-                     evaluation_mode AS "evaluation_mode: EvaluationMode",
-                     baseline_pair_count, candidates_total, candidates_good,
-                     avg_improvement_ms, results"#,
-        campaign_id,
-        loss_threshold_pct,
-        stddev_weight,
-        mode as EvaluationMode,
-        outputs.baseline_pair_count,
-        outputs.candidates_total,
-        outputs.candidates_good,
-        outputs.avg_improvement_ms,
-        results_json,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-
-    // Stamp `evaluated_at` and (only on a real transition) promote
-    // `completed → evaluated`. The branches are split to avoid
-    // touching the `state` column during a repeat `/evaluate` on an
-    // already-evaluated campaign: `measurement_campaigns_notify` is
-    // `AFTER UPDATE OF state`, so including `state` in the SET list
-    // fires the trigger whether or not the value actually changes —
-    // producing a redundant `campaign_state_changed` NOTIFY and SSE
-    // frame on every re-evaluate. Using `locked_state` from the
-    // earlier `FOR UPDATE` read lets us pick the right UPDATE shape
-    // without a second lookup.
-    match locked_state {
-        CampaignState::Completed => {
-            sqlx::query!(
-                r#"UPDATE measurement_campaigns
-                      SET state = 'evaluated', evaluated_at = now()
-                    WHERE id = $1 AND state = 'completed'"#,
-                campaign_id,
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-        CampaignState::Evaluated => {
-            sqlx::query!(
-                r#"UPDATE measurement_campaigns
-                      SET evaluated_at = now()
-                    WHERE id = $1 AND state = 'evaluated'"#,
-                campaign_id,
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-        // Unreachable given the gate above, but handled defensively
-        // rather than panicking if a future refactor widens the gate
-        // without updating this match.
-        _ => {}
-    }
-
-    tx.commit().await?;
-
-    Ok(EvaluationRow {
-        id: row.id,
-        campaign_id: row.campaign_id,
-        evaluated_at: row.evaluated_at,
-        loss_threshold_pct: row.loss_threshold_pct,
-        stddev_weight: row.stddev_weight,
-        evaluation_mode: row.evaluation_mode,
-        baseline_pair_count: row.baseline_pair_count,
-        candidates_total: row.candidates_total,
-        candidates_good: row.candidates_good,
-        avg_improvement_ms: row.avg_improvement_ms,
-        results: row.results,
-    })
-}
-
-/// Read the persisted evaluation row for a campaign. `Ok(None)` when
-/// the campaign has never been evaluated.
-pub async fn read_evaluation(
-    pool: &PgPool,
-    campaign_id: Uuid,
-) -> Result<Option<EvaluationRow>, RepoError> {
-    let row = sqlx::query!(
-        r#"SELECT id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
-                  evaluation_mode AS "evaluation_mode: EvaluationMode",
-                  baseline_pair_count, candidates_total, candidates_good,
-                  avg_improvement_ms, results
-             FROM campaign_evaluations WHERE campaign_id = $1"#,
-        campaign_id,
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| EvaluationRow {
-        id: r.id,
-        campaign_id: r.campaign_id,
-        evaluated_at: r.evaluated_at,
-        loss_threshold_pct: r.loss_threshold_pct,
-        stddev_weight: r.stddev_weight,
-        evaluation_mode: r.evaluation_mode,
-        baseline_pair_count: r.baseline_pair_count,
-        candidates_total: r.candidates_total,
-        candidates_good: r.candidates_good,
-        avg_improvement_ms: r.avg_improvement_ms,
-        results: r.results,
-    }))
 }
 
 /// Returns every (source_agent_id, destination_ip) tuple for baseline

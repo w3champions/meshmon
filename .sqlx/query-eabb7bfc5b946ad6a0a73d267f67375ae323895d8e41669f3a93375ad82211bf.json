@@ -1,31 +1,31 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, campaign_id, source_agent_id, destination_ip,\n               resolution_state AS \"resolution_state: PairResolutionState\",\n               measurement_id, dispatched_at, settled_at, attempt_count, last_error,\n               kind AS \"kind: MeasurementKind\"\n          FROM campaign_pairs\n         WHERE campaign_id = $1\n           AND kind = 'campaign'\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY id\n         LIMIT $3\n        ",
+  "query": "\n        SELECT cp.id                     AS \"id!\",\n               cp.campaign_id            AS \"campaign_id!\",\n               cp.source_agent_id        AS \"source_agent_id!\",\n               cp.destination_ip         AS \"destination_ip!\",\n               cp.resolution_state       AS \"resolution_state!: PairResolutionState\",\n               cp.measurement_id         AS \"measurement_id?\",\n               cp.dispatched_at          AS \"dispatched_at?\",\n               cp.settled_at             AS \"settled_at?\",\n               cp.attempt_count          AS \"attempt_count!\",\n               cp.last_error             AS \"last_error?\",\n               cp.kind                   AS \"kind!: MeasurementKind\"\n          FROM campaign_pairs cp\n         WHERE cp.campaign_id = $1\n           AND cp.kind = 'campaign'\n           AND (cardinality($2::pair_resolution_state[]) = 0\n                OR cp.resolution_state = ANY($2::pair_resolution_state[]))\n         ORDER BY cp.id\n         LIMIT $3\n        ",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "id!",
         "type_info": "Int8"
       },
       {
         "ordinal": 1,
-        "name": "campaign_id",
+        "name": "campaign_id!",
         "type_info": "Uuid"
       },
       {
         "ordinal": 2,
-        "name": "source_agent_id",
+        "name": "source_agent_id!",
         "type_info": "Text"
       },
       {
         "ordinal": 3,
-        "name": "destination_ip",
+        "name": "destination_ip!",
         "type_info": "Inet"
       },
       {
         "ordinal": 4,
-        "name": "resolution_state: PairResolutionState",
+        "name": "resolution_state!: PairResolutionState",
         "type_info": {
           "Custom": {
             "name": "pair_resolution_state",
@@ -44,32 +44,32 @@
       },
       {
         "ordinal": 5,
-        "name": "measurement_id",
+        "name": "measurement_id?",
         "type_info": "Int8"
       },
       {
         "ordinal": 6,
-        "name": "dispatched_at",
+        "name": "dispatched_at?",
         "type_info": "Timestamptz"
       },
       {
         "ordinal": 7,
-        "name": "settled_at",
+        "name": "settled_at?",
         "type_info": "Timestamptz"
       },
       {
         "ordinal": 8,
-        "name": "attempt_count",
+        "name": "attempt_count!",
         "type_info": "Int2"
       },
       {
         "ordinal": 9,
-        "name": "last_error",
+        "name": "last_error?",
         "type_info": "Text"
       },
       {
         "ordinal": 10,
-        "name": "kind: MeasurementKind",
+        "name": "kind!: MeasurementKind",
         "type_info": {
           "Custom": {
             "name": "measurement_kind",
@@ -126,5 +126,5 @@
       false
     ]
   },
-  "hash": "0501a0adc91df5086cbc46286822f86a5ee8ae3894968d6d58f381709aa949de"
+  "hash": "eabb7bfc5b946ad6a0a73d267f67375ae323895d8e41669f3a93375ad82211bf"
 }

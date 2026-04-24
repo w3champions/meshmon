@@ -239,7 +239,7 @@ export const campaignDetailSearchSchema = z.object({
       "asn",
       "pairs_improved",
       "avg_improvement_ms",
-      "avg_loss_pct",
+      "avg_loss_ratio",
       "composite_score",
     ])
     .catch(() => undefined as never)

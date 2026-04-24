@@ -33,9 +33,9 @@ async fn config_returns_defaults() {
     );
     assert_eq!(body.windows.unwrap().primary_sec, 300);
     let icmp = body.icmp_thresholds.unwrap();
-    assert!((icmp.unhealthy_trigger_pct - 0.90).abs() < 1e-9);
+    assert!((icmp.unhealthy_trigger_ratio - 0.90).abs() < 1e-9);
     let tcp = body.tcp_thresholds.unwrap();
-    assert!((tcp.unhealthy_trigger_pct - 0.50).abs() < 1e-9);
+    assert!((tcp.unhealthy_trigger_ratio - 0.50).abs() < 1e-9);
     assert_eq!(body.rates.len(), 9);
 }
 

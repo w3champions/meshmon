@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_pct, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 2.0::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_pct, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
+  "query": "\n        SELECT id, title, notes,\n               state AS \"state: CampaignState\",\n               protocol AS \"protocol: ProbeProtocol\",\n               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n               force_measurement, loss_threshold_ratio, stddev_weight,\n               evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n          FROM measurement_campaigns\n         WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -135,39 +135,7 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text",
-        {
-          "Custom": {
-            "name": "probe_protocol",
-            "kind": {
-              "Enum": [
-                "icmp",
-                "tcp",
-                "udp"
-              ]
-            }
-          }
-        },
-        "Int2",
-        "Int2",
-        "Int4",
-        "Int4",
-        "Bool",
-        "Float4",
-        "Float4",
-        {
-          "Custom": {
-            "name": "evaluation_mode",
-            "kind": {
-              "Enum": [
-                "diversity",
-                "optimization"
-              ]
-            }
-          }
-        },
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -192,5 +160,5 @@
       true
     ]
   },
-  "hash": "33769922e963e3d8d8de4a3168881b420b72298d5951ef0bc188950b1f619d5d"
+  "hash": "259bded4d68f05525264c1cb0b34926a83a90171226884bb0f3c045d834629d3"
 }

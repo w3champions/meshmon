@@ -9,10 +9,12 @@ import { Label } from "@/components/ui/label";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   extractCampaignErrorCode,
+  extractCampaignErrorDetail,
   isIllegalStateTransition,
   isNoBaselinePairs,
+  isVmUpstream,
 } from "@/lib/campaign";
-import { clampKnob, KNOB_BOUNDS } from "@/lib/campaign-config";
+import { clampKnob, KNOB_BOUNDS, ratioToPercentInput } from "@/lib/campaign-config";
 import { useToastStore } from "@/stores/toast";
 
 /**
@@ -28,7 +30,8 @@ import { useToastStore } from "@/stores/toast";
 // ---------------------------------------------------------------------------
 
 interface EvaluationKnobs {
-  loss_threshold_pct: number;
+  /** Wire-format ratio in `[0, 1]`; the form renders it as percent. */
+  loss_threshold_ratio: number;
   stddev_weight: number;
   evaluation_mode: EvaluationMode;
 }
@@ -58,7 +61,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   const initial = useMemo<EvaluationKnobs>(() => {
     const source = evaluationQuery.data ?? campaign;
     return {
-      loss_threshold_pct: source.loss_threshold_pct,
+      loss_threshold_ratio: source.loss_threshold_ratio,
       stddev_weight: source.stddev_weight,
       evaluation_mode: source.evaluation_mode,
     };
@@ -80,12 +83,27 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   const isPending = patchMutation.isPending || evaluateMutation.isPending;
 
   const handleNumber =
-    (key: "loss_threshold_pct" | "stddev_weight") =>
+    (key: "stddev_weight") =>
     (event: React.ChangeEvent<HTMLInputElement>): void => {
       const raw = event.target.value;
       const parsed = raw === "" ? form[key] : Number(raw);
       setForm((prev) => ({ ...prev, [key]: clampKnob(key, parsed, prev[key]) }));
     };
+
+  // Loss threshold: input is percent-facing for UX, but the wire value is a
+  // ratio — convert at the form boundary so the submitted body stays in
+  // ratio units while the operator keeps typing percent-style numbers.
+  const handleLossThresholdPct = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    const raw = event.target.value;
+    if (raw === "") return;
+    const percent = Number(raw);
+    if (!Number.isFinite(percent)) return;
+    const ratio = percent / 100;
+    setForm((prev) => ({
+      ...prev,
+      loss_threshold_ratio: clampKnob("loss_threshold_ratio", ratio, prev.loss_threshold_ratio),
+    }));
+  };
 
   const handleMode = (next: string): void => {
     // Radix emits "" when the active item is toggled off — keep the
@@ -99,9 +117,18 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   };
 
   const handleEvaluateError = (err: Error): void => {
+    if (isVmUpstream(err)) {
+      const detail = extractCampaignErrorDetail(err);
+      toastError(
+        detail
+          ? `VictoriaMetrics couldn't be reached for baseline data (${detail}). Check service config and retry.`
+          : "VictoriaMetrics couldn't be reached for baseline data. Check service config and retry.",
+      );
+      return;
+    }
     if (isNoBaselinePairs(err)) {
       toastError(
-        "No baseline measurements available yet — add a pair or wait for in-flight measurements to settle.",
+        "No agent-to-agent baseline measurements exist for this campaign yet. Add a pair or wait for in-flight measurements to settle, then retry.",
       );
       return;
     }
@@ -130,7 +157,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       {
         id: campaign.id,
         body: {
-          loss_threshold_pct: form.loss_threshold_pct,
+          loss_threshold_ratio: form.loss_threshold_ratio,
           stddev_weight: form.stddev_weight,
           evaluation_mode: form.evaluation_mode,
         },
@@ -147,8 +174,8 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       <header className="flex flex-col gap-1">
         <h2 className="text-base font-semibold">Evaluation settings</h2>
         <p className="text-sm text-muted-foreground">
-          Persist new threshold / mode values and re-run the evaluator against the existing
-          baseline. Available once the campaign is Completed or Evaluated.
+          Persist new threshold / mode values and re-run the evaluator against this campaign's
+          measurements. Available once the campaign is Completed or Evaluated.
         </p>
       </header>
 
@@ -160,10 +187,10 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
               id="settings-loss-threshold"
               type="number"
               step="0.1"
-              min={KNOB_BOUNDS.loss_threshold_pct.min}
-              max={KNOB_BOUNDS.loss_threshold_pct.max}
-              value={form.loss_threshold_pct}
-              onChange={handleNumber("loss_threshold_pct")}
+              min={KNOB_BOUNDS.loss_threshold_ratio.min * 100}
+              max={KNOB_BOUNDS.loss_threshold_ratio.max * 100}
+              value={ratioToPercentInput(form.loss_threshold_ratio)}
+              onChange={handleLossThresholdPct}
               disabled={!isEligible || isPending}
             />
           </div>

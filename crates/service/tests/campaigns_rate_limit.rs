@@ -109,7 +109,7 @@ async fn per_destination_rps_caps_cross_agent_traffic() {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,

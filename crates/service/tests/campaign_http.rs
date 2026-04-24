@@ -79,7 +79,7 @@ async fn preview_dispatch_count_returns_total_reusable_fresh() {
     // committed `.sqlx/` offline cache.
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+             (source_agent_id, destination_ip, protocol, probe_count, loss_ratio) \
          VALUES ('agent-h2', '198.51.100.210', 'icmp', 10, 0.0)",
     )
     .execute(&h.state.pool)
@@ -361,23 +361,18 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
     // Verifies both nested stamp paths on `/api/campaigns/{id}/evaluation`:
     //   - `results.candidates[*].hostname`            (candidate IP)
     //   - `results.candidates[*].pair_details[*].destination_hostname`
-    //     (pair-detail destination IP)
+    //     (candidate transit IP — evaluator renders it as the
+    //     pair_detail.destination_ip too, so one hostname entry
+    //     lights up both fields)
     //
-    // Also proves the stamp is response-time only: after the response
-    // comes back, the stored JSONB (`campaign_evaluations.results`) is
-    // re-read directly and asserted to carry NO hostname fields at all.
+    // Also proves the stamp is response-time only: the child tables
+    // carry no hostname columns, so the response-time join is the
+    // only path hostnames can ever reach the wire.
     use meshmon_service::hostname::record_positive;
 
     let h = common::HttpHarness::start().await;
     let pool = &h.state.pool;
 
-    // Create a campaign so the FK from `campaign_evaluations.campaign_id`
-    // resolves, and transition it to `completed` so `state IN
-    // ('completed','evaluated')` — the only states `/evaluation` can be
-    // read from. (The handler surfaces 404 `not_evaluated` for other
-    // states, but `get_evaluation` reads the row directly regardless of
-    // state, so the transition is only strictly required for
-    // `POST /evaluate`. Left here for symmetry with the end-to-end flow.)
     let created: serde_json::Value = h
         .post_json(
             "/api/campaigns",
@@ -392,63 +387,65 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
     let campaign_id_str = created["id"].as_str().expect("id is string").to_owned();
     let campaign_id: uuid::Uuid = campaign_id_str.parse().expect("parse campaign id");
 
-    // Candidate IP and pair-detail destination IP. Distinct so the two
-    // stamp paths can be asserted independently.
+    // Candidate transit IP — the evaluator surfaces this same value on
+    // both `candidates[*].destination_ip` and
+    // `candidates[*].pair_details[*].destination_ip`, so one hostname
+    // stamp lights up both nested paths.
     let cand_ip_str = "198.51.100.254";
     let cand_ip: std::net::IpAddr = cand_ip_str.parse().unwrap();
-    let pd_ip_str = "198.51.100.255";
-    let pd_ip: std::net::IpAddr = pd_ip_str.parse().unwrap();
 
-    // Craft a raw `EvaluationResultsDto` JSONB with one candidate + one
-    // nested pair_detail. No hostname fields are included — they are
-    // skip-none, so the stored JSON must never carry them. The handler
-    // populates both via response-time stamping.
-    let results = serde_json::json!({
-        "candidates": [{
-            "destination_ip": cand_ip_str,
-            "is_mesh_member": false,
-            "pairs_improved": 1,
-            "pairs_total_considered": 1,
-            "avg_improvement_ms": 2.0,
-            "avg_loss_pct": 0.0,
-            "composite_score": 1.5,
-            "pair_details": [{
-                "source_agent_id": "agent-a",
-                "destination_agent_id": "agent-b",
-                "destination_ip": pd_ip_str,
-                "direct_rtt_ms": 10.0,
-                "direct_stddev_ms": 1.0,
-                "direct_loss_pct": 0.0,
-                "transit_rtt_ms": 8.0,
-                "transit_stddev_ms": 1.0,
-                "transit_loss_pct": 0.0,
-                "improvement_ms": 2.0,
-                "qualifies": true
-            }]
-        }],
-        "unqualified_reasons": {}
-    });
-    sqlx::query(
+    // Seed the parent + child rows directly so the test focuses on
+    // the stamp paths rather than driving the full evaluator. The
+    // evaluator today stamps every pair_detail with `active_probe`;
+    // seed the same here.
+    let evaluation_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO campaign_evaluations \
-             (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode, \
+             (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode, \
               baseline_pair_count, candidates_total, candidates_good, \
-              avg_improvement_ms, results, evaluated_at) \
-         VALUES ($1, 10.0, 1.0, 'optimization', 1, 1, 1, 2.0, $2::jsonb, now())",
+              avg_improvement_ms, evaluated_at) \
+         VALUES ($1, 0.10, 1.0, 'optimization', 1, 1, 1, 2.0, now()) \
+         RETURNING id",
     )
     .bind(campaign_id)
-    .bind(&results)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .expect("seed campaign_evaluations row");
 
-    // Seed positive-cached hostnames for both the candidate and the
-    // pair-detail destination — covers both nested stamp paths.
+    sqlx::query(
+        "INSERT INTO campaign_evaluation_candidates \
+             (evaluation_id, destination_ip, is_mesh_member, \
+              pairs_improved, pairs_total_considered, avg_improvement_ms) \
+         VALUES ($1, $2::inet, false, 1, 1, 2.0)",
+    )
+    .bind(evaluation_id)
+    .bind(cand_ip_str)
+    .execute(pool)
+    .await
+    .expect("seed candidate row");
+
+    sqlx::query(
+        "INSERT INTO campaign_evaluation_pair_details \
+             (evaluation_id, candidate_destination_ip, source_agent_id, destination_agent_id, \
+              direct_rtt_ms, direct_stddev_ms, direct_loss_ratio, direct_source, \
+              transit_rtt_ms, transit_stddev_ms, transit_loss_ratio, \
+              improvement_ms, qualifies) \
+         VALUES ($1, $2::inet, 'agent-a', 'agent-b', \
+                 10.0, 1.0, 0.0, 'active_probe', \
+                 8.0, 1.0, 0.0, 2.0, true)",
+    )
+    .bind(evaluation_id)
+    .bind(cand_ip_str)
+    .execute(pool)
+    .await
+    .expect("seed pair_detail row");
+
+    // Seed a positive-cached hostname for the candidate IP — both
+    // stamp paths (`candidates[*].hostname` and
+    // `candidates[*].pair_details[*].destination_hostname`) key on
+    // the same IP in this fixture, so one record covers both.
     record_positive(pool, cand_ip, "candidate.example.com")
         .await
         .expect("seed candidate hostname");
-    record_positive(pool, pd_ip, "pair-detail.example.com")
-        .await
-        .expect("seed pair_detail hostname");
 
     let body: serde_json::Value = h
         .get_json(&format!("/api/campaigns/{campaign_id_str}/evaluation"))
@@ -465,31 +462,41 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
     );
     let pd = &cand["pair_details"][0];
     assert_eq!(
-        pd["destination_ip"], pd_ip_str,
-        "pair_detail ip mismatch: {body}"
+        pd["destination_ip"], cand_ip_str,
+        "pair_detail's destination_ip mirrors the candidate transit IP: {body}"
     );
     assert_eq!(
-        pd["destination_hostname"], "pair-detail.example.com",
+        pd["destination_hostname"], "candidate.example.com",
         "pair_detail destination_hostname must be stamped from positive cache: {body}"
     );
-
-    // Stamp-invariant: the stored JSONB must NEVER carry hostname fields
-    // — the stamp is a response-time join only. Re-read the row and
-    // assert both keys are absent from the serialised document.
-    let stored: serde_json::Value =
-        sqlx::query_scalar("SELECT results FROM campaign_evaluations WHERE campaign_id = $1")
-            .bind(campaign_id)
-            .fetch_one(pool)
-            .await
-            .expect("read back campaign_evaluations row");
-    let stored_cand = &stored["candidates"][0];
-    assert!(
-        stored_cand.get("hostname").is_none(),
-        "stored JSONB must NOT carry candidates[*].hostname: {stored}"
+    assert_eq!(
+        pd["direct_source"], "active_probe",
+        "pair_detail direct_source stamped by the evaluator defaults to active_probe: {body}"
     );
-    let stored_pd = &stored_cand["pair_details"][0];
+
+    // Stamp-invariant: the relational child tables carry no hostname
+    // columns, so the only way any hostname reaches the wire is via
+    // the response-time join. Assert the schema stays hostname-free.
+    let cand_cols: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns \
+          WHERE table_name = 'campaign_evaluation_candidates'",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("list candidate cols");
     assert!(
-        stored_pd.get("destination_hostname").is_none(),
-        "stored JSONB must NOT carry pair_details[*].destination_hostname: {stored}"
+        !cand_cols.iter().any(|c| c == "hostname"),
+        "campaign_evaluation_candidates must not carry a hostname column: {cand_cols:?}"
+    );
+    let pd_cols: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns \
+          WHERE table_name = 'campaign_evaluation_pair_details'",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("list pair_detail cols");
+    assert!(
+        !pd_cols.iter().any(|c| c == "destination_hostname"),
+        "campaign_evaluation_pair_details must not carry a destination_hostname column: {pd_cols:?}"
     );
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, notes,\n               state AS \"state: CampaignState\",\n               protocol AS \"protocol: ProbeProtocol\",\n               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n               force_measurement, loss_threshold_pct, stddev_weight,\n               evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n          FROM measurement_campaigns\n         WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)\n           AND ($2::campaign_state IS NULL OR state = $2)\n           AND ($3::text IS NULL OR created_by = $3)\n         ORDER BY created_at DESC\n         LIMIT $4\n        ",
+  "query": "\n            UPDATE measurement_campaigns SET state = $2, stopped_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -135,7 +135,7 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
+        "Uuid",
         {
           "Custom": {
             "name": "campaign_state",
@@ -150,8 +150,27 @@
             }
           }
         },
-        "Text",
-        "Int8"
+        {
+          "Custom": {
+            "name": "campaign_state[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "campaign_state",
+                  "kind": {
+                    "Enum": [
+                      "draft",
+                      "running",
+                      "completed",
+                      "evaluated",
+                      "stopped"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
       ]
     },
     "nullable": [
@@ -176,5 +195,5 @@
       true
     ]
   },
-  "hash": "36ed3f86e187ee90acb2fcd5db481540fcda0cabe3e3f0401639cf2e5108d89f"
+  "hash": "7cb06d23d0fcedfa7b17149989c9b031e68f70e8d8a67a51003a62b409614118"
 }

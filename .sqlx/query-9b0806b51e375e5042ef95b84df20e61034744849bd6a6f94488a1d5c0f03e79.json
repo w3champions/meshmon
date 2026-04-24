@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns SET state = $2, evaluated_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_pct, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n        UPDATE measurement_campaigns\n           SET title              = COALESCE($2, title),\n               notes              = COALESCE($3, notes),\n               loss_threshold_ratio = COALESCE($4, loss_threshold_ratio),\n               stddev_weight      = COALESCE($5, stddev_weight),\n               evaluation_mode    = COALESCE($6::evaluation_mode, evaluation_mode)\n         WHERE id = $1\n         RETURNING id, title, notes,\n                   state AS \"state: CampaignState\",\n                   protocol AS \"protocol: ProbeProtocol\",\n                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                   force_measurement, loss_threshold_ratio, stddev_weight,\n                   evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -136,38 +136,18 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
+        "Float4",
+        "Float4",
         {
           "Custom": {
-            "name": "campaign_state",
+            "name": "evaluation_mode",
             "kind": {
               "Enum": [
-                "draft",
-                "running",
-                "completed",
-                "evaluated",
-                "stopped"
+                "diversity",
+                "optimization"
               ]
-            }
-          }
-        },
-        {
-          "Custom": {
-            "name": "campaign_state[]",
-            "kind": {
-              "Array": {
-                "Custom": {
-                  "name": "campaign_state",
-                  "kind": {
-                    "Enum": [
-                      "draft",
-                      "running",
-                      "completed",
-                      "evaluated",
-                      "stopped"
-                    ]
-                  }
-                }
-              }
             }
           }
         }
@@ -195,5 +175,5 @@
       true
     ]
   },
-  "hash": "9dff415bbe630fa044a6e4b70308fd5bc6292415734e1c10b97bc48f4e804da0"
+  "hash": "9b0806b51e375e5042ef95b84df20e61034744849bd6a6f94488a1d5c0f03e79"
 }

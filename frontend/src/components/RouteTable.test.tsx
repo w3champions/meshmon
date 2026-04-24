@@ -23,11 +23,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function hop(position: number, ip: string, rtt_us: number, loss_pct: number, freq = 1): HopJson {
+function hop(position: number, ip: string, rtt_us: number, loss_ratio: number, freq = 1): HopJson {
   return {
     position,
     avg_rtt_micros: rtt_us,
-    loss_pct,
+    loss_ratio,
     observed_ips: [{ ip, freq }],
     stddev_rtt_micros: 0,
   };
@@ -67,7 +67,7 @@ describe("RouteTable", () => {
     const hopWithHostname: HopJson = {
       position: 1,
       avg_rtt_micros: 1_000,
-      loss_pct: 0,
+      loss_ratio: 0,
       observed_ips: [{ ip: "10.0.0.1", hostname: "router.example.com", freq: 1 }],
       stddev_rtt_micros: 0,
     };

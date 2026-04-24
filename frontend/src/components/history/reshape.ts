@@ -72,7 +72,10 @@ export function reshapeForChart(measurements: readonly HistoryMeasurement[]): Ch
     if (m.latency_min_ms != null && m.latency_max_ms != null) {
       bag[`${proto}_range_delta`] = m.latency_max_ms - m.latency_min_ms;
     }
-    bag[`${proto}_loss`] = m.loss_pct;
+    // `loss_ratio` is the wire-format fraction in [0, 1]; the PairChart
+    // renders loss on a [0, 100] axis, so scale once here rather than in
+    // every chart site.
+    bag[`${proto}_loss`] = m.loss_ratio * 100;
     buckets.set(m.measured_at, row);
   }
   return [...buckets.values()].sort((a, b) => a.t.localeCompare(b.t));

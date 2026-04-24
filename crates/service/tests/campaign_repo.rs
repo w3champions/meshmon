@@ -29,7 +29,7 @@ fn make_input(title: &str) -> CreateInput {
         probe_count_detail: None,
         timeout_ms: None,
         probe_stagger_ms: None,
-        loss_threshold_pct: None,
+        loss_threshold_ratio: None,
         stddev_weight: None,
         evaluation_mode: None,
         created_by: Some("tester".into()),
@@ -53,6 +53,39 @@ async fn create_persists_campaign_and_cross_product_pairs() {
             .await
             .unwrap();
     assert_eq!(pair_count, 4, "2 sources × 2 destinations = 4 pairs");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_uses_ratio_space_default_loss_threshold() {
+    // Regression for T54-04: after the `_pct → _ratio` column rename, the
+    // application-level `COALESCE` must match the DB-level `DEFAULT 0.02`
+    // (2 % loss). A stale 2.0 default would be 200 % — effectively
+    // disabling the evaluator's loss gate on campaigns created without an
+    // explicit threshold.
+    let pool = common::shared_migrated_pool().await;
+    let mut input = make_input("t-create-default-loss");
+    input.loss_threshold_ratio = None;
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Row returned from INSERT ... RETURNING.
+    assert!(
+        (row.loss_threshold_ratio - 0.02).abs() < f32::EPSILON,
+        "default loss_threshold_ratio must be 0.02 (2 %), got {}",
+        row.loss_threshold_ratio,
+    );
+
+    // And the same when re-read from the DB.
+    let persisted = repo::get(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("row present");
+    assert!(
+        (persisted.loss_threshold_ratio - 0.02).abs() < f32::EPSILON,
+        "persisted loss_threshold_ratio must be 0.02 (2 %), got {}",
+        persisted.loss_threshold_ratio,
+    );
 
     repo::delete(&pool, row.id).await.unwrap();
 }
@@ -150,7 +183,7 @@ async fn patch_updates_provided_fields_only() {
         row.id,
         Some("t-patch-renamed"),
         None,
-        Some(5.0_f32),
+        Some(0.05_f32),
         None,
         Some(EvaluationMode::Diversity),
     )
@@ -159,7 +192,7 @@ async fn patch_updates_provided_fields_only() {
 
     assert_eq!(patched.title, "t-patch-renamed");
     assert_eq!(patched.notes, row.notes, "notes untouched when None");
-    assert!((patched.loss_threshold_pct - 5.0).abs() < f32::EPSILON);
+    assert!((patched.loss_threshold_ratio - 0.05).abs() < f32::EPSILON);
     assert_eq!(patched.evaluation_mode, EvaluationMode::Diversity);
 
     repo::delete(&pool, row.id).await.unwrap();
@@ -351,7 +384,7 @@ async fn preview_dispatch_count_returns_total_reusable_fresh() {
     // collide with other concurrent tests in the shared DB.
     let agent = format!("preview-{}", uuid::Uuid::new_v4().simple());
     sqlx::query(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_ratio) \
          VALUES ($1, '198.51.100.1', 'icmp', 10, 0.0)",
     )
     .bind(&agent)
@@ -434,7 +467,7 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
     let measurement_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             latency_avg_ms, loss_pct) \
+             latency_avg_ms, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
@@ -1056,7 +1089,7 @@ async fn preview_dispatch_count_for_campaign_uses_actual_pair_set() {
 
     // Seed a reusable measurement for (agent_a, ip1) so reusable=1.
     sqlx::query(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 0.0)",
     )
     .bind(&agent_a)
@@ -1120,7 +1153,7 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     let m_campaign_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             latency_avg_ms, loss_pct) \
+             latency_avg_ms, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
@@ -1131,7 +1164,7 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     let m_detail_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             latency_avg_ms, loss_pct) \
+             latency_avg_ms, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
@@ -1246,7 +1279,7 @@ async fn resolve_reuse_skips_rtt_null_measurements() {
     let m_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             loss_pct, kind) \
+             loss_ratio, kind) \
          VALUES ($1, $2, 'icmp', 1, 0.0, 'detail_mtr') RETURNING id",
     )
     .bind(&agent)
@@ -1327,7 +1360,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
     let m_campaign_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements (source_agent_id, destination_ip, protocol, \
                                    probe_count, latency_avg_ms, latency_stddev_ms, \
-                                   loss_pct, kind) \
+                                   loss_ratio, kind) \
          VALUES ($1, $2, 'icmp', 10, 25.0, 1.5, 0.0, 'campaign') RETURNING id",
     )
     .bind(&agent)
@@ -1338,7 +1371,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
     let m_detail_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements (source_agent_id, destination_ip, protocol, \
                                    probe_count, latency_avg_ms, latency_stddev_ms, \
-                                   loss_pct, kind) \
+                                   loss_ratio, kind) \
          VALUES ($1, $2, 'icmp', 250, 18.0, 0.7, 0.0, 'detail_ping') RETURNING id",
     )
     .bind(&agent)
@@ -1390,7 +1423,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
         "only the campaign-kind measurement attached",
     );
     assert_eq!(
-        inputs.loss_threshold_pct, row.loss_threshold_pct,
+        inputs.loss_threshold_ratio, row.loss_threshold_ratio,
         "campaign scoring knobs thread through"
     );
     assert_eq!(inputs.stddev_weight, row.stddev_weight);
@@ -1405,16 +1438,18 @@ async fn measurements_for_campaign_filters_detail_kind() {
 }
 
 #[tokio::test]
-async fn write_then_read_evaluation_round_trip() {
-    // Write a synthetic evaluation, read it back, then UPSERT a second
-    // time with a different mode and verify the old row is gone and the
-    // timestamp did not regress.
+async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
+    // Write a synthetic evaluation, read it back, then persist a
+    // second one with a different mode. The new schema dropped the
+    // per-campaign UNIQUE constraint, so two rows must coexist and
+    // the read-path must surface the freshest.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
     use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
     let row = repo::create(&pool, make_input("t-eval-rt")).await.unwrap();
-    // `write_evaluation` now locks the row and rechecks state inside
+    // `persist_evaluation` locks the row and rechecks state inside
     // its transaction — drafts are rejected. Force completed so the
     // persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
@@ -1429,26 +1464,40 @@ async fn write_then_read_evaluation_round_trip() {
             unqualified_reasons: Default::default(),
         },
     };
-    let persisted_first =
-        repo::write_evaluation(&pool, row.id, &first, 2.5, 1.25, EvaluationMode::Diversity)
-            .await
-            .unwrap();
-    assert_eq!(persisted_first.campaign_id, row.id);
-    assert_eq!(persisted_first.baseline_pair_count, 3);
-    assert_eq!(persisted_first.candidates_good, 1);
-    assert_eq!(persisted_first.evaluation_mode, EvaluationMode::Diversity);
+    let first_id = evaluation_repo::persist_evaluation(
+        &pool,
+        row.id,
+        &first,
+        0.025,
+        1.25,
+        EvaluationMode::Diversity,
+    )
+    .await
+    .unwrap();
 
-    let read_first = repo::read_evaluation(&pool, row.id)
+    let read_first = evaluation_repo::latest_evaluation_for_campaign(&pool, row.id)
         .await
         .unwrap()
-        .expect("row present after first UPSERT");
-    assert_eq!(read_first.id, persisted_first.id);
+        .expect("row present after first persist");
+    assert_eq!(read_first.baseline_pair_count, 3);
+    assert_eq!(read_first.candidates_good, 1);
+    assert_eq!(read_first.evaluation_mode, EvaluationMode::Diversity);
     assert_eq!(read_first.avg_improvement_ms, Some(12.5));
-    assert_eq!(read_first.loss_threshold_pct, 2.5);
+    assert_eq!(read_first.loss_threshold_ratio, 0.025);
     assert_eq!(read_first.stddev_weight, 1.25);
 
-    // Force a clock delta so evaluated_at is strictly greater on the
-    // second write regardless of platform timestamp resolution.
+    // Capture the first row's evaluated_at so we can assert the
+    // insert below appends a distinct row rather than mutating the
+    // existing one.
+    let first_evaluated_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT evaluated_at FROM campaign_evaluations WHERE id = $1")
+            .bind(first_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Force a clock delta so evaluated_at on the second row is
+    // strictly greater regardless of platform timestamp resolution.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
     let second = EvaluationOutputs {
@@ -1461,36 +1510,55 @@ async fn write_then_read_evaluation_round_trip() {
             unqualified_reasons: Default::default(),
         },
     };
-    let persisted_second = repo::write_evaluation(
+    let second_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &second,
-        3.0,
+        0.03,
         0.5,
         EvaluationMode::Optimization,
     )
     .await
     .unwrap();
-    assert_eq!(
-        persisted_second.id, persisted_first.id,
-        "UPSERT keeps the same row id (unique on campaign_id)"
-    );
-    assert!(
-        persisted_second.evaluated_at >= persisted_first.evaluated_at,
-        "evaluated_at must not regress: {:?} vs {:?}",
-        persisted_first.evaluated_at,
-        persisted_second.evaluated_at
+    assert_ne!(
+        second_id, first_id,
+        "INSERT-history: every /evaluate produces a new id"
     );
 
-    let read_second = repo::read_evaluation(&pool, row.id)
+    // The first row must be untouched after the second insert —
+    // history, not UPSERT.
+    let first_still: (EvaluationMode, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT evaluation_mode, evaluated_at FROM campaign_evaluations WHERE id = $1",
+    )
+    .bind(first_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        first_still.0,
+        EvaluationMode::Diversity,
+        "first row's evaluation_mode must remain untouched"
+    );
+    assert_eq!(
+        first_still.1, first_evaluated_at,
+        "first row's evaluated_at must remain untouched"
+    );
+
+    let read_second = evaluation_repo::latest_evaluation_for_campaign(&pool, row.id)
         .await
         .unwrap()
-        .expect("row present after second UPSERT");
+        .expect("row present after second persist");
     assert_eq!(read_second.evaluation_mode, EvaluationMode::Optimization);
     assert_eq!(read_second.baseline_pair_count, 7);
     assert_eq!(read_second.candidates_good, 4);
-    assert_eq!(read_second.loss_threshold_pct, 3.0);
+    assert_eq!(read_second.loss_threshold_ratio, 0.03);
     assert_eq!(read_second.stddev_weight, 0.5);
+    assert!(
+        read_second.evaluated_at >= read_first.evaluated_at,
+        "latest-by-evaluated_at must not regress: {:?} vs {:?}",
+        read_first.evaluated_at,
+        read_second.evaluated_at
+    );
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
@@ -1498,20 +1566,24 @@ async fn write_then_read_evaluation_round_trip() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(count, 1, "UPSERT collapses into a single row per campaign");
+    assert_eq!(
+        count, 2,
+        "INSERT-history preserves both rows; latest-pick happens on read"
+    );
 
     repo::delete(&pool, row.id).await.unwrap();
 }
 
 #[tokio::test]
-async fn write_evaluation_rejects_running_campaign() {
-    // Race guard: `write_evaluation` must recheck state under the row
+async fn persist_evaluation_rejects_running_campaign() {
+    // Race guard: `persist_evaluation` must recheck state under the row
     // lock. If a concurrent `/detail` flipped the campaign to `running`
-    // between the handler's initial gate and our UPSERT, persistence
+    // between the handler's initial gate and our insert, persistence
     // must abort with IllegalTransition rather than silently writing a
     // fresh evaluation against a now-running campaign.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
     use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
     let row = repo::create(&pool, make_input("t-eval-gate"))
@@ -1531,7 +1603,7 @@ async fn write_evaluation_rejects_running_campaign() {
         },
     };
 
-    let err = repo::write_evaluation(
+    let err = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &outputs,
@@ -1540,7 +1612,7 @@ async fn write_evaluation_rejects_running_campaign() {
         EvaluationMode::Optimization,
     )
     .await
-    .expect_err("write_evaluation must reject running state");
+    .expect_err("persist_evaluation must reject running state");
     match err {
         RepoError::IllegalTransition { from, .. } => {
             assert_eq!(
@@ -1560,6 +1632,103 @@ async fn write_evaluation_rejects_running_campaign() {
             .await
             .unwrap();
     assert_eq!(count, 0, "nothing persisted on the reject path");
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
+    // Consistency contract: the parent row's `candidates_total`
+    // counter must never disagree with the child-row count after
+    // commit. The writer guarantees this by aborting the tx when any
+    // evaluator-provided `destination_ip` fails to round-trip through
+    // IpAddr — an unreachable case in normal operation, but cheap to
+    // guard against and cheap to verify.
+    use meshmon_service::campaign::dto::{
+        EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto,
+    };
+    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
+    use meshmon_service::campaign::model::DirectSource;
+    let pool = common::shared_migrated_pool().await;
+
+    let row = repo::create(&pool, make_input("t-eval-rollback"))
+        .await
+        .unwrap();
+    common::mark_completed(&pool, &row.id.to_string()).await;
+
+    // Craft an EvaluationOutputs whose candidate carries a garbage
+    // destination_ip string. Every other field is valid.
+    let garbage_candidate = EvaluationCandidateDto {
+        destination_ip: "not-an-ip".to_string(),
+        display_name: None,
+        city: None,
+        country_code: None,
+        asn: None,
+        network_operator: None,
+        is_mesh_member: false,
+        pairs_improved: 0,
+        pairs_total_considered: 1,
+        avg_improvement_ms: Some(0.0),
+        avg_loss_ratio: Some(0.0),
+        composite_score: 0.0,
+        pair_details: vec![EvaluationPairDetailDto {
+            source_agent_id: "a".into(),
+            destination_agent_id: "b".into(),
+            destination_ip: "not-an-ip".into(),
+            direct_rtt_ms: 1.0,
+            direct_stddev_ms: 0.0,
+            direct_loss_ratio: 0.0,
+            direct_source: DirectSource::ActiveProbe,
+            transit_rtt_ms: 1.0,
+            transit_stddev_ms: 0.0,
+            transit_loss_ratio: 0.0,
+            improvement_ms: 0.0,
+            qualifies: false,
+            mtr_measurement_id_ax: None,
+            mtr_measurement_id_xb: None,
+            destination_hostname: None,
+        }],
+        hostname: None,
+    };
+    let outputs = EvaluationOutputs {
+        baseline_pair_count: 1,
+        candidates_total: 1,
+        candidates_good: 0,
+        avg_improvement_ms: None,
+        results: EvaluationResultsDto {
+            candidates: vec![garbage_candidate],
+            unqualified_reasons: Default::default(),
+        },
+    };
+
+    let err = evaluation_repo::persist_evaluation(
+        &pool,
+        row.id,
+        &outputs,
+        0.05,
+        1.0,
+        EvaluationMode::Optimization,
+    )
+    .await
+    .expect_err("unparseable candidate destination_ip must abort the tx");
+    match err {
+        RepoError::Sqlx(sqlx::Error::Protocol(_)) => {}
+        other => panic!("expected sqlx::Error::Protocol, got {other:?}"),
+    }
+
+    // Parent row must not exist — the abort happened after the parent
+    // INSERT but before commit, so the rollback must drop it.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1")
+            .bind(row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 0,
+        "tx rollback must drop the parent row so counters can never skew"
+    );
 
     repo::delete(&pool, row.id).await.unwrap();
 }
@@ -1744,7 +1913,7 @@ async fn apply_edit_preserves_detail_rows() {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,
@@ -1825,7 +1994,7 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,
@@ -1889,19 +2058,21 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
 #[tokio::test]
 async fn campaign_evaluations_cascade_on_campaign_delete() {
     // `campaign_evaluations.campaign_id` has an `ON DELETE CASCADE` FK
-    // to `measurement_campaigns.id`. Deleting the parent must drop the
-    // evaluation row in the same transaction — otherwise orphan rows
-    // would accumulate and the `UNIQUE (campaign_id)` constraint would
-    // block a future re-creation of a campaign reusing the same UUID
-    // (tests and disaster-recovery paths both rely on reusable ids).
+    // to `measurement_campaigns.id`. Deleting the parent must drop
+    // every historical evaluation row (plus its children via the
+    // second cascade chain) in the same transaction — orphan rows
+    // would otherwise accumulate and clutter `/evaluation` read
+    // attempts on a recreated campaign reusing the same UUID (tests
+    // and disaster-recovery paths both rely on reusable ids).
     use meshmon_service::campaign::dto::EvaluationResultsDto;
     use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::evaluation_repo;
 
     let pool = common::shared_migrated_pool().await;
     let row = repo::create(&pool, make_input("t-eval-cascade"))
         .await
         .unwrap();
-    // `write_evaluation` locks the row and rechecks state — force
+    // `persist_evaluation` locks the row and rechecks state — force
     // completed so the persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
@@ -1915,7 +2086,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
             unqualified_reasons: Default::default(),
         },
     };
-    repo::write_evaluation(
+    evaluation_repo::persist_evaluation(
         &pool,
         row.id,
         &outputs,

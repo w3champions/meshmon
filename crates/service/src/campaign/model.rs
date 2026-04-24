@@ -128,6 +128,26 @@ pub enum EvaluationMode {
     Optimization,
 }
 
+/// Where an evaluation pair-detail's "direct A→B" baseline came from.
+///
+/// Mirrors the `pair_detail_direct_source` Postgres enum. The `/evaluate`
+/// handler layers VM continuous-mesh baselines on top of the active-probe
+/// `measurements` join for agent→agent pairs the campaign didn't cover
+/// itself, stamping [`Self::VmContinuous`] on the synthesized rows. When
+/// both sources exist for the same pair, active-probe wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[sqlx(type_name = "pair_detail_direct_source", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum DirectSource {
+    /// Baseline derived from a per-campaign active probe measurement
+    /// (i.e. the `measurements` row joined in via `campaign_pairs`).
+    ActiveProbe,
+    /// Baseline synthesized from VictoriaMetrics continuous-monitoring
+    /// samples at `/evaluate` time — used when the campaign's own
+    /// active-probe data left the agent→agent pair uncovered.
+    VmContinuous,
+}
+
 /// Kind of measurement row stored in `measurements`. `campaign` is the
 /// default; T44 never writes anything else (T45/T48 do).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
@@ -184,8 +204,8 @@ pub struct CampaignRow {
     /// When `true`, the scheduler forces a fresh measurement instead of
     /// reusing a matching row from the 24 h window.
     pub force_measurement: bool,
-    /// Loss-rate threshold (percent) used by the evaluator.
-    pub loss_threshold_pct: f32,
+    /// Loss-rate threshold (fraction 0.0–1.0) used by the evaluator.
+    pub loss_threshold_ratio: f32,
     /// Weight applied to RTT stddev by the evaluator.
     pub stddev_weight: f32,
     /// Evaluation strategy (see [`EvaluationMode`]).

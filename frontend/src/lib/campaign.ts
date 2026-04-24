@@ -47,11 +47,37 @@ export function isNoPairsSelected(err: unknown): boolean {
 }
 
 /**
- * 400 from `POST /evaluate` when the campaign has no baseline pairs to score
- * against. Signals the operator the campaign has not actually run probes.
+ * 422 from `POST /evaluate` when no agent→agent baseline measurements
+ * exist for the campaign. Signals the operator to verify the campaign
+ * actually probed agent destinations or wait for in-flight dispatches to
+ * settle.
  */
 export function isNoBaselinePairs(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "no_baseline_pairs";
+}
+
+/**
+ * Matches the `vm_upstream` error code the backend returns from
+ * `/evaluate` when VictoriaMetrics is configured but a baseline fetch
+ * fails (unreachable, non-2xx, malformed response). Surfaced as a
+ * 503 — operator can retry once VM is back.
+ */
+export function isVmUpstream(err: unknown): boolean {
+  return extractCampaignErrorCode(err) === "vm_upstream";
+}
+
+/**
+ * Extract the optional `detail` string from a structured `{error, detail}`
+ * body. Returns `null` when the error body isn't a structured API body or
+ * when `detail` is missing / non-string. Used by the `vm_upstream` toast to
+ * surface the upstream reason without leaking raw error shapes.
+ */
+export function extractCampaignErrorDetail(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  const cause: unknown = err.cause;
+  if (cause === null || typeof cause !== "object") return null;
+  const detail = (cause as { detail?: unknown }).detail;
+  return typeof detail === "string" ? detail : null;
 }
 
 /**

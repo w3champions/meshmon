@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns\n               SET state = $2\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_pct, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n            UPDATE measurement_campaigns SET state = $2, evaluated_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -195,5 +195,5 @@
       true
     ]
   },
-  "hash": "2f07983f5a3ff19558cdaab8d663ca873391b58a71a342a49a057ee4aa2439d6"
+  "hash": "cbd934ead794df96800c4170f980e75e4894e023a2843c24e097b67653dbbc5a"
 }

@@ -525,3 +525,51 @@ async fn register_upsert_updates_probe_ports() {
     assert_eq!(tcp, 6001);
     assert_eq!(udp, 6002);
 }
+
+#[tokio::test]
+async fn register_rejects_agent_id_with_unsafe_charset() {
+    // T54-05: IDs with whitespace / quotes / regex metacharacters are
+    // rejected at the boundary so the downstream PromQL-label-value
+    // plumbing in `vm_query.rs` never has to cope with an injection.
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 7, 1])).await;
+
+    for bad_id in [
+        "bad id with space",
+        "x\"injection",
+        "a|b",
+        "with\\slash",
+        "-leading-dash",
+        ".leading-dot",
+        "_leading-underscore",
+    ] {
+        let req = sample(bad_id, [10, 9, 7, 1]);
+        let err = client.register(req).await.expect_err(bad_id);
+        assert_eq!(err.code(), Code::InvalidArgument, "id={bad_id:?}");
+        assert!(
+            err.message().contains("agent id"),
+            "id={bad_id:?} message={:?}",
+            err.message()
+        );
+    }
+}
+
+#[tokio::test]
+async fn register_accepts_standard_agent_ids() {
+    // Sanity-check: the tightened regex still accepts every id shape
+    // used in the fleet (deploy/docker-compose.agents-dev.yml,
+    // agent.env.example, and the existing integration-test names).
+    let pool = common::shared_migrated_pool().await.clone();
+    let state = common::state_with_agent_token(pool).await;
+    let mut client =
+        common::grpc_harness::in_process_agent_client(state, IpAddr::from([10, 9, 7, 2])).await;
+
+    for good_id in ["good-id_01", "dev-agent-1", "edge_us_1", "edge.us.1", "a"] {
+        let _ = client
+            .register(sample(good_id, [10, 9, 7, 2]))
+            .await
+            .unwrap_or_else(|e| panic!("id={good_id:?} unexpectedly rejected: {e:?}"));
+    }
+}

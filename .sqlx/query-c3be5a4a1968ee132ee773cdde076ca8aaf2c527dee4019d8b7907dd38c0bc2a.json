@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns SET state = $2, stopped_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_pct, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -135,42 +135,39 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
+        "Text",
+        "Text",
         {
           "Custom": {
-            "name": "campaign_state",
+            "name": "probe_protocol",
             "kind": {
               "Enum": [
-                "draft",
-                "running",
-                "completed",
-                "evaluated",
-                "stopped"
+                "icmp",
+                "tcp",
+                "udp"
               ]
             }
           }
         },
+        "Int2",
+        "Int2",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Float4",
+        "Float4",
         {
           "Custom": {
-            "name": "campaign_state[]",
+            "name": "evaluation_mode",
             "kind": {
-              "Array": {
-                "Custom": {
-                  "name": "campaign_state",
-                  "kind": {
-                    "Enum": [
-                      "draft",
-                      "running",
-                      "completed",
-                      "evaluated",
-                      "stopped"
-                    ]
-                  }
-                }
-              }
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
             }
           }
-        }
+        },
+        "Text"
       ]
     },
     "nullable": [
@@ -195,5 +192,5 @@
       true
     ]
   },
-  "hash": "771ebabdaa2a810b9aa9f5119100ea30a59754d2471f6ca8bcf49bd3dcc0e866"
+  "hash": "c3be5a4a1968ee132ee773cdde076ca8aaf2c527dee4019d8b7907dd38c0bc2a"
 }

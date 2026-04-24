@@ -106,7 +106,7 @@ pub struct ValidHop {
     /// Standard deviation of RTT to this hop, in microseconds.
     pub stddev_rtt_micros: u32,
     /// Fraction of probes that received no response at this hop; in `[0.0, 1.0]`.
-    pub loss_pct: f64,
+    pub loss_ratio: f64,
 }
 
 /// An IP address observed at a particular traceroute hop.
@@ -124,7 +124,7 @@ pub struct ValidSummary {
     /// Mean RTT across all hops, in microseconds.
     pub avg_rtt_micros: u32,
     /// Overall path loss fraction; in `[0.0, 1.0]`.
-    pub loss_pct: f64,
+    pub loss_ratio: f64,
     /// Total number of hops in the route.
     pub hop_count: u32,
 }
@@ -216,7 +216,7 @@ pub enum ValidationError {
         value: f64,
     },
     /// A hop loss percentage is outside `[0.0, 1.0]`.
-    #[error("hop loss_pct {value} outside [0.0, 1.0] at position {position}")]
+    #[error("hop loss_ratio {value} outside [0.0, 1.0] at position {position}")]
     HopLossOutOfRange {
         /// Hop position index.
         position: u32,
@@ -339,10 +339,10 @@ pub fn validate_snapshot(req: RouteSnapshotRequest) -> Result<ValidatedSnapshot,
             actual: req.hops.len(),
         });
     }
-    if !(0.0..=1.0).contains(&path_summary.loss_pct) || path_summary.loss_pct.is_nan() {
+    if !(0.0..=1.0).contains(&path_summary.loss_ratio) || path_summary.loss_ratio.is_nan() {
         return Err(ValidationError::HopLossOutOfRange {
             position: 0,
-            value: path_summary.loss_pct,
+            value: path_summary.loss_ratio,
         });
     }
 
@@ -359,7 +359,7 @@ pub fn validate_snapshot(req: RouteSnapshotRequest) -> Result<ValidatedSnapshot,
         hops,
         path_summary: ValidSummary {
             avg_rtt_micros: path_summary.avg_rtt_micros,
-            loss_pct: path_summary.loss_pct,
+            loss_ratio: path_summary.loss_ratio,
             hop_count: path_summary.hop_count,
         },
     })
@@ -369,10 +369,10 @@ fn validate_hop(h: HopSummary) -> Result<ValidHop, ValidationError> {
     if h.position == 0 {
         return Err(ValidationError::InvalidHopPosition);
     }
-    if !(0.0..=1.0).contains(&h.loss_pct) || h.loss_pct.is_nan() {
+    if !(0.0..=1.0).contains(&h.loss_ratio) || h.loss_ratio.is_nan() {
         return Err(ValidationError::HopLossOutOfRange {
             position: h.position,
-            value: h.loss_pct,
+            value: h.loss_ratio,
         });
     }
     let mut ips = Vec::with_capacity(h.observed_ips.len());
@@ -398,7 +398,7 @@ fn validate_hop(h: HopSummary) -> Result<ValidHop, ValidationError> {
         observed_ips: ips,
         avg_rtt_micros: h.avg_rtt_micros,
         stddev_rtt_micros: h.stddev_rtt_micros,
-        loss_pct: h.loss_pct,
+        loss_ratio: h.loss_ratio,
     })
 }
 

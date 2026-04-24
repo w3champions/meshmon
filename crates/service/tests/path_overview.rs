@@ -98,11 +98,11 @@ async fn insert_snapshot(
         "observed_ips": [{"ip": "10.0.0.1", "freq": 1.0}],
         "avg_rtt_micros": 1000,
         "stddev_rtt_micros": 100,
-        "loss_pct": 0.0
+        "loss_ratio": 0.0
     }]);
     let summary = serde_json::json!({
         "avg_rtt_micros": 1000,
-        "loss_pct": 0.0,
+        "loss_ratio": 0.0,
         "hop_count": 1
     });
     sqlx::query(
@@ -1175,26 +1175,26 @@ async fn insert_three_hop_snapshot(
             "observed_ips": [{"ip": OV_HOP_IP_POS, "freq": 1.0}],
             "avg_rtt_micros": 1000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         },
         {
             "position": 2,
             "observed_ips": [{"ip": OV_HOP_IP_NEG, "freq": 1.0}],
             "avg_rtt_micros": 2000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         },
         {
             "position": 3,
             "observed_ips": [{"ip": OV_HOP_IP_COLD, "freq": 1.0}],
             "avg_rtt_micros": 3000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         }
     ]);
     let summary = serde_json::json!({
         "avg_rtt_micros": 2000,
-        "loss_pct": 0.0,
+        "loss_ratio": 0.0,
         "hop_count": 3
     });
     sqlx::query(

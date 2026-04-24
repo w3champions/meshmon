@@ -727,7 +727,7 @@ async fn run(
                 // Force the next eval tick to fire immediately so new
                 // thresholds / rate rows apply without a 10s lag. Without
                 // this an operator-visible config change (e.g. tightening
-                // unhealthy_trigger_pct) could take up to the remainder of
+                // unhealthy_trigger_ratio) could take up to the remainder of
                 // the current interval to take effect. `reset_immediately`
                 // (tokio 1.29+) schedules the next tick now.
                 eval_interval.reset_immediately();
@@ -795,7 +795,7 @@ async fn compute_primary_summary(
 
     PathSummarySource {
         primary_protocol: Some(proto),
-        loss_pct: summary.failure_rate,
+        loss_ratio: summary.failure_rate,
         // mean_rtt_micros is None when no successful samples; render as 0
         // (consistent with the per-hop "0 µs == no RTT data" convention).
         avg_rtt_micros: summary
@@ -1410,28 +1410,28 @@ mod tests {
             rates,
             // Tight 1-second hysteresis: fires within 10s eval intervals.
             icmp_thresholds: Some(ProtocolThresholds {
-                unhealthy_trigger_pct: 0.9,
-                healthy_recovery_pct: 0.1,
+                unhealthy_trigger_ratio: 0.9,
+                healthy_recovery_ratio: 0.1,
                 unhealthy_hysteresis_sec: 1,
                 healthy_hysteresis_sec: 1,
             }),
             tcp_thresholds: Some(ProtocolThresholds {
-                unhealthy_trigger_pct: 0.9,
-                healthy_recovery_pct: 0.1,
+                unhealthy_trigger_ratio: 0.9,
+                healthy_recovery_ratio: 0.1,
                 unhealthy_hysteresis_sec: 1,
                 healthy_hysteresis_sec: 1,
             }),
             udp_thresholds: Some(ProtocolThresholds {
-                unhealthy_trigger_pct: 0.9,
-                healthy_recovery_pct: 0.1,
+                unhealthy_trigger_ratio: 0.9,
+                healthy_recovery_ratio: 0.1,
                 unhealthy_hysteresis_sec: 1,
                 healthy_hysteresis_sec: 1,
             }),
             path_health_thresholds: Some(PathHealthThresholds {
-                degraded_trigger_pct: 0.05,
+                degraded_trigger_ratio: 0.05,
                 degraded_trigger_sec: 1,
                 degraded_min_samples: 3,
-                normal_recovery_pct: 0.02,
+                normal_recovery_ratio: 0.02,
                 normal_recovery_sec: 1,
             }),
             windows: Some(Windows {
@@ -2370,7 +2370,7 @@ mod tests {
 
         let s = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
         assert_eq!(s.primary_protocol, Some(Protocol::Icmp));
-        assert!((s.loss_pct - 0.0).abs() < 1e-9, "got {}", s.loss_pct);
+        assert!((s.loss_ratio - 0.0).abs() < 1e-9, "got {}", s.loss_ratio);
         assert_eq!(s.avg_rtt_micros, 1_000);
     }
 
@@ -2382,7 +2382,7 @@ mod tests {
 
         let s = compute_primary_summary(&stats, Some(Protocol::Tcp)).await;
         assert_eq!(s.primary_protocol, Some(Protocol::Tcp));
-        assert!((s.loss_pct - 0.0).abs() < 1e-9);
+        assert!((s.loss_ratio - 0.0).abs() < 1e-9);
         assert_eq!(s.avg_rtt_micros, 2_500);
     }
 
@@ -2395,7 +2395,7 @@ mod tests {
 
         let s = compute_primary_summary(&stats, None).await;
         assert_eq!(s.primary_protocol, None);
-        assert!((s.loss_pct - 1.0).abs() < 1e-9, "got {}", s.loss_pct);
+        assert!((s.loss_ratio - 1.0).abs() < 1e-9, "got {}", s.loss_ratio);
         assert_eq!(s.avg_rtt_micros, 0);
     }
 
@@ -2407,7 +2407,7 @@ mod tests {
         // than 0% loss / 0 µs RTT.
         let s = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
         assert_eq!(s.primary_protocol, None);
-        assert!((s.loss_pct - 1.0).abs() < 1e-9);
+        assert!((s.loss_ratio - 1.0).abs() < 1e-9);
         assert_eq!(s.avg_rtt_micros, 0);
     }
 
@@ -2421,7 +2421,7 @@ mod tests {
 
         let s = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
         assert_eq!(s.primary_protocol, Some(Protocol::Icmp));
-        assert!((s.loss_pct - 0.3).abs() < 1e-9, "got {}", s.loss_pct);
+        assert!((s.loss_ratio - 0.3).abs() < 1e-9, "got {}", s.loss_ratio);
         assert_eq!(s.avg_rtt_micros, 5_000);
     }
 
@@ -2447,7 +2447,7 @@ mod tests {
         // Seed the tracker so its destination hop carries 100% loss.
         // Five rounds: every probe to position 1 is a silent timeout
         // (no IP), which the truncate-at-target logic preserves as the
-        // destination hop with `loss_pct = 1.0`.
+        // destination hop with `loss_ratio = 1.0`.
         let mut tracker = RouteTracker::new(Duration::from_secs(60), target_ip);
         tracker.reset_for_protocol(Some(Protocol::Icmp));
         let now = tokio::time::Instant::now();
@@ -2467,9 +2467,9 @@ mod tests {
         // longer exercises the "two sources disagree" path.
         let dest_hop = snap.hops.last().expect("snapshot has at least one hop");
         assert!(
-            (dest_hop.loss_pct - 1.0).abs() < 1e-9,
+            (dest_hop.loss_ratio - 1.0).abs() < 1e-9,
             "test premise broken: destination hop loss is {} (expected 1.0)",
-            dest_hop.loss_pct,
+            dest_hop.loss_ratio,
         );
 
         // Seed the primary's RollingStats with 10 successful 1 ms
@@ -2484,9 +2484,9 @@ mod tests {
         let path_summary = compute_primary_summary(&stats, Some(Protocol::Icmp)).await;
         assert_eq!(path_summary.primary_protocol, Some(Protocol::Icmp));
         assert!(
-            (path_summary.loss_pct - 0.0).abs() < 1e-9,
-            "primary stats should win over tracker hop; got loss_pct = {}",
-            path_summary.loss_pct,
+            (path_summary.loss_ratio - 0.0).abs() < 1e-9,
+            "primary stats should win over tracker hop; got loss_ratio = {}",
+            path_summary.loss_ratio,
         );
         assert_eq!(path_summary.avg_rtt_micros, 1_000);
     }

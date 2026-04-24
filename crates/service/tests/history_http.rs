@@ -35,7 +35,7 @@ async fn history_sources_returns_distinct_agents_with_measurements() {
     query!(
         r#"INSERT INTO measurements
              (source_agent_id, destination_ip, protocol, probe_count,
-              measured_at, loss_pct, kind)
+              measured_at, loss_ratio, kind)
            VALUES
              ('hist-a', '203.0.113.1'::inet, 'icmp', 10, now(), 0.0, 'campaign'),
              ('hist-b', '203.0.113.2'::inet, 'tcp',  10, now(), 0.0, 'campaign')"#,
@@ -79,7 +79,7 @@ async fn history_destinations_filters_by_source_and_partial_match() {
     query!(
         r#"INSERT INTO measurements
              (source_agent_id, destination_ip, protocol, probe_count,
-              measured_at, loss_pct, kind)
+              measured_at, loss_ratio, kind)
            VALUES
              ('hist-d', '203.0.113.11'::inet, 'icmp', 10, now(), 0.0, 'campaign'),
              ('hist-d', '203.0.113.12'::inet, 'icmp', 10, now(), 0.0, 'campaign'),
@@ -150,7 +150,7 @@ async fn history_measurements_returns_joined_rows_in_range() {
     query!(
         r#"INSERT INTO measurements
              (source_agent_id, destination_ip, protocol, probe_count,
-              measured_at, latency_avg_ms, loss_pct, kind)
+              measured_at, latency_avg_ms, loss_ratio, kind)
            VALUES
              ('hist-e', '203.0.113.21'::inet, 'icmp', 10, $1, 12.0, 0.0, 'campaign'),
              ('hist-e', '203.0.113.21'::inet, 'tcp',  10, $1, 15.0, 0.0, 'campaign'),
@@ -498,7 +498,7 @@ async fn history_destinations_stamps_hostname_from_positive_cache() {
 
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_pct, kind) \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'campaign')",
     )
     .bind(src)
@@ -547,7 +547,7 @@ async fn history_destinations_omits_hostname_on_negative_cache() {
 
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_pct, kind) \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'campaign')",
     )
     .bind(src)
@@ -597,7 +597,7 @@ async fn history_measurements_stamps_destination_hostname_from_positive_cache() 
 
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_pct, kind) \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'campaign')",
     )
     .bind(src)
@@ -648,7 +648,7 @@ async fn history_measurements_omits_destination_hostname_on_negative_cache() {
 
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_pct, kind) \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'campaign')",
     )
     .bind(src)
@@ -697,7 +697,7 @@ async fn history_destinations_cold_miss_omits_hostname_and_enqueues_resolver() {
 
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_pct, kind) \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'campaign')",
     )
     .bind(src)
@@ -756,7 +756,7 @@ async fn history_measurements_cold_miss_omits_destination_hostname_and_enqueues_
 
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_pct, kind) \
+             (source_agent_id, destination_ip, protocol, probe_count, measured_at, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'campaign')",
     )
     .bind(src)
@@ -833,21 +833,21 @@ async fn history_measurements_stamps_mtr_hop_hostnames_three_state() {
             "observed_ips": [{"ip": MTR_HOP_IP_POS, "freq": 1.0}],
             "avg_rtt_micros": 1000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         },
         {
             "position": 2,
             "observed_ips": [{"ip": MTR_HOP_IP_NEG, "freq": 1.0}],
             "avg_rtt_micros": 2000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         },
         {
             "position": 3,
             "observed_ips": [{"ip": MTR_HOP_IP_COLD, "freq": 1.0}],
             "avg_rtt_micros": 3000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         }
     ]);
     let mtr_id: i64 =
@@ -862,7 +862,7 @@ async fn history_measurements_stamps_mtr_hop_hostnames_three_state() {
     sqlx::query(
         "INSERT INTO measurements \
              (source_agent_id, destination_ip, protocol, probe_count, measured_at, \
-              loss_pct, kind, mtr_id) \
+              loss_ratio, kind, mtr_id) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'detail_mtr', $3)",
     )
     .bind(src)
@@ -1025,21 +1025,21 @@ async fn campaign_measurements_stamps_destination_and_hop_hostnames_three_state(
             "observed_ips": [{"ip": CM_HOP_IP_POS, "freq": 1.0}],
             "avg_rtt_micros": 1000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         },
         {
             "position": 2,
             "observed_ips": [{"ip": CM_HOP_IP_NEG, "freq": 1.0}],
             "avg_rtt_micros": 2000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         },
         {
             "position": 3,
             "observed_ips": [{"ip": CM_HOP_IP_COLD, "freq": 1.0}],
             "avg_rtt_micros": 3000,
             "stddev_rtt_micros": 100,
-            "loss_pct": 0.0
+            "loss_ratio": 0.0
         }
     ]);
     let mtr_id: i64 =
@@ -1052,7 +1052,7 @@ async fn campaign_measurements_stamps_destination_and_hop_hostnames_three_state(
     let measurement_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
              (source_agent_id, destination_ip, protocol, probe_count, measured_at, \
-              loss_pct, kind, mtr_id) \
+              loss_ratio, kind, mtr_id) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 0.0, 'detail_mtr', $3) \
          RETURNING id",
     )

@@ -54,11 +54,28 @@ pub fn map_failure_code(code: MeasurementFailureCode) -> &'static str {
 
 /// Returns the target terminal `resolution_state` for a given failure tag.
 ///
-/// `unreachable` is a dedicated state; everything else funnels into
-/// `skipped` with the tag preserved in `last_error`.
+/// Real measurement failures map to `Unreachable`; non-measurement
+/// terminations map to `Skipped`. The tag is preserved in `last_error`
+/// either way so operators keep the origin signal.
+///
+/// Tag vocabulary (from [`map_failure_code`]):
+/// * `"unreachable"`, `"timeout"`, `"refused"` — the probe ran and the
+///   destination failed to answer (no route, silent drops, active
+///   refuse). These are valid datapoints; packet loss is a signal.
+/// * `"cancelled"`, `"agent_rejected"` — the agent aborted before or
+///   during the probe (scheduler shutdown, agent-side protocol error).
+///   No measurement was attempted.
+/// * Any unknown tag defaults to `Skipped` so a future writer-side
+///   classification bug can't silently inflate unreachability.
 fn state_for_failure_tag(tag: &str) -> PairResolutionState {
     match tag {
-        "unreachable" => PairResolutionState::Unreachable,
+        "unreachable" | "timeout" | "refused" => PairResolutionState::Unreachable,
+        "cancelled" | "agent_rejected" => PairResolutionState::Skipped,
+        // Unknown tags default to Skipped so a future MeasurementFailureCode
+        // variant added to `map_failure_code` but not listed here can't
+        // silently inflate the Unreachable metric — the exhaustive test in
+        // this module (`failure_code_resolves_to_expected_state`) will still
+        // catch it before release.
         _ => PairResolutionState::Skipped,
     }
 }
@@ -92,7 +109,7 @@ fn hops_to_jsonb(hops: &[HopSummary]) -> Result<JsonValue, serde_json::Error> {
                 .collect(),
             avg_rtt_micros: h.avg_rtt_micros,
             stddev_rtt_micros: h.stddev_rtt_micros,
-            loss_pct: h.loss_pct,
+            loss_ratio: h.loss_ratio,
         })
         .collect();
     serde_json::to_value(converted)
@@ -153,7 +170,7 @@ impl SettleWriter {
                         (source_agent_id, destination_ip, protocol, probe_count,
                          latency_min_ms, latency_avg_ms, latency_median_ms,
                          latency_p95_ms, latency_max_ms, latency_stddev_ms,
-                         loss_pct, kind)
+                         loss_ratio, kind)
                     VALUES ($1, $2, $3::probe_protocol, $4,
                             $5, $6, $7, $8, $9, $10, $11,
                             $12::measurement_kind)
@@ -169,7 +186,9 @@ impl SettleWriter {
                     s.latency_p95_ms,
                     s.latency_max_ms,
                     s.latency_stddev_ms,
-                    s.loss_pct,
+                    // Agent-wire and DB convention is fraction (0.0–1.0);
+                    // FE multiplies by 100 at display.
+                    s.loss_ratio,
                     pair.kind as MeasurementKind,
                 )
                 .fetch_one(&mut *tx)
@@ -208,7 +227,7 @@ impl SettleWriter {
                     r#"
                     INSERT INTO measurements
                         (source_agent_id, destination_ip, protocol, probe_count,
-                         loss_pct, kind, mtr_id)
+                         loss_ratio, kind, mtr_id)
                     VALUES ($1, $2, $3::probe_protocol, 1,
                             0.0, $4::measurement_kind, $5)
                     RETURNING id
@@ -324,27 +343,37 @@ mod tests {
         }
     }
 
+    /// Exhaustive regression barrier: every `MeasurementFailureCode`
+    /// variant must round-trip through `map_failure_code` →
+    /// `state_for_failure_tag` to the documented resolution state.
+    ///
+    /// This is load-bearing — per spec §3.2/§3.3, `timeout` / `refused`
+    /// / `unreachable` are real measurement failures (resolve to
+    /// `Unreachable`, 100% loss is a signal), while `cancelled` /
+    /// `agent_rejected` are non-measurement terminations (resolve to
+    /// `Skipped`, no attempt made). A single refactor of the match arm
+    /// could silently invert the mapping; this test fails if it does.
     #[test]
-    fn no_route_targets_unreachable_state() {
-        let tag = map_failure_code(MeasurementFailureCode::NoRoute);
-        assert_eq!(tag, "unreachable");
-        assert_eq!(state_for_failure_tag(tag), PairResolutionState::Unreachable,);
-    }
+    fn failure_code_resolves_to_expected_state() {
+        use MeasurementFailureCode::*;
+        use PairResolutionState::{Skipped, Unreachable};
 
-    #[test]
-    fn every_other_failure_funnels_into_skipped() {
-        for code in [
-            MeasurementFailureCode::Unspecified,
-            MeasurementFailureCode::Refused,
-            MeasurementFailureCode::Timeout,
-            MeasurementFailureCode::Cancelled,
-            MeasurementFailureCode::AgentError,
-        ] {
+        let cases: &[(MeasurementFailureCode, &str, PairResolutionState)] = &[
+            (Unspecified, "agent_rejected", Skipped),
+            (NoRoute, "unreachable", Unreachable),
+            (Refused, "refused", Unreachable),
+            (Timeout, "timeout", Unreachable),
+            (Cancelled, "cancelled", Skipped),
+            (AgentError, "agent_rejected", Skipped),
+        ];
+
+        for &(code, expected_tag, expected_state) in cases {
             let tag = map_failure_code(code);
+            assert_eq!(tag, expected_tag, "{code:?} tag regressed");
             assert_eq!(
                 state_for_failure_tag(tag),
-                PairResolutionState::Skipped,
-                "{code:?} should map to skipped",
+                expected_state,
+                "{code:?} (tag {tag:?}) resolution state regressed",
             );
         }
     }

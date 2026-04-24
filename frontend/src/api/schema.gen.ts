@@ -307,14 +307,24 @@ export interface paths {
          * `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
          * @description Gated on `state IN ('completed','evaluated')`: re-running on an
          *     already-evaluated campaign is allowed so operators can retune
-         *     `loss_threshold_pct` / `stddev_weight` without editing the row. When
+         *     `loss_threshold_ratio` / `stddev_weight` without editing the row. When
          *     the campaign was in `completed`, a best-effort transition flips it to
          *     `evaluated`; a concurrent transition that loses the gate still leaves
          *     the evaluation row written and the SSE event fired.
          *
-         *     Returns 422 (`no_baseline_pairs`) when the evaluator finds no
-         *     agent→agent baseline — the campaign must include at least one pair
-         *     whose destination IP belongs to a registered agent.
+         *     Before the evaluator runs, the handler augments the active-probe
+         *     baseline set with VictoriaMetrics continuous-mesh samples for every
+         *     agent→agent pair the campaign's `measurements` rows didn't already
+         *     cover. VM-sourced rows carry `direct_source='vm_continuous'` on the
+         *     resulting `campaign_evaluation_pair_details`. When `upstream.vm_url`
+         *     isn't configured the handler silently falls back to active-probe
+         *     data only.
+         *
+         *     Returns:
+         *     * 422 (`no_baseline_pairs`) — no agent→agent baseline available,
+         *       even after the VM fallback (or VM wasn't configured).
+         *     * 503 (`vm_upstream`) — VM was configured but the query failed
+         *       (unreachable, non-2xx, malformed response).
          */
         post: operations["evaluate"];
         delete?: never;
@@ -1168,9 +1178,9 @@ export interface components {
             id: string;
             /**
              * Format: float
-             * @description Loss-rate threshold (percent) used by the evaluator.
+             * @description Loss-rate threshold (fraction 0.0–1.0) used by the evaluator.
              */
-            loss_threshold_pct: number;
+            loss_threshold_ratio: number;
             /** @description Free-form operator notes. */
             notes: string;
             /** @description Per-state pair counts. Empty on list responses; populated on single-row GET. */
@@ -1250,9 +1260,9 @@ export interface components {
             latency_avg_ms?: number | null;
             /**
              * Format: float
-             * @description Observed loss percentage ([0, 100]) (nullable).
+             * @description Observed loss fraction ([0.0, 1.0]) (nullable).
              */
-            loss_pct?: number | null;
+            loss_ratio?: number | null;
             /**
              * Format: date-time
              * @description When the measurement was produced (null when pending/dispatched).
@@ -1522,9 +1532,9 @@ export interface components {
             force_measurement?: boolean;
             /**
              * Format: float
-             * @description Optional loss-rate threshold for the evaluator.
+             * @description Optional loss-rate threshold for the evaluator (fraction 0.0–1.0).
              */
-            loss_threshold_pct?: number | null;
+            loss_threshold_ratio?: number | null;
             /** @description Optional free-form notes. */
             notes?: string | null;
             /**
@@ -1587,6 +1597,17 @@ export interface components {
          * @enum {string}
          */
         DetailScope: "all" | "good_candidates" | "pair";
+        /**
+         * @description Where an evaluation pair-detail's "direct A→B" baseline came from.
+         *
+         *     Mirrors the `pair_detail_direct_source` Postgres enum. The `/evaluate`
+         *     handler layers VM continuous-mesh baselines on top of the active-probe
+         *     `measurements` join for agent→agent pairs the campaign didn't cover
+         *     itself, stamping [`Self::VmContinuous`] on the synthesized rows. When
+         *     both sources exist for the same pair, active-probe wins.
+         * @enum {string}
+         */
+        DirectSource: "active_probe" | "vm_continuous";
         /** @description Body for `POST /api/campaigns/{id}/edit`. */
         EditCampaignRequest: {
             /** @description Pairs to add (or reset to `pending` if they already exist). */
@@ -1636,10 +1657,10 @@ export interface components {
             avg_improvement_ms?: number | null;
             /**
              * Format: float
-             * @description Average compound loss (percent) across transit triples that
-             *     cleared the loss gate during scoring.
+             * @description Average compound loss (fraction 0.0–1.0) across transit triples
+             *     that cleared the loss gate during scoring.
              */
-            avg_loss_pct?: number | null;
+            avg_loss_ratio?: number | null;
             /** @description Catalogue city, when present. */
             city?: string | null;
             /**
@@ -1683,10 +1704,14 @@ export interface components {
         /**
          * @description Wire shape for `GET /api/campaigns/{id}/evaluation`.
          *
-         *     Also the exact JSON persisted into `campaign_evaluations.results` —
-         *     the evaluator serialises [`EvaluationResultsDto`] directly into the
-         *     JSONB column so the read handler can hand the stored document back
-         *     to the client without rehydrating through a domain model.
+         *     Assembled from the relational `campaign_evaluations` parent row
+         *     plus its child tables (`campaign_evaluation_candidates`,
+         *     `campaign_evaluation_pair_details`,
+         *     `campaign_evaluation_unqualified_reasons`) by
+         *     [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
+         *     The read-path joins in Rust so the wire DTO stays unchanged
+         *     compared to the pre-T54-02 JSONB layout, modulo the new
+         *     `direct_source` field on every `pair_detail`.
          */
         EvaluationDto: {
             /**
@@ -1727,9 +1752,9 @@ export interface components {
             evaluation_mode: components["schemas"]["EvaluationMode"];
             /**
              * Format: float
-             * @description Loss-rate threshold (percent) that was applied.
+             * @description Loss-rate threshold (fraction 0.0–1.0) that was applied.
              */
-            loss_threshold_pct: number;
+            loss_threshold_ratio: number;
             /** @description Full candidate breakdown + unqualified-reason map. */
             results: components["schemas"]["EvaluationResultsDto"];
             /**
@@ -1757,14 +1782,24 @@ export interface components {
             destination_ip: string;
             /**
              * Format: float
-             * @description Direct A→B observed loss (percent).
+             * @description Direct A→B observed loss (fraction 0.0–1.0).
              */
-            direct_loss_pct: number;
+            direct_loss_ratio: number;
             /**
              * Format: float
              * @description Direct A→B RTT (ms).
              */
             direct_rtt_ms: number;
+            /**
+             * @description Provenance of the direct A→B baseline figures:
+             *     [`DirectSource::ActiveProbe`] for rows that came from the
+             *     campaign's own `measurements`, or [`DirectSource::VmContinuous`]
+             *     when the evaluator pulled the A→B baseline from VictoriaMetrics
+             *     continuous-mesh data at `/evaluate` time. Transit legs (A→X,
+             *     X→B) are always active-probe; only the direct A→B baseline can
+             *     be VM-sourced.
+             */
+            direct_source: components["schemas"]["DirectSource"];
             /**
              * Format: float
              * @description Direct A→B RTT stddev (ms).
@@ -1794,9 +1829,9 @@ export interface components {
             source_agent_id: string;
             /**
              * Format: float
-             * @description Composed A→X→B transit observed loss (percent).
+             * @description Composed A→X→B transit observed loss (fraction 0.0–1.0).
              */
-            transit_loss_pct: number;
+            transit_loss_ratio: number;
             /**
              * Format: float
              * @description Composed A→X→B transit RTT (ms).
@@ -1808,7 +1843,11 @@ export interface components {
              */
             transit_stddev_ms: number;
         };
-        /** @description Candidate breakdown persisted in `campaign_evaluations.results`. */
+        /**
+         * @description Candidate breakdown assembled from
+         *     `campaign_evaluation_candidates` and
+         *     `campaign_evaluation_unqualified_reasons`.
+         */
         EvaluationResultsDto: {
             /** @description Per-candidate scoring rows, ordered by composite score. */
             candidates: components["schemas"]["EvaluationCandidateDto"][];
@@ -1919,9 +1958,9 @@ export interface components {
             latency_stddev_ms?: number | null;
             /**
              * Format: float
-             * @description Observed loss percentage ([0, 100]).
+             * @description Observed loss fraction ([0.0, 1.0]).
              */
-            loss_pct: number;
+            loss_ratio: number;
             /**
              * Format: date-time
              * @description When the row was produced (UTC).
@@ -1986,7 +2025,7 @@ export interface components {
              * Format: double
              * @description Fraction of probes with no response at this hop.
              */
-            loss_pct: number;
+            loss_ratio: number;
             /** @description IP addresses observed at this hop and their frequencies. */
             observed_ips: components["schemas"]["HopIpJson"][];
             /**
@@ -2353,9 +2392,9 @@ export interface components {
             evaluation_mode?: null | components["schemas"]["EvaluationMode"];
             /**
              * Format: float
-             * @description Replacement loss-rate threshold.
+             * @description Replacement loss-rate threshold (fraction 0.0–1.0).
              */
-            loss_threshold_pct?: number | null;
+            loss_threshold_ratio?: number | null;
             /** @description Replacement notes (when present). */
             notes?: string | null;
             /**
@@ -2482,7 +2521,7 @@ export interface components {
              * Format: double
              * @description Overall path loss fraction.
              */
-            loss_pct: number;
+            loss_ratio: number;
         };
         /**
          * @description GeoJSON-compatible polygon ring expressed as `[lng, lat]` pairs.
@@ -3348,6 +3387,15 @@ export interface operations {
             };
             /** @description Internal error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description VictoriaMetrics upstream unreachable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

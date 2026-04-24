@@ -63,6 +63,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::campaign::dto::PreviewDispatchResponse,
         crate::campaign::broker::CampaignStreamEvent,
         crate::campaign::model::CampaignState,
+        crate::campaign::model::DirectSource,
         crate::campaign::model::EvaluationMode,
         crate::campaign::model::MeasurementKind,
         crate::campaign::model::PairResolutionState,

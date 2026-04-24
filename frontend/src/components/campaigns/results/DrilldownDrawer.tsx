@@ -26,6 +26,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { formatLossRatio } from "@/lib/format-loss";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -53,11 +54,6 @@ export interface DrilldownDrawerProps {
 function formatMs(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return `${value.toFixed(1)} ms`;
-}
-
-function formatLoss(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return `${value.toFixed(2)}%`;
 }
 
 function formatImprovement(value: number): string {
@@ -251,13 +247,13 @@ function PairRow({ pair, sourceAgent, destAgent, onOpenMtr }: PairRowProps) {
             label="Direct A→B"
             rtt={pair.direct_rtt_ms}
             stddev={pair.direct_stddev_ms}
-            loss={pair.direct_loss_pct}
+            loss={pair.direct_loss_ratio}
           />
           <MetricBlock
             label={`Transit via ${pair.destination_ip}`}
             rtt={pair.transit_rtt_ms}
             stddev={pair.transit_stddev_ms}
-            loss={pair.transit_loss_pct}
+            loss={pair.transit_loss_ratio}
           />
         </dl>
 
@@ -292,7 +288,7 @@ function MetricBlock({ label, rtt, stddev, loss }: MetricBlockProps) {
       <dd className="font-mono text-sm text-foreground tabular-nums">
         {formatMs(rtt)} <span className="text-xs text-muted-foreground">±{formatMs(stddev)}</span>
       </dd>
-      <dd className="text-xs text-muted-foreground">loss {formatLoss(loss)}</dd>
+      <dd className="text-xs text-muted-foreground">loss {formatLossRatio(loss)}</dd>
     </div>
   );
 }

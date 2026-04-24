@@ -42,7 +42,7 @@ fn measurement_result_success_roundtrips() {
             latency_p95_ms: 4.0,
             latency_max_ms: 5.0,
             latency_stddev_ms: 1.2,
-            loss_pct: 10.0,
+            loss_ratio: 10.0,
         })),
     };
     let bytes = msg.encode_to_vec();

@@ -64,8 +64,8 @@ export function truncateHostname(name: string): string {
 
 function baseClass(hop: HopJson, colorBy: ColorBy): string {
   if (colorBy === "loss") {
-    if (hop.loss_pct >= 0.2) return "state-unreachable";
-    if (hop.loss_pct >= 0.05) return "state-degraded";
+    if (hop.loss_ratio >= 0.2) return "state-unreachable";
+    if (hop.loss_ratio >= 0.05) return "state-degraded";
     return "state-normal";
   }
   if (hop.avg_rtt_micros >= 150_000) return "state-unreachable";
@@ -245,7 +245,7 @@ export function RouteTopology({
   const descText = hops
     .map(
       (h) =>
-        `Hop ${h.position}: ${dominantIp(h)}, RTT ${(h.avg_rtt_micros / 1000).toFixed(1)} ms, loss ${(h.loss_pct * 100).toFixed(1)}%.`,
+        `Hop ${h.position}: ${dominantIp(h)}, RTT ${(h.avg_rtt_micros / 1000).toFixed(1)} ms, loss ${(h.loss_ratio * 100).toFixed(1)}%.`,
     )
     .join(" ");
 

@@ -286,7 +286,7 @@ export default function CampaignComposer() {
       probe_count_detail: knobs.probe_count_detail,
       timeout_ms: knobs.timeout_ms,
       probe_stagger_ms: knobs.probe_stagger_ms,
-      loss_threshold_pct: knobs.loss_threshold_pct,
+      loss_threshold_ratio: knobs.loss_threshold_ratio,
       stddev_weight: knobs.stddev_weight,
       evaluation_mode: knobs.evaluation_mode,
       force_measurement: knobs.force_measurement,

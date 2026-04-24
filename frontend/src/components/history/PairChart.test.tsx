@@ -13,7 +13,7 @@ function measurement(over: Partial<HistoryMeasurement>): HistoryMeasurement {
     kind: "campaign",
     measured_at: "2026-04-20T00:00:00.000Z",
     probe_count: 10,
-    loss_pct: 0.1,
+    loss_ratio: 0.1,
     latency_avg_ms: 12,
     latency_min_ms: 10,
     latency_max_ms: 15,

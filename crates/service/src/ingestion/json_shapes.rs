@@ -20,7 +20,9 @@ pub struct HopJson {
     /// Standard deviation of RTT to this hop, in microseconds.
     pub stddev_rtt_micros: u32,
     /// Fraction of probes with no response at this hop.
-    pub loss_pct: f64,
+    // Alias for BC: main-era route_snapshots / mtr_traces JSONB rows use "loss_pct".
+    #[serde(alias = "loss_pct")]
+    pub loss_ratio: f64,
 }
 
 /// JSON representation of an observed IP at a hop.
@@ -47,7 +49,9 @@ pub struct PathSummaryJson {
     /// Mean RTT across all hops, in microseconds.
     pub avg_rtt_micros: u32,
     /// Overall path loss fraction.
-    pub loss_pct: f64,
+    // Alias for BC: main-era route_snapshots / mtr_traces JSONB rows use "loss_pct".
+    #[serde(alias = "loss_pct")]
+    pub loss_ratio: f64,
     /// Total number of hops in the route.
     pub hop_count: u32,
 }
@@ -69,7 +73,7 @@ impl From<&crate::ingestion::validator::ValidHop> for HopJson {
                 .collect(),
             avg_rtt_micros: h.avg_rtt_micros,
             stddev_rtt_micros: h.stddev_rtt_micros,
-            loss_pct: h.loss_pct,
+            loss_ratio: h.loss_ratio,
         }
     }
 }
@@ -78,8 +82,27 @@ impl From<&crate::ingestion::validator::ValidSummary> for PathSummaryJson {
     fn from(s: &crate::ingestion::validator::ValidSummary) -> Self {
         PathSummaryJson {
             avg_rtt_micros: s.avg_rtt_micros,
-            loss_pct: s.loss_pct,
+            loss_ratio: s.loss_ratio,
             hop_count: s.hop_count,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hop_json_deserializes_main_era_loss_pct_alias() {
+        let payload = r#"{"position":1,"observed_ips":[],"avg_rtt_micros":0,"stddev_rtt_micros":0,"loss_pct":0.25}"#;
+        let hop: HopJson = serde_json::from_str(payload).unwrap();
+        assert!((hop.loss_ratio - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn path_summary_json_deserializes_main_era_loss_pct_alias() {
+        let payload = r#"{"avg_rtt_micros":0,"loss_pct":0.42,"hop_count":3}"#;
+        let s: PathSummaryJson = serde_json::from_str(payload).unwrap();
+        assert!((s.loss_ratio - 0.42).abs() < 1e-6);
     }
 }

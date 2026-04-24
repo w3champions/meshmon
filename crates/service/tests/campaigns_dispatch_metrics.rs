@@ -84,7 +84,7 @@ impl AgentCommand for EchoSuccessAgent {
                     latency_p95_ms: 1.0,
                     latency_max_ms: 1.0,
                     latency_stddev_ms: 0.0,
-                    loss_pct: 0.0,
+                    loss_ratio: 0.0,
                 })),
             };
             let _ = tx.send(Ok(r)).await;
@@ -146,7 +146,7 @@ async fn seed_dispatched_batch(
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,

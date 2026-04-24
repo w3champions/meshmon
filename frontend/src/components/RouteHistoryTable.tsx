@@ -100,7 +100,7 @@ export function RouteHistoryTable({
                 {s.path_summary ? `${(s.path_summary.avg_rtt_micros / 1000).toFixed(0)} ms` : "—"}
               </TableCell>
               <TableCell>
-                {s.path_summary ? `${(s.path_summary.loss_pct * 100).toFixed(1)}%` : "—"}
+                {s.path_summary ? `${(s.path_summary.loss_ratio * 100).toFixed(1)}%` : "—"}
               </TableCell>
               <TableCell>
                 <RadioDot

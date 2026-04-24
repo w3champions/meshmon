@@ -8,6 +8,7 @@ import {
   clampKnob,
   KNOB_BOUNDS,
   type KnobProtocol,
+  ratioToPercentInput,
 } from "@/lib/campaign-config";
 
 const MTR_HINT =
@@ -46,6 +47,23 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
       const parsed = raw === "" ? value[key] : Number(raw);
       patch({ [key]: clampKnob(key, parsed, value[key]) } as Partial<CampaignKnobs>);
     };
+
+  // `loss_threshold_ratio` is wire-format ratio (0.0–1.0), but the form UX
+  // presents percent — convert at the form boundary so the DTO stays in
+  // ratio units while the operator still types "2" for 2 %.
+  const handleLossThresholdPct = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = event.target.value;
+    if (raw === "") {
+      // Operator cleared the field — hold the current knob value.
+      return;
+    }
+    const percent = Number(raw);
+    if (!Number.isFinite(percent)) return;
+    const ratio = percent / 100;
+    patch({
+      loss_threshold_ratio: clampKnob("loss_threshold_ratio", ratio, value.loss_threshold_ratio),
+    });
+  };
 
   return (
     <section
@@ -195,10 +213,10 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             id="knob-loss-threshold"
             type="number"
             step="0.1"
-            min={KNOB_BOUNDS.loss_threshold_pct.min}
-            max={KNOB_BOUNDS.loss_threshold_pct.max}
-            value={value.loss_threshold_pct}
-            onChange={handleNumber("loss_threshold_pct")}
+            min={KNOB_BOUNDS.loss_threshold_ratio.min * 100}
+            max={KNOB_BOUNDS.loss_threshold_ratio.max * 100}
+            value={ratioToPercentInput(value.loss_threshold_ratio)}
+            onChange={handleLossThresholdPct}
             disabled={disabled}
           />
         </div>

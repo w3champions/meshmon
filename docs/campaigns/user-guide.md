@@ -213,7 +213,7 @@ composer posts:
   host-address strings.
 - Optional overrides: `probe_count` (default 10), `probe_count_detail`
   (default 250), `timeout_ms` (default 2000), `probe_stagger_ms`
-  (default 100), `loss_threshold_pct` (default 2.0), `stddev_weight`
+  (default 100), `loss_threshold_ratio` (default 0.02), `stddev_weight`
   (default 1.0), `evaluation_mode` (default `optimization`).
 - `force_measurement` — when `true`, the scheduler ignores the 24 h
   reuse cache for every pair in this campaign.
@@ -389,12 +389,34 @@ the operator can compare campaign samples against the broader history.
 
 ### Settings tab
 
-Shows the three evaluator knobs (`loss_threshold_pct`, `stddev_weight`,
+Shows the three evaluator knobs (`loss_threshold_ratio`, `stddev_weight`,
 `evaluation_mode`) along with a **Re-evaluate** button. Only `completed`
 and `evaluated` states enable Re-evaluate; it's hidden on `draft`,
-`running`, and `stopped` campaigns. Re-evaluating is free: it re-scores
-existing measurements against the new settings without dispatching
-anything.
+`running`, and `stopped` campaigns.
+
+Re-evaluate re-scores the campaign against every agent→agent
+baseline it can find: first the active-probe measurements attributed
+to the campaign, then — for any agent→agent pair the active probes
+didn't cover — samples pulled from VictoriaMetrics continuous-mesh
+data at evaluate time. Active-probe data wins when both sources cover
+the same pair; VM-sourced rows never land in `measurements`, they only
+feed the evaluator for that single call.
+
+Each pair in the result carries a `direct_source` field
+(`active_probe` | `vm_continuous`) so operators can tell whether a
+given baseline came from the campaign's own probes or from the
+continuous mesh.
+
+Error responses:
+
+- 422 `no_baseline_pairs` — both sources were empty for every
+  agent→agent pair in the campaign's source/destination agent roster.
+  When the deployment has no VictoriaMetrics configured
+  (`[upstream] vm_url` unset), only the active-probe set is consulted
+  before this error fires.
+- 503 `vm_upstream` — `[upstream] vm_url` is configured but the VM
+  query failed (unreachable, non-2xx, or malformed response).
+  Retry-safe: no evaluation row is written.
 
 ### Switching modes
 
@@ -440,9 +462,15 @@ measurements into the candidate scoring.
 ## Running Evaluate
 
 Evaluate is manual. Finish a campaign, press **Evaluate**, and the
-scoring runs against every measurement attributed to the campaign.
-The result is a single row in `campaign_evaluations`, overwritten on
-every re-evaluate — no history, no audit trail.
+scoring runs against the campaign's attributed measurements plus —
+when `[upstream] vm_url` is configured — any agent→agent pair the
+campaign didn't cover itself, pulled from VictoriaMetrics
+continuous-mesh data at evaluate time.
+
+Each call appends a fresh row to `campaign_evaluations` (with
+per-candidate and per-pair rows in the child tables); older rows
+stay immutable. `GET /api/campaigns/{id}/evaluation` always returns
+the latest.
 
 ## History
 
@@ -519,8 +547,8 @@ Per-campaign parameters exposed in the composer:
 - `probe_count_detail` — probes per detail re-run (default 250).
 - `timeout_ms` — per-probe timeout (default 2000).
 - `probe_stagger_ms` — inter-probe stagger (default 100).
-- `loss_threshold_pct` — evaluator's loss-rate threshold in percent
-  (default 2.0).
+- `loss_threshold_ratio` — evaluator's loss-rate threshold as a fraction
+  (default 0.02, i.e. 2 %).
 - `stddev_weight` — weight applied to RTT stddev (default 1.0).
 - `evaluation_mode` — `diversity` or `optimization` (default
   `optimization`).

@@ -33,7 +33,7 @@ const CAMPAIGN: Campaign = {
   evaluation_mode: "diversity",
   protocol: "icmp",
   force_measurement: false,
-  loss_threshold_pct: 5,
+  loss_threshold_ratio: 0.05,
   stddev_weight: 1,
   probe_count: 60,
   probe_count_detail: 10,

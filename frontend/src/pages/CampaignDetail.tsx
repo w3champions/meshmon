@@ -23,6 +23,7 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isIllegalStateTransition, stateBadgeVariant } from "@/lib/campaign";
+import { ratioToPercentInput } from "@/lib/campaign-config";
 import {
   type CampaignDetailSearch,
   type CampaignDetailTab,
@@ -309,7 +310,7 @@ export default function CampaignDetail() {
         probe_count_detail: cloneCampaign.probe_count_detail,
         timeout_ms: cloneCampaign.timeout_ms,
         probe_stagger_ms: cloneCampaign.probe_stagger_ms,
-        loss_threshold_pct: cloneCampaign.loss_threshold_pct,
+        loss_threshold_ratio: cloneCampaign.loss_threshold_ratio,
         stddev_weight: cloneCampaign.stddev_weight,
         evaluation_mode: cloneCampaign.evaluation_mode,
         // Reset `force_measurement` — clones default to reuse-cache
@@ -532,7 +533,10 @@ export default function CampaignDetail() {
           <KnobRow label="Probe count (detail)" value={campaign.probe_count_detail} />
           <KnobRow label="Timeout (ms)" value={campaign.timeout_ms} />
           <KnobRow label="Probe stagger (ms)" value={campaign.probe_stagger_ms} />
-          <KnobRow label="Loss threshold (%)" value={campaign.loss_threshold_pct} />
+          <KnobRow
+            label="Loss threshold (%)"
+            value={ratioToPercentInput(campaign.loss_threshold_ratio)}
+          />
           <KnobRow label="Stddev weight" value={campaign.stddev_weight} />
           <KnobRow label="Evaluation mode" value={campaign.evaluation_mode} />
           <KnobRow label="Force measurement" value={campaign.force_measurement} />

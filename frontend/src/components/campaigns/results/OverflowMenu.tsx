@@ -34,8 +34,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   extractCampaignErrorCode,
+  extractCampaignErrorDetail,
   isIllegalStateTransition,
   isNoBaselinePairs,
+  isVmUpstream,
 } from "@/lib/campaign";
 import { useToastStore } from "@/stores/toast";
 
@@ -74,11 +76,21 @@ export function OverflowMenu({ campaign, evaluation }: OverflowMenuProps) {
         pushToast({ kind: "success", message: "Re-evaluation complete." });
       },
       onError: (err) => {
+        if (isVmUpstream(err)) {
+          const detail = extractCampaignErrorDetail(err);
+          pushToast({
+            kind: "error",
+            message: detail
+              ? `VictoriaMetrics couldn't be reached for baseline data (${detail}). Check service config and retry.`
+              : "VictoriaMetrics couldn't be reached for baseline data. Check service config and retry.",
+          });
+          return;
+        }
         if (isNoBaselinePairs(err)) {
           pushToast({
             kind: "error",
             message:
-              "No baseline measurements available yet — add a pair or wait for in-flight measurements to settle.",
+              "No agent-to-agent baseline measurements exist for this campaign yet. Add a pair or wait for in-flight measurements to settle, then retry.",
           });
           return;
         }

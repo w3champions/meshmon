@@ -23,8 +23,11 @@ export type KnobProtocol = ProbeProtocol | "mtr";
  * Fully-specified knob draft the composer edits as a controlled value.
  * Defaults match the backend INSERT (`crates/service/src/campaign/repo.rs`
  * lines 112-115): `probe_count=10`, `probe_count_detail=250`,
- * `timeout_ms=2000`, `probe_stagger_ms=100`, `loss_threshold_pct=2.0`,
+ * `timeout_ms=2000`, `probe_stagger_ms=100`, `loss_threshold_ratio=0.02`,
  * `stddev_weight=1.0`, `evaluation_mode='optimization'`.
+ *
+ * `loss_threshold_ratio` is a fraction in `[0, 1]` on the wire; the knob
+ * form presents the same value as percent in the UX layer.
  */
 export interface CampaignKnobs {
   title: string;
@@ -38,8 +41,8 @@ export interface CampaignKnobs {
   timeout_ms: number;
   /** Inter-probe stagger in milliseconds. */
   probe_stagger_ms: number;
-  /** Loss-rate threshold (percent) used by the evaluator. */
-  loss_threshold_pct: number;
+  /** Loss-rate threshold (fraction 0.0–1.0) used by the evaluator. */
+  loss_threshold_ratio: number;
   /** Weight applied to RTT stddev by the evaluator. */
   stddev_weight: number;
   /** Evaluation strategy. */
@@ -51,14 +54,17 @@ export interface CampaignKnobs {
 /**
  * Min/max clamps for numeric knobs. The lower bound is 1 for everything
  * but `probe_stagger_ms` (0 is legitimate — dispatch with no stagger)
- * and `loss_threshold_pct` / `stddev_weight` (both accept 0).
+ * and `loss_threshold_ratio` / `stddev_weight` (both accept 0).
+ *
+ * `loss_threshold_ratio` is clamped in ratio units (0.0–1.0); the composer
+ * input is percent-facing and converts at the form boundary.
  */
 export const KNOB_BOUNDS: Record<
   | "probe_count"
   | "probe_count_detail"
   | "timeout_ms"
   | "probe_stagger_ms"
-  | "loss_threshold_pct"
+  | "loss_threshold_ratio"
   | "stddev_weight",
   { min: number; max: number }
 > = {
@@ -66,7 +72,7 @@ export const KNOB_BOUNDS: Record<
   probe_count_detail: { min: 1, max: 10000 },
   timeout_ms: { min: 100, max: 60000 },
   probe_stagger_ms: { min: 0, max: 60000 },
-  loss_threshold_pct: { min: 0, max: 100 },
+  loss_threshold_ratio: { min: 0, max: 1 },
   stddev_weight: { min: 0, max: 10 },
 };
 
@@ -82,7 +88,7 @@ export const DEFAULT_KNOBS: CampaignKnobs = {
   probe_count_detail: 250,
   timeout_ms: 2000,
   probe_stagger_ms: 100,
-  loss_threshold_pct: 2.0,
+  loss_threshold_ratio: 0.02,
   stddev_weight: 1.0,
   evaluation_mode: "optimization",
   force_measurement: false,
@@ -99,4 +105,13 @@ export function clampKnob(key: keyof typeof KNOB_BOUNDS, value: number, fallback
   if (value < min) return min;
   if (value > max) return max;
   return value;
+}
+
+/**
+ * Render a ratio knob as a percent number suitable for an `<input type="number">`
+ * value. Rounds to four decimals so float-multiplication artefacts
+ * (`0.075 * 100 → 7.500000000000001`) never leak into the rendered form.
+ */
+export function ratioToPercentInput(ratio: number): number {
+  return Math.round(ratio * 1_000_000) / 10_000;
 }

@@ -12,30 +12,52 @@ but is exercised only by transport-level integration tests.
 request knobs. `T = req.timeout_ms`, `S = req.probe_stagger_ms`,
 `N = req.probe_count.max(1)`.
 
-| Kind       | Protocol | `max_rounds` | `min/max_round_duration` | `read_timeout` | `grace`   | TTL      | `port_direction`  | `trace_identifier`     |
-|------------|----------|-------------:|--------------------------|----------------|-----------|----------|-------------------|------------------------|
-| `LATENCY`  | `ICMP`   | `Some(N)`    | `S ms`                   | `T ms`         | `500 ms`  | `1..=32` | default           | `Some(next_trace_id())`|
-| `LATENCY`  | `TCP`    | `Some(N)`    | `S ms`                   | `T ms`         | `500 ms`  | `1..=32` | `FixedDest(port)` | unset                  |
-| `LATENCY`  | `UDP`    | `Some(N)`    | `S ms`                   | `T ms`         | `500 ms`  | `1..=32` | `FixedDest(port)` | unset                  |
-| `MTR` any  | —        | `Some(1)`    | `0 ms` / `30 s`          | `30 s`         | `500 ms`  | `1..=32` | per-protocol      | ICMP only              |
+| Kind       | Protocol | `max_rounds` | `min_round_duration` | `max_round_duration` | `read_timeout` | `grace`   | TTL      | `port_direction`  | `trace_identifier`     |
+|------------|----------|-------------:|----------------------|----------------------|----------------|-----------|----------|-------------------|------------------------|
+| `LATENCY`  | `ICMP`   | `Some(N)`    | `S ms`               | `T ms`               | `T ms`         | `500 ms`  | `1..=32` | default           | `Some(next_trace_id())`|
+| `LATENCY`  | `TCP`    | `Some(N)`    | `S ms`               | `T ms`               | `T ms`         | `500 ms`  | `1..=32` | `FixedDest(port)` | unset                  |
+| `LATENCY`  | `UDP`    | `Some(N)`    | `S ms`               | `T ms`               | `T ms`         | `500 ms`  | `1..=32` | `FixedDest(port)` | unset                  |
+| `MTR` any  | —        | `Some(1)`    | `0 ms`               | `30 s`               | `30 s`         | `500 ms`  | `1..=32` | per-protocol      | ICMP only              |
 
 MTR always pins `max_rounds(1)` — the request's `probe_count` is ignored
 — and uses a hard-coded 30-second round timeout. For LATENCY,
-`min_round_duration == max_round_duration` pins the probe cadence so
-`trippy-core` does not add internal jitter. `grace_duration` covers
+`min_round_duration = S ms` holds the cadence floor so rounds don't
+fire faster than the caller asked, and `max_round_duration = T ms`
+gives each round enough headroom to collect destination replies at WAN
+RTTs before closing. Tying `max_round_duration` to the stagger (an
+earlier wiring) ended rounds before replies landed and made trippy's
+`highest_ttl_for_round` point at whichever TTL happened to fire last,
+which in turn caused `aggregate_latency` to source counters from an
+intermediate hop on unreachable destinations. `grace_duration` covers
 late destination replies (>200 ms RTT paths) and matches the continuous
 prober.
 
 ## Loss predicates
 
-Every protocol reads `state.target_hop(State::default_flow_id())` after
-the blocking `Tracer::run()` returns and interprets the resulting counts
-per the table below.
+Every protocol reads the **destination-reached hop** after the blocking
+`Tracer::run()` returns. `aggregate_latency` and `aggregate_mtr`
+identify that hop by walking `state.hops()` and picking the one whose
+`Hop::addrs()` contains the destination IP — **not** by reading
+`State::target_hop()`, which tracks `highest_ttl_for_round` and drifts
+to an intermediate hop on unreachable destinations (turning a router's
+Time-Exceeded RTT into a fake destination reply). A reply is guaranteed
+to carry the destination IP on the destination hop because:
+
+- ICMP Echo Reply → source = destination.
+- TCP SYN/ACK or RST from the destination → source = destination.
+- UDP service reply → source = destination.
+- ICMP Port-Unreachable from the destination itself → source =
+  destination.
+
+Intermediate-hop Time-Exceeded messages carry the router's IP on the
+router's lower-TTL hop, so they cannot leak into the destination
+match. If no hop ever carries the destination IP, the probe truly did
+not reach → emit `MeasurementFailureCode::Timeout`.
 
 | Protocol | Success predicate                                                              | Silent-batch failure |
 |----------|--------------------------------------------------------------------------------|----------------------|
-| ICMP     | `total_recv > 0` within `T`                                                    | `TIMEOUT`            |
-| TCP      | Any destination reply within `T` (SYN/ACK and RST both count as `total_recv`)  | `TIMEOUT`            |
+| ICMP     | `total_recv > 0` on the destination-matched hop within `T`                     | `TIMEOUT`            |
+| TCP      | Any reply on the destination-matched hop within `T` (SYN/ACK and RST both count) | `TIMEOUT`          |
 | UDP      | Destination reply or ICMP Port-Unreachable from the destination IP within `T`  | `TIMEOUT`            |
 
 ### TCP REFUSED — coverage gap
@@ -57,16 +79,19 @@ restructuring this module.
 
 Single-round MTR. `aggregate_mtr` walks `[1..=target_reached_ttl]`:
 
-- `target_reached_ttl = target_hop.ttl()` when the destination
-  responded, otherwise the highest responsive TTL in the snapshot; a
-  completely silent trace surfaces as `MeasurementFailureCode::TIMEOUT`
-  rather than an empty MTR result.
+- `target_reached_ttl` is the TTL of the hop whose `addrs()` contains
+  the destination IP. If no hop saw the destination, it falls back to
+  the highest responsive TTL in the snapshot. A completely silent
+  trace surfaces as `MeasurementFailureCode::TIMEOUT` rather than an
+  empty MTR result. The destination-IP match is the same spec §4.3
+  signal used by `aggregate_latency` — avoids `State::target_hop()`
+  drift on unreachable targets.
 - Each responsive TTL becomes one `HopSummary`: `position = ttl`,
   `observed_ips` carries one `HopIp` per unique `Hop::addrs()` entry at
   `frequency = 1.0`, `avg_rtt_micros` comes from `Hop::best_ms()`,
-  `stddev_rtt_micros = 0` (single probe), `loss_pct = 0`.
+  `stddev_rtt_micros = 0` (single probe), `loss_ratio = 0`.
 - Each silent TTL pads with `observed_ips: []`, zero RTT, and
-  `loss_pct = 1.0`.
+  `loss_ratio = 1.0`.
 
 ## Cancellation
 

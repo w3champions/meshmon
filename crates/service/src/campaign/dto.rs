@@ -9,7 +9,8 @@
 //! rendered as a bare IP string).
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, PairResolutionState, PairRow, ProbeProtocol,
+    CampaignRow, CampaignState, DirectSource, EvaluationMode, PairResolutionState, PairRow,
+    ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -50,8 +51,8 @@ pub struct CampaignDto {
     /// When `true`, the scheduler forces a fresh measurement instead of
     /// reusing a matching row from the 24 h window.
     pub force_measurement: bool,
-    /// Loss-rate threshold (percent) used by the evaluator.
-    pub loss_threshold_pct: f32,
+    /// Loss-rate threshold (fraction 0.0–1.0) used by the evaluator.
+    pub loss_threshold_ratio: f32,
     /// Weight applied to RTT stddev by the evaluator.
     pub stddev_weight: f32,
     /// Evaluation strategy.
@@ -91,7 +92,7 @@ impl From<CampaignRow> for CampaignDto {
             timeout_ms: r.timeout_ms,
             probe_stagger_ms: r.probe_stagger_ms,
             force_measurement: r.force_measurement,
-            loss_threshold_pct: r.loss_threshold_pct,
+            loss_threshold_ratio: r.loss_threshold_ratio,
             stddev_weight: r.stddev_weight,
             evaluation_mode: r.evaluation_mode,
             created_by: r.created_by,
@@ -136,9 +137,9 @@ pub struct CreateCampaignRequest {
     /// Optional inter-probe stagger (ms).
     #[serde(default)]
     pub probe_stagger_ms: Option<i32>,
-    /// Optional loss-rate threshold for the evaluator.
+    /// Optional loss-rate threshold for the evaluator (fraction 0.0–1.0).
     #[serde(default)]
-    pub loss_threshold_pct: Option<f32>,
+    pub loss_threshold_ratio: Option<f32>,
     /// Optional RTT-stddev weight for the evaluator.
     #[serde(default)]
     pub stddev_weight: Option<f32>,
@@ -160,9 +161,9 @@ pub struct PatchCampaignRequest {
     /// Replacement notes (when present).
     #[serde(default)]
     pub notes: Option<String>,
-    /// Replacement loss-rate threshold.
+    /// Replacement loss-rate threshold (fraction 0.0–1.0).
     #[serde(default)]
-    pub loss_threshold_pct: Option<f32>,
+    pub loss_threshold_ratio: Option<f32>,
     /// Replacement RTT-stddev weight.
     #[serde(default)]
     pub stddev_weight: Option<f32>,
@@ -340,18 +341,22 @@ where
 
 /// Wire shape for `GET /api/campaigns/{id}/evaluation`.
 ///
-/// Also the exact JSON persisted into `campaign_evaluations.results` —
-/// the evaluator serialises [`EvaluationResultsDto`] directly into the
-/// JSONB column so the read handler can hand the stored document back
-/// to the client without rehydrating through a domain model.
+/// Assembled from the relational `campaign_evaluations` parent row
+/// plus its child tables (`campaign_evaluation_candidates`,
+/// `campaign_evaluation_pair_details`,
+/// `campaign_evaluation_unqualified_reasons`) by
+/// [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
+/// The read-path joins in Rust so the wire DTO stays unchanged
+/// compared to the pre-T54-02 JSONB layout, modulo the new
+/// `direct_source` field on every `pair_detail`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationDto {
     /// Owning campaign.
     pub campaign_id: Uuid,
     /// When the evaluator produced this result set.
     pub evaluated_at: DateTime<Utc>,
-    /// Loss-rate threshold (percent) that was applied.
-    pub loss_threshold_pct: f32,
+    /// Loss-rate threshold (fraction 0.0–1.0) that was applied.
+    pub loss_threshold_ratio: f32,
     /// Weight applied to RTT stddev during scoring.
     pub stddev_weight: f32,
     /// Evaluation strategy that produced this result.
@@ -373,7 +378,9 @@ pub struct EvaluationDto {
     pub results: EvaluationResultsDto,
 }
 
-/// Candidate breakdown persisted in `campaign_evaluations.results`.
+/// Candidate breakdown assembled from
+/// `campaign_evaluation_candidates` and
+/// `campaign_evaluation_unqualified_reasons`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationResultsDto {
     /// Per-candidate scoring rows, ordered by composite score.
@@ -417,10 +424,10 @@ pub struct EvaluationCandidateDto {
     /// the direct A→B baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_improvement_ms: Option<f32>,
-    /// Average compound loss (percent) across transit triples that
-    /// cleared the loss gate during scoring.
+    /// Average compound loss (fraction 0.0–1.0) across transit triples
+    /// that cleared the loss gate during scoring.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub avg_loss_pct: Option<f32>,
+    pub avg_loss_ratio: Option<f32>,
     /// Composite score `(pairs_improved / baseline_pair_count) ×
     /// avg_improvement_ms`; higher is better. Candidates are returned
     /// in descending composite-score order.
@@ -446,14 +453,22 @@ pub struct EvaluationPairDetailDto {
     pub direct_rtt_ms: f32,
     /// Direct A→B RTT stddev (ms).
     pub direct_stddev_ms: f32,
-    /// Direct A→B observed loss (percent).
-    pub direct_loss_pct: f32,
+    /// Direct A→B observed loss (fraction 0.0–1.0).
+    pub direct_loss_ratio: f32,
+    /// Provenance of the direct A→B baseline figures:
+    /// [`DirectSource::ActiveProbe`] for rows that came from the
+    /// campaign's own `measurements`, or [`DirectSource::VmContinuous`]
+    /// when the evaluator pulled the A→B baseline from VictoriaMetrics
+    /// continuous-mesh data at `/evaluate` time. Transit legs (A→X,
+    /// X→B) are always active-probe; only the direct A→B baseline can
+    /// be VM-sourced.
+    pub direct_source: DirectSource,
     /// Composed A→X→B transit RTT (ms).
     pub transit_rtt_ms: f32,
     /// Composed A→X→B transit RTT stddev (ms).
     pub transit_stddev_ms: f32,
-    /// Composed A→X→B transit observed loss (percent).
-    pub transit_loss_pct: f32,
+    /// Composed A→X→B transit observed loss (fraction 0.0–1.0).
+    pub transit_loss_ratio: f32,
     /// `direct_rtt − transit_rtt − (transit_stddev_penalty −
     /// direct_stddev_penalty)`; positive means the transit beats the
     /// direct A→B baseline by that many ms after stddev-penalty
@@ -522,7 +537,7 @@ mod tests {
         let v = EvaluationDto {
             campaign_id: Uuid::nil(),
             evaluated_at: chrono::Utc::now(),
-            loss_threshold_pct: 2.0,
+            loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             evaluation_mode: EvaluationMode::Optimization,
             baseline_pair_count: 24,

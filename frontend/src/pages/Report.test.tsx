@@ -138,7 +138,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -155,7 +155,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 2000,
-          loss_pct: 0.05,
+          loss_ratio: 0.05,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.9.99", freq: 1 }],
         },
@@ -250,7 +250,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
         },
@@ -311,7 +311,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -328,7 +328,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 2000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -403,7 +403,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 2000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -475,7 +475,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 2000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -554,14 +554,14 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
         {
           position: 4,
           avg_rtt_micros: 4000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.40", freq: 1 }],
         },
@@ -580,7 +580,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -657,7 +657,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.10", freq: 1 }],
         },
@@ -721,7 +721,7 @@ describe("Report page", () => {
         {
           position: 1,
           avg_rtt_micros: 1000,
-          loss_pct: 0,
+          loss_ratio: 0,
           stddev_rtt_micros: 0,
           observed_ips: [{ ip: "10.0.0.1", freq: 1 }],
         },

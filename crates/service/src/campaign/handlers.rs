@@ -9,25 +9,47 @@
 
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
-    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
-    EvaluationResultsDto, ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest,
-    PreviewDispatchResponse,
+    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto, ForcePairRequest,
+    PairDto, PairListQuery, PatchCampaignRequest, PreviewDispatchResponse,
 };
-use super::eval::{self, EvalError};
-use super::model::{CampaignState, PairResolutionState};
-use super::repo::{self, CreateInput, EditInput, EvaluationRow, RepoError};
+use super::eval::{self, AttributedMeasurement, EvalError};
+use super::evaluation_repo;
+use super::model::{CampaignState, DirectSource, PairResolutionState, ProbeProtocol};
+use super::repo::{self, CreateInput, EditInput, RepoError};
 use crate::hostname::session_id_from_auth;
 use crate::hostname::stamp::bulk_hostnames_and_enqueue;
 use crate::http::auth::AuthSession;
 use crate::state::AppState;
+use crate::vm_query::{self, VmQueryError};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::time::Duration;
 use uuid::Uuid;
+
+/// Lookback window for VM continuous-mesh baselines surfaced into the
+/// evaluator at `/evaluate` time. 15 minutes matches the operator
+/// expectation of a "recent" baseline without inflating the `avg_over_time`
+/// aggregation cost — VM samples tick every ~30 s per pair.
+const VM_BASELINE_LOOKBACK: Duration = Duration::from_secs(15 * 60);
+
+/// Map a [`ProbeProtocol`] to the `protocol=` label value used by the
+/// ingestion pipeline's metrics emitter (see
+/// `ingestion::protocol_label`). Keeping the mapping local so the
+/// evaluator's VM read path does not take a dependency on the internal
+/// `meshmon_protocol::Protocol` wire enum.
+fn protocol_label(p: ProbeProtocol) -> &'static str {
+    match p {
+        ProbeProtocol::Icmp => "icmp",
+        ProbeProtocol::Tcp => "tcp",
+        ProbeProtocol::Udp => "udp",
+    }
+}
 
 /// Render a raw sqlx error as an HTTP 500 with a stable JSON body. Logs
 /// the full error server-side so we never leak sqlx-level detail to
@@ -121,7 +143,7 @@ pub async fn create(
         probe_count_detail: body.probe_count_detail,
         timeout_ms: body.timeout_ms,
         probe_stagger_ms: body.probe_stagger_ms,
-        loss_threshold_pct: body.loss_threshold_pct,
+        loss_threshold_ratio: body.loss_threshold_ratio,
         stddev_weight: body.stddev_weight,
         evaluation_mode: body.evaluation_mode,
         created_by: Some(principal.username.clone()),
@@ -268,7 +290,7 @@ pub async fn patch(
         id,
         body.title.as_deref(),
         body.notes.as_deref(),
-        body.loss_threshold_pct,
+        body.loss_threshold_ratio,
         body.stddev_weight,
         body.evaluation_mode,
     )
@@ -637,55 +659,128 @@ pub async fn preview_dispatch_count(
     }
 }
 
-/// Convert an [`EvaluationRow`] into the wire DTO.
+/// Fetch VictoriaMetrics continuous-mesh baselines for agent→agent pairs
+/// the active-probe data didn't cover and synthesize
+/// [`AttributedMeasurement`] rows carrying
+/// [`DirectSource::VmContinuous`] for use by the evaluator.
 ///
-/// The stored `results` column is owned by this service (written by
-/// [`repo::write_evaluation`] as a serialised [`EvaluationResultsDto`]),
-/// so a deserialisation failure here signals data corruption from outside
-/// the normal write path. Returns `Err` so the caller can map it to a
-/// `500 invalid_evaluation_payload` response instead of panicking a tokio
-/// worker.
-fn to_evaluation_dto(row: EvaluationRow) -> Result<EvaluationDto, serde_json::Error> {
-    let results: EvaluationResultsDto = serde_json::from_value(row.results)?;
-    Ok(EvaluationDto {
-        campaign_id: row.campaign_id,
-        evaluated_at: row.evaluated_at,
-        loss_threshold_pct: row.loss_threshold_pct,
-        stddev_weight: row.stddev_weight,
-        evaluation_mode: row.evaluation_mode,
-        baseline_pair_count: row.baseline_pair_count,
-        candidates_total: row.candidates_total,
-        candidates_good: row.candidates_good,
-        avg_improvement_ms: row.avg_improvement_ms,
-        results,
-    })
-}
+/// Returns an empty vector when:
+/// * `vm_url_opt` is `None` (silent degrade; operator sees 422 if
+///   active-probe data is also absent),
+/// * the roster is empty,
+/// * no agent→agent pair is missing from the active-probe set,
+/// * VM returned nothing usable for any missing pair.
+///
+/// Errors are propagated verbatim from [`vm_query::fetch_agent_baselines`]
+/// so the caller can map `NotConfigured` to silent skip and the remaining
+/// variants to a single 503 response.
+async fn fetch_and_synthesize_vm_baselines(
+    vm_url_opt: Option<&str>,
+    protocol: ProbeProtocol,
+    active: &[AttributedMeasurement],
+    roster: &[eval::AgentRow],
+) -> Result<Vec<AttributedMeasurement>, VmQueryError> {
+    let Some(vm_url) = vm_url_opt else {
+        return Ok(Vec::new());
+    };
+    if roster.is_empty() {
+        return Ok(Vec::new());
+    }
 
-fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Response {
-    tracing::error!(
-        %campaign_id,
-        error = %err,
-        "campaign_evaluations.results failed to deserialise"
-    );
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": "invalid_evaluation_payload" })),
+    // `covered` only counts rows with a latency value; a rtt-less row
+    // (e.g. 100 %-loss success) doesn't stop us from asking VM for a
+    // usable baseline on the same pair.
+    let covered: HashSet<(String, IpAddr)> = active
+        .iter()
+        .filter(|m| m.latency_avg_ms.is_some())
+        .map(|m| (m.source_agent_id.clone(), m.destination_ip))
+        .collect();
+
+    let missing: HashSet<(String, IpAddr)> = roster
+        .iter()
+        .flat_map(|a| {
+            roster
+                .iter()
+                .filter(move |b| a.agent_id != b.agent_id)
+                .map(move |b| (a.agent_id.clone(), b.ip))
+        })
+        .filter(|pair| !covered.contains(pair))
+        .collect();
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let roster_ids: Vec<String> = roster.iter().map(|a| a.agent_id.clone()).collect();
+    let samples = vm_query::fetch_agent_baselines(
+        vm_url,
+        &roster_ids,
+        protocol_label(protocol),
+        VM_BASELINE_LOOKBACK,
     )
-        .into_response()
+    .await?;
+
+    let ip_by_id: HashMap<&str, IpAddr> =
+        roster.iter().map(|a| (a.agent_id.as_str(), a.ip)).collect();
+
+    let mut synthesized: Vec<AttributedMeasurement> = Vec::with_capacity(samples.len());
+    for sample in &samples {
+        let Some(&target_ip) = ip_by_id.get(sample.target_agent_id.as_str()) else {
+            // VM surfaced a label we don't recognise as a roster
+            // agent (IP rebind, stale label cache, etc.). Ignore it —
+            // the evaluator only needs pairs in the current roster.
+            continue;
+        };
+        let Some(&source_ip) = ip_by_id.get(sample.source_agent_id.as_str()) else {
+            continue;
+        };
+        if source_ip == target_ip {
+            continue;
+        }
+        if !missing.contains(&(sample.source_agent_id.clone(), target_ip)) {
+            // Active-probe data already covers this pair; skip.
+            continue;
+        }
+        let Some(latency_avg_ms) = sample.latency_avg_ms else {
+            // No RTT → unusable downstream; the evaluator would short-
+            // circuit on `Some(direct_rtt)` anyway.
+            continue;
+        };
+        synthesized.push(AttributedMeasurement {
+            source_agent_id: sample.source_agent_id.clone(),
+            destination_ip: target_ip,
+            latency_avg_ms: Some(latency_avg_ms),
+            latency_stddev_ms: sample.latency_stddev_ms,
+            loss_ratio: sample.loss_ratio.unwrap_or(0.0),
+            mtr_measurement_id: None,
+            direct_source: DirectSource::VmContinuous,
+        });
+    }
+
+    Ok(synthesized)
 }
 
 /// `POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.
 ///
 /// Gated on `state IN ('completed','evaluated')`: re-running on an
 /// already-evaluated campaign is allowed so operators can retune
-/// `loss_threshold_pct` / `stddev_weight` without editing the row. When
+/// `loss_threshold_ratio` / `stddev_weight` without editing the row. When
 /// the campaign was in `completed`, a best-effort transition flips it to
 /// `evaluated`; a concurrent transition that loses the gate still leaves
 /// the evaluation row written and the SSE event fired.
 ///
-/// Returns 422 (`no_baseline_pairs`) when the evaluator finds no
-/// agent→agent baseline — the campaign must include at least one pair
-/// whose destination IP belongs to a registered agent.
+/// Before the evaluator runs, the handler augments the active-probe
+/// baseline set with VictoriaMetrics continuous-mesh samples for every
+/// agent→agent pair the campaign's `measurements` rows didn't already
+/// cover. VM-sourced rows carry `direct_source='vm_continuous'` on the
+/// resulting `campaign_evaluation_pair_details`. When `upstream.vm_url`
+/// isn't configured the handler silently falls back to active-probe
+/// data only.
+///
+/// Returns:
+/// * 422 (`no_baseline_pairs`) — no agent→agent baseline available,
+///   even after the VM fallback (or VM wasn't configured).
+/// * 503 (`vm_upstream`) — VM was configured but the query failed
+///   (unreachable, non-2xx, malformed response).
 #[utoipa::path(
     post,
     path = "/api/campaigns/{id}/evaluate",
@@ -697,6 +792,7 @@ fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Resp
         (status = 404, description = "Campaign not found", body = ErrorEnvelope),
         (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
         (status = 422, description = "No baseline (agent→agent) pairs", body = ErrorEnvelope),
+        (status = 503, description = "VictoriaMetrics upstream unreachable", body = ErrorEnvelope),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
 )]
@@ -723,7 +819,7 @@ pub async fn evaluate(
             .into_response();
     }
 
-    let inputs = match repo::measurements_for_campaign(&state.pool, id).await {
+    let mut inputs = match repo::measurements_for_campaign(&state.pool, id).await {
         Ok(i) => i,
         Err(e) => return repo_error("campaign::evaluate::inputs", e),
     };
@@ -732,9 +828,75 @@ pub async fn evaluate(
     // cannot desync the scored knobs from the persisted evaluation row.
     // `campaign` stays in use only for its `state` gate above; it is no
     // longer the source of knob values.
-    let loss_threshold_pct = inputs.loss_threshold_pct;
+    let loss_threshold_ratio = inputs.loss_threshold_ratio;
     let stddev_weight = inputs.stddev_weight;
     let evaluation_mode = inputs.mode;
+
+    // T54-03: layer VM continuous-mesh baselines on top of the active-
+    // probe rows for agent→agent pairs the campaign did not cover.
+    // `fetch_and_synthesize_vm_baselines` returns the rows to prepend so
+    // active-probe data wins on `HashMap::insert` (last write wins; see
+    // `eval::evaluate`'s `by_pair` loop).
+    let vm_url_opt = state
+        .config()
+        .upstream
+        .vm_url
+        .as_deref()
+        .map(|u| u.trim_end_matches('/').to_owned());
+    match fetch_and_synthesize_vm_baselines(
+        vm_url_opt.as_deref(),
+        campaign.protocol,
+        &inputs.measurements,
+        &inputs.agents,
+    )
+    .await
+    {
+        Ok(synthesized) => {
+            if !synthesized.is_empty() {
+                let mut combined =
+                    Vec::with_capacity(synthesized.len() + inputs.measurements.len());
+                // Synthesized FIRST so the `by_pair` loop in the evaluator
+                // overwrites any VM row with a matching active-probe row —
+                // "active wins over VM" when both are present.
+                combined.extend(synthesized);
+                combined.append(&mut inputs.measurements);
+                inputs.measurements = combined;
+            }
+        }
+        Err(VmQueryError::NotConfigured) => {
+            // `fetch_and_synthesize_vm_baselines` short-circuits to
+            // `Ok(Vec::new())` when `vm_url_opt` is `None` and
+            // `vm_query::fetch_agent_baselines` itself never produces
+            // `NotConfigured` (see `crates/service/src/vm_query.rs`).
+            // Panic so any future refactor that lets this variant
+            // escape fails loudly in tests rather than being silently
+            // dropped and masking a regression.
+            unreachable!(
+                "VmQueryError::NotConfigured is structurally unreachable here: \
+                 caller gates on Some(vm_url) before dispatching the fetch"
+            );
+        }
+        Err(
+            e @ (VmQueryError::UpstreamStatus(_)
+            | VmQueryError::Request(_)
+            | VmQueryError::MalformedResponse(_)),
+        ) => {
+            tracing::warn!(
+                campaign_id = %id,
+                error = %e,
+                "evaluate: VM baseline fetch failed; surfacing 503 vm_upstream"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "vm_upstream",
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let outputs = match eval::evaluate(inputs) {
         Ok(o) => o,
         Err(EvalError::NoBaseline) => {
@@ -746,22 +908,42 @@ pub async fn evaluate(
         }
     };
 
-    // `write_evaluation` writes the evaluation row AND promotes
-    // `completed → evaluated` in the same transaction. A crash between
-    // the UPSERT and the state flip would otherwise leave the campaign
-    // stuck in `completed` with a written evaluation row (inconsistent).
-    let row = match repo::write_evaluation(
+    // `persist_evaluation` writes the parent `campaign_evaluations`
+    // row and every child `campaign_evaluation_{candidates,
+    // pair_details, unqualified_reasons}` row inside one transaction,
+    // then promotes `completed → evaluated`. A crash between the
+    // insert and the state flip would otherwise leave the campaign
+    // stuck in `completed` with a written evaluation history row —
+    // inconsistent for UI consumers keyed off `state`.
+    if let Err(e) = evaluation_repo::persist_evaluation(
         &state.pool,
         id,
         &outputs,
-        loss_threshold_pct,
+        loss_threshold_ratio,
         stddev_weight,
         evaluation_mode,
     )
     .await
     {
-        Ok(r) => r,
-        Err(e) => return repo_error("campaign::evaluate::write", e),
+        return repo_error("campaign::evaluate::persist", e);
+    }
+
+    // Re-read the latest row so the response carries the exact
+    // relational shape the read-path assembles (ordering, composite
+    // score recompute, hostname stamp surface). The cost is one extra
+    // index lookup; the alternative is threading the just-written
+    // parent row through the orchestrator, duplicating assembly
+    // logic.
+    let mut dto = match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
+        Ok(Some(dto)) => dto,
+        Ok(None) => {
+            tracing::error!(
+                %id,
+                "campaign::evaluate: freshly written row missing on read-back"
+            );
+            return db_error("campaign::evaluate::readback", sqlx::Error::RowNotFound);
+        }
+        Err(e) => return db_error("campaign::evaluate::readback", e),
     };
 
     // No in-process broker publish here. The `campaign_evaluations_notify`
@@ -770,14 +952,9 @@ pub async fn evaluate(
     // instance's and its peers') — a direct publish here would cause
     // same-instance clients to receive a duplicate `evaluated` frame.
 
-    match to_evaluation_dto(row) {
-        Ok(mut dto) => {
-            let session = session_id_from_auth(&auth);
-            stamp_evaluation_dto(&state, &session, &mut dto).await;
-            (StatusCode::OK, Json(dto)).into_response()
-        }
-        Err(e) => invalid_evaluation_payload(id, e),
-    }
+    let session = session_id_from_auth(&auth);
+    stamp_evaluation_dto(&state, &session, &mut dto).await;
+    (StatusCode::OK, Json(dto)).into_response()
 }
 
 /// `GET /api/campaigns/{id}/evaluation` — read-through on the persisted
@@ -804,21 +981,18 @@ pub async fn get_evaluation(
     auth: AuthSession,
     Path(id): Path<Uuid>,
 ) -> Response {
-    match repo::read_evaluation(&state.pool, id).await {
-        Ok(Some(row)) => match to_evaluation_dto(row) {
-            Ok(mut dto) => {
-                let session = session_id_from_auth(&auth);
-                stamp_evaluation_dto(&state, &session, &mut dto).await;
-                (StatusCode::OK, Json(dto)).into_response()
-            }
-            Err(e) => invalid_evaluation_payload(id, e),
-        },
+    match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
+        Ok(Some(mut dto)) => {
+            let session = session_id_from_auth(&auth);
+            stamp_evaluation_dto(&state, &session, &mut dto).await;
+            (StatusCode::OK, Json(dto)).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "not_evaluated" })),
         )
             .into_response(),
-        Err(e) => repo_error("campaign::get_evaluation", e),
+        Err(e) => db_error("campaign::get_evaluation", e),
     }
 }
 
@@ -922,11 +1096,11 @@ pub async fn detail(
                 )
                     .into_response();
             }
-            let row = match repo::read_evaluation(&state.pool, id).await {
+            let dto = match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
                 Ok(Some(r)) => r,
                 Ok(None) => {
                     // Defensive: `state=evaluated` implies a row exists
-                    // (write_evaluation is the only writer that sets
+                    // (persist_evaluation is the only writer that sets
                     // that state). Reaching this arm would mean a
                     // concurrent DELETE raced the read; treat as
                     // missing evaluation.
@@ -936,25 +1110,15 @@ pub async fn detail(
                     )
                         .into_response();
                 }
-                Err(e) => return repo_error("campaign::detail::eval", e),
-            };
-            let results: EvaluationResultsDto = match serde_json::from_value(row.results) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        campaign_id = %id,
-                        "campaign::detail: stored evaluation row failed to deserialise"
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "invalid_evaluation_payload" })),
-                    )
-                        .into_response();
-                }
+                Err(e) => return db_error("campaign::detail::eval", e),
             };
             let mut acc: Vec<(String, IpAddr)> = Vec::new();
-            for cand in results.candidates.iter().filter(|c| c.pairs_improved >= 1) {
+            for cand in dto
+                .results
+                .candidates
+                .iter()
+                .filter(|c| c.pairs_improved >= 1)
+            {
                 let Ok(transit_ip) = IpAddr::from_str(&cand.destination_ip) else {
                     tracing::warn!(
                         campaign_id = %id,

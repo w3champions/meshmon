@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_evaluation_unqualified_reasons\n                  (evaluation_id, destination_ip, reason)\n               VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Inet",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4807ae8537358cd0cf4d3cea99b8f38c30aa5a1a9b9f02ee7367d00eda06cc13"
+}

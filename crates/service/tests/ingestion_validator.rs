@@ -193,11 +193,11 @@ fn good_snapshot() -> RouteSnapshotRequest {
             }],
             avg_rtt_micros: 500,
             stddev_rtt_micros: 50,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
         }],
         path_summary: Some(PathSummary {
             avg_rtt_micros: 500,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
             hop_count: 1,
         }),
     }
@@ -248,7 +248,7 @@ fn snapshot_hop_frequency_out_of_range_rejected() {
 #[test]
 fn snapshot_hop_loss_out_of_range_rejected() {
     let mut s = good_snapshot();
-    s.hops[0].loss_pct = 1.1;
+    s.hops[0].loss_ratio = 1.1;
     assert!(matches!(
         validate_snapshot(s).unwrap_err(),
         ValidationError::HopLossOutOfRange { .. }
@@ -267,7 +267,7 @@ fn snapshot_too_many_hops_rejected() {
             }],
             avg_rtt_micros: 100,
             stddev_rtt_micros: 0,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
         })
         .collect();
     s.path_summary.as_mut().unwrap().hop_count = s.hops.len() as u32;

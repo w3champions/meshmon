@@ -401,7 +401,7 @@ Campaign header row. Columns (selected):
 | `timeout_ms` | `INTEGER` | Per-probe timeout, default 2000. |
 | `probe_stagger_ms` | `INTEGER` | Inter-probe stagger, default 100. |
 | `force_measurement` | `BOOLEAN` | When `true`, reuse lookup is skipped. |
-| `loss_threshold_pct`, `stddev_weight` | `REAL` | Evaluator knobs. |
+| `loss_threshold_ratio`, `stddev_weight` | `REAL` | Evaluator knobs. |
 | `evaluation_mode` | `evaluation_mode` enum | `diversity` or `optimization`. |
 | `created_by`, `created_at` | `TEXT` / `TIMESTAMPTZ` | Audit. |
 | `started_at`, `stopped_at`, `completed_at`, `evaluated_at` | `TIMESTAMPTZ` | Lifecycle timestamps. |
@@ -460,7 +460,7 @@ settled from.
 | `probe_count` | `SMALLINT` | Samples that went into this measurement. |
 | `measured_at` | `TIMESTAMPTZ` | `now()` default. |
 | `latency_min_ms`, `latency_avg_ms`, `latency_median_ms`, `latency_p95_ms`, `latency_max_ms`, `latency_stddev_ms` | `REAL` | RTT aggregates. |
-| `loss_pct` | `REAL` | Loss percentage. |
+| `loss_ratio` | `REAL` | Loss fraction (0.0–1.0). |
 | `kind` | `measurement_kind` enum | `campaign` default; `detail_ping` / `detail_mtr` for UI re-runs. |
 | `mtr_id` | `BIGINT` | Nullable FK → `mtr_traces(id)`; set on MTR settlements. |
 
@@ -477,7 +477,7 @@ consumes both paths without a second deserialiser.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `BIGSERIAL` | Primary key. |
-| `hops` | `JSONB` | Array of `{position, observed_ips, avg_rtt_micros, stddev_rtt_micros, loss_pct}`. |
+| `hops` | `JSONB` | Array of `{position, observed_ips, avg_rtt_micros, stddev_rtt_micros, loss_ratio}`. |
 | `captured_at` | `TIMESTAMPTZ` | `now()` default — when the trace was persisted. |
 
 The writer inserts the trace first, captures the ID, then inserts the
@@ -804,7 +804,7 @@ pins the probe cadence so trippy emits no internal jitter.
   the per-probe `read_timeout`; silent batches surface as
   `MeasurementFailureCode::TIMEOUT`. Per-probe RTTs come from
   `target_hop.samples()`; the `MeasurementSummary` carries
-  min / avg / median / p95 / max / stddev and `loss_pct`.
+  min / avg / median / p95 / max / stddev and `loss_ratio`.
 - **TCP LATENCY** — any destination reply counts as success.
   Trippy 0.13 collapses SYN/ACK and RST replies into
   `total_recv` at the hop level and exposes no per-probe distinction
@@ -821,8 +821,8 @@ pins the probe cadence so trippy emits no internal jitter.
   `[1..=target_reached_ttl]`: every hop with `total_recv > 0`
   contributes one `HopSummary` with its observed IPs (frequency 1.0
   per unique address, single-round), `avg_rtt_micros` derived from
-  `best_ms`, `stddev_rtt_micros = 0`, and `loss_pct = 0`. Silent TTLs
-  pad with `observed_ips: []`, `loss_pct = 1.0`, and zero RTT. A
+  `best_ms`, `stddev_rtt_micros = 0`, and `loss_ratio = 0`. Silent TTLs
+  pad with `observed_ips: []`, `loss_ratio = 1.0`, and zero RTT. A
   completely silent trace surfaces as `MeasurementFailureCode::TIMEOUT`
   instead of a zero-length MTR result so the writer's `last_error`
   vocabulary stays consistent with LATENCY paths.
@@ -1028,27 +1028,66 @@ metric aggregates do not require a `.sqlx/` regeneration.
 
 Evaluation answers "which destination X improves A → X → B over A → B?"
 using the measurements attributed to a campaign (joined via
-`campaign_pairs.measurement_id`). The algorithm runs entirely
-in-process; no worker, no queue.
+`campaign_pairs.measurement_id`) plus, when configured, a VictoriaMetrics
+continuous-mesh fallback for agent→agent baseline pairs the campaign
+itself did not cover. The algorithm runs entirely in-process; no worker,
+no queue.
+
+### Baselines
+
+The `/evaluate` handler assembles its baseline set from two sources:
+
+- **Active probe.** `repo::measurements_for_campaign` joins
+  `campaign_pairs` to `measurements` (excluding `detail_ping` /
+  `detail_mtr` kinds) and stamps every resulting `AttributedMeasurement`
+  with `DirectSource::ActiveProbe`.
+- **VictoriaMetrics continuous mesh.** For every agent→agent pair in
+  the campaign's roster that the active-probe set did not cover, the
+  handler calls `vm_query::fetch_agent_baselines` against
+  `[upstream] vm_url` and synthesizes in-memory `AttributedMeasurement`
+  rows stamped `DirectSource::VmContinuous`. These rows are never
+  written to `measurements`; they only live inside the `/evaluate`
+  handler's in-memory input for the current call.
+
+Active-probe always wins when both sources cover the same
+`(source_agent_id, destination_ip)`: the synthesis step pre-filters
+against the active-probe cover set, and the evaluator's `by_pair`
+`HashMap::insert` loop additionally orders synthesized rows first and
+active-probe rows last, so any residual overlap resolves last-write-wins
+in favour of the active probe.
+
+`[upstream] vm_url` is optional:
+
+- Unset → the VM fetch is skipped silently and the evaluator runs on
+  active-probe data only. Operators still see 422 `no_baseline_pairs`
+  when that set is empty.
+- Set but unreachable / non-2xx / malformed → the handler returns
+  503 `vm_upstream`; nothing is persisted.
+
+`vm_query.rs` two-stage-escapes agent-id label values before embedding
+them in the PromQL selector, and agent IDs are validated at register
+time against `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
 ### Result aggregation
 
 The evaluator builds an in-memory matrix keyed by
-`(source_agent_id, destination_ip)` where the value is the attributed
-`measurements` row. Only `campaign_pairs.kind = 'campaign'` rows feed
-the matrix — detail pairs are excluded so their high-fidelity
-measurements never poison the baseline.
+`(source_agent_id, destination_ip)` where the value is an
+`AttributedMeasurement`. Only `campaign_pairs.kind = 'campaign'` rows
+feed the active-probe side of the matrix — detail pairs are excluded so
+their high-fidelity measurements never poison the baseline.
 
 For every `(A, B)` where both endpoints are agents and a direct
-`A → B` measurement exists, the evaluator considers every candidate `X`
-with measurements `A → X` and `B → X` (the latter approximates
-`X → B` under the symmetric-latency assumption).
+`A → B` baseline exists (active-probe or VM-continuous), the evaluator
+considers every candidate `X` with measurements `A → X` and `B → X`
+(the latter approximates `X → B` under the symmetric-latency
+assumption). Transit legs (`A → X` and `X → B`) are always active-probe;
+only the direct `A → B` baseline can be VM-sourced.
 
 A triple `(A, B, X)` qualifies iff:
 
 1. All three measurements exist and have non-null `latency_avg_ms`.
-2. `compound_loss_pct ≤ loss_threshold_pct` AND
-   `direct_loss_pct ≤ loss_threshold_pct`.
+2. `compound_loss_ratio ≤ loss_threshold_ratio` AND
+   `direct_loss_ratio ≤ loss_threshold_ratio`.
 3. The mode-specific latency bar:
    - **diversity** —
      `transit_rtt + stddev_penalty < direct_rtt + direct_stddev_penalty`.
@@ -1057,12 +1096,72 @@ A triple `(A, B, X)` qualifies iff:
      `Y → B` measurements exist in the campaign.
 
 Per-candidate aggregates: `pairs_improved`, `avg_improvement_ms`,
-`avg_loss_pct`,
+`avg_loss_ratio`,
 `composite_score = (pairs_improved / total_baseline_pairs) × avg_improvement_ms`.
 
-Results serialise into a single JSONB column on
-`campaign_evaluations.results`. The row is upserted — one evaluation
-per campaign, overwritten on every re-evaluate.
+### Evaluation storage
+
+Each `/evaluate` call appends a fresh row to `campaign_evaluations`;
+the per-campaign UNIQUE is gone so history accumulates, and
+`GET /api/campaigns/{id}/evaluation` picks the latest via
+`(campaign_id, evaluated_at DESC)`. Older rows are immutable — only
+deletion via the parent campaign cascade removes them.
+
+The row set is relational. Four tables, all chained to
+`measurement_campaigns` by ON DELETE CASCADE:
+
+- **`campaign_evaluations`** — parent row. Holds the run's metadata
+  (`evaluated_at`, `evaluation_mode`) and the thresholds that were
+  applied (`loss_threshold_ratio`, `stddev_weight`), plus aggregate
+  counters (`baseline_pair_count`, `candidates_total`,
+  `candidates_good`, `avg_improvement_ms`). PK `id UUID`; FK
+  `campaign_id → measurement_campaigns(id) ON DELETE CASCADE`. Index
+  `(campaign_id, evaluated_at DESC)` drives the latest-row lookup.
+- **`campaign_evaluation_candidates`** — one row per transit
+  destination scored by the evaluation. Keyed by
+  `(evaluation_id, destination_ip)`; carries catalogue-join fields
+  (`display_name`, `city`, `country_code`, `asn`, `network_operator`),
+  the `is_mesh_member` flag, and the per-candidate aggregates
+  `pairs_improved`, `pairs_total_considered`, `avg_improvement_ms`.
+- **`campaign_evaluation_pair_details`** — one row per `(A, B, X)`
+  triple. Keyed by
+  `(evaluation_id, candidate_destination_ip, source_agent_id,
+  destination_agent_id)` with FK
+  `(evaluation_id, candidate_destination_ip) → campaign_evaluation_candidates
+  ON DELETE CASCADE`. Columns split into three groups:
+  - Direct baseline: `direct_rtt_ms`, `direct_stddev_ms`,
+    `direct_loss_ratio`, `direct_source` (enum
+    `pair_detail_direct_source` — `active_probe` | `vm_continuous`).
+  - Transit composition: `transit_rtt_ms`, `transit_stddev_ms`,
+    `transit_loss_ratio`, `improvement_ms`, `qualifies`.
+  - Optional FKs into `measurements(id)` for the A→X and X→B MTR runs
+    (`mtr_measurement_id_ax`, `mtr_measurement_id_xb`), both
+    `ON DELETE SET NULL`.
+- **`campaign_evaluation_unqualified_reasons`** — one row per rejected
+  destination. Keyed by `(evaluation_id, destination_ip)` with a
+  free-text `reason` column the UI renders verbatim.
+
+All three child tables cascade from `campaign_evaluations`, which in
+turn cascades from `measurement_campaigns`, so deleting a campaign
+tears down its entire evaluation history.
+
+`evaluation_repo::persist_evaluation` writes the parent + all three
+child tables inside a single transaction and, when the campaign was in
+`completed`, promotes it to `evaluated` in the same tx.
+`evaluation_repo::latest_evaluation_for_campaign` is the read path;
+it joins the four tables and assembles the wire
+`EvaluationDto` — the DTO shape is otherwise unchanged from the
+pre-refactor JSONB layout, modulo the new `direct_source` field on
+every `pair_detail`.
+
+### Evaluator error envelope
+
+| Condition | Status | `error` code |
+|---|---|---|
+| Campaign not in `completed` / `evaluated` | 409 | `illegal_state_transition` |
+| No agent→agent baseline pairs (active-probe empty and VM empty or unconfigured) | 422 | `no_baseline_pairs` |
+| `[upstream] vm_url` set but VM query failed (unreachable, non-2xx, malformed) | 503 | `vm_upstream` |
+| Campaign id not found | 404 | `not_found` |
 
 ### Detail measurements
 

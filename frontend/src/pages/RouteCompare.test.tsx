@@ -46,7 +46,7 @@ function hop(position: number, ip: string, rttUs: number) {
     observed_ips: [{ ip, freq: 1 }],
     avg_rtt_micros: rttUs,
     stddev_rtt_micros: 100,
-    loss_pct: 0,
+    loss_ratio: 0,
   };
 }
 

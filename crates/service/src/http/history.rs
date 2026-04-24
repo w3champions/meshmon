@@ -305,8 +305,8 @@ pub struct HistoryMeasurementDto {
     pub latency_max_ms: Option<f32>,
     /// Latency standard deviation in ms.
     pub latency_stddev_ms: Option<f32>,
-    /// Observed loss percentage ([0, 100]).
-    pub loss_pct: f32,
+    /// Observed loss fraction ([0.0, 1.0]).
+    pub loss_ratio: f32,
     /// MTR hop array; populated when the measurement has an `mtr_id`.
     #[schema(value_type = Option<Vec<HopJson>>)]
     pub mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
@@ -366,7 +366,7 @@ struct MeasurementRow {
     latency_p95_ms: Option<f32>,
     latency_max_ms: Option<f32>,
     latency_stddev_ms: Option<f32>,
-    loss_pct: f32,
+    loss_ratio: f32,
     mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
     mtr_captured_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -386,7 +386,7 @@ impl From<MeasurementRow> for HistoryMeasurementDto {
             latency_p95_ms: r.latency_p95_ms,
             latency_max_ms: r.latency_max_ms,
             latency_stddev_ms: r.latency_stddev_ms,
-            loss_pct: r.loss_pct,
+            loss_ratio: r.loss_ratio,
             mtr_hops: r.mtr_hops,
             mtr_captured_at: r.mtr_captured_at,
             destination_hostname: None,
@@ -471,7 +471,7 @@ pub async fn measurements(
           m.latency_p95_ms,
           m.latency_max_ms,
           m.latency_stddev_ms,
-          m.loss_pct                       AS "loss_pct!",
+          m.loss_ratio                       AS "loss_ratio!",
           t.hops                           AS "mtr_hops?: sqlx::types::Json<Vec<HopJson>>",
           t.captured_at                    AS "mtr_captured_at?"
         FROM measurements m
@@ -620,8 +620,8 @@ pub struct CampaignMeasurementDto {
     pub measured_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Average round-trip latency in ms (nullable).
     pub latency_avg_ms: Option<f32>,
-    /// Observed loss percentage ([0, 100]) (nullable).
-    pub loss_pct: Option<f32>,
+    /// Observed loss fraction ([0.0, 1.0]) (nullable).
+    pub loss_ratio: Option<f32>,
     /// `measurements.mtr_id` FK — reference to `mtr_traces.id`.
     pub mtr_id: Option<i64>,
     /// Inline MTR hops — populated iff `mtr_id` resolves to an
@@ -768,7 +768,7 @@ struct CampaignMeasurementRow {
     protocol: Option<ProbeProtocol>,
     measured_at: Option<chrono::DateTime<chrono::Utc>>,
     latency_avg_ms: Option<f32>,
-    loss_pct: Option<f32>,
+    loss_ratio: Option<f32>,
     mtr_id: Option<i64>,
     mtr_hops: Option<sqlx::types::Json<Vec<HopJson>>>,
 }
@@ -785,7 +785,7 @@ impl From<CampaignMeasurementRow> for CampaignMeasurementDto {
             protocol: r.protocol,
             measured_at: r.measured_at,
             latency_avg_ms: r.latency_avg_ms,
-            loss_pct: r.loss_pct,
+            loss_ratio: r.loss_ratio,
             mtr_id: r.mtr_id,
             mtr_hops: r.mtr_hops,
             destination_hostname: None,
@@ -825,7 +825,7 @@ async fn fetch_campaign_measurements(
           m.protocol                    AS "protocol?: ProbeProtocol",
           m.measured_at                 AS "measured_at?",
           m.latency_avg_ms              AS "latency_avg_ms?",
-          m.loss_pct                    AS "loss_pct?",
+          m.loss_ratio                    AS "loss_ratio?",
           m.mtr_id                      AS "mtr_id?",
           t.hops                        AS "mtr_hops?: sqlx::types::Json<Vec<HopJson>>"
         FROM campaign_pairs cp

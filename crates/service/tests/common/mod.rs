@@ -979,7 +979,7 @@ pub async fn insert_agent_with_ip(pool: &PgPool, id: &str, ip: std::net::IpAddr)
 
 /// Seed campaign-kind measurements for an existing campaign.
 ///
-/// For each `(src, dst, rtt_ms, stddev_ms, loss_pct)`, inserts a
+/// For each `(src, dst, rtt_ms, stddev_ms, loss_ratio)`, inserts a
 /// `measurements` row + upserts the matching `campaign_pairs` row to
 /// point at the new measurement (kind `'campaign'`, resolution
 /// `'succeeded'`). The campaign's other knobs (protocol, probe_count)
@@ -996,7 +996,7 @@ pub async fn seed_measurements(
         let m_id: i64 = sqlx::query_scalar(
             "INSERT INTO measurements \
                  (source_agent_id, destination_ip, protocol, probe_count, \
-                  latency_avg_ms, latency_stddev_ms, loss_pct, kind) \
+                  latency_avg_ms, latency_stddev_ms, loss_ratio, kind) \
              VALUES ($1, $2::inet, 'icmp', 10, $3, $4, $5, 'campaign') \
              RETURNING id",
         )
@@ -1088,7 +1088,7 @@ pub async fn seed_settled_pair(
     let measurement_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
              (source_agent_id, destination_ip, protocol, probe_count, \
-              measured_at, latency_avg_ms, loss_pct, kind) \
+              measured_at, latency_avg_ms, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 25.0, 0.0, $3::measurement_kind) \
          RETURNING id",
     )
@@ -1235,6 +1235,22 @@ impl HttpHarness {
     pub async fn start() -> Self {
         let pool = shared_migrated_pool().await.clone();
         let state = state_with_admin(pool).await;
+        let app = meshmon_service::http::router(state.clone());
+        let cookie = login_as_admin(&app, "203.0.113.42").await;
+        Self {
+            app,
+            cookie,
+            state,
+            live: None,
+        }
+    }
+
+    /// Same as [`Self::start`] but wires `[upstream.vm_url]` to
+    /// `vm_url`. Used by campaign-evaluate tests that need to mock VM
+    /// responses before the evaluator runs.
+    pub async fn start_with_vm(vm_url: &str) -> Self {
+        let pool = shared_migrated_pool().await.clone();
+        let state = state_with_admin_and_vm(pool, vm_url).await;
         let app = meshmon_service::http::router(state.clone());
         let cookie = login_as_admin(&app, "203.0.113.42").await;
         Self {

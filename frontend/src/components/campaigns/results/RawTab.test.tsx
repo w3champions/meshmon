@@ -75,7 +75,7 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     protocol: overrides.protocol ?? "icmp",
     evaluation_mode: overrides.evaluation_mode ?? "optimization",
     force_measurement: overrides.force_measurement ?? false,
-    loss_threshold_pct: overrides.loss_threshold_pct ?? 2,
+    loss_threshold_ratio: overrides.loss_threshold_ratio ?? 0.02,
     stddev_weight: overrides.stddev_weight ?? 1,
     probe_count: overrides.probe_count ?? 10,
     probe_count_detail: overrides.probe_count_detail ?? 250,
@@ -104,7 +104,8 @@ function makeMeasurement(
     measurement_id: overrides.measurement_id ?? overrides.pair_id,
     measured_at: overrides.measured_at ?? "2026-04-21T09:55:00Z",
     latency_avg_ms: overrides.latency_avg_ms ?? 42,
-    loss_pct: overrides.loss_pct ?? 0.5,
+    // Ratio 0.005 → LossChip renders "0.50%" (sits at the healthy boundary).
+    loss_ratio: overrides.loss_ratio ?? 0.005,
     mtr_id: overrides.mtr_id ?? null,
     mtr_hops: overrides.mtr_hops ?? null,
   };

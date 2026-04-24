@@ -99,11 +99,11 @@ Key patterns:
   limited `tracing::warn!` (once per 60 s per process) reports which
   sibling IP leaked.
 - The route tracker retains silent TTLs as padded `HopSummary`s (empty
-  `observed_ips`, `loss_pct = 1.0`) and truncates snapshots at the first
+  `observed_ips`, `loss_ratio = 1.0`) and truncates snapshots at the first
   position where the target's own IP appears. This matches mtr's output
   shape and stops trippy's over-probing from oscillating the reported
   hop count.
-- `path_summary.{loss_pct, avg_rtt_micros}` on a route snapshot derives
+- `path_summary.{loss_ratio, avg_rtt_micros}` on a route snapshot derives
   from the elected primary protocol's `RollingStats` — the same source
   that feeds `meshmon_path_failure_rate`, so the matrix view and alerts
   agree by construction. The supervisor samples
@@ -111,7 +111,7 @@ Key patterns:
   time and stamps the result onto `RouteSnapshotEnvelope.path_summary`;
   the emitter encodes those values onto the wire. When `primary` is
   `None` (cold start before the sample-floor is met, or every protocol
-  unhealthy), `loss_pct = 1.0` is emitted so the matrix renders red.
+  unhealthy), `loss_ratio = 1.0` is emitted so the matrix renders red.
   Trippy's destination-hop accounting (`hops.last()`) is intentionally
   not the source: its 60 s window with 500 ms grace inflates phantom
   loss whenever the destination's reply lands past the grace deadline
