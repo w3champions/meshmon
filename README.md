@@ -395,8 +395,7 @@ cargo run -p meshmon-agent
 
 ## Status
 
-This repo is under active initial construction. Feature work lands
-incrementally.
+This repo is under active initial construction. Feature work lands incrementally.
 
 ## License
 
