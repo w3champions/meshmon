@@ -17,6 +17,7 @@ use super::model::{CampaignState, MeasurementKind, PairResolutionState};
 use super::repo::{self, RepoError};
 use crate::metrics;
 use crate::registry::AgentRegistry;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -162,6 +163,17 @@ impl Scheduler {
         }
     }
 
+    /// Integration-test seam. Drives exactly one tick with a fresh
+    /// cursor so tests can assert the per-tick fan-out contract without
+    /// spinning up the full `run` loop or the `PgListener`. Mirrors the
+    /// `refresh_once_for_test` pattern already used by
+    /// [`crate::registry`]. Not part of the stable public API.
+    #[doc(hidden)]
+    pub async fn tick_once_for_test(&self) -> Result<(), RepoError> {
+        let mut cursor: usize = 0;
+        self.tick_once(&mut cursor).await
+    }
+
     async fn tick_once(&self, cursor: &mut usize) -> Result<(), RepoError> {
         // Stopwatch around the dispatch body. We record the histogram
         // whether the inner loop returns Ok or Err so failed ticks still
@@ -229,18 +241,66 @@ impl Scheduler {
         let active_agents = active_snapshot.active_targets("", self.target_active_window);
 
         let len = active_campaigns.len();
-        for agent in &active_agents {
-            // Start one-past-cursor so the rotation advances between ticks
-            // even when the first campaign keeps returning work.
-            for step in 1..=len {
-                let c_idx = (*cursor + step) % len;
-                let c_id = active_campaigns[c_idx];
-                let dispatched = self.dispatch_for_campaign(c_id, &agent.id).await?;
-                if dispatched {
-                    *cursor = c_idx;
-                    break;
+        let cursor_start = *cursor;
+
+        let mut fanout: FuturesUnordered<_> = active_agents
+            .iter()
+            .map(|agent| {
+                let agent_id = agent.id.clone();
+                let campaigns = &active_campaigns;
+                async move {
+                    // Walk campaigns round-robin starting one-past the shared
+                    // cursor snapshot so the rotation advances between ticks
+                    // even when one campaign keeps returning work.
+                    for step in 1..=len {
+                        let c_idx = (cursor_start + step) % len;
+                        let c_id = campaigns[c_idx];
+                        if self.dispatch_for_campaign(c_id, &agent_id).await? {
+                            return Ok::<Option<usize>, RepoError>(Some(c_idx));
+                        }
+                    }
+                    Ok(None)
+                }
+            })
+            .collect();
+
+        // Drain the entire fan-out even if one future errors. The `?` shortcut
+        // would drop `fanout`, which cancels in-flight sibling futures and can
+        // orphan rows they already flipped `pending → dispatched` (the claim
+        // commits atomically but the revert runs later in `dispatch_for_campaign`
+        // — a cancelled future skips the revert, and `expire_stale_attempts`
+        // only sweeps `pending`). Remember the first error and return it after
+        // the drain so every agent's dispatch reaches its own revert path.
+        let mut any_dispatched = false;
+        let mut first_error: Option<RepoError> = None;
+        while let Some(res) = fanout.next().await {
+            match res {
+                Ok(Some(_)) => any_dispatched = true,
+                Ok(None) => {}
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    } else {
+                        warn!(
+                            error = %e,
+                            "scheduler: additional fan-out error suppressed (first error will be returned)"
+                        );
+                    }
                 }
             }
+        }
+
+        // Advance by exactly one slot per tick. Unlike the previous serial
+        // implementation, the cursor is not set to the last successful c_idx —
+        // because concurrent agents may settle on different c_idx values, there
+        // is no canonical "winner" to honour. A deterministic +1 preserves the
+        // existing round-robin fairness guarantee that no campaign starves.
+        if any_dispatched {
+            *cursor = (cursor_start + 1) % len;
+        }
+
+        if let Some(e) = first_error {
+            return Err(e);
         }
 
         // Skip pairs for source agents that are not currently active.
@@ -266,8 +326,8 @@ impl Scheduler {
 
         // After a batch settles (or agent-offline sweep skips), complete
         // any campaigns whose pairs are all terminal.
-        for c_id in active_campaigns {
-            let _ = repo::maybe_complete(&self.pool, c_id).await?;
+        for c_id in &active_campaigns {
+            let _ = repo::maybe_complete(&self.pool, *c_id).await?;
         }
 
         // Safety-net sweep for max-attempts-exceeded pairs.

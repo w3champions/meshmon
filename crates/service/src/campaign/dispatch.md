@@ -18,10 +18,12 @@ clone (interior state is `Arc`-owned) and holds references to:
 2. **Acquire a per-agent semaphore permit (non-blocking).** Effective
    concurrency is `registry.snapshot().get(agent).campaign_max_concurrency
      .unwrap_or(default_agent_concurrency).max(1)`. Uses
-   `try_acquire_owned` so a saturated agent never stalls the scheduler
-   loop: scheduler dispatches agents serially per tick, so awaiting
-   the permit here would queue every other agent behind the
-   bottlenecked one. On saturation the batch returns with
+   `try_acquire_owned` so a saturated agent never stalls the tick's
+   fan-out: awaiting the permit here would hold the agent's slot in
+   the current fan-out until one freed — a pointless wait since the
+   same pairs get re-claimed on the next tick. Fast-failing lets the
+   fan-out drain promptly and the revert path re-queues the pairs
+   immediately. On saturation the batch returns with
    `skipped_reason = "agent_busy"` and all pairs in `rate_limited_ids`
    (not `rejected_ids`) — saturating the cap is the same "pre-RPC
    throttling" category as losing the per-destination bucket, so the
@@ -48,8 +50,9 @@ clone (interior state is `Arc`-owned) and holds references to:
 4. **Build `RunMeasurementBatchRequest`.** Every pair in a batch
    shares the same campaign (scheduler invariant:
    `take_pending_batch` is per-`(campaign, agent)`), so per-campaign
-   knobs come from the head pair. `MeasurementKind` is `Mtr` when
-   `probe_count == 1`, `Latency` otherwise. Targets are truncated at
+   knobs come from the head pair. `MeasurementKind` is `Mtr` for
+   `DetailMtr` pairs, `Latency` for `Campaign` and `DetailPing` pairs
+   (determined by `PendingPair::kind`, not `probe_count`). Targets are truncated at
    `max_batch_size`. Per-target `destination_port` is hardcoded to `0`
    (correct for ICMP); TCP/UDP campaigns require the port to be
    populated from a per-target source once `PendingPair` carries one.

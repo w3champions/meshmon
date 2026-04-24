@@ -357,11 +357,14 @@ impl PairDispatcher for RpcDispatcher {
         };
 
         // 2. Per-agent semaphore. Use `try_acquire_owned`, not the
-        // awaiting variant: the scheduler dispatches agents serially
-        // per tick, so blocking here on a saturated agent would stall
-        // every other agent's dispatch behind it. Saturation lands
-        // in `rate_limited_ids` (same "pre-RPC throttling" category
-        // as the per-destination bucket) so the scheduler reverts to
+        // awaiting variant: under the fan-out scheduler, blocking here
+        // on a saturated agent would hold the agent's slot in the
+        // current tick's fan-out until a permit freed — a pointless
+        // wait since the same pairs get re-claimed on the next tick.
+        // Fast-failing lets the fan-out drain promptly and the revert
+        // path re-queues the pairs immediately. Saturation lands in
+        // `rate_limited_ids` (same "pre-RPC throttling" category as
+        // the per-destination bucket) so the scheduler reverts to
         // `pending` AND decrements `attempt_count` — declining to
         // dispatch because the cap is saturated must not burn retry
         // budget.

@@ -129,6 +129,52 @@ impl PairDispatcher for DirectSettleDispatcher {
     }
 }
 
+/// Test-only dispatcher that uses a `tokio::sync::Barrier` to prove the
+/// scheduler dispatches N agents concurrently. Each `dispatch()` call
+/// records the agent id, then blocks at `Barrier::wait()` until
+/// `expected_agents` calls have arrived. A serial caller deadlocks at
+/// the first call; a concurrent caller releases all N simultaneously.
+/// Tests add a `tokio::time::timeout` to turn the deadlock into an
+/// assertable failure.
+#[derive(Clone)]
+pub struct RendezvousDispatcher {
+    /// Barrier shared by every `dispatch()` call; releases only once
+    /// `expected_agents` concurrent callers have arrived.
+    barrier: Arc<tokio::sync::Barrier>,
+    /// Agent IDs captured in call order. Used by the integration test
+    /// to assert that the expected set of agents reached the barrier.
+    pub calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl RendezvousDispatcher {
+    /// Create a dispatcher whose barrier unlocks after
+    /// `expected_agents` concurrent `dispatch()` calls have arrived.
+    /// With a serial caller, the first call blocks forever — the test
+    /// wraps `tick_once_for_test` in `tokio::time::timeout` to turn
+    /// that deadlock into an assertable failure.
+    pub fn new(expected_agents: usize) -> Self {
+        Self {
+            barrier: Arc::new(tokio::sync::Barrier::new(expected_agents)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl PairDispatcher for RendezvousDispatcher {
+    async fn dispatch(&self, agent_id: &str, batch: Vec<PendingPair>) -> DispatchOutcome {
+        self.calls.lock().await.push(agent_id.to_string());
+        // Releases only when `expected_agents` calls have arrived.
+        // Under a serial scheduler this waits forever; the test's
+        // outer `tokio::time::timeout` surfaces the deadlock.
+        self.barrier.wait().await;
+        DispatchOutcome {
+            dispatched: batch.len(),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
