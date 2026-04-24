@@ -352,7 +352,7 @@ async fn run_one_pair(
             match joined {
                 Ok(Ok(())) => {
                     let state = tracer.snapshot();
-                    aggregate(req.kind, target.pair_id, &state)
+                    aggregate(req.kind, target.pair_id, &state, dest_ip)
                 }
                 Ok(Err(e)) => failure_result(
                     target.pair_id,
@@ -403,7 +403,15 @@ pub(crate) fn build_oneshot_config(
         MeasurementKind::Latency => {
             let stagger = Duration::from_millis(req.probe_stagger_ms.into());
             let timeout = Duration::from_millis(req.timeout_ms.into());
-            (req.probe_count.max(1) as usize, stagger, stagger, timeout)
+            // Spec 03 §4.3: min_round_duration = probe_stagger_ms pins
+            // the round cadence floor; max_round_duration = timeout_ms
+            // gives each round enough headroom to collect destination
+            // replies at WAN RTTs. Tying max to stagger (the previous
+            // wiring) ended rounds too early and caused trippy's
+            // highest_ttl_for_round to point at intermediate hops on
+            // unreachable destinations — those hops' Time-Exceeded
+            // RTTs then masqueraded as destination replies.
+            (req.probe_count.max(1) as usize, stagger, timeout, timeout)
         }
         MeasurementKind::Mtr => (
             1,
@@ -448,10 +456,15 @@ pub(crate) fn build_oneshot_config(
 // Aggregation
 // ---------------------------------------------------------------------------
 
-fn aggregate(kind: MeasurementKind, pair_id: u64, state: &State) -> MeasurementResult {
+fn aggregate(
+    kind: MeasurementKind,
+    pair_id: u64,
+    state: &State,
+    dest_ip: IpAddr,
+) -> MeasurementResult {
     match kind {
-        MeasurementKind::Latency => aggregate_latency(pair_id, state),
-        MeasurementKind::Mtr => aggregate_mtr(pair_id, state),
+        MeasurementKind::Latency => aggregate_latency(pair_id, state, dest_ip),
+        MeasurementKind::Mtr => aggregate_mtr(pair_id, state, dest_ip),
         MeasurementKind::Unspecified => failure_result(
             pair_id,
             MeasurementFailureCode::AgentError,
@@ -472,22 +485,52 @@ fn aggregate(kind: MeasurementKind, pair_id: u64, state: &State) -> MeasurementR
 /// distinction, a secondary `TcpStream::connect` channel or a patched
 /// trippy-core can layer it on without reshuffling this function.
 ///
-/// UDP success similarly piggybacks on trippy's destination-reached
-/// predicate: `target_hop.total_recv()` counts replies from the
-/// destination IP only (service response OR ICMP Port-Unreachable from
-/// the destination itself). ICMP Time-Exceeded from intermediate hops
-/// do not inflate this counter — they accrue on their own lower-TTL
-/// hops, which we ignore for LATENCY.
-fn aggregate_latency(pair_id: u64, state: &State) -> MeasurementResult {
-    let target_hop = state.target_hop(State::default_flow_id());
-    let attempted: u32 = target_hop.total_sent().try_into().unwrap_or(u32::MAX);
-    let succeeded: u32 = target_hop.total_recv().try_into().unwrap_or(u32::MAX);
+/// UDP success is sourced from the same destination-matched hop: its
+/// `total_recv` counts replies from the destination IP only (service
+/// response OR ICMP Port-Unreachable from the destination itself).
+/// ICMP Time-Exceeded from intermediate hops accrues on those routers'
+/// lower-TTL hops — those hops' `addrs()` never contains the
+/// destination IP, so they cannot leak into the destination-hop
+/// counters.
+fn aggregate_latency(pair_id: u64, state: &State, dest_ip: IpAddr) -> MeasurementResult {
+    // Spec 03 §4.3: identify the "destination-reached hop" by matching
+    // the destination IP against `Hop::addrs()`, NOT by reading
+    // `State::target_hop()`. The latter points at
+    // `highest_ttl_for_round` — the largest TTL probed in the most
+    // recent round — which drifts to an intermediate hop on
+    // unreachable destinations and makes a Time-Exceeded RTT from an
+    // upstream router masquerade as a destination reply (causing the
+    // "unreachable target returns ~0.1 ms RTT" bug).
+    //
+    // `Hop::addrs()` carries the reply source IP:
+    //   - ICMP Echo Reply → destination IP
+    //   - TCP SYN/ACK or RST from the destination → destination IP
+    //   - UDP service reply OR ICMP Port-Unreachable from the
+    //     destination itself → destination IP
+    // Intermediate-hop Time-Exceeded carries the router's IP on the
+    // router's lower-TTL hop, so it cannot leak into the destination
+    // match.
+    let dest_hop = state
+        .hops()
+        .iter()
+        .find(|h| h.addrs().any(|ip| *ip == dest_ip));
+
+    let Some(dest_hop) = dest_hop else {
+        return failure_result(
+            pair_id,
+            MeasurementFailureCode::Timeout,
+            "destination never replied",
+        );
+    };
+
+    let attempted: u32 = dest_hop.total_sent().try_into().unwrap_or(u32::MAX);
+    let succeeded: u32 = dest_hop.total_recv().try_into().unwrap_or(u32::MAX);
 
     if attempted == 0 {
         return failure_result(
             pair_id,
             MeasurementFailureCode::AgentError,
-            "tracer sent zero probes",
+            "destination hop has zero sent probes",
         );
     }
 
@@ -500,7 +543,7 @@ fn aggregate_latency(pair_id: u64, state: &State) -> MeasurementResult {
     // probe (see trippy-core state.rs around ProbeStatus::Awaited/Failed).
     // Feeding those zeros into the stats pulls `min` to 0 and skews
     // `avg`/`stddev` on any partial-loss batch. Drop them before stats.
-    let rtts: Vec<Duration> = target_hop
+    let rtts: Vec<Duration> = dest_hop
         .samples()
         .iter()
         .copied()
@@ -514,22 +557,35 @@ fn aggregate_latency(pair_id: u64, state: &State) -> MeasurementResult {
 /// into a `MtrTraceResult`. Silent TTLs pad with `loss_ratio = 1.0`,
 /// `avg_rtt_micros = 0`, and an empty `observed_ips` list.
 ///
-/// `target_reached_ttl` is the TTL at which the destination hop replied;
-/// when no reply landed we truncate at the highest responsive TTL instead
-/// of emitting a full 32-hop list against an unreachable destination.
-fn aggregate_mtr(pair_id: u64, state: &State) -> MeasurementResult {
-    let target_hop = state.target_hop(State::default_flow_id());
-    let target_reached_ttl = if target_hop.total_recv() > 0 {
-        target_hop.ttl()
-    } else {
-        state
-            .hops()
-            .iter()
-            .filter(|h| h.total_recv() > 0)
-            .map(|h| h.ttl())
-            .max()
-            .unwrap_or(0)
-    };
+/// `target_reached_ttl` is resolved by finding the hop whose
+/// `addrs()` contains the destination IP — that identifies the
+/// destination-reached TTL even when trippy's internal `target_hop`
+/// drifted to a higher TTL with no reply. When no hop saw the
+/// destination IP we fall back to the highest responsive TTL, so a
+/// partial trace still produces a bounded snapshot instead of a full
+/// 32-hop list against an unreachable destination.
+fn aggregate_mtr(pair_id: u64, state: &State, dest_ip: IpAddr) -> MeasurementResult {
+    // Spec 03 §4.3: prefer the hop whose `addrs()` contains the
+    // destination IP — that unambiguously identifies the
+    // destination-reached TTL even when trippy's `target_hop` tracked
+    // a higher TTL that never received a reply. Fall back to the
+    // highest responsive TTL only when the destination never replied,
+    // so a partial trace still produces a bounded snapshot instead of
+    // a full 32-hop list.
+    let target_reached_ttl = state
+        .hops()
+        .iter()
+        .find(|h| h.addrs().any(|ip| *ip == dest_ip))
+        .map(|h| h.ttl())
+        .unwrap_or_else(|| {
+            state
+                .hops()
+                .iter()
+                .filter(|h| h.total_recv() > 0)
+                .map(|h| h.ttl())
+                .max()
+                .unwrap_or(0)
+        });
 
     if target_reached_ttl == 0 {
         // No hop responded at all — surface as a Timeout failure so the
