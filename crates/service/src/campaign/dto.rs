@@ -9,7 +9,8 @@
 //! rendered as a bare IP string).
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, PairResolutionState, PairRow, ProbeProtocol,
+    CampaignRow, CampaignState, EvaluationMode, MeasurementSource, PairResolutionState, PairRow,
+    ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -229,6 +230,9 @@ pub struct PairDto {
     pub destination_ip: String,
     /// Current resolution state.
     pub resolution_state: PairResolutionState,
+    /// How this measurement was produced — active campaign probe vs. archived VM baseline.
+    /// Defaults to `active_probe` for pairs without a joined measurement (e.g. pending rows).
+    pub source: MeasurementSource,
     /// FK to the `measurements` row once dispatched or reused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measurement_id: Option<i64>,
@@ -259,6 +263,7 @@ impl From<PairRow> for PairDto {
             // `IpNetwork` carries in its default `Display` impl.
             destination_ip: r.destination_ip.ip().to_string(),
             resolution_state: r.resolution_state,
+            source: r.source,
             measurement_id: r.measurement_id,
             dispatched_at: r.dispatched_at,
             settled_at: r.settled_at,

@@ -251,6 +251,11 @@ pub struct PairRow {
     /// Drives the dispatcher's `MeasurementKind` selection and the
     /// scheduler's kind-specific `probe_count` override.
     pub kind: MeasurementKind,
+    /// Provenance of the joined measurement row. Defaults to
+    /// `ActiveProbe` for pairs without a joined measurement (e.g.
+    /// pending / dispatched rows) — nothing downstream reads this
+    /// unless a measurement has actually landed.
+    pub source: MeasurementSource,
 }
 
 #[cfg(test)]

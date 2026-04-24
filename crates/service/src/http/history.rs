@@ -30,7 +30,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::campaign::dto::ErrorEnvelope;
-use crate::campaign::model::{MeasurementKind, PairResolutionState, ProbeProtocol};
+use crate::campaign::model::{
+    MeasurementKind, MeasurementSource, PairResolutionState, ProbeProtocol,
+};
 use crate::hostname::session_id_from_auth;
 use crate::hostname::stamp::bulk_hostnames_and_enqueue;
 use crate::http::auth::AuthSession;
@@ -616,6 +618,8 @@ pub struct CampaignMeasurementDto {
     pub measurement_id: Option<i64>,
     /// Protocol of the joined measurement (null when pending/dispatched).
     pub protocol: Option<ProbeProtocol>,
+    /// How this measurement was produced — active campaign probe vs. archived VM baseline.
+    pub source: MeasurementSource,
     /// When the measurement was produced (null when pending/dispatched).
     pub measured_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Average round-trip latency in ms (nullable).
@@ -766,6 +770,7 @@ struct CampaignMeasurementRow {
     pair_kind: MeasurementKind,
     measurement_id: Option<i64>,
     protocol: Option<ProbeProtocol>,
+    source: MeasurementSource,
     measured_at: Option<chrono::DateTime<chrono::Utc>>,
     latency_avg_ms: Option<f32>,
     loss_ratio: Option<f32>,
@@ -783,6 +788,7 @@ impl From<CampaignMeasurementRow> for CampaignMeasurementDto {
             pair_kind: r.pair_kind,
             measurement_id: r.measurement_id,
             protocol: r.protocol,
+            source: r.source,
             measured_at: r.measured_at,
             latency_avg_ms: r.latency_avg_ms,
             loss_ratio: r.loss_ratio,
@@ -823,6 +829,8 @@ async fn fetch_campaign_measurements(
           cp.kind                       AS "pair_kind!: MeasurementKind",
           m.id                          AS "measurement_id?",
           m.protocol                    AS "protocol?: ProbeProtocol",
+          COALESCE(m.source, 'active_probe'::measurement_source)
+                                        AS "source!: MeasurementSource",
           m.measured_at                 AS "measured_at?",
           m.latency_avg_ms              AS "latency_avg_ms?",
           m.loss_ratio                    AS "loss_ratio?",

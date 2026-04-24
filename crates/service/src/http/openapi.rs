@@ -65,6 +65,7 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::campaign::model::CampaignState,
         crate::campaign::model::EvaluationMode,
         crate::campaign::model::MeasurementKind,
+        crate::campaign::model::MeasurementSource,
         crate::campaign::model::PairResolutionState,
         crate::campaign::model::ProbeProtocol,
         crate::catalogue::dto::BulkReenrichRequest,

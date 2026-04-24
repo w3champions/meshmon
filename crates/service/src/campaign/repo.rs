@@ -7,8 +7,8 @@
 //! into HTTP 409 without a second SELECT.
 
 use super::model::{
-    CampaignRow, CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, PairRow,
-    ProbeProtocol,
+    CampaignRow, CampaignState, EvaluationMode, MeasurementKind, MeasurementSource,
+    PairResolutionState, PairRow, ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{types::ipnetwork::IpNetwork, PgPool, Postgres, Transaction};
@@ -569,16 +569,26 @@ pub async fn list_pairs(
     let raws = sqlx::query_as!(
         PairRowRaw,
         r#"
-        SELECT id, campaign_id, source_agent_id, destination_ip,
-               resolution_state AS "resolution_state: PairResolutionState",
-               measurement_id, dispatched_at, settled_at, attempt_count, last_error,
-               kind AS "kind: MeasurementKind"
-          FROM campaign_pairs
-         WHERE campaign_id = $1
-           AND kind = 'campaign'
+        SELECT cp.id                     AS "id!",
+               cp.campaign_id            AS "campaign_id!",
+               cp.source_agent_id        AS "source_agent_id!",
+               cp.destination_ip         AS "destination_ip!",
+               cp.resolution_state       AS "resolution_state!: PairResolutionState",
+               cp.measurement_id         AS "measurement_id?",
+               cp.dispatched_at          AS "dispatched_at?",
+               cp.settled_at             AS "settled_at?",
+               cp.attempt_count          AS "attempt_count!",
+               cp.last_error             AS "last_error?",
+               cp.kind                   AS "kind!: MeasurementKind",
+               COALESCE(m.source, 'active_probe'::measurement_source)
+                                         AS "source!: MeasurementSource"
+          FROM campaign_pairs cp
+          LEFT JOIN measurements m ON m.id = cp.measurement_id
+         WHERE cp.campaign_id = $1
+           AND cp.kind = 'campaign'
            AND (cardinality($2::pair_resolution_state[]) = 0
-                OR resolution_state = ANY($2::pair_resolution_state[]))
-         ORDER BY id
+                OR cp.resolution_state = ANY($2::pair_resolution_state[]))
+         ORDER BY cp.id
          LIMIT $3
         "#,
         id,
@@ -812,7 +822,12 @@ pub async fn take_pending_batch(
                    campaign_pairs.settled_at,
                    campaign_pairs.attempt_count,
                    campaign_pairs.last_error,
-                   campaign_pairs.kind AS "kind: MeasurementKind"
+                   campaign_pairs.kind AS "kind: MeasurementKind",
+                   -- Pending pairs have no joined measurement yet; default
+                   -- to active_probe so `PairRow.source` is always typed.
+                   -- Scheduler callers do not read this field.
+                   'active_probe'::measurement_source
+                       AS "source!: MeasurementSource"
         "#,
         campaign_id,
         source_agent_id,
@@ -1325,6 +1340,7 @@ struct PairRowRaw {
     attempt_count: i16,
     last_error: Option<String>,
     kind: MeasurementKind,
+    source: MeasurementSource,
 }
 
 impl From<PairRowRaw> for PairRow {
@@ -1341,6 +1357,7 @@ impl From<PairRowRaw> for PairRow {
             attempt_count: r.attempt_count,
             last_error: r.last_error,
             kind: r.kind,
+            source: r.source,
         }
     }
 }

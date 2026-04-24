@@ -8,7 +8,8 @@
 mod common;
 
 use meshmon_service::campaign::model::{
-    CampaignState, EvaluationMode, MeasurementKind, PairResolutionState, ProbeProtocol,
+    CampaignState, EvaluationMode, MeasurementKind, MeasurementSource, PairResolutionState,
+    ProbeProtocol,
 };
 use meshmon_service::campaign::repo::{self, CreateInput, EditInput, RepoError};
 use std::net::IpAddr;
@@ -1182,6 +1183,7 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
             attempt_count: 0,
             last_error: None,
             kind,
+            source: MeasurementSource::ActiveProbe,
         })
         .collect();
 
@@ -1276,6 +1278,7 @@ async fn resolve_reuse_skips_rtt_null_measurements() {
         attempt_count: 0,
         last_error: None,
         kind: MeasurementKind::Campaign,
+        source: MeasurementSource::ActiveProbe,
     }];
     let decisions = repo::resolve_reuse(&pool, &pairs, ProbeProtocol::Icmp)
         .await
