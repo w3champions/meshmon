@@ -399,4 +399,4 @@ This repo is under active initial construction. Feature work lands incrementally
 
 ## License
 
-AGPL-3.0. See `LICENSE`.
+AGPL-3.0. See `LICENSE`
