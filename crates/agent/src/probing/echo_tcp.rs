@@ -5,12 +5,14 @@
 //! reach the listener transparently via IPv4-mapped IPv6 addresses
 //! (`::ffff:a.b.c.d`). There is no application-level echo — peers measure
 //! the TCP handshake itself. We accept the connection and close it
-//! immediately with RST (SO_LINGER(0)) to minimize kernel state on both
-//! ends.
+//! immediately; the kernel does a graceful FIN close, leaving the server
+//! in a short TIME_WAIT. At the mesh's TCP probe rate this is negligible
+//! (≈0.05 PPS per peer) and far preferable to an `SO_LINGER(0)` RST,
+//! which races the client's non-blocking `connect()` completion on
+//! same-host deployments and surfaces as spurious ECONNRESET.
 
-use socket2::{Domain, SockRef, Socket, Type};
+use socket2::{Domain, Socket, Type};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -64,11 +66,9 @@ async fn run(listener: TcpListener, cancel: CancellationToken) {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, peer)) => {
-                        // SO_LINGER(0) → RST on drop, no TIME_WAIT buildup.
-                        let sock = SockRef::from(&stream);
-                        if let Err(e) = sock.set_linger(Some(Duration::ZERO)) {
-                            tracing::debug!(error = %e, "set_linger failed (ignored)");
-                        }
+                        // Dropping the stream triggers a graceful FIN close.
+                        // Never force RST here — it races the client's
+                        // non-blocking connect() on μs-RTT links.
                         drop(stream);
                         tracing::trace!(%peer, "tcp probe accepted");
                     }
@@ -76,7 +76,7 @@ async fn run(listener: TcpListener, cancel: CancellationToken) {
                         tracing::warn!(error = %e, "tcp echo accept failed");
                         // Backoff a tiny amount to avoid hot-looping on
                         // something like EMFILE.
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }
             }
@@ -100,24 +100,72 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn(port, cancel.clone()).await.expect("bind");
 
-        // Connect and expect the peer to close immediately. With
-        // SO_LINGER(0) the close sends a RST, so the reader may observe
-        // either a clean EOF (Ok(0)) or ECONNRESET — both prove the peer
-        // closed without application data. Platform-dependent: Linux
-        // often returns EOF; macOS raises ECONNRESET.
+        // Connect and expect the peer to close gracefully (FIN → EOF).
+        // The listener never writes application data; the client sees zero
+        // bytes on the first read. A previous SO_LINGER(0) variant sent RST
+        // here, but that raced the client's non-blocking connect() on local
+        // deployments and caused spurious ECONNRESET.
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let mut buf = [0u8; 1];
-        let res = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await;
-        match res.expect("read within 500 ms") {
-            Ok(n) => assert_eq!(n, 0, "expected EOF, got {n} bytes"),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                // Expected on macOS when peer closes with RST.
-            }
-            Err(e) => panic!("unexpected read error: {e}"),
-        }
+        let n = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf))
+            .await
+            .expect("read within 500 ms")
+            .expect("clean EOF, not a socket error");
+        assert_eq!(n, 0, "expected EOF, got {n} bytes");
 
         cancel.cancel();
         handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_connects_never_reset() {
+        // Regression: the listener used to set SO_LINGER(0) and drop the
+        // accepted stream, which RSTs the connection. On same-host
+        // deployments (loopback, Docker bridge) the RST races the client's
+        // non-blocking connect() completion — the `getsockopt(SO_ERROR)`
+        // check after epoll-writable sees ECONNRESET and connect() returns
+        // Err. The fix is to let the kernel do a graceful FIN close.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn(port, cancel.clone()).await.expect("bind");
+
+        const ATTEMPTS: usize = 50;
+        let mut handles = Vec::with_capacity(ATTEMPTS);
+        for _ in 0..ATTEMPTS {
+            handles.push(tokio::spawn(async move {
+                // connect() can already fail on Linux when the server's
+                // RST races the final ACK. On macOS connect() succeeds
+                // but a subsequent read() surfaces the reset. Both modes
+                // must be caught; wrap both into a single Result.
+                let mut s = TcpStream::connect(("127.0.0.1", port)).await?;
+                let mut buf = [0u8; 1];
+                let n = s.read(&mut buf).await?;
+                Ok::<usize, std::io::Error>(n)
+            }));
+        }
+
+        let mut failures: Vec<std::io::Error> = Vec::new();
+        for h in handles {
+            match h.await.unwrap() {
+                Ok(n) => assert_eq!(n, 0, "listener must not write data"),
+                Err(e) => failures.push(e),
+            }
+        }
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        assert!(
+            failures.is_empty(),
+            "{}/{} connects were reset; first error: {} (kind={:?})",
+            failures.len(),
+            ATTEMPTS,
+            failures[0],
+            failures[0].kind(),
+        );
     }
 
     #[tokio::test]
