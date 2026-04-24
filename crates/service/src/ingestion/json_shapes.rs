@@ -20,6 +20,8 @@ pub struct HopJson {
     /// Standard deviation of RTT to this hop, in microseconds.
     pub stddev_rtt_micros: u32,
     /// Fraction of probes with no response at this hop.
+    // Alias for BC: main-era route_snapshots / mtr_traces JSONB rows use "loss_pct".
+    #[serde(alias = "loss_pct")]
     pub loss_ratio: f64,
 }
 
@@ -47,6 +49,8 @@ pub struct PathSummaryJson {
     /// Mean RTT across all hops, in microseconds.
     pub avg_rtt_micros: u32,
     /// Overall path loss fraction.
+    // Alias for BC: main-era route_snapshots / mtr_traces JSONB rows use "loss_pct".
+    #[serde(alias = "loss_pct")]
     pub loss_ratio: f64,
     /// Total number of hops in the route.
     pub hop_count: u32,
@@ -81,5 +85,24 @@ impl From<&crate::ingestion::validator::ValidSummary> for PathSummaryJson {
             loss_ratio: s.loss_ratio,
             hop_count: s.hop_count,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hop_json_deserializes_main_era_loss_pct_alias() {
+        let payload = r#"{"position":1,"observed_ips":[],"avg_rtt_micros":0,"stddev_rtt_micros":0,"loss_pct":0.25}"#;
+        let hop: HopJson = serde_json::from_str(payload).unwrap();
+        assert!((hop.loss_ratio - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn path_summary_json_deserializes_main_era_loss_pct_alias() {
+        let payload = r#"{"avg_rtt_micros":0,"loss_pct":0.42,"hop_count":3}"#;
+        let s: PathSummaryJson = serde_json::from_str(payload).unwrap();
+        assert!((s.loss_ratio - 0.42).abs() < 1e-6);
     }
 }
