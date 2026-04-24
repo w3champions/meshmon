@@ -368,3 +368,21 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose down -v
+
+  # Reusable-workflow call that runs release.yml's build/scan/merge/
+  # azure-trigger jobs in-line with ci.yml on every green main push.
+  # Running under ci.yml (instead of the previous workflow_run trigger)
+  # means each release job attaches to the source commit as a regular
+  # check status — same gate as before (tests must pass first), now
+  # visible in the commit's "All checks have passed" panel.
+  release:
+    name: Release containers
+    needs: [rust-lint, rust-test, frontend, release-binary, rust-e2e, actionlint, yamllint, shellcheck]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/release.yml
+    with:
+      main_release: true
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
