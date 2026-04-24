@@ -162,6 +162,17 @@ impl Scheduler {
         }
     }
 
+    /// Integration-test seam. Drives exactly one tick with a fresh
+    /// cursor so tests can assert the per-tick fan-out contract without
+    /// spinning up the full `run` loop or the `PgListener`. Mirrors the
+    /// `refresh_once_for_test` pattern already used by
+    /// [`crate::registry`]. Not part of the stable public API.
+    #[doc(hidden)]
+    pub async fn tick_once_for_test(&self) -> Result<(), RepoError> {
+        let mut cursor: usize = 0;
+        self.tick_once(&mut cursor).await
+    }
+
     async fn tick_once(&self, cursor: &mut usize) -> Result<(), RepoError> {
         // Stopwatch around the dispatch body. We record the histogram
         // whether the inner loop returns Ok or Err so failed ticks still

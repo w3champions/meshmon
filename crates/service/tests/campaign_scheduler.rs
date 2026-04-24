@@ -8,7 +8,7 @@
 mod common;
 
 use meshmon_service::campaign::dispatch::{
-    DirectSettleDispatcher, DispatchOutcome, PairDispatcher, PendingPair,
+    DirectSettleDispatcher, DispatchOutcome, PairDispatcher, PendingPair, RendezvousDispatcher,
 };
 use meshmon_service::campaign::model::{
     CampaignState, MeasurementKind, PairResolutionState, ProbeProtocol,
@@ -643,6 +643,103 @@ async fn scheduler_splits_batches_by_kind_with_kind_specific_probe_count() {
         camp_call.pair_ids, mtr_call.pair_ids,
         "kind split must produce disjoint dispatch calls"
     );
+
+    db.close().await;
+}
+
+/// Fan-out contract: within one tick, the scheduler MUST dispatch
+/// multiple agents concurrently — i.e. at some moment, N agents' calls
+/// to `PairDispatcher::dispatch` are simultaneously in flight.
+///
+/// Proof shape: a `RendezvousDispatcher` with `expected_agents = 2`
+/// holds every call at a barrier that releases only when both have
+/// arrived. A serial scheduler parks the first call forever (the
+/// second call never starts), so the whole `tick_once` blocks; the
+/// test's `tokio::time::timeout` surfaces that as a RED failure. A
+/// fan-out scheduler drives both calls into the barrier, releases,
+/// and completes well within the timeout (GREEN).
+///
+/// This test does not assert wall-clock timing of any kind; it asserts
+/// the *behavioural* property that two dispatch futures can be
+/// simultaneously in flight. The 5 s timeout is a safety net for the
+/// deadlock case, not a timing bound.
+#[tokio::test]
+async fn fanout_dispatches_agents_concurrently() {
+    let db = common::own_container().await;
+    meshmon_service::db::run_migrations(&db.pool).await.unwrap();
+
+    // Two source agents, each with one pending pair against a unique
+    // destination so neither is reuse-eligible.
+    seed_agents(&db.pool, &["agent-a", "agent-b"]).await;
+
+    let camp_a = repo::create(
+        &db.pool,
+        create_input(
+            "fanout-a",
+            "agent-a",
+            vec![IpAddr::from_str("203.0.113.1").unwrap()],
+        ),
+    )
+    .await
+    .unwrap();
+    repo::start(&db.pool, camp_a.id).await.unwrap();
+
+    let camp_b = repo::create(
+        &db.pool,
+        create_input(
+            "fanout-b",
+            "agent-b",
+            vec![IpAddr::from_str("203.0.113.2").unwrap()],
+        ),
+    )
+    .await
+    .unwrap();
+    repo::start(&db.pool, camp_b.id).await.unwrap();
+
+    // Barrier size = number of agents we expect to see in-flight
+    // simultaneously.
+    let dispatcher = Arc::new(RendezvousDispatcher::new(2));
+
+    let registry = Arc::new(AgentRegistry::new(
+        db.pool.clone(),
+        Duration::from_secs(60),
+        Duration::from_secs(300),
+    ));
+    registry.initial_load().await.unwrap();
+
+    let scheduler = Scheduler::new(
+        db.pool.clone(),
+        registry,
+        dispatcher.clone(),
+        /*tick_ms=*/ 100,
+        /*chunk_size=*/ 32,
+        /*max_pair_attempts=*/ 3,
+        /*target_active_window=*/ Duration::from_secs(300),
+    );
+
+    // Run a single tick under a timeout. Serial dispatch deadlocks at
+    // the barrier; fan-out completes in milliseconds.
+    let tick = tokio::time::timeout(Duration::from_secs(5), scheduler.tick_once_for_test()).await;
+
+    match tick {
+        Err(_) => panic!(
+            "tick_once timed out waiting at the rendezvous barrier — agents \
+             were dispatched serially, not concurrently"
+        ),
+        Ok(Err(e)) => panic!("tick_once returned error: {e:?}"),
+        Ok(Ok(())) => {}
+    }
+
+    let calls = dispatcher.calls.lock().await;
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected 2 dispatch calls, got {}",
+        calls.len()
+    );
+    let agent_ids: std::collections::HashSet<&str> = calls.iter().map(String::as_str).collect();
+    assert!(agent_ids.contains("agent-a"));
+    assert!(agent_ids.contains("agent-b"));
 
     db.close().await;
 }
