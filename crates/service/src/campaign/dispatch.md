@@ -50,8 +50,9 @@ clone (interior state is `Arc`-owned) and holds references to:
 4. **Build `RunMeasurementBatchRequest`.** Every pair in a batch
    shares the same campaign (scheduler invariant:
    `take_pending_batch` is per-`(campaign, agent)`), so per-campaign
-   knobs come from the head pair. `MeasurementKind` is `Mtr` when
-   `probe_count == 1`, `Latency` otherwise. Targets are truncated at
+   knobs come from the head pair. `MeasurementKind` is `Mtr` for
+   `DetailMtr` pairs, `Latency` for `Campaign` and `DetailPing` pairs
+   (determined by `PendingPair::kind`, not `probe_count`). Targets are truncated at
    `max_batch_size`. Per-target `destination_port` is hardcoded to `0`
    (correct for ICMP); TCP/UDP campaigns require the port to be
    populated from a per-target source once `PendingPair` carries one.

@@ -264,10 +264,29 @@ impl Scheduler {
             })
             .collect();
 
+        // Drain the entire fan-out even if one future errors. The `?` shortcut
+        // would drop `fanout`, which cancels in-flight sibling futures and can
+        // orphan rows they already flipped `pending → dispatched` (the claim
+        // commits atomically but the revert runs later in `dispatch_for_campaign`
+        // — a cancelled future skips the revert, and `expire_stale_attempts`
+        // only sweeps `pending`). Remember the first error and return it after
+        // the drain so every agent's dispatch reaches its own revert path.
         let mut any_dispatched = false;
+        let mut first_error: Option<RepoError> = None;
         while let Some(res) = fanout.next().await {
-            if res?.is_some() {
-                any_dispatched = true;
+            match res {
+                Ok(Some(_)) => any_dispatched = true,
+                Ok(None) => {}
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    } else {
+                        warn!(
+                            error = %e,
+                            "scheduler: additional fan-out error suppressed (first error will be returned)"
+                        );
+                    }
+                }
             }
         }
 
@@ -278,6 +297,10 @@ impl Scheduler {
         // existing round-robin fairness guarantee that no campaign starves.
         if any_dispatched {
             *cursor = (cursor_start + 1) % len;
+        }
+
+        if let Some(e) = first_error {
+            return Err(e);
         }
 
         // Skip pairs for source agents that are not currently active.
