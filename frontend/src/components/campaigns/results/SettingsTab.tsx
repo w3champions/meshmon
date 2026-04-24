@@ -9,8 +9,11 @@ import { Label } from "@/components/ui/label";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   extractCampaignErrorCode,
+  extractCampaignErrorDetail,
   isIllegalStateTransition,
   isNoBaselinePairs,
+  isVmNotConfigured,
+  isVmUpstream,
 } from "@/lib/campaign";
 import { clampKnob, KNOB_BOUNDS, ratioToPercentInput } from "@/lib/campaign-config";
 import { useToastStore } from "@/stores/toast";
@@ -115,9 +118,22 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   };
 
   const handleEvaluateError = (err: Error): void => {
+    if (isVmNotConfigured(err)) {
+      toastError(
+        "VictoriaMetrics isn't configured for this deployment — set `[upstream.vm_url]` and retry.",
+      );
+      return;
+    }
+    if (isVmUpstream(err)) {
+      const detail = extractCampaignErrorDetail(err);
+      toastError(
+        detail ? `VictoriaMetrics is unreachable: ${detail}` : "VictoriaMetrics is unreachable.",
+      );
+      return;
+    }
     if (isNoBaselinePairs(err)) {
       toastError(
-        "No baseline measurements available yet — add a pair or wait for in-flight measurements to settle.",
+        "No agent-to-agent baselines from VictoriaMetrics in the last 15 minutes — wait for continuous-mesh data to accrue, or verify agents are online.",
       );
       return;
     }
@@ -163,8 +179,9 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       <header className="flex flex-col gap-1">
         <h2 className="text-base font-semibold">Evaluation settings</h2>
         <p className="text-sm text-muted-foreground">
-          Persist new threshold / mode values and re-run the evaluator against the existing
-          baseline. Available once the campaign is Completed or Evaluated.
+          Persist new threshold / mode values and re-run the evaluator against the VictoriaMetrics
+          continuous-mesh baselines plus any active-probe measurements on this campaign. Available
+          once the campaign is Completed or Evaluated.
         </p>
       </header>
 

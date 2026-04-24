@@ -235,7 +235,9 @@ describe("OverflowMenu — re-evaluate", () => {
     await user.click(screen.getByTestId("overflow-re-evaluate"));
 
     await waitFor(() => {
-      expect(screen.getByText(/no baseline measurements/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/no agent-to-agent baselines from victoriametrics/i),
+      ).toBeInTheDocument();
     });
   });
 });

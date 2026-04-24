@@ -34,8 +34,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   extractCampaignErrorCode,
+  extractCampaignErrorDetail,
   isIllegalStateTransition,
   isNoBaselinePairs,
+  isVmNotConfigured,
+  isVmUpstream,
 } from "@/lib/campaign";
 import { useToastStore } from "@/stores/toast";
 
@@ -74,11 +77,29 @@ export function OverflowMenu({ campaign, evaluation }: OverflowMenuProps) {
         pushToast({ kind: "success", message: "Re-evaluation complete." });
       },
       onError: (err) => {
+        if (isVmNotConfigured(err)) {
+          pushToast({
+            kind: "error",
+            message:
+              "VictoriaMetrics isn't configured for this deployment — set `[upstream.vm_url]` and retry.",
+          });
+          return;
+        }
+        if (isVmUpstream(err)) {
+          const detail = extractCampaignErrorDetail(err);
+          pushToast({
+            kind: "error",
+            message: detail
+              ? `VictoriaMetrics is unreachable: ${detail}`
+              : "VictoriaMetrics is unreachable.",
+          });
+          return;
+        }
         if (isNoBaselinePairs(err)) {
           pushToast({
             kind: "error",
             message:
-              "No baseline measurements available yet — add a pair or wait for in-flight measurements to settle.",
+              "No agent-to-agent baselines from VictoriaMetrics in the last 15 minutes — wait for continuous-mesh data to accrue, or verify agents are online.",
           });
           return;
         }

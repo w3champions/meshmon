@@ -782,7 +782,7 @@
           "campaigns"
         ],
         "summary": "`POST /api/campaigns/{id}/evaluate` — run the evaluator and persist.",
-        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_ratio` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nReturns 422 (`no_baseline_pairs`) when the evaluator finds no\nagent→agent baseline — the campaign must include at least one pair\nwhose destination IP belongs to a registered agent.",
+        "description": "Gated on `state IN ('completed','evaluated')`: re-running on an\nalready-evaluated campaign is allowed so operators can retune\n`loss_threshold_ratio` / `stddev_weight` without editing the row. When\nthe campaign was in `completed`, a best-effort transition flips it to\n`evaluated`; a concurrent transition that loses the gate still leaves\nthe evaluation row written and the SSE event fired.\n\nBefore evaluation, the handler pulls agent-to-agent baselines from\nVictoriaMetrics continuous-mesh data and archives them as raw\n`measurements` rows tagged `source = 'archived_vm_continuous'`. The\nevaluator's existing join-by-measurement-id path then surfaces the\narchival rows alongside any active-probe measurements. This is why\nthe evaluate endpoint now depends on `[upstream.vm_url]`.\n\nReturns 422 (`no_baseline_pairs`) when the VM fetch produced no\nagent→agent samples inside the 15-minute lookback window and no\nactive-probe baseline rows exist either. Operator remedy: verify\nthe agent mesh is actually probing, wait until continuous data\naccumulates, or add an active-probe fallback.\n\nReturns 503 (`vm_not_configured`) when `[upstream.vm_url]` is not\nset, and 503 (`vm_upstream`) when VM is configured but the query\nfailed (unreachable, 5xx, malformed response).",
         "operationId": "evaluate",
         "parameters": [
           {
@@ -842,6 +842,16 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "VictoriaMetrics unconfigured or unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3214,7 +3224,8 @@
           "source_agent_id",
           "destination_ip",
           "resolution_state",
-          "pair_kind"
+          "pair_kind",
+          "source"
         ],
         "properties": {
           "destination_hostname": {
@@ -3301,6 +3312,10 @@
           "resolution_state": {
             "$ref": "#/components/schemas/PairResolutionState",
             "description": "Current lifecycle of the pair."
+          },
+          "source": {
+            "$ref": "#/components/schemas/MeasurementSource",
+            "description": "How this measurement was produced — active campaign probe vs. archived VM baseline."
           },
           "source_agent_id": {
             "type": "string",
@@ -4834,6 +4849,14 @@
           "detail_mtr"
         ]
       },
+      "MeasurementSource": {
+        "type": "string",
+        "description": "Provenance of a `measurements` row.\n\nDistinguishes rows an agent actively measured from rows the evaluator\narchived out of VictoriaMetrics continuous-mesh data so the agent\nmesh doesn't have to re-probe itself at evaluation time.\n\nMirrors the `measurement_source` Postgres enum.",
+        "enum": [
+          "active_probe",
+          "archived_vm_continuous"
+        ]
+      },
       "NetworkFacet": {
         "type": "object",
         "description": "Per-network-operator occurrence count.",
@@ -4862,6 +4885,7 @@
           "source_agent_id",
           "destination_ip",
           "resolution_state",
+          "source",
           "attempt_count"
         ],
         "properties": {
@@ -4925,6 +4949,10 @@
             ],
             "format": "date-time",
             "description": "When the pair reached a terminal state."
+          },
+          "source": {
+            "$ref": "#/components/schemas/MeasurementSource",
+            "description": "How this measurement was produced — active campaign probe vs. archived VM baseline.\nDefaults to `active_probe` for pairs without a joined measurement (e.g. pending rows)."
           },
           "source_agent_id": {
             "type": "string",

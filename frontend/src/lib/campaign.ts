@@ -47,11 +47,45 @@ export function isNoPairsSelected(err: unknown): boolean {
 }
 
 /**
- * 400 from `POST /evaluate` when the campaign has no baseline pairs to score
- * against. Signals the operator the campaign has not actually run probes.
+ * 422 from `POST /evaluate` when the VictoriaMetrics fetch produced no
+ * agent→agent samples inside the 15-minute lookback window and no
+ * active-probe baseline rows exist either. Signals the operator to verify
+ * the agent mesh is actually probing, wait for continuous-mesh data to
+ * accumulate, or add an active-probe fallback.
  */
 export function isNoBaselinePairs(err: unknown): boolean {
   return extractCampaignErrorCode(err) === "no_baseline_pairs";
+}
+
+/**
+ * 503 from `POST /evaluate` when `[upstream.vm_url]` is unset and the
+ * evaluator therefore cannot pull continuous-mesh baselines from
+ * VictoriaMetrics.
+ */
+export function isVmNotConfigured(err: unknown): boolean {
+  return extractCampaignErrorCode(err) === "vm_not_configured";
+}
+
+/**
+ * 503 from `POST /evaluate` when VictoriaMetrics is configured but the
+ * query failed (unreachable, 5xx, malformed response).
+ */
+export function isVmUpstream(err: unknown): boolean {
+  return extractCampaignErrorCode(err) === "vm_upstream";
+}
+
+/**
+ * Extract the optional `detail` string from a structured `{error, detail}`
+ * body. Returns `null` when the error body isn't a structured API body or
+ * when `detail` is missing / non-string. Used by the `vm_upstream` toast to
+ * surface the upstream reason without leaking raw error shapes.
+ */
+export function extractCampaignErrorDetail(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  const cause: unknown = err.cause;
+  if (cause === null || typeof cause !== "object") return null;
+  const detail = (cause as { detail?: unknown }).detail;
+  return typeof detail === "string" ? detail : null;
 }
 
 /**

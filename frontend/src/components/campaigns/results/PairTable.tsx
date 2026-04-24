@@ -31,6 +31,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  measurementSourceBadgeClass,
+  measurementSourceLabel,
+  normaliseSource,
+} from "@/lib/measurement-source";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -251,6 +256,7 @@ export function PairTable({
             />
             <SortableHead column="state" label="State" sort={sort} onSortChange={onSortChange} />
             <TableHead>Protocol</TableHead>
+            <TableHead>Source</TableHead>
             <SortableHead
               column="dispatched_at"
               label="Dispatched"
@@ -305,6 +311,9 @@ export function PairTable({
                   </Badge>
                 </TableCell>
                 <TableCell className="text-xs uppercase tracking-wide">{protocol}</TableCell>
+                <TableCell>
+                  <SourceBadge source={pair.source} />
+                </TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {formatTimestamp(pair.dispatched_at)}
                 </TableCell>
@@ -326,6 +335,37 @@ export function PairTable({
         </TableBody>
       </Table>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Source badge
+// ---------------------------------------------------------------------------
+
+interface SourceBadgeProps {
+  source: CampaignPair["source"] | null | undefined;
+}
+
+/**
+ * Visual chip distinguishing `archived_vm_continuous` pairs (VM-archived
+ * baselines pulled from continuous-mesh data) from `active_probe` pairs.
+ * Sky/blue tone for VM baselines; muted tone for active-probe rows so the
+ * default case doesn't add visual noise.
+ */
+function SourceBadge({ source }: SourceBadgeProps) {
+  const resolved = normaliseSource(source);
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "font-mono text-[10px] uppercase tracking-wide",
+        measurementSourceBadgeClass(resolved),
+      )}
+      data-testid={`pair-source-badge-${resolved}`}
+      aria-label={`Source: ${measurementSourceLabel(resolved)}`}
+    >
+      {measurementSourceLabel(resolved)}
+    </Badge>
   );
 }
 
