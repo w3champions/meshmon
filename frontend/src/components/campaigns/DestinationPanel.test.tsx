@@ -316,6 +316,127 @@ describe("DestinationPanel", () => {
     expect(onSelectedChange).not.toHaveBeenCalled();
   });
 
+  test("walk passes `throwOnError: true` so TanStack Query rejects on page errors", async () => {
+    // By default TanStack Query's `fetchNextPage` resolves with an
+    // error-carrying result (it does not reject). Without
+    // `throwOnError: true` the walk would spin on a page-fetch error
+    // with `result.hasNextPage` unchanged. The catch path only fires
+    // because the option is set.
+    const page1 = pagesOf([[ENTRY_A]], 10)[0];
+    page1.next_cursor = "cursor-1";
+    const fetchNextPage = vi.fn().mockRejectedValueOnce(new Error("net"));
+
+    mockList({ pages: [page1], hasNextPage: true, fetchNextPage });
+
+    const user = userEvent.setup();
+    renderWithQuery(
+      <DestinationPanel
+        selected={new Set()}
+        onSelectedChange={vi.fn()}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^add all$/i }));
+
+    await waitFor(() => {
+      expect(fetchNextPage).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+    });
+  });
+
+  test("mid-walk filter change aborts the walk and leaves selection untouched", async () => {
+    // Simulate a filter mutation mid-walk by swapping the `filter` prop
+    // between the initial render and the next render cycle. The walk
+    // handler closes over `query` at click time; the `JSON.stringify`
+    // compare inside the loop catches the divergence on the next
+    // iteration and bails.
+    const page1 = pagesOf([[ENTRY_A]], 3)[0];
+    page1.next_cursor = "cursor-1";
+
+    // `fetchNextPage` waits for the parent to mutate the filter before
+    // resolving — this reproduces the "filter changed while waiting
+    // for a page" race deterministically. `resolvePage2` is seeded with
+    // a no-op so TypeScript's control flow sees it as always callable;
+    // the Promise executor overwrites it synchronously before any
+    // consumer can reach it.
+    let resolvePage2: (value: unknown) => void = () => {};
+    const fetchNextPage = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePage2 = resolve;
+        }),
+    );
+
+    mockList({ pages: [page1], hasNextPage: true, fetchNextPage });
+
+    const onSelectedChange = vi.fn<(next: Set<string>) => void>();
+    const user = userEvent.setup();
+
+    const { rerender } = renderWithQuery(
+      <DestinationPanel
+        selected={new Set()}
+        onSelectedChange={onSelectedChange}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^add all$/i }));
+    await waitFor(() => expect(fetchNextPage).toHaveBeenCalled());
+
+    // Parent mutates the filter while the walk is awaiting page 2.
+    rerender(
+      <DestinationPanel
+        selected={new Set()}
+        onSelectedChange={onSelectedChange}
+        filter={{ ...EMPTY_FILTER, countryCodes: ["DE"] }}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+
+    // Resolve page 2 so the walk's await returns; the post-await check
+    // sees the divergent query and aborts.
+    const page2 = pagesOf([[ENTRY_B]], 3)[0];
+    page2.next_cursor = null;
+    resolvePage2({
+      data: { pages: [page1, page2], pageParams: [undefined, "cursor-1"] },
+      hasNextPage: false,
+    });
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "error",
+          message: expect.stringMatching(/filter changed/i),
+        }),
+      );
+    });
+    expect(onSelectedChange).not.toHaveBeenCalled();
+  });
+
+  test("requests catalogue pages at the 500-row server clamp max", () => {
+    renderWithQuery(
+      <DestinationPanel
+        selected={new Set()}
+        onSelectedChange={vi.fn()}
+        filter={EMPTY_FILTER}
+        onFilterChange={vi.fn()}
+        facets={undefined}
+        onOpenMap={vi.fn()}
+      />,
+    );
+    expect(catalogueHook.useCatalogueListInfinite).toHaveBeenCalledWith(expect.any(Object), {
+      pageSize: 500,
+    });
+  });
+
   test("paste flow adds acknowledged IPs to the selected set", async () => {
     const onSelectedChange = vi.fn<(next: Set<string>) => void>();
     const user = userEvent.setup();

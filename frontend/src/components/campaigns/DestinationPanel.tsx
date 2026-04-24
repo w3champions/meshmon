@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogueEntry } from "@/api/hooks/catalogue";
 import { useCatalogueListInfinite } from "@/api/hooks/catalogue";
 import type { components } from "@/api/schema.gen";
@@ -70,6 +70,14 @@ export function DestinationPanel({
   const listQuery = useCatalogueListInfinite(query, { pageSize: PAGE_SIZE });
   const [pasteOpen, setPasteOpen] = useState(false);
 
+  // Mirror the current query into a ref so the walk handler — whose
+  // closure is frozen at click time — can still observe mid-walk
+  // filter mutations and abort instead of mixing pages across queries.
+  const queryRef = useRef(query);
+  useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
+
   const rows: CatalogueEntry[] = useMemo(
     () => listQuery.data?.pages.flatMap((p) => p.entries) ?? [],
     [listQuery.data],
@@ -122,6 +130,16 @@ export function DestinationPanel({
       return;
     }
 
+    // Snapshot the active filter query. If the operator mutates the
+    // filter mid-walk, the infinite query key changes and subsequent
+    // `fetchNextPage` calls route to a different cursor chain — the
+    // aggregation would Frankenstein-union pages from two filters. The
+    // FilterRail stays live during the walk on purpose, so this check
+    // is the only defence against that race. Read via the ref — the
+    // handler closure is frozen at click time so a stale `query`
+    // wouldn't detect the change.
+    const startKey = JSON.stringify(queryRef.current);
+
     walkRunningRef.current = true;
     setWalkError(null);
 
@@ -130,13 +148,26 @@ export function DestinationPanel({
       let collectedCount = initialPages.reduce((n, p) => n + p.entries.length, 0);
       setWalkProgress({ collected: collectedCount, total: seedTotal });
 
-      // Drain remaining pages. Each `fetchNextPage` resolves with the
-      // updated InfiniteData snapshot; read the cumulative page list off
-      // that result rather than racing the hook's state.
+      // Drain remaining pages. `throwOnError: true` is load-bearing —
+      // without it, TanStack Query's `fetchNextPage` resolves with an
+      // error-carrying result (never rejects), so the walk would spin
+      // on a page-fetch failure with `result.hasNextPage` still true.
       let hasNext = listQuery.hasNextPage;
       let latestPages = initialPages;
       while (hasNext) {
-        const result = await listQuery.fetchNextPage();
+        const result = await listQuery.fetchNextPage({ throwOnError: true });
+
+        // Filter changed since walk start — abort instead of mixing
+        // pages from different queries.
+        if (JSON.stringify(queryRef.current) !== startKey) {
+          useToastStore.getState().pushToast({
+            kind: "error",
+            message: "Filter changed — Add all aborted. Re-click to rerun under the new filter.",
+          });
+          setWalkProgress(null);
+          return;
+        }
+
         latestPages = result.data?.pages ?? latestPages;
         collectedCount = latestPages.reduce((n, p) => n + p.entries.length, 0);
         const pageTotal = latestPages[0]?.total ?? seedTotal;
@@ -202,11 +233,14 @@ export function DestinationPanel({
 
   const walking = walkProgress !== null;
   // "Add all" re-uses the display hook, so clicking before the first
-  // page lands races the empty-snapshot guard above. Also gate on the
-  // hook's own loading/fetching state so background refetches (e.g. a
-  // filter change) don't race an in-flight drain.
-  const addAllDisabled =
-    disabled || walking || listQuery.isLoading || listQuery.isFetching || rows.length === 0;
+  // page lands races the empty-snapshot guard above. Gate on
+  // `isLoading` for the no-cache first-fetch case and on an empty
+  // row snapshot for the post-filter-change refetch case. Do NOT gate
+  // on `isFetching` — the campaign-stream subscription triggers
+  // background refetches of the same query on every lifecycle event,
+  // which would disable the button for milliseconds at a time on a
+  // stable filter.
+  const addAllDisabled = disabled || walking || listQuery.isLoading || rows.length === 0;
 
   return (
     <section aria-label="Destinations" className="flex h-full min-h-0 gap-3">
