@@ -74,8 +74,10 @@ export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation
  * Kick off the evaluator for a terminal campaign. Seeds the evaluation cache
  * from the returned row so the UI does not have to wait for the SSE
  * `evaluated` frame (which may not arrive if this client subscribed after the
- * COMMIT). Also invalidates the campaign shell key since `state` and
- * `evaluated_at` have moved.
+ * COMMIT). Also invalidates the campaign shell key (state + `evaluated_at`),
+ * the pairs list and preview (evaluator may have regenerated baseline pairs),
+ * and the measurements prefix so the Raw tab refetches — parallel to the
+ * invalidation set `useTriggerDetail` applies after detail dispatch.
  */
 export function useEvaluateCampaign(): UseMutationResult<Evaluation, Error, string> {
   const queryClient = useQueryClient();
@@ -93,6 +95,10 @@ export function useEvaluateCampaign(): UseMutationResult<Evaluation, Error, stri
       // produce, so seed the cache directly and skip a refetch round-trip.
       queryClient.setQueryData(campaignEvaluationKey(id), data);
       queryClient.invalidateQueries({ queryKey: campaignKey(id) });
+      queryClient.invalidateQueries({ queryKey: campaignPairsKey(id) });
+      queryClient.invalidateQueries({ queryKey: campaignPreviewKey(id) });
+      // Prefix invalidation so every filter variant of the Raw tab refetches.
+      queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
     },
   });
 }

@@ -109,7 +109,7 @@ describe("useEvaluation", () => {
 });
 
 describe("useEvaluateCampaign", () => {
-  test("seeds the evaluation cache from the response and invalidates the shell", async () => {
+  test("seeds the evaluation cache from the response and invalidates dependent views", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify(EVALUATION), { status: 200 }));
@@ -128,11 +128,17 @@ describe("useEvaluateCampaign", () => {
     expect(request.method).toBe("POST");
     expect(request.url).toMatch(new RegExp(`/api/campaigns/${CAMPAIGN_ID}/evaluate$`));
 
-    // Cache was seeded directly — no refetch round-trip. A subsequent
-    // `invalidate` would be visible as a second call, but none should fire.
+    // Evaluation cache is seeded directly from the mutation response, so
+    // the evaluation key itself is NOT invalidated (avoids a refetch
+    // round-trip). All other dependent views ARE invalidated so the
+    // Pairs tab, Raw tab, and preview mirror the fresh state — parallel
+    // to what `useTriggerDetail` does.
     expect(qc.getQueryData(campaignEvaluationKey(CAMPAIGN_ID))).toEqual(EVALUATION);
     const invalidatedKeys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
     expect(invalidatedKeys).toContainEqual(campaignKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).toContainEqual(campaignPairsKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN_ID));
+    expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN_ID));
     expect(invalidatedKeys).not.toContainEqual(campaignEvaluationKey(CAMPAIGN_ID));
   });
 });
