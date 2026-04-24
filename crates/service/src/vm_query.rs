@@ -109,38 +109,66 @@ pub async fn fetch_agent_baselines(
     if agent_ids.is_empty() {
         return Ok(Vec::new());
     }
-    // Drop self-pairs implicitly later; here we just build the regex
-    // alternation. Escape every id so an ID containing regex metacharacters
-    // can't distort the selector. The existing ingestion validators don't
-    // enforce a strict charset; defence in depth.
-    let escaped: Vec<String> = agent_ids.iter().map(|id| regex_escape(id)).collect();
-    let id_alternation = escaped.join("|");
-    let lookback_s = format!("{}s", lookback.as_secs().max(1));
-
-    let rtt_query = format!(
-        "avg_over_time(meshmon_path_rtt_avg_micros{{source=~\"{ids}\",target=~\"{ids}\",protocol=\"{proto}\"}}[{win}]) / 1000",
-        ids = id_alternation,
-        proto = escape_label_value(protocol),
-        win = lookback_s,
-    );
-    let stddev_query = format!(
-        "avg_over_time(meshmon_path_rtt_stddev_micros{{source=~\"{ids}\",target=~\"{ids}\",protocol=\"{proto}\"}}[{win}]) / 1000",
-        ids = id_alternation,
-        proto = escape_label_value(protocol),
-        win = lookback_s,
-    );
-    let loss_query = format!(
-        "avg_over_time(meshmon_path_failure_rate{{source=~\"{ids}\",target=~\"{ids}\",protocol=\"{proto}\"}}[{win}])",
-        ids = id_alternation,
-        proto = escape_label_value(protocol),
-        win = lookback_s,
-    );
+    let BaselineQueries {
+        rtt: rtt_query,
+        stddev: stddev_query,
+        loss: loss_query,
+    } = build_baseline_queries(agent_ids, protocol, lookback);
 
     let rtt_samples = run_instant_query(vm_url, &rtt_query).await?;
     let stddev_samples = run_instant_query(vm_url, &stddev_query).await?;
     let loss_samples = run_instant_query(vm_url, &loss_query).await?;
 
     Ok(merge_samples(rtt_samples, stddev_samples, loss_samples))
+}
+
+/// The three PromQL instant queries built for one call. Pulled out of
+/// [`fetch_agent_baselines`] so the escape/quote plumbing is unit-testable
+/// without spinning up an HTTP round-trip.
+struct BaselineQueries {
+    rtt: String,
+    stddev: String,
+    loss: String,
+}
+
+/// Build the three instant-query strings. Two-stage escape on each
+/// agent id: RE2 metacharacters first (so the regex alternation stays a
+/// valid regex), then PromQL label-value escaping (so a `"` or `\` in
+/// the id can't break out of the surrounding double-quoted string
+/// literal). The ingestion validators don't enforce a strict charset;
+/// defence in depth.
+fn build_baseline_queries(
+    agent_ids: &[String],
+    protocol: &str,
+    lookback: Duration,
+) -> BaselineQueries {
+    let id_alternation: String = agent_ids
+        .iter()
+        .map(|id| escape_label_value(&regex_escape(id)))
+        .collect::<Vec<_>>()
+        .join("|");
+    let lookback_s = format!("{}s", lookback.as_secs().max(1));
+    let proto = escape_label_value(protocol);
+
+    let rtt = format!(
+        "avg_over_time(meshmon_path_rtt_avg_micros{{source=~\"{ids}\",target=~\"{ids}\",protocol=\"{proto}\"}}[{win}]) / 1000",
+        ids = id_alternation,
+        proto = proto,
+        win = lookback_s,
+    );
+    let stddev = format!(
+        "avg_over_time(meshmon_path_rtt_stddev_micros{{source=~\"{ids}\",target=~\"{ids}\",protocol=\"{proto}\"}}[{win}]) / 1000",
+        ids = id_alternation,
+        proto = proto,
+        win = lookback_s,
+    );
+    let loss = format!(
+        "avg_over_time(meshmon_path_failure_rate{{source=~\"{ids}\",target=~\"{ids}\",protocol=\"{proto}\"}}[{win}])",
+        ids = id_alternation,
+        proto = proto,
+        win = lookback_s,
+    );
+    BaselineQueries { rtt, stddev, loss }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +339,66 @@ mod tests {
         assert_eq!(escape_label_value("icmp"), "icmp");
         assert_eq!(escape_label_value("a\"b"), "a\\\"b");
         assert_eq!(escape_label_value("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn build_baseline_queries_escapes_quotes_in_agent_ids() {
+        // Regression for T54-05: a malicious agent id containing `"`
+        // must stay inside the label-value string literal. Before the
+        // two-stage escape, `x"injection` would close the string early
+        // and splice arbitrary PromQL into the selector.
+        let ids = vec!["ok-id".to_string(), "x\"injection".to_string()];
+        let q = build_baseline_queries(&ids, "icmp", Duration::from_secs(60));
+
+        // The escaped `"` must appear as `\"`; there must be no bare `"`
+        // that would close the selector and let the id-alternation leak
+        // into surrounding PromQL.
+        assert!(
+            q.rtt.contains("x\\\"injection"),
+            "agent id quote must be escaped, got: {}",
+            q.rtt
+        );
+        // Every `"` in the final string must be preceded by `\` — i.e.
+        // no bare quote leaked from an unescaped id.
+        let bytes = q.rtt.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'"' {
+                assert!(
+                    i > 0 && (bytes[i - 1] == b'\\' || is_outer_quote(bytes, i)),
+                    "unescaped `\"` at byte {i} in query: {}",
+                    q.rtt
+                );
+            }
+        }
+    }
+
+    /// True if the `"` at byte offset `i` is one of the outer quotes that
+    /// opens/closes a selector label-value. Those are the only bare `"`
+    /// bytes we expect: `{source=~"…"`, `,target=~"…"`, `,protocol="…"`.
+    /// An unescaped `"` anywhere else signals an injection.
+    fn is_outer_quote(bytes: &[u8], i: usize) -> bool {
+        // Bytes that precede an opening outer quote in our template.
+        // Either `~` (for regex-match operators) or `=` (for eq match).
+        i > 0 && (bytes[i - 1] == b'~' || bytes[i - 1] == b'=')
+            // or a closing outer quote: followed by `,` (next label),
+            // `}` (selector end).
+            || (i + 1 < bytes.len() && (bytes[i + 1] == b',' || bytes[i + 1] == b'}'))
+    }
+
+    #[test]
+    fn build_baseline_queries_embeds_ids_and_protocol() {
+        // Sanity-check: a plain id shows up unescaped; the protocol
+        // label binds with `=` not `=~`.
+        let q = build_baseline_queries(
+            &["agent-a".into(), "agent-b".into()],
+            "icmp",
+            Duration::from_secs(3600),
+        );
+        assert!(q.rtt.contains("source=~\"agent-a|agent-b\""), "{}", q.rtt);
+        assert!(q.rtt.contains("target=~\"agent-a|agent-b\""), "{}", q.rtt);
+        assert!(q.rtt.contains("protocol=\"icmp\""), "{}", q.rtt);
+        assert!(q.stddev.contains("[3600s]"), "{}", q.stddev);
+        assert!(q.loss.contains("meshmon_path_failure_rate"), "{}", q.loss);
     }
 
     #[test]

@@ -80,6 +80,24 @@ fn resolve_peer_ip<T>(request: &Request<T>, trust_forwarded: bool) -> Option<IpA
 }
 
 /// Concrete implementation of the `AgentApi` tonic service.
+/// `^[A-Za-z0-9][A-Za-z0-9._-]*$` — the charset enforced on newly-registered
+/// agent ids. Picked to cover kebab-case (`dev-agent-1`), snake_case
+/// (`edge_us_1`), and dotted DNS-ish names (`edge.us.1`) while rejecting
+/// anything that would need escaping in a PromQL label value, a regex, a
+/// SQL identifier, or a URL path segment. Leading dot/dash/underscore is
+/// disallowed so a misplaced `-` never looks like a CLI flag to downstream
+/// tooling.
+fn is_valid_agent_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 ///
 /// Each RPC body is a stub returning [`Status::unimplemented`]; the real
 /// implementations arrive in Tasks 10–12, 15–16.
@@ -197,6 +215,19 @@ impl AgentApi for AgentApiImpl {
         // Step 2: payload validation.
         if req.id.trim().is_empty() || req.display_name.trim().is_empty() {
             return Err(Status::invalid_argument("id and display_name required"));
+        }
+        // Tighten the charset on agent ids. Downstream consumers (PromQL
+        // label values in `vm_query.rs`, `campaign_pairs.source_agent_id`,
+        // log/tracing spans) were all written assuming a kebab/snake/dot
+        // case id. Rejecting quotes, whitespace, regex metacharacters,
+        // colons, and anything exotic here closes the label-injection
+        // surface as defence in depth even when the query builder escapes
+        // values.
+        if !is_valid_agent_id(&req.id) {
+            return Err(Status::invalid_argument(format!(
+                "agent id {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                req.id
+            )));
         }
         // Reject non-finite or out-of-range coordinates before they enter
         // the DB — `ip_catalogue.latitude`/`longitude` are `DOUBLE PRECISION`
@@ -560,5 +591,53 @@ fn probing_to_config_response(p: &crate::probing::ProbingSection) -> ConfigRespo
             .udp_probe_previous_secret
             .map(|s| s.to_vec().into())
             .unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_agent_id;
+
+    #[test]
+    fn accepts_standard_charsets() {
+        // Kebab-case (the convention used in deploy/ compose files).
+        assert!(is_valid_agent_id("agent-01"));
+        assert!(is_valid_agent_id("dev-agent-1"));
+        assert!(is_valid_agent_id("edge-eu-fra-01"));
+        // Snake_case.
+        assert!(is_valid_agent_id("edge_us_1"));
+        // Dotted / DNS-ish.
+        assert!(is_valid_agent_id("edge.us.1"));
+        // Single char + digits.
+        assert!(is_valid_agent_id("a"));
+        assert!(is_valid_agent_id("A1"));
+        assert!(is_valid_agent_id("9"));
+    }
+
+    #[test]
+    fn rejects_empty_and_unsafe_chars() {
+        assert!(!is_valid_agent_id(""));
+        // Space and other whitespace — breaks log spans and label values.
+        assert!(!is_valid_agent_id("bad id"));
+        assert!(!is_valid_agent_id("bad\tid"));
+        // Quotes and backslash — PromQL label-value escape hazards.
+        assert!(!is_valid_agent_id("x\"injection"));
+        assert!(!is_valid_agent_id("with\\slash"));
+        // RE2 metacharacters.
+        assert!(!is_valid_agent_id("a|b"));
+        assert!(!is_valid_agent_id("a*b"));
+        assert!(!is_valid_agent_id("a.b{c}"));
+        // Colons, slashes — unsafe in URL segments / metric-name-adjacent
+        // tooling.
+        assert!(!is_valid_agent_id("ns:name"));
+        assert!(!is_valid_agent_id("with/slash"));
+    }
+
+    #[test]
+    fn rejects_leading_punctuation() {
+        // Leading dot/dash/underscore — reserved for sort order / CLI flags.
+        assert!(!is_valid_agent_id("-agent"));
+        assert!(!is_valid_agent_id(".agent"));
+        assert!(!is_valid_agent_id("_agent"));
     }
 }
