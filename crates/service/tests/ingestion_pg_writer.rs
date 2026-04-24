@@ -24,11 +24,11 @@ fn validated() -> ValidatedSnapshot {
             }],
             avg_rtt_micros: 500,
             stddev_rtt_micros: 50,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
         }],
         path_summary: ValidSummary {
             avg_rtt_micros: 500,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
             hop_count: 1,
         },
     }

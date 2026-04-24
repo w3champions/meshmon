@@ -199,8 +199,8 @@ message HopSummary {
   repeated HopIp observed_ips = 2;
   uint32 avg_rtt_micros = 3;
   uint32 stddev_rtt_micros = 4;
-  // 0.0 .. 1.0 loss at this hop over the 5-min window.
-  double loss_pct = 5;
+  // Loss fraction at this hop over the current window (0.0 .. 1.0).
+  double loss_ratio = 5;
 
   reserved 15 to 31;
 }
@@ -225,7 +225,8 @@ message RouteSnapshotRequest {
 // Aggregate of the hops for quick display in lists without JSONB extraction.
 message PathSummary {
   uint32 avg_rtt_micros = 1;
-  double loss_pct = 2;
+  // Aggregate loss fraction across the path (0.0 .. 1.0).
+  double loss_ratio = 2;
   uint32 hop_count = 3;
 
   reserved 15 to 31;
@@ -253,8 +254,8 @@ message RateEntry {
 // Per-protocol state-machine thresholds. Values are 0.0–1.0 fractions.
 // Hysteresis durations are in seconds.
 message ProtocolThresholds {
-  double unhealthy_trigger_pct = 1;
-  double healthy_recovery_pct = 2;
+  double unhealthy_trigger_ratio = 1;
+  double healthy_recovery_ratio = 2;
   uint32 unhealthy_hysteresis_sec = 3;
   uint32 healthy_hysteresis_sec = 4;
 
@@ -263,10 +264,10 @@ message ProtocolThresholds {
 
 // Path-health state-machine thresholds (spec 02 "Path health (derived)").
 message PathHealthThresholds {
-  double degraded_trigger_pct = 1;
+  double degraded_trigger_ratio = 1;
   uint32 degraded_trigger_sec = 2;
   uint32 degraded_min_samples = 3;
-  double normal_recovery_pct = 4;
+  double normal_recovery_ratio = 4;
   uint32 normal_recovery_sec = 5;
 
   reserved 15 to 31;
@@ -491,10 +492,8 @@ message MeasurementSummary {
   float  latency_p95_ms    = 6;
   float  latency_max_ms    = 7;
   float  latency_stddev_ms = 8;
-  // 0.0 .. 1.0 loss fraction across the batch. The service multiplies
-  // by 100 before storing in `measurements.loss_pct`; downstream
-  // consumers treat that column as percentage 0..100.
-  float  loss_pct          = 9;
+  // 0.0 .. 1.0 loss fraction across the batch.
+  float  loss_ratio        = 9;
 
   reserved 15 to 31;
 }

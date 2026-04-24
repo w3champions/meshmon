@@ -713,7 +713,7 @@ fn build_route_snapshot_request(
 
 /// Build the wire `PathSummary` for a route snapshot.
 ///
-/// `loss_pct` and `avg_rtt_micros` come from the supervisor's elected
+/// `loss_ratio` and `avg_rtt_micros` come from the supervisor's elected
 /// `primary_protocol` `RollingStats` (carried on the envelope as
 /// [`PathSummarySource`]). When the primary is `None` (cold start before
 /// the sample-floor is met, or every protocol is unhealthy), loss is
@@ -721,7 +721,7 @@ fn build_route_snapshot_request(
 ///
 /// `hop_count` is the topology depth recorded by the route tracker.
 /// Trippy destination-hop accounting (`hops.last()`) is intentionally NOT
-/// the source for `loss_pct` / `avg_rtt_micros`: trippy's 60 s window
+/// the source for `loss_ratio` / `avg_rtt_micros`: trippy's 60 s window
 /// with 500 ms grace inflates phantom loss whenever the destination's
 /// reply lands past the grace deadline (common on healthy LANs at low
 /// pps), and conflates with end-to-end loss the silent
@@ -729,8 +729,8 @@ fn build_route_snapshot_request(
 /// per-hop. Per-hop loss / RTT for the topology drilldown stays in
 /// `hops[]`.
 fn build_path_summary(source: PathSummarySource, hop_count: usize) -> PathSummaryProto {
-    let (avg_rtt_micros, loss_pct) = match source.primary_protocol {
-        Some(_) => (source.avg_rtt_micros, source.loss_pct.clamp(0.0, 1.0)),
+    let (avg_rtt_micros, loss_ratio) = match source.primary_protocol {
+        Some(_) => (source.avg_rtt_micros, source.loss_ratio.clamp(0.0, 1.0)),
         // Unhealthy / not-yet-elected → encode as 100 % loss so the
         // matrix renders red. The `.clamp` above keeps a misbehaving
         // primary stats source within the wire validator's [0, 1] band.
@@ -738,7 +738,7 @@ fn build_path_summary(source: PathSummarySource, hop_count: usize) -> PathSummar
     };
     PathSummaryProto {
         avg_rtt_micros,
-        loss_pct,
+        loss_ratio,
         hop_count: hop_count as u32,
     }
 }
@@ -760,7 +760,7 @@ fn hop_to_proto(h: &crate::route::HopSummary) -> HopSummaryProto {
         observed_ips,
         avg_rtt_micros: h.avg_rtt_micros,
         stddev_rtt_micros: h.stddev_rtt_micros,
-        loss_pct: h.loss_pct,
+        loss_ratio: h.loss_ratio,
     }
 }
 
@@ -1359,14 +1359,14 @@ mod tests {
         // hop-loss stays in `hops[]` for the topology drilldown.
         let source = PathSummarySource {
             primary_protocol: Some(Protocol::Icmp),
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
             avg_rtt_micros: 30_000,
         };
 
         let s = build_path_summary(source, /* hop_count_input = */ 3);
         assert_eq!(s.hop_count, 3);
         assert_eq!(s.avg_rtt_micros, 30_000);
-        assert!((s.loss_pct - 0.0).abs() < 1e-9, "got {}", s.loss_pct);
+        assert!((s.loss_ratio - 0.0).abs() < 1e-9, "got {}", s.loss_ratio);
     }
 
     #[test]
@@ -1378,14 +1378,14 @@ mod tests {
         // hard-coding in the encoder.
         let source = PathSummarySource {
             primary_protocol: Some(Protocol::Tcp),
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
             avg_rtt_micros: 12_500,
         };
 
         let s = build_path_summary(source, 1);
         assert_eq!(s.hop_count, 1);
         assert_eq!(s.avg_rtt_micros, 12_500);
-        assert!((s.loss_pct - 0.0).abs() < 1e-9);
+        assert!((s.loss_ratio - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1393,31 +1393,31 @@ mod tests {
         use crate::route::PathSummarySource;
 
         // No primary elected (cold start before sample-floor met, or
-        // every protocol unhealthy). Encoder must emit `loss_pct = 1.0`
+        // every protocol unhealthy). Encoder must emit `loss_ratio = 1.0`
         // so the matrix renders red rather than a misleading 0%.
         let s = build_path_summary(PathSummarySource::unhealthy(), 0);
         assert_eq!(s.hop_count, 0);
         assert_eq!(s.avg_rtt_micros, 0);
-        assert!((s.loss_pct - 1.0).abs() < 1e-9, "got {}", s.loss_pct);
+        assert!((s.loss_ratio - 1.0).abs() < 1e-9, "got {}", s.loss_ratio);
     }
 
     #[test]
-    fn build_path_summary_clamps_misbehaving_loss_pct_into_wire_band() {
+    fn build_path_summary_clamps_misbehaving_loss_ratio_into_wire_band() {
         use crate::route::PathSummarySource;
 
         // A misbehaving primary stats source could in principle hand the
-        // encoder a loss_pct outside [0, 1]. The wire validator rejects
+        // encoder a loss_ratio outside [0, 1]. The wire validator rejects
         // that, so the encoder clamps defensively rather than fail the
         // whole snapshot push.
         let s = build_path_summary(
             PathSummarySource {
                 primary_protocol: Some(Protocol::Icmp),
-                loss_pct: 1.7,
+                loss_ratio: 1.7,
                 avg_rtt_micros: 1_000,
             },
             1,
         );
-        assert!((s.loss_pct - 1.0).abs() < 1e-9);
+        assert!((s.loss_ratio - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1438,13 +1438,13 @@ mod tests {
             ],
             avg_rtt_micros: 12_345,
             stddev_rtt_micros: 123,
-            loss_pct: 0.05,
+            loss_ratio: 0.05,
         };
         let proto = hop_to_proto(&agent_hop);
         assert_eq!(proto.position, 4);
         assert_eq!(proto.avg_rtt_micros, 12_345);
         assert_eq!(proto.stddev_rtt_micros, 123);
-        assert!((proto.loss_pct - 0.05).abs() < 1e-9);
+        assert!((proto.loss_ratio - 0.05).abs() < 1e-9);
         assert_eq!(proto.observed_ips.len(), 2);
         assert_eq!(proto.observed_ips[0].ip.len(), 4);
         assert_eq!(proto.observed_ips[0].ip, vec![10, 1, 2, 3]);
@@ -1479,7 +1479,7 @@ mod tests {
         let ps = req.path_summary.unwrap();
         assert_eq!(ps.hop_count, 0);
         assert_eq!(ps.avg_rtt_micros, 0);
-        assert!((ps.loss_pct - 1.0).abs() < 1e-9);
+        assert!((ps.loss_ratio - 1.0).abs() < 1e-9);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1506,7 +1506,7 @@ mod tests {
                 observed_ips: vec![],
                 avg_rtt_micros: 2_000,
                 stddev_rtt_micros: 0,
-                loss_pct: 0.0,
+                loss_ratio: 0.0,
             }],
         };
         stx.send(RouteSnapshotEnvelope {
@@ -1514,7 +1514,7 @@ mod tests {
             snapshot: snap,
             path_summary: PathSummarySource {
                 primary_protocol: Some(Protocol::Tcp),
-                loss_pct: 0.0,
+                loss_ratio: 0.0,
                 avg_rtt_micros: 2_000,
             },
         })
@@ -1538,7 +1538,7 @@ mod tests {
         let ps = req.path_summary.as_ref().expect("PathSummary stamped");
         assert_eq!(ps.hop_count, 1);
         assert_eq!(ps.avg_rtt_micros, 2_000);
-        assert!((ps.loss_pct - 0.0).abs() < 1e-9);
+        assert!((ps.loss_ratio - 0.0).abs() < 1e-9);
     }
 
     /// ServiceApi that fails the first N `push_metrics` calls with

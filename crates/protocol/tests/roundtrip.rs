@@ -112,7 +112,7 @@ fn route_snapshot_request_roundtrip() {
         ],
         avg_rtt_micros: 2_100,
         stddev_rtt_micros: 180,
-        loss_pct: 0.0,
+        loss_ratio: 0.0,
     };
     let msg = RouteSnapshotRequest {
         source_id: "brazil-north".into(),
@@ -122,7 +122,7 @@ fn route_snapshot_request_roundtrip() {
         hops: vec![hop],
         path_summary: Some(PathSummary {
             avg_rtt_micros: 45_000,
-            loss_pct: 0.01,
+            loss_ratio: 0.01,
             hop_count: 12,
         }),
     };
@@ -132,8 +132,8 @@ fn route_snapshot_request_roundtrip() {
 #[test]
 fn config_response_roundtrip() {
     let thresholds = ProtocolThresholds {
-        unhealthy_trigger_pct: 0.9,
-        healthy_recovery_pct: 0.1,
+        unhealthy_trigger_ratio: 0.9,
+        healthy_recovery_ratio: 0.1,
         unhealthy_hysteresis_sec: 60,
         healthy_hysteresis_sec: 120,
     };
@@ -166,8 +166,8 @@ fn config_response_roundtrip() {
         ],
         icmp_thresholds: Some(thresholds),
         tcp_thresholds: Some(ProtocolThresholds {
-            unhealthy_trigger_pct: 0.5,
-            healthy_recovery_pct: 0.05,
+            unhealthy_trigger_ratio: 0.5,
+            healthy_recovery_ratio: 0.05,
             ..thresholds
         }),
         udp_thresholds: Some(thresholds),
@@ -180,10 +180,10 @@ fn config_response_roundtrip() {
             hop_count_change: 1,
         }),
         path_health_thresholds: Some(PathHealthThresholds {
-            degraded_trigger_pct: 0.02,
+            degraded_trigger_ratio: 0.02,
             degraded_trigger_sec: 120,
             degraded_min_samples: 30,
-            normal_recovery_pct: 0.01,
+            normal_recovery_ratio: 0.01,
             normal_recovery_sec: 300,
         }),
         udp_probe_secret: vec![0u8; 8].into(),

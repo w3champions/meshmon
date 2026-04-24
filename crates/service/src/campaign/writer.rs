@@ -109,7 +109,7 @@ fn hops_to_jsonb(hops: &[HopSummary]) -> Result<JsonValue, serde_json::Error> {
                 .collect(),
             avg_rtt_micros: h.avg_rtt_micros,
             stddev_rtt_micros: h.stddev_rtt_micros,
-            loss_pct: h.loss_pct,
+            loss_ratio: h.loss_ratio,
         })
         .collect();
     serde_json::to_value(converted)
@@ -170,7 +170,7 @@ impl SettleWriter {
                         (source_agent_id, destination_ip, protocol, probe_count,
                          latency_min_ms, latency_avg_ms, latency_median_ms,
                          latency_p95_ms, latency_max_ms, latency_stddev_ms,
-                         loss_pct, kind)
+                         loss_ratio, kind)
                     VALUES ($1, $2, $3::probe_protocol, $4,
                             $5, $6, $7, $8, $9, $10, $11,
                             $12::measurement_kind)
@@ -186,12 +186,9 @@ impl SettleWriter {
                     s.latency_p95_ms,
                     s.latency_max_ms,
                     s.latency_stddev_ms,
-                    // Agent-wire convention is fraction (0.0–1.0); the
-                    // `measurements.loss_pct` column stores percentage
-                    // (0.0–100.0) so the evaluator and FE — both of
-                    // which already assume percent — render correctly
-                    // without a per-consumer *100.
-                    s.loss_pct * 100.0f32,
+                    // Agent-wire and DB convention is fraction (0.0–1.0);
+                    // FE multiplies by 100 at display.
+                    s.loss_ratio,
                     pair.kind as MeasurementKind,
                 )
                 .fetch_one(&mut *tx)
@@ -230,7 +227,7 @@ impl SettleWriter {
                     r#"
                     INSERT INTO measurements
                         (source_agent_id, destination_ip, protocol, probe_count,
-                         loss_pct, kind, mtr_id)
+                         loss_ratio, kind, mtr_id)
                     VALUES ($1, $2, $3::probe_protocol, 1,
                             0.0, $4::measurement_kind, $5)
                     RETURNING id

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, notes,\n               state AS \"state: CampaignState\",\n               protocol AS \"protocol: ProbeProtocol\",\n               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n               force_measurement, loss_threshold_pct, stddev_weight,\n               evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n          FROM measurement_campaigns\n         WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)\n           AND ($2::campaign_state IS NULL OR state = $2)\n           AND ($3::text IS NULL OR created_by = $3)\n         ORDER BY created_at DESC\n         LIMIT $4\n        ",
+  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 2.0::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -136,22 +136,38 @@
     "parameters": {
       "Left": [
         "Text",
+        "Text",
         {
           "Custom": {
-            "name": "campaign_state",
+            "name": "probe_protocol",
             "kind": {
               "Enum": [
-                "draft",
-                "running",
-                "completed",
-                "evaluated",
-                "stopped"
+                "icmp",
+                "tcp",
+                "udp"
               ]
             }
           }
         },
-        "Text",
-        "Int8"
+        "Int2",
+        "Int2",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Float4",
+        "Float4",
+        {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization"
+              ]
+            }
+          }
+        },
+        "Text"
       ]
     },
     "nullable": [
@@ -176,5 +192,5 @@
       true
     ]
   },
-  "hash": "36ed3f86e187ee90acb2fcd5db481540fcda0cabe3e3f0401639cf2e5108d89f"
+  "hash": "61e3b0ff59de0ee70ee5eb87bda94a1ba20dab9ac9f2160d6809369353fac6b2"
 }

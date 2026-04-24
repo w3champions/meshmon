@@ -64,9 +64,9 @@ Single-round MTR. `aggregate_mtr` walks `[1..=target_reached_ttl]`:
 - Each responsive TTL becomes one `HopSummary`: `position = ttl`,
   `observed_ips` carries one `HopIp` per unique `Hop::addrs()` entry at
   `frequency = 1.0`, `avg_rtt_micros` comes from `Hop::best_ms()`,
-  `stddev_rtt_micros = 0` (single probe), `loss_pct = 0`.
+  `stddev_rtt_micros = 0` (single probe), `loss_ratio = 0`.
 - Each silent TTL pads with `observed_ips: []`, zero RTT, and
-  `loss_pct = 1.0`.
+  `loss_ratio = 1.0`.
 
 ## Cancellation
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    INSERT INTO measurements\n                        (source_agent_id, destination_ip, protocol, probe_count,\n                         latency_min_ms, latency_avg_ms, latency_median_ms,\n                         latency_p95_ms, latency_max_ms, latency_stddev_ms,\n                         loss_pct, kind)\n                    VALUES ($1, $2, $3::probe_protocol, $4,\n                            $5, $6, $7, $8, $9, $10, $11,\n                            $12::measurement_kind)\n                    RETURNING id\n                    ",
+  "query": "\n                    INSERT INTO measurements\n                        (source_agent_id, destination_ip, protocol, probe_count,\n                         latency_min_ms, latency_avg_ms, latency_median_ms,\n                         latency_p95_ms, latency_max_ms, latency_stddev_ms,\n                         loss_ratio, kind)\n                    VALUES ($1, $2, $3::probe_protocol, $4,\n                            $5, $6, $7, $8, $9, $10, $11,\n                            $12::measurement_kind)\n                    RETURNING id\n                    ",
   "describe": {
     "columns": [
       {
@@ -51,5 +51,5 @@
       false
     ]
   },
-  "hash": "ba9210799978e0947a921f30488925beb64d432a81ad4bfa49f1c6ae086a0980"
+  "hash": "2cacd7bc7d1e8c52b7bafe4de49ed5ff112428809d5758a4bfe98a2bad38252a"
 }

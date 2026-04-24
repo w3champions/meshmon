@@ -124,7 +124,7 @@ async fn scheduler_dispatches_five_batches_end_to_end() {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,

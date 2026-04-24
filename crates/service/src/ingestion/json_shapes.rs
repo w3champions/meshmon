@@ -20,7 +20,7 @@ pub struct HopJson {
     /// Standard deviation of RTT to this hop, in microseconds.
     pub stddev_rtt_micros: u32,
     /// Fraction of probes with no response at this hop.
-    pub loss_pct: f64,
+    pub loss_ratio: f64,
 }
 
 /// JSON representation of an observed IP at a hop.
@@ -47,7 +47,7 @@ pub struct PathSummaryJson {
     /// Mean RTT across all hops, in microseconds.
     pub avg_rtt_micros: u32,
     /// Overall path loss fraction.
-    pub loss_pct: f64,
+    pub loss_ratio: f64,
     /// Total number of hops in the route.
     pub hop_count: u32,
 }
@@ -69,7 +69,7 @@ impl From<&crate::ingestion::validator::ValidHop> for HopJson {
                 .collect(),
             avg_rtt_micros: h.avg_rtt_micros,
             stddev_rtt_micros: h.stddev_rtt_micros,
-            loss_pct: h.loss_pct,
+            loss_ratio: h.loss_ratio,
         }
     }
 }
@@ -78,7 +78,7 @@ impl From<&crate::ingestion::validator::ValidSummary> for PathSummaryJson {
     fn from(s: &crate::ingestion::validator::ValidSummary) -> Self {
         PathSummaryJson {
             avg_rtt_micros: s.avg_rtt_micros,
-            loss_pct: s.loss_pct,
+            loss_ratio: s.loss_ratio,
             hop_count: s.hop_count,
         }
     }

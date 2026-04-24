@@ -79,7 +79,7 @@ async fn preview_dispatch_count_returns_total_reusable_fresh() {
     // committed `.sqlx/` offline cache.
     sqlx::query(
         "INSERT INTO measurements \
-             (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+             (source_agent_id, destination_ip, protocol, probe_count, loss_ratio) \
          VALUES ('agent-h2', '198.51.100.210', 'icmp', 10, 0.0)",
     )
     .execute(&h.state.pool)
@@ -410,7 +410,7 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
             "pairs_improved": 1,
             "pairs_total_considered": 1,
             "avg_improvement_ms": 2.0,
-            "avg_loss_pct": 0.0,
+            "avg_loss_ratio": 0.0,
             "composite_score": 1.5,
             "pair_details": [{
                 "source_agent_id": "agent-a",
@@ -418,10 +418,10 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
                 "destination_ip": pd_ip_str,
                 "direct_rtt_ms": 10.0,
                 "direct_stddev_ms": 1.0,
-                "direct_loss_pct": 0.0,
+                "direct_loss_ratio": 0.0,
                 "transit_rtt_ms": 8.0,
                 "transit_stddev_ms": 1.0,
-                "transit_loss_pct": 0.0,
+                "transit_loss_ratio": 0.0,
                 "improvement_ms": 2.0,
                 "qualifies": true
             }]
@@ -430,10 +430,10 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
     });
     sqlx::query(
         "INSERT INTO campaign_evaluations \
-             (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode, \
+             (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode, \
               baseline_pair_count, candidates_total, candidates_good, \
               avg_improvement_ms, results, evaluated_at) \
-         VALUES ($1, 10.0, 1.0, 'optimization', 1, 1, 1, 2.0, $2::jsonb, now())",
+         VALUES ($1, 0.10, 1.0, 'optimization', 1, 1, 1, 2.0, $2::jsonb, now())",
     )
     .bind(campaign_id)
     .bind(&results)

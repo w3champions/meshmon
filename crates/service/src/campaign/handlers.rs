@@ -121,7 +121,7 @@ pub async fn create(
         probe_count_detail: body.probe_count_detail,
         timeout_ms: body.timeout_ms,
         probe_stagger_ms: body.probe_stagger_ms,
-        loss_threshold_pct: body.loss_threshold_pct,
+        loss_threshold_ratio: body.loss_threshold_ratio,
         stddev_weight: body.stddev_weight,
         evaluation_mode: body.evaluation_mode,
         created_by: Some(principal.username.clone()),
@@ -268,7 +268,7 @@ pub async fn patch(
         id,
         body.title.as_deref(),
         body.notes.as_deref(),
-        body.loss_threshold_pct,
+        body.loss_threshold_ratio,
         body.stddev_weight,
         body.evaluation_mode,
     )
@@ -650,7 +650,7 @@ fn to_evaluation_dto(row: EvaluationRow) -> Result<EvaluationDto, serde_json::Er
     Ok(EvaluationDto {
         campaign_id: row.campaign_id,
         evaluated_at: row.evaluated_at,
-        loss_threshold_pct: row.loss_threshold_pct,
+        loss_threshold_ratio: row.loss_threshold_ratio,
         stddev_weight: row.stddev_weight,
         evaluation_mode: row.evaluation_mode,
         baseline_pair_count: row.baseline_pair_count,
@@ -678,7 +678,7 @@ fn invalid_evaluation_payload(campaign_id: Uuid, err: serde_json::Error) -> Resp
 ///
 /// Gated on `state IN ('completed','evaluated')`: re-running on an
 /// already-evaluated campaign is allowed so operators can retune
-/// `loss_threshold_pct` / `stddev_weight` without editing the row. When
+/// `loss_threshold_ratio` / `stddev_weight` without editing the row. When
 /// the campaign was in `completed`, a best-effort transition flips it to
 /// `evaluated`; a concurrent transition that loses the gate still leaves
 /// the evaluation row written and the SSE event fired.
@@ -732,7 +732,7 @@ pub async fn evaluate(
     // cannot desync the scored knobs from the persisted evaluation row.
     // `campaign` stays in use only for its `state` gate above; it is no
     // longer the source of knob values.
-    let loss_threshold_pct = inputs.loss_threshold_pct;
+    let loss_threshold_ratio = inputs.loss_threshold_ratio;
     let stddev_weight = inputs.stddev_weight;
     let evaluation_mode = inputs.mode;
     let outputs = match eval::evaluate(inputs) {
@@ -754,7 +754,7 @@ pub async fn evaluate(
         &state.pool,
         id,
         &outputs,
-        loss_threshold_pct,
+        loss_threshold_ratio,
         stddev_weight,
         evaluation_mode,
     )

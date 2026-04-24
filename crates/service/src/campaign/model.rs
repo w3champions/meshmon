@@ -184,8 +184,8 @@ pub struct CampaignRow {
     /// When `true`, the scheduler forces a fresh measurement instead of
     /// reusing a matching row from the 24 h window.
     pub force_measurement: bool,
-    /// Loss-rate threshold (percent) used by the evaluator.
-    pub loss_threshold_pct: f32,
+    /// Loss-rate threshold (fraction 0.0–1.0) used by the evaluator.
+    pub loss_threshold_ratio: f32,
     /// Weight applied to RTT stddev by the evaluator.
     pub stddev_weight: f32,
     /// Evaluation strategy (see [`EvaluationMode`]).

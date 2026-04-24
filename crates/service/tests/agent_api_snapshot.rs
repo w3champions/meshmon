@@ -23,11 +23,11 @@ fn good_snapshot(source: &str, target: &str) -> RouteSnapshotRequest {
             }],
             avg_rtt_micros: 1_000,
             stddev_rtt_micros: 100,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
         }],
         path_summary: Some(PathSummary {
             avg_rtt_micros: 1_000,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
             hop_count: 1,
         }),
     }

@@ -64,7 +64,7 @@ pub struct CreateInput {
     /// Optional inter-probe stagger (ms).
     pub probe_stagger_ms: Option<i32>,
     /// Optional loss-rate threshold for the evaluator.
-    pub loss_threshold_pct: Option<f32>,
+    pub loss_threshold_ratio: Option<f32>,
     /// Optional RTT-stddev weight for the evaluator.
     pub stddev_weight: Option<f32>,
     /// Optional evaluation strategy.
@@ -107,7 +107,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         r#"
         INSERT INTO measurement_campaigns
             (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,
-             probe_stagger_ms, force_measurement, loss_threshold_pct, stddev_weight,
+             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,
              evaluation_mode, created_by)
         VALUES ($1, $2, $3::probe_protocol,
                 COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),
@@ -119,7 +119,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
                   state AS "state: CampaignState",
                   protocol AS "protocol: ProbeProtocol",
                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                  force_measurement, loss_threshold_pct, stddev_weight,
+                  force_measurement, loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
@@ -131,7 +131,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         input.timeout_ms,
         input.probe_stagger_ms,
         input.force_measurement,
-        input.loss_threshold_pct,
+        input.loss_threshold_ratio,
         input.stddev_weight,
         input.evaluation_mode as _,
         input.created_by.as_deref(),
@@ -164,7 +164,7 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoErr
                state AS "state: CampaignState",
                protocol AS "protocol: ProbeProtocol",
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-               force_measurement, loss_threshold_pct, stddev_weight,
+               force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
@@ -198,7 +198,7 @@ pub async fn list(
                state AS "state: CampaignState",
                protocol AS "protocol: ProbeProtocol",
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-               force_measurement, loss_threshold_pct, stddev_weight,
+               force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
@@ -226,7 +226,7 @@ pub async fn patch(
     id: Uuid,
     title: Option<&str>,
     notes: Option<&str>,
-    loss_threshold_pct: Option<f32>,
+    loss_threshold_ratio: Option<f32>,
     stddev_weight: Option<f32>,
     evaluation_mode: Option<EvaluationMode>,
 ) -> Result<CampaignRow, RepoError> {
@@ -236,7 +236,7 @@ pub async fn patch(
         UPDATE measurement_campaigns
            SET title              = COALESCE($2, title),
                notes              = COALESCE($3, notes),
-               loss_threshold_pct = COALESCE($4, loss_threshold_pct),
+               loss_threshold_ratio = COALESCE($4, loss_threshold_ratio),
                stddev_weight      = COALESCE($5, stddev_weight),
                evaluation_mode    = COALESCE($6::evaluation_mode, evaluation_mode)
          WHERE id = $1
@@ -244,14 +244,14 @@ pub async fn patch(
                    state AS "state: CampaignState",
                    protocol AS "protocol: ProbeProtocol",
                    probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                   force_measurement, loss_threshold_pct, stddev_weight,
+                   force_measurement, loss_threshold_ratio, stddev_weight,
                    evaluation_mode AS "evaluation_mode: EvaluationMode",
                    created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         id,
         title,
         notes,
-        loss_threshold_pct,
+        loss_threshold_ratio,
         stddev_weight,
         evaluation_mode as Option<EvaluationMode>,
     )
@@ -748,7 +748,7 @@ pub async fn get_raw_for_scheduler(
                state AS "state: CampaignState",
                protocol AS "protocol: ProbeProtocol",
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-               force_measurement, loss_threshold_pct, stddev_weight,
+               force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
@@ -1110,7 +1110,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1131,7 +1131,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1152,7 +1152,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1173,7 +1173,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1194,7 +1194,7 @@ pub(crate) async fn transition_state_in_tx(
                  state AS "state: CampaignState",
                  protocol AS "protocol: ProbeProtocol",
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
-                 force_measurement, loss_threshold_pct, stddev_weight,
+                 force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
@@ -1275,7 +1275,7 @@ struct CampaignRowRaw {
     timeout_ms: i32,
     probe_stagger_ms: i32,
     force_measurement: bool,
-    loss_threshold_pct: f32,
+    loss_threshold_ratio: f32,
     stddev_weight: f32,
     evaluation_mode: EvaluationMode,
     created_by: Option<String>,
@@ -1299,7 +1299,7 @@ impl From<CampaignRowRaw> for CampaignRow {
             timeout_ms: r.timeout_ms,
             probe_stagger_ms: r.probe_stagger_ms,
             force_measurement: r.force_measurement,
-            loss_threshold_pct: r.loss_threshold_pct,
+            loss_threshold_ratio: r.loss_threshold_ratio,
             stddev_weight: r.stddev_weight,
             evaluation_mode: r.evaluation_mode,
             created_by: r.created_by,
@@ -1365,7 +1365,7 @@ pub async fn measurements_for_campaign(
     campaign_id: Uuid,
 ) -> Result<EvaluationInputs, RepoError> {
     let campaign = sqlx::query!(
-        r#"SELECT loss_threshold_pct, stddev_weight,
+        r#"SELECT loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode"
              FROM measurement_campaigns WHERE id = $1"#,
         campaign_id,
@@ -1385,7 +1385,7 @@ pub async fn measurements_for_campaign(
                   m.destination_ip,
                   m.latency_avg_ms,
                   m.latency_stddev_ms,
-                  m.loss_pct,
+                  m.loss_ratio,
                   m.id AS measurement_id,
                   m.mtr_id
              FROM measurements m
@@ -1409,7 +1409,7 @@ pub async fn measurements_for_campaign(
             destination_ip: r.destination_ip.ip(),
             latency_avg_ms: r.latency_avg_ms,
             latency_stddev_ms: r.latency_stddev_ms,
-            loss_pct: r.loss_pct,
+            loss_ratio: r.loss_ratio,
             mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
         })
         .collect();
@@ -1472,7 +1472,7 @@ pub async fn measurements_for_campaign(
         measurements,
         agents,
         enrichment,
-        loss_threshold_pct: campaign.loss_threshold_pct,
+        loss_threshold_ratio: campaign.loss_threshold_ratio,
         stddev_weight: campaign.stddev_weight,
         mode: campaign.evaluation_mode,
     })
@@ -1487,8 +1487,8 @@ pub struct EvaluationRow {
     pub campaign_id: Uuid,
     /// Wall-clock stamp from the most recent UPSERT.
     pub evaluated_at: DateTime<Utc>,
-    /// Loss threshold (percent) used during scoring.
-    pub loss_threshold_pct: f32,
+    /// Loss threshold (fraction 0.0–1.0) used during scoring.
+    pub loss_threshold_ratio: f32,
     /// RTT-stddev weight used during scoring.
     pub stddev_weight: f32,
     /// Evaluator strategy that produced this row.
@@ -1523,7 +1523,7 @@ pub async fn write_evaluation(
     pool: &PgPool,
     campaign_id: Uuid,
     outputs: &EvaluationOutputs,
-    loss_threshold_pct: f32,
+    loss_threshold_ratio: f32,
     stddev_weight: f32,
     mode: EvaluationMode,
 ) -> Result<EvaluationRow, RepoError> {
@@ -1561,12 +1561,12 @@ pub async fn write_evaluation(
 
     let row = sqlx::query!(
         r#"INSERT INTO campaign_evaluations
-              (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,
+              (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
                baseline_pair_count, candidates_total, candidates_good,
                avg_improvement_ms, results, evaluated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
            ON CONFLICT (campaign_id) DO UPDATE SET
-               loss_threshold_pct   = EXCLUDED.loss_threshold_pct,
+               loss_threshold_ratio   = EXCLUDED.loss_threshold_ratio,
                stddev_weight        = EXCLUDED.stddev_weight,
                evaluation_mode      = EXCLUDED.evaluation_mode,
                baseline_pair_count  = EXCLUDED.baseline_pair_count,
@@ -1575,12 +1575,12 @@ pub async fn write_evaluation(
                avg_improvement_ms   = EXCLUDED.avg_improvement_ms,
                results              = EXCLUDED.results,
                evaluated_at         = now()
-           RETURNING id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
+           RETURNING id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,
                      evaluation_mode AS "evaluation_mode: EvaluationMode",
                      baseline_pair_count, candidates_total, candidates_good,
                      avg_improvement_ms, results"#,
         campaign_id,
-        loss_threshold_pct,
+        loss_threshold_ratio,
         stddev_weight,
         mode as EvaluationMode,
         outputs.baseline_pair_count,
@@ -1635,7 +1635,7 @@ pub async fn write_evaluation(
         id: row.id,
         campaign_id: row.campaign_id,
         evaluated_at: row.evaluated_at,
-        loss_threshold_pct: row.loss_threshold_pct,
+        loss_threshold_ratio: row.loss_threshold_ratio,
         stddev_weight: row.stddev_weight,
         evaluation_mode: row.evaluation_mode,
         baseline_pair_count: row.baseline_pair_count,
@@ -1653,7 +1653,7 @@ pub async fn read_evaluation(
     campaign_id: Uuid,
 ) -> Result<Option<EvaluationRow>, RepoError> {
     let row = sqlx::query!(
-        r#"SELECT id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,
+        r#"SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   baseline_pair_count, candidates_total, candidates_good,
                   avg_improvement_ms, results
@@ -1666,7 +1666,7 @@ pub async fn read_evaluation(
         id: r.id,
         campaign_id: r.campaign_id,
         evaluated_at: r.evaluated_at,
-        loss_threshold_pct: r.loss_threshold_pct,
+        loss_threshold_ratio: r.loss_threshold_ratio,
         stddev_weight: r.stddev_weight,
         evaluation_mode: r.evaluation_mode,
         baseline_pair_count: r.baseline_pair_count,

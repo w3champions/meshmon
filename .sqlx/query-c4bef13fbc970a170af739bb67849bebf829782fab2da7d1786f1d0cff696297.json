@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO campaign_evaluations\n              (campaign_id, loss_threshold_pct, stddev_weight, evaluation_mode,\n               baseline_pair_count, candidates_total, candidates_good,\n               avg_improvement_ms, results, evaluated_at)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())\n           ON CONFLICT (campaign_id) DO UPDATE SET\n               loss_threshold_pct   = EXCLUDED.loss_threshold_pct,\n               stddev_weight        = EXCLUDED.stddev_weight,\n               evaluation_mode      = EXCLUDED.evaluation_mode,\n               baseline_pair_count  = EXCLUDED.baseline_pair_count,\n               candidates_total     = EXCLUDED.candidates_total,\n               candidates_good      = EXCLUDED.candidates_good,\n               avg_improvement_ms   = EXCLUDED.avg_improvement_ms,\n               results              = EXCLUDED.results,\n               evaluated_at         = now()\n           RETURNING id, campaign_id, evaluated_at, loss_threshold_pct, stddev_weight,\n                     evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                     baseline_pair_count, candidates_total, candidates_good,\n                     avg_improvement_ms, results",
+  "query": "INSERT INTO campaign_evaluations\n              (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,\n               baseline_pair_count, candidates_total, candidates_good,\n               avg_improvement_ms, results, evaluated_at)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())\n           ON CONFLICT (campaign_id) DO UPDATE SET\n               loss_threshold_ratio   = EXCLUDED.loss_threshold_ratio,\n               stddev_weight        = EXCLUDED.stddev_weight,\n               evaluation_mode      = EXCLUDED.evaluation_mode,\n               baseline_pair_count  = EXCLUDED.baseline_pair_count,\n               candidates_total     = EXCLUDED.candidates_total,\n               candidates_good      = EXCLUDED.candidates_good,\n               avg_improvement_ms   = EXCLUDED.avg_improvement_ms,\n               results              = EXCLUDED.results,\n               evaluated_at         = now()\n           RETURNING id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                     evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                     baseline_pair_count, candidates_total, candidates_good,\n                     avg_improvement_ms, results",
   "describe": {
     "columns": [
       {
@@ -20,7 +20,7 @@
       },
       {
         "ordinal": 3,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -106,5 +106,5 @@
       false
     ]
   },
-  "hash": "f0c8e4e1b5fecf28e7f1c69322509379bd28fec848f43a9914e9432f809a305e"
+  "hash": "c4bef13fbc970a170af739bb67849bebf829782fab2da7d1786f1d0cff696297"
 }

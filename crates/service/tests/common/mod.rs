@@ -979,7 +979,7 @@ pub async fn insert_agent_with_ip(pool: &PgPool, id: &str, ip: std::net::IpAddr)
 
 /// Seed campaign-kind measurements for an existing campaign.
 ///
-/// For each `(src, dst, rtt_ms, stddev_ms, loss_pct)`, inserts a
+/// For each `(src, dst, rtt_ms, stddev_ms, loss_ratio)`, inserts a
 /// `measurements` row + upserts the matching `campaign_pairs` row to
 /// point at the new measurement (kind `'campaign'`, resolution
 /// `'succeeded'`). The campaign's other knobs (protocol, probe_count)
@@ -996,7 +996,7 @@ pub async fn seed_measurements(
         let m_id: i64 = sqlx::query_scalar(
             "INSERT INTO measurements \
                  (source_agent_id, destination_ip, protocol, probe_count, \
-                  latency_avg_ms, latency_stddev_ms, loss_pct, kind) \
+                  latency_avg_ms, latency_stddev_ms, loss_ratio, kind) \
              VALUES ($1, $2::inet, 'icmp', 10, $3, $4, $5, 'campaign') \
              RETURNING id",
         )
@@ -1088,7 +1088,7 @@ pub async fn seed_settled_pair(
     let measurement_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
              (source_agent_id, destination_ip, protocol, probe_count, \
-              measured_at, latency_avg_ms, loss_pct, kind) \
+              measured_at, latency_avg_ms, loss_ratio, kind) \
          VALUES ($1, $2::inet, 'icmp', 10, now(), 25.0, 0.0, $3::measurement_kind) \
          RETURNING id",
     )

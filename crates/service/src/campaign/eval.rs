@@ -22,8 +22,8 @@ pub struct AttributedMeasurement {
     pub latency_avg_ms: Option<f32>,
     /// RTT stddev in milliseconds; `None` when no reply landed.
     pub latency_stddev_ms: Option<f32>,
-    /// Observed loss percentage on this leg (0.0–100.0).
-    pub loss_pct: f32,
+    /// Observed loss fraction on this leg (0.0–1.0).
+    pub loss_ratio: f32,
     /// FK into `measurements.id` for the MTR-bearing row, when available.
     pub mtr_measurement_id: Option<i64>,
 }
@@ -63,8 +63,8 @@ pub struct EvaluationInputs {
     pub agents: Vec<AgentRow>,
     /// IP → catalogue enrichment for candidate rendering.
     pub enrichment: HashMap<IpAddr, CatalogueLookup>,
-    /// Loss ceiling (percent); triples exceeding this never qualify.
-    pub loss_threshold_pct: f32,
+    /// Loss ceiling (fraction); triples exceeding this never qualify.
+    pub loss_threshold_ratio: f32,
     /// Weight applied to RTT stddev when computing the improvement score.
     pub stddev_weight: f32,
     /// Diversity vs. Optimization arbitration (spec §2.4).
@@ -205,10 +205,8 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             let ax_stddev = a_to_x.latency_stddev_ms.unwrap_or(0.0);
             let xb_stddev = x_to_b.latency_stddev_ms.unwrap_or(0.0);
 
-            let direct_loss = direct.loss_pct;
-            let compound_loss_frac =
-                1.0 - (1.0 - a_to_x.loss_pct / 100.0) * (1.0 - x_to_b.loss_pct / 100.0);
-            let compound_loss_pct = compound_loss_frac * 100.0;
+            let direct_loss_ratio = direct.loss_ratio;
+            let compound_loss_ratio = 1.0 - (1.0 - a_to_x.loss_ratio) * (1.0 - x_to_b.loss_ratio);
 
             let transit_rtt = ax_rtt + xb_rtt;
             let transit_stddev = (ax_stddev * ax_stddev + xb_stddev * xb_stddev).sqrt();
@@ -216,8 +214,8 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             let transit_penalty = inputs.stddev_weight * transit_stddev;
             let improvement_ms = direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
 
-            let loss_ok = compound_loss_pct <= inputs.loss_threshold_pct
-                && direct_loss <= inputs.loss_threshold_pct;
+            let loss_ok = compound_loss_ratio <= inputs.loss_threshold_ratio
+                && direct_loss_ratio <= inputs.loss_threshold_ratio;
             if !loss_ok {
                 any_threshold_fail = true;
                 continue;
@@ -273,7 +271,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                 pairs_improved += 1;
                 improvements.push(improvement_ms);
             }
-            compound_losses.push(compound_loss_pct);
+            compound_losses.push(compound_loss_ratio);
 
             pair_details.push(EvaluationPairDetailDto {
                 source_agent_id: a_id.clone(),
@@ -286,10 +284,10 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                 destination_ip: x_ip.to_string(),
                 direct_rtt_ms: direct_rtt,
                 direct_stddev_ms: direct_stddev,
-                direct_loss_pct: direct_loss,
+                direct_loss_ratio,
                 transit_rtt_ms: transit_rtt,
                 transit_stddev_ms: transit_stddev,
-                transit_loss_pct: compound_loss_pct,
+                transit_loss_ratio: compound_loss_ratio,
                 improvement_ms,
                 qualifies,
                 mtr_measurement_id_ax: a_to_x.mtr_measurement_id,
@@ -302,7 +300,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             if any_threshold_fail {
                 unqualified_reasons.insert(
                     x_ip.to_string(),
-                    "all triples exceeded loss_threshold_pct".into(),
+                    "all triples exceeded loss_threshold_ratio".into(),
                 );
             }
             continue;
@@ -313,7 +311,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
         } else {
             Some(improvements.iter().sum::<f32>() / improvements.len() as f32)
         };
-        let avg_loss_pct = if compound_losses.is_empty() {
+        let avg_loss_ratio = if compound_losses.is_empty() {
             None
         } else {
             Some(compound_losses.iter().sum::<f32>() / compound_losses.len() as f32)
@@ -333,7 +331,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             pairs_improved,
             pairs_total_considered: pair_details.len() as i32,
             avg_improvement_ms,
-            avg_loss_pct,
+            avg_loss_ratio,
             composite_score,
             pair_details,
             hostname: None,
@@ -413,7 +411,7 @@ mod tests {
             destination_ip: ip(dst),
             latency_avg_ms: Some(rtt),
             latency_stddev_ms: Some(stddev),
-            loss_pct: loss,
+            loss_ratio: loss,
             mtr_measurement_id: None,
         }
     }
@@ -427,7 +425,7 @@ mod tests {
             ],
             agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
             enrichment: Default::default(),
-            loss_threshold_pct: 2.0,
+            loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode,
         }
@@ -451,7 +449,7 @@ mod tests {
             measurements: vec![m("a", "203.0.113.7", 120.0, 8.0, 0.0)],
             agents: vec![agent("a", "10.0.0.1")],
             enrichment: Default::default(),
-            loss_threshold_pct: 2.0,
+            loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Optimization,
         };
@@ -473,12 +471,12 @@ mod tests {
                 destination_ip: ip("10.0.0.2"),
                 latency_avg_ms: None,
                 latency_stddev_ms: None,
-                loss_pct: 100.0,
+                loss_ratio: 1.0,
                 mtr_measurement_id: None,
             }],
             agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
             enrichment: Default::default(),
-            loss_threshold_pct: 2.0,
+            loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Optimization,
         };
@@ -505,7 +503,7 @@ mod tests {
     #[test]
     fn loss_threshold_filters_unreliable_transit() {
         let mut i = inputs_basic(EvaluationMode::Diversity);
-        i.measurements[1].loss_pct = 3.0;
+        i.measurements[1].loss_ratio = 0.03;
         let out = evaluate(i).unwrap();
         let cand = out
             .results
@@ -557,7 +555,7 @@ mod tests {
                 agent("y", "10.0.0.3"),
             ],
             enrichment: Default::default(),
-            loss_threshold_pct: 2.0,
+            loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Optimization,
         };
@@ -599,7 +597,7 @@ mod tests {
                 agent("c", "10.0.0.3"),
             ],
             enrichment: Default::default(),
-            loss_threshold_pct: 2.0,
+            loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Diversity,
         };

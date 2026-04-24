@@ -54,7 +54,7 @@ async fn seed_dispatched_pair(pool: &PgPool) -> (uuid::Uuid, i64, IpAddr) {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,
@@ -97,7 +97,7 @@ fn ok_result(pair_id: i64) -> MeasurementResult {
             latency_p95_ms: 2.0,
             latency_max_ms: 2.5,
             latency_stddev_ms: 0.3,
-            loss_pct: 0.0,
+            loss_ratio: 0.0,
         })),
     }
 }
@@ -142,15 +142,16 @@ async fn settle_success_writes_measurement_and_flips_pair_to_succeeded() {
     // `kind='campaign'`. See `settle_detail_ping_success_writes_detail_kind`
     // for the `/detail`-path assertion.
     let m_id = measurement_id.unwrap();
-    let (kind, probe_count, loss_pct): (String, i16, f32) =
-        sqlx::query_as("SELECT kind::text, probe_count, loss_pct FROM measurements WHERE id = $1")
-            .bind(m_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (kind, probe_count, loss_ratio): (String, i16, f32) = sqlx::query_as(
+        "SELECT kind::text, probe_count, loss_ratio FROM measurements WHERE id = $1",
+    )
+    .bind(m_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(kind, "campaign");
     assert_eq!(probe_count, 10);
-    assert_eq!(loss_pct, 0.0);
+    assert_eq!(loss_ratio, 0.0);
 
     repo::delete(&pool, campaign_id).await.unwrap();
 }
@@ -377,7 +378,7 @@ async fn settle_mtr_writes_trace_and_links_measurement() {
                 }],
                 avg_rtt_micros: 500,
                 stddev_rtt_micros: 0,
-                loss_pct: 0.0,
+                loss_ratio: 0.0,
             }],
         })),
     };
@@ -525,16 +526,11 @@ async fn settle_emits_campaign_pair_settled_notify() {
 }
 
 #[tokio::test]
-async fn settle_success_converts_agent_loss_fraction_to_percent() {
-    // Regression barrier for Bug 4a: the agent emits `loss_pct` as a
-    // fraction (0.0–1.0) while the rest of the service stack — the
-    // evaluator, the DTOs, and the frontend — treats
-    // `measurements.loss_pct` as a percentage (0.0–100.0). The writer is
-    // the boundary where that asymmetry is reconciled. A summary carrying
-    // `loss_pct = 0.75` must land in the DB column as `75.0`, so the
-    // evaluator's `loss_threshold_pct` (default 2.0 = 2 %) and the
-    // frontend's `${value.toFixed(2)}%` both render correctly without
-    // per-consumer scale fixups.
+async fn settle_success_persists_agent_loss_ratio() {
+    // Regression barrier: the whole stack — agent wire, DB, evaluator,
+    // DTOs — speaks fraction (0.0–1.0). The writer must store the
+    // agent's `loss_ratio` unchanged in `measurements.loss_ratio`; the
+    // frontend multiplies by 100 at display time.
     let pool = common::shared_migrated_pool().await.clone();
     let (campaign_id, pair_id, dest) = seed_dispatched_pair(&pool).await;
     let writer = SettleWriter::new(pool.clone());
@@ -551,7 +547,7 @@ async fn settle_success_converts_agent_loss_fraction_to_percent() {
             latency_max_ms: 2.5,
             latency_stddev_ms: 0.3,
             // Agent-wire fraction: 75 % packet loss.
-            loss_pct: 0.75,
+            loss_ratio: 0.75,
         })),
     };
 
@@ -569,14 +565,14 @@ async fn settle_success_converts_agent_loss_fraction_to_percent() {
     .await
     .unwrap();
 
-    let stored_loss: f32 = sqlx::query_scalar("SELECT loss_pct FROM measurements WHERE id = $1")
+    let stored_loss: f32 = sqlx::query_scalar("SELECT loss_ratio FROM measurements WHERE id = $1")
         .bind(m_id)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert!(
-        (stored_loss - 75.0f32).abs() < 0.001,
-        "expected 75.0 (percent) stored for a 0.75 fraction, got {stored_loss}",
+        (stored_loss - 0.75f32).abs() < 0.001,
+        "expected 0.75 (fraction) stored for a 0.75 wire fraction, got {stored_loss}",
     );
 
     repo::delete(&pool, campaign_id).await.unwrap();

@@ -85,7 +85,7 @@ impl CampaignProber for StubProber {
                     latency_p95_ms: 1.0,
                     latency_max_ms: 1.0,
                     latency_stddev_ms: 0.0,
-                    loss_pct: 0.0,
+                    loss_ratio: 0.0,
                 })),
             };
             if results.send(Ok(result)).await.is_err() {
@@ -294,7 +294,7 @@ mod tests {
                     assert_eq!(s.attempted, 8);
                     assert_eq!(s.succeeded, 8);
                     assert!((s.latency_avg_ms - 1.0).abs() < f32::EPSILON);
-                    assert!((s.loss_pct).abs() < f32::EPSILON);
+                    assert!((s.loss_ratio).abs() < f32::EPSILON);
                 }
                 other => panic!("expected success outcome, got {other:?}"),
             }

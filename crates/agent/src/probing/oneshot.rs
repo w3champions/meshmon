@@ -511,7 +511,7 @@ fn aggregate_latency(pair_id: u64, state: &State) -> MeasurementResult {
 }
 
 /// Spec 03 §4.5: single-round MTR. Dense-pack TTLs `[1..=target_reached_ttl]`
-/// into a `MtrTraceResult`. Silent TTLs pad with `loss_pct = 1.0`,
+/// into a `MtrTraceResult`. Silent TTLs pad with `loss_ratio = 1.0`,
 /// `avg_rtt_micros = 0`, and an empty `observed_ips` list.
 ///
 /// `target_reached_ttl` is the TTL at which the destination hop replied;
@@ -567,7 +567,7 @@ fn aggregate_mtr(pair_id: u64, state: &State) -> MeasurementResult {
                     observed_ips,
                     avg_rtt_micros,
                     stddev_rtt_micros: 0,
-                    loss_pct: 0.0,
+                    loss_ratio: 0.0,
                 });
             }
             _ => {
@@ -576,7 +576,7 @@ fn aggregate_mtr(pair_id: u64, state: &State) -> MeasurementResult {
                     observed_ips: Vec::new(),
                     avg_rtt_micros: 0,
                     stddev_rtt_micros: 0,
-                    loss_pct: 1.0,
+                    loss_ratio: 1.0,
                 });
             }
         }
@@ -622,7 +622,7 @@ fn build_summary(attempted: u32, succeeded: u32, samples: &[Duration]) -> Measur
     };
     let median = percentile(&rtts_ms, 0.50);
     let p95 = percentile(&rtts_ms, 0.95);
-    let loss_pct = if attempted > 0 {
+    let loss_ratio = if attempted > 0 {
         1.0 - (succeeded as f32 / attempted as f32)
     } else {
         0.0
@@ -637,7 +637,7 @@ fn build_summary(attempted: u32, succeeded: u32, samples: &[Duration]) -> Measur
         latency_p95_ms: p95 as f32,
         latency_max_ms: max as f32,
         latency_stddev_ms: stddev as f32,
-        loss_pct,
+        loss_ratio,
     }
 }
 
@@ -803,7 +803,7 @@ mod tests {
         let s = build_summary(5, 0, &[]);
         assert_eq!(s.attempted, 5);
         assert_eq!(s.succeeded, 0);
-        assert_eq!(s.loss_pct, 1.0);
+        assert_eq!(s.loss_ratio, 1.0);
         assert_eq!(s.latency_avg_ms, 0.0);
     }
 
@@ -817,7 +817,7 @@ mod tests {
         let s = build_summary(3, 3, &samples);
         assert_eq!(s.attempted, 3);
         assert_eq!(s.succeeded, 3);
-        assert!((s.loss_pct - 0.0).abs() < 1e-6);
+        assert!((s.loss_ratio - 0.0).abs() < 1e-6);
         assert!((s.latency_min_ms - 10.0).abs() < 1e-3);
         assert!((s.latency_max_ms - 30.0).abs() < 1e-3);
         assert!((s.latency_avg_ms - 20.0).abs() < 1e-3);
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(s.succeeded, 2);
         assert!((s.latency_min_ms - 10.0).abs() < 1e-3);
         assert!((s.latency_max_ms - 30.0).abs() < 1e-3);
-        assert!((s.loss_pct - 0.6).abs() < 1e-5);
+        assert!((s.loss_ratio - 0.6).abs() < 1e-5);
     }
 
     // End-to-end: feed aggregate_latency a mixture of real and sentinel
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     // Loopback integration: MTR against 127.0.0.1. Expect exactly one hop
-    // (position=1) with the destination IP listed and loss_pct=0.
+    // (position=1) with the destination IP listed and loss_ratio=0.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn oneshot_mtr_against_loopback() {
         crate::probing::icmp_pool::skip_unless_raw_ip_socket!();
@@ -1091,7 +1091,7 @@ mod tests {
                 assert_eq!(trace.hops.len(), 1, "loopback MTR is single-hop");
                 let hop = &trace.hops[0];
                 assert_eq!(hop.position, 1);
-                assert!((hop.loss_pct - 0.0).abs() < 1e-6);
+                assert!((hop.loss_ratio - 0.0).abs() < 1e-6);
                 assert_eq!(hop.observed_ips.len(), 1);
                 let bytes: &[u8] = &hop.observed_ips[0].ip;
                 assert_eq!(bytes, &[127, 0, 0, 1]);

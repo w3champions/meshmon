@@ -27,10 +27,10 @@
 //! trippy's over-probing artefacts where the target responds to TTLs beyond
 //! the real path length.
 //!
-//! - Hop-level loss: `loss_pct(p) = 1 - successful/seen` from `position_probes[p]`.
+//! - Hop-level loss: `loss_ratio(p) = 1 - successful/seen` from `position_probes[p]`.
 //!   No per-IP loss attribution; silent probes are accounted at the position level.
 //! - IP frequency: `frequency(ip, p) = hops[(p, ip)].seen / position_probes[p].seen`.
-//!   Frequencies at a position sum to `1 - loss_pct(p)`.
+//!   Frequencies at a position sum to `1 - loss_ratio(p)`.
 //!
 //! ## Diff detection
 //!
@@ -109,7 +109,7 @@ pub struct HopSummary {
     /// `successful < 2`.
     pub stddev_rtt_micros: u32,
     /// Loss fraction at this hop over the current window (`0.0 .. 1.0`).
-    pub loss_pct: f64,
+    pub loss_ratio: f64,
 }
 
 /// Canonical per-target route snapshot. Emitted by the tracker when a
@@ -438,14 +438,14 @@ impl RouteTracker {
             };
 
             // Hop-level loss: silent probes / all probes at this TTL.
-            let loss_pct = (pos_acc.seen - pos_acc.successful) as f64 / pos_acc.seen as f64;
+            let loss_ratio = (pos_acc.seen - pos_acc.successful) as f64 / pos_acc.seen as f64;
 
             hops_out.push(HopSummary {
                 position,
                 observed_ips,
                 avg_rtt_micros,
                 stddev_rtt_micros,
-                loss_pct,
+                loss_ratio,
             });
         }
 
@@ -584,11 +584,11 @@ pub struct PathSummarySource {
     /// The protocol the supervisor's `TargetStateMachine` elected as
     /// primary on the most recent eval tick, or `None` when no protocol
     /// has met the sample-floor yet (cold start) or all protocols are
-    /// unhealthy. `None` makes the emitter encode `loss_pct = 1.0`.
+    /// unhealthy. `None` makes the emitter encode `loss_ratio = 1.0`.
     pub primary_protocol: Option<Protocol>,
     /// Loss fraction from the elected protocol's rolling stats, in
     /// `[0.0, 1.0]`. Ignored when `primary_protocol` is `None`.
-    pub loss_pct: f64,
+    pub loss_ratio: f64,
     /// Mean RTT from the elected protocol's rolling stats, in
     /// microseconds. `0` when no successful samples in the window.
     pub avg_rtt_micros: u32,
@@ -600,7 +600,7 @@ impl PathSummarySource {
     pub fn unhealthy() -> Self {
         Self {
             primary_protocol: None,
-            loss_pct: 1.0,
+            loss_ratio: 1.0,
             avg_rtt_micros: 0,
         }
     }
@@ -852,7 +852,7 @@ mod tests {
         assert!((h.observed_ips[0].frequency - 1.0).abs() < 1e-9);
         assert_eq!(h.avg_rtt_micros, 5_000);
         assert_eq!(h.stddev_rtt_micros, 0, "single sample → stddev = 0");
-        assert!((h.loss_pct - 0.0).abs() < 1e-9);
+        assert!((h.loss_ratio - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -891,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn build_snapshot_loss_pct_reflects_timeouts() {
+    fn build_snapshot_loss_ratio_reflects_timeouts() {
         let mut t = tracker_ready(five_min(), Protocol::Icmp);
         let now = Instant::now();
         // 3 successful, 1 timeout at the same IP → 25% loss.
@@ -902,7 +902,7 @@ mod tests {
         let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
         let h = &snap.hops[0];
         assert_eq!(h.position, 2);
-        assert!((h.loss_pct - 0.25).abs() < 1e-9, "got {}", h.loss_pct);
+        assert!((h.loss_ratio - 0.25).abs() < 1e-9, "got {}", h.loss_ratio);
         // avg = (1000+2000+3000)/3 = 2000 (timeouts don't count toward mean).
         assert_eq!(h.avg_rtt_micros, 2_000);
     }
@@ -968,7 +968,7 @@ mod tests {
                         .collect(),
                     avg_rtt_micros: *rtt,
                     stddev_rtt_micros: 0,
-                    loss_pct: 0.0,
+                    loss_ratio: 0.0,
                 })
                 .collect(),
         }
@@ -1556,7 +1556,7 @@ mod tests {
         let h = &snap.hops[0];
         assert_eq!(h.position, 5);
         assert!(h.observed_ips.is_empty(), "silent hop has no IPs");
-        assert!((h.loss_pct - 1.0).abs() < 1e-9, "silent hop is 100% loss");
+        assert!((h.loss_ratio - 1.0).abs() < 1e-9, "silent hop is 100% loss");
         assert_eq!(h.avg_rtt_micros, 0);
     }
 
@@ -1572,7 +1572,7 @@ mod tests {
         }
         let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
         let h = &snap.hops[0];
-        assert!((h.loss_pct - 0.30).abs() < 1e-9, "loss={}", h.loss_pct);
+        assert!((h.loss_ratio - 0.30).abs() < 1e-9, "loss={}", h.loss_ratio);
         assert_eq!(h.observed_ips.len(), 1);
         let f = h.observed_ips[0].frequency;
         assert!((f - 0.70).abs() < 1e-9, "freq={f}");
@@ -1593,7 +1593,7 @@ mod tests {
         }
         let snap = t.build_snapshot(now, systemtime_epoch_plus(0)).unwrap();
         let h = &snap.hops[0];
-        assert!((h.loss_pct - 0.20).abs() < 1e-9);
+        assert!((h.loss_ratio - 0.20).abs() < 1e-9);
         assert_eq!(h.observed_ips.len(), 2);
         let total: f64 = h.observed_ips.iter().map(|o| o.frequency).sum();
         assert!(
@@ -1994,7 +1994,7 @@ mod tests {
                     }],
                     avg_rtt_micros: 331,
                     stddev_rtt_micros: 0,
-                    loss_pct: 0.9966,
+                    loss_ratio: 0.9966,
                 },
                 HopSummary {
                     position: 2,
@@ -2004,7 +2004,7 @@ mod tests {
                     }],
                     avg_rtt_micros: 1664,
                     stddev_rtt_micros: 2094,
-                    loss_pct: 0.0,
+                    loss_ratio: 0.0,
                 },
             ],
         };
@@ -2023,7 +2023,7 @@ mod tests {
                     }],
                     avg_rtt_micros: 1181,
                     stddev_rtt_micros: 850,
-                    loss_pct: 0.9932,
+                    loss_ratio: 0.9932,
                 },
                 HopSummary {
                     position: 2,
@@ -2035,7 +2035,7 @@ mod tests {
                     }],
                     avg_rtt_micros: 1664,
                     stddev_rtt_micros: 2094,
-                    loss_pct: 0.15,
+                    loss_ratio: 0.15,
                 },
             ],
         };

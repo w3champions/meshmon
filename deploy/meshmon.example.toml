@@ -189,20 +189,20 @@ udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
 # All *_pct values are fractions in [0.0, 1.0]; *_sec values must be > 0.
 #
 # [probing.icmp_thresholds]
-# unhealthy_trigger_pct   = 0.90
-# healthy_recovery_pct    = 0.10
+# unhealthy_trigger_ratio   = 0.90
+# healthy_recovery_ratio    = 0.10
 # unhealthy_hysteresis_sec = 30
 # healthy_hysteresis_sec   = 60
 #
 # [probing.tcp_thresholds]
-# unhealthy_trigger_pct   = 0.50
-# healthy_recovery_pct    = 0.05
+# unhealthy_trigger_ratio   = 0.50
+# healthy_recovery_ratio    = 0.05
 # unhealthy_hysteresis_sec = 30
 # healthy_hysteresis_sec   = 60
 #
 # [probing.udp_thresholds]
-# unhealthy_trigger_pct   = 0.90
-# healthy_recovery_pct    = 0.10
+# unhealthy_trigger_ratio   = 0.90
+# healthy_recovery_ratio    = 0.10
 # unhealthy_hysteresis_sec = 30
 # healthy_hysteresis_sec   = 60
 #
@@ -222,10 +222,10 @@ udp_probe_secret_env = "MESHMON_UDP_PROBE_SECRET"
 #
 # Path-level health state-machine thresholds.
 # [probing.path_health_thresholds]
-# degraded_trigger_pct  = 0.05
+# degraded_trigger_ratio  = 0.05
 # degraded_trigger_sec  = 120
 # degraded_min_samples  = 30
-# normal_recovery_pct   = 0.02
+# normal_recovery_ratio   = 0.02
 # normal_recovery_sec   = 300
 #
 # Probe-rate table: one entry per (primary_protocol, path_health) pair.

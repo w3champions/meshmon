@@ -342,8 +342,8 @@ impl ProbeConfig {
 
 fn default_icmp_thresholds() -> ProtocolThresholds {
     ProtocolThresholds {
-        unhealthy_trigger_pct: 0.9,
-        healthy_recovery_pct: 0.1,
+        unhealthy_trigger_ratio: 0.9,
+        healthy_recovery_ratio: 0.1,
         unhealthy_hysteresis_sec: 30,
         healthy_hysteresis_sec: 60,
     }
@@ -351,8 +351,8 @@ fn default_icmp_thresholds() -> ProtocolThresholds {
 
 fn default_tcp_thresholds() -> ProtocolThresholds {
     ProtocolThresholds {
-        unhealthy_trigger_pct: 0.5,
-        healthy_recovery_pct: 0.05,
+        unhealthy_trigger_ratio: 0.5,
+        healthy_recovery_ratio: 0.05,
         unhealthy_hysteresis_sec: 30,
         healthy_hysteresis_sec: 60,
     }
@@ -360,8 +360,8 @@ fn default_tcp_thresholds() -> ProtocolThresholds {
 
 fn default_udp_thresholds() -> ProtocolThresholds {
     ProtocolThresholds {
-        unhealthy_trigger_pct: 0.9,
-        healthy_recovery_pct: 0.1,
+        unhealthy_trigger_ratio: 0.9,
+        healthy_recovery_ratio: 0.1,
         unhealthy_hysteresis_sec: 30,
         healthy_hysteresis_sec: 60,
     }
@@ -369,10 +369,10 @@ fn default_udp_thresholds() -> ProtocolThresholds {
 
 fn default_path_thresholds() -> PathHealthThresholds {
     PathHealthThresholds {
-        degraded_trigger_pct: 0.05,
+        degraded_trigger_ratio: 0.05,
         degraded_trigger_sec: 120,
         degraded_min_samples: 30,
-        normal_recovery_pct: 0.02,
+        normal_recovery_ratio: 0.02,
         normal_recovery_sec: 300,
     }
 }
@@ -823,8 +823,8 @@ mod tests {
         };
         let cfg = ProbeConfig::from_proto(resp).unwrap();
         let t = cfg.thresholds_for(Protocol::Tcp);
-        assert!((t.unhealthy_trigger_pct - 0.5).abs() < 1e-9);
-        assert!((t.healthy_recovery_pct - 0.05).abs() < 1e-9);
+        assert!((t.unhealthy_trigger_ratio - 0.5).abs() < 1e-9);
+        assert!((t.healthy_recovery_ratio - 0.05).abs() < 1e-9);
     }
 
     #[test]

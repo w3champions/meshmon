@@ -49,7 +49,7 @@ async fn evaluate_then_reevaluate_different_mode_no_redispatch() {
                 "protocol": "icmp",
                 "source_agent_ids": ["eval-t1-a", "eval-t1-b"],
                 "destination_ips": ["192.0.2.12", "192.0.2.11", "192.0.2.99"],
-                "loss_threshold_pct": 2.0,
+                "loss_threshold_ratio": 0.02,
                 "stddev_weight": 1.0,
                 "evaluation_mode": "optimization",
             }),
@@ -239,7 +239,7 @@ async fn reused_pair_surfaces_in_baseline() {
                 "protocol": "icmp",
                 "source_agent_ids": ["eval-t5-a", "eval-t5-b"],
                 "destination_ips": ["192.0.2.52", "192.0.2.51", "192.0.2.59"],
-                "loss_threshold_pct": 5.0,
+                "loss_threshold_ratio": 0.05,
                 "stddev_weight": 1.0,
                 "evaluation_mode": "optimization",
             }),
@@ -257,7 +257,7 @@ async fn reused_pair_surfaces_in_baseline() {
     let m_ab: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
              (source_agent_id, destination_ip, protocol, probe_count, \
-              latency_avg_ms, latency_stddev_ms, loss_pct, kind) \
+              latency_avg_ms, latency_stddev_ms, loss_ratio, kind) \
          VALUES ('eval-t5-a', '192.0.2.52'::inet, 'icmp', 10, 300.0, 20.0, 0.0, 'detail_ping') \
          RETURNING id",
     )

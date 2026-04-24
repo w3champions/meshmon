@@ -401,7 +401,7 @@ Campaign header row. Columns (selected):
 | `timeout_ms` | `INTEGER` | Per-probe timeout, default 2000. |
 | `probe_stagger_ms` | `INTEGER` | Inter-probe stagger, default 100. |
 | `force_measurement` | `BOOLEAN` | When `true`, reuse lookup is skipped. |
-| `loss_threshold_pct`, `stddev_weight` | `REAL` | Evaluator knobs. |
+| `loss_threshold_ratio`, `stddev_weight` | `REAL` | Evaluator knobs. |
 | `evaluation_mode` | `evaluation_mode` enum | `diversity` or `optimization`. |
 | `created_by`, `created_at` | `TEXT` / `TIMESTAMPTZ` | Audit. |
 | `started_at`, `stopped_at`, `completed_at`, `evaluated_at` | `TIMESTAMPTZ` | Lifecycle timestamps. |
@@ -460,7 +460,7 @@ settled from.
 | `probe_count` | `SMALLINT` | Samples that went into this measurement. |
 | `measured_at` | `TIMESTAMPTZ` | `now()` default. |
 | `latency_min_ms`, `latency_avg_ms`, `latency_median_ms`, `latency_p95_ms`, `latency_max_ms`, `latency_stddev_ms` | `REAL` | RTT aggregates. |
-| `loss_pct` | `REAL` | Loss percentage. |
+| `loss_ratio` | `REAL` | Loss fraction (0.0–1.0). |
 | `kind` | `measurement_kind` enum | `campaign` default; `detail_ping` / `detail_mtr` for UI re-runs. |
 | `mtr_id` | `BIGINT` | Nullable FK → `mtr_traces(id)`; set on MTR settlements. |
 
@@ -477,7 +477,7 @@ consumes both paths without a second deserialiser.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `BIGSERIAL` | Primary key. |
-| `hops` | `JSONB` | Array of `{position, observed_ips, avg_rtt_micros, stddev_rtt_micros, loss_pct}`. |
+| `hops` | `JSONB` | Array of `{position, observed_ips, avg_rtt_micros, stddev_rtt_micros, loss_ratio}`. |
 | `captured_at` | `TIMESTAMPTZ` | `now()` default — when the trace was persisted. |
 
 The writer inserts the trace first, captures the ID, then inserts the
@@ -804,7 +804,7 @@ pins the probe cadence so trippy emits no internal jitter.
   the per-probe `read_timeout`; silent batches surface as
   `MeasurementFailureCode::TIMEOUT`. Per-probe RTTs come from
   `target_hop.samples()`; the `MeasurementSummary` carries
-  min / avg / median / p95 / max / stddev and `loss_pct`.
+  min / avg / median / p95 / max / stddev and `loss_ratio`.
 - **TCP LATENCY** — any destination reply counts as success.
   Trippy 0.13 collapses SYN/ACK and RST replies into
   `total_recv` at the hop level and exposes no per-probe distinction
@@ -821,8 +821,8 @@ pins the probe cadence so trippy emits no internal jitter.
   `[1..=target_reached_ttl]`: every hop with `total_recv > 0`
   contributes one `HopSummary` with its observed IPs (frequency 1.0
   per unique address, single-round), `avg_rtt_micros` derived from
-  `best_ms`, `stddev_rtt_micros = 0`, and `loss_pct = 0`. Silent TTLs
-  pad with `observed_ips: []`, `loss_pct = 1.0`, and zero RTT. A
+  `best_ms`, `stddev_rtt_micros = 0`, and `loss_ratio = 0`. Silent TTLs
+  pad with `observed_ips: []`, `loss_ratio = 1.0`, and zero RTT. A
   completely silent trace surfaces as `MeasurementFailureCode::TIMEOUT`
   instead of a zero-length MTR result so the writer's `last_error`
   vocabulary stays consistent with LATENCY paths.
@@ -1047,8 +1047,8 @@ with measurements `A → X` and `B → X` (the latter approximates
 A triple `(A, B, X)` qualifies iff:
 
 1. All three measurements exist and have non-null `latency_avg_ms`.
-2. `compound_loss_pct ≤ loss_threshold_pct` AND
-   `direct_loss_pct ≤ loss_threshold_pct`.
+2. `compound_loss_ratio ≤ loss_threshold_ratio` AND
+   `direct_loss_ratio ≤ loss_threshold_ratio`.
 3. The mode-specific latency bar:
    - **diversity** —
      `transit_rtt + stddev_penalty < direct_rtt + direct_stddev_penalty`.
@@ -1057,7 +1057,7 @@ A triple `(A, B, X)` qualifies iff:
      `Y → B` measurements exist in the campaign.
 
 Per-candidate aggregates: `pairs_improved`, `avg_improvement_ms`,
-`avg_loss_pct`,
+`avg_loss_ratio`,
 `composite_score = (pairs_improved / total_baseline_pairs) × avg_improvement_ms`.
 
 Results serialise into a single JSONB column on

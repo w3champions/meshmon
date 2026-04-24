@@ -29,7 +29,7 @@ fn make_input(title: &str) -> CreateInput {
         probe_count_detail: None,
         timeout_ms: None,
         probe_stagger_ms: None,
-        loss_threshold_pct: None,
+        loss_threshold_ratio: None,
         stddev_weight: None,
         evaluation_mode: None,
         created_by: Some("tester".into()),
@@ -150,7 +150,7 @@ async fn patch_updates_provided_fields_only() {
         row.id,
         Some("t-patch-renamed"),
         None,
-        Some(5.0_f32),
+        Some(0.05_f32),
         None,
         Some(EvaluationMode::Diversity),
     )
@@ -159,7 +159,7 @@ async fn patch_updates_provided_fields_only() {
 
     assert_eq!(patched.title, "t-patch-renamed");
     assert_eq!(patched.notes, row.notes, "notes untouched when None");
-    assert!((patched.loss_threshold_pct - 5.0).abs() < f32::EPSILON);
+    assert!((patched.loss_threshold_ratio - 0.05).abs() < f32::EPSILON);
     assert_eq!(patched.evaluation_mode, EvaluationMode::Diversity);
 
     repo::delete(&pool, row.id).await.unwrap();
@@ -351,7 +351,7 @@ async fn preview_dispatch_count_returns_total_reusable_fresh() {
     // collide with other concurrent tests in the shared DB.
     let agent = format!("preview-{}", uuid::Uuid::new_v4().simple());
     sqlx::query(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_ratio) \
          VALUES ($1, '198.51.100.1', 'icmp', 10, 0.0)",
     )
     .bind(&agent)
@@ -434,7 +434,7 @@ async fn resolve_and_apply_reuse_settles_matched_pairs() {
     let measurement_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             latency_avg_ms, loss_pct) \
+             latency_avg_ms, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
@@ -1056,7 +1056,7 @@ async fn preview_dispatch_count_for_campaign_uses_actual_pair_set() {
 
     // Seed a reusable measurement for (agent_a, ip1) so reusable=1.
     sqlx::query(
-        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_pct) \
+        "INSERT INTO measurements (source_agent_id, destination_ip, protocol, probe_count, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 0.0)",
     )
     .bind(&agent_a)
@@ -1120,7 +1120,7 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     let m_campaign_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             latency_avg_ms, loss_pct) \
+             latency_avg_ms, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
@@ -1131,7 +1131,7 @@ async fn resolve_reuse_skips_detail_kind_pairs() {
     let m_detail_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             latency_avg_ms, loss_pct) \
+             latency_avg_ms, loss_ratio) \
          VALUES ($1, $2, 'icmp', 10, 100.0, 0.0) RETURNING id",
     )
     .bind(&agent)
@@ -1246,7 +1246,7 @@ async fn resolve_reuse_skips_rtt_null_measurements() {
     let m_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements \
             (source_agent_id, destination_ip, protocol, probe_count, \
-             loss_pct, kind) \
+             loss_ratio, kind) \
          VALUES ($1, $2, 'icmp', 1, 0.0, 'detail_mtr') RETURNING id",
     )
     .bind(&agent)
@@ -1327,7 +1327,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
     let m_campaign_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements (source_agent_id, destination_ip, protocol, \
                                    probe_count, latency_avg_ms, latency_stddev_ms, \
-                                   loss_pct, kind) \
+                                   loss_ratio, kind) \
          VALUES ($1, $2, 'icmp', 10, 25.0, 1.5, 0.0, 'campaign') RETURNING id",
     )
     .bind(&agent)
@@ -1338,7 +1338,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
     let m_detail_id: i64 = sqlx::query_scalar(
         "INSERT INTO measurements (source_agent_id, destination_ip, protocol, \
                                    probe_count, latency_avg_ms, latency_stddev_ms, \
-                                   loss_pct, kind) \
+                                   loss_ratio, kind) \
          VALUES ($1, $2, 'icmp', 250, 18.0, 0.7, 0.0, 'detail_ping') RETURNING id",
     )
     .bind(&agent)
@@ -1390,7 +1390,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
         "only the campaign-kind measurement attached",
     );
     assert_eq!(
-        inputs.loss_threshold_pct, row.loss_threshold_pct,
+        inputs.loss_threshold_ratio, row.loss_threshold_ratio,
         "campaign scoring knobs thread through"
     );
     assert_eq!(inputs.stddev_weight, row.stddev_weight);
@@ -1429,10 +1429,16 @@ async fn write_then_read_evaluation_round_trip() {
             unqualified_reasons: Default::default(),
         },
     };
-    let persisted_first =
-        repo::write_evaluation(&pool, row.id, &first, 2.5, 1.25, EvaluationMode::Diversity)
-            .await
-            .unwrap();
+    let persisted_first = repo::write_evaluation(
+        &pool,
+        row.id,
+        &first,
+        0.025,
+        1.25,
+        EvaluationMode::Diversity,
+    )
+    .await
+    .unwrap();
     assert_eq!(persisted_first.campaign_id, row.id);
     assert_eq!(persisted_first.baseline_pair_count, 3);
     assert_eq!(persisted_first.candidates_good, 1);
@@ -1444,7 +1450,7 @@ async fn write_then_read_evaluation_round_trip() {
         .expect("row present after first UPSERT");
     assert_eq!(read_first.id, persisted_first.id);
     assert_eq!(read_first.avg_improvement_ms, Some(12.5));
-    assert_eq!(read_first.loss_threshold_pct, 2.5);
+    assert_eq!(read_first.loss_threshold_ratio, 0.025);
     assert_eq!(read_first.stddev_weight, 1.25);
 
     // Force a clock delta so evaluated_at is strictly greater on the
@@ -1465,7 +1471,7 @@ async fn write_then_read_evaluation_round_trip() {
         &pool,
         row.id,
         &second,
-        3.0,
+        0.03,
         0.5,
         EvaluationMode::Optimization,
     )
@@ -1489,7 +1495,7 @@ async fn write_then_read_evaluation_round_trip() {
     assert_eq!(read_second.evaluation_mode, EvaluationMode::Optimization);
     assert_eq!(read_second.baseline_pair_count, 7);
     assert_eq!(read_second.candidates_good, 4);
-    assert_eq!(read_second.loss_threshold_pct, 3.0);
+    assert_eq!(read_second.loss_threshold_ratio, 0.03);
     assert_eq!(read_second.stddev_weight, 0.5);
 
     let count: i64 =
@@ -1744,7 +1750,7 @@ async fn apply_edit_preserves_detail_rows() {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,
@@ -1825,7 +1831,7 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
             probe_count_detail: None,
             timeout_ms: None,
             probe_stagger_ms: None,
-            loss_threshold_pct: None,
+            loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
             created_by: None,

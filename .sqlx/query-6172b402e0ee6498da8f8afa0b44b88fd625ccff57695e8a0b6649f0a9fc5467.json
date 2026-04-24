@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE measurement_campaigns\n           SET title              = COALESCE($2, title),\n               notes              = COALESCE($3, notes),\n               loss_threshold_pct = COALESCE($4, loss_threshold_pct),\n               stddev_weight      = COALESCE($5, stddev_weight),\n               evaluation_mode    = COALESCE($6::evaluation_mode, evaluation_mode)\n         WHERE id = $1\n         RETURNING id, title, notes,\n                   state AS \"state: CampaignState\",\n                   protocol AS \"protocol: ProbeProtocol\",\n                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                   force_measurement, loss_threshold_pct, stddev_weight,\n                   evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
+  "query": "\n        SELECT id, title, notes,\n               state AS \"state: CampaignState\",\n               protocol AS \"protocol: ProbeProtocol\",\n               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n               force_measurement, loss_threshold_ratio, stddev_weight,\n               evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n          FROM measurement_campaigns\n         WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)\n           AND ($2::campaign_state IS NULL OR state = $2)\n           AND ($3::text IS NULL OR created_by = $3)\n         ORDER BY created_at DESC\n         LIMIT $4\n        ",
   "describe": {
     "columns": [
       {
@@ -79,7 +79,7 @@
       },
       {
         "ordinal": 10,
-        "name": "loss_threshold_pct",
+        "name": "loss_threshold_ratio",
         "type_info": "Float4"
       },
       {
@@ -135,22 +135,23 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
         "Text",
-        "Text",
-        "Float4",
-        "Float4",
         {
           "Custom": {
-            "name": "evaluation_mode",
+            "name": "campaign_state",
             "kind": {
               "Enum": [
-                "diversity",
-                "optimization"
+                "draft",
+                "running",
+                "completed",
+                "evaluated",
+                "stopped"
               ]
             }
           }
-        }
+        },
+        "Text",
+        "Int8"
       ]
     },
     "nullable": [
@@ -175,5 +176,5 @@
       true
     ]
   },
-  "hash": "3341a98ca660705a61d0c215f2c4577278b0da9e8cbdc2fce54de1850c876fa3"
+  "hash": "6172b402e0ee6498da8f8afa0b44b88fd625ccff57695e8a0b6649f0a9fc5467"
 }

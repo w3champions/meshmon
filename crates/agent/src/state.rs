@@ -154,10 +154,10 @@ fn condition_for(
     t: &ProtocolThresholds,
 ) -> Option<ProtoHealth> {
     match state {
-        ProtoHealth::Healthy if failure_rate >= t.unhealthy_trigger_pct => {
+        ProtoHealth::Healthy if failure_rate >= t.unhealthy_trigger_ratio => {
             Some(ProtoHealth::Unhealthy)
         }
-        ProtoHealth::Unhealthy if failure_rate <= t.healthy_recovery_pct => {
+        ProtoHealth::Unhealthy if failure_rate <= t.healthy_recovery_ratio => {
             Some(ProtoHealth::Healthy)
         }
         _ => None,
@@ -227,7 +227,7 @@ impl PathStateMachine {
                 // not a tunable.
                 let effective_floor = (t.degraded_min_samples as u64).max(MIN_TRANSITION_SAMPLES);
                 if stats.sample_count < effective_floor
-                    || stats.failure_rate < t.degraded_trigger_pct
+                    || stats.failure_rate < t.degraded_trigger_ratio
                 {
                     self.condition_since = None;
                     PathHealthState::Normal
@@ -250,7 +250,7 @@ impl PathStateMachine {
                 // with zero evidence of recovery. Require at least
                 // MIN_TRANSITION_SAMPLES before honouring the dwell timer.
                 if stats.sample_count < MIN_TRANSITION_SAMPLES
-                    || stats.failure_rate > t.normal_recovery_pct
+                    || stats.failure_rate > t.normal_recovery_ratio
                 {
                     self.condition_since = None;
                     PathHealthState::Degraded
@@ -594,8 +594,8 @@ mod tests {
 
     fn icmp_thresholds() -> ProtocolThresholds {
         ProtocolThresholds {
-            unhealthy_trigger_pct: 0.9,
-            healthy_recovery_pct: 0.1,
+            unhealthy_trigger_ratio: 0.9,
+            healthy_recovery_ratio: 0.1,
             unhealthy_hysteresis_sec: 30,
             healthy_hysteresis_sec: 60,
         }
@@ -607,8 +607,8 @@ mod tests {
     /// code change in both places.
     fn tcp_thresholds() -> ProtocolThresholds {
         ProtocolThresholds {
-            unhealthy_trigger_pct: 0.5,
-            healthy_recovery_pct: 0.05,
+            unhealthy_trigger_ratio: 0.5,
+            healthy_recovery_ratio: 0.05,
             unhealthy_hysteresis_sec: 30,
             healthy_hysteresis_sec: 60,
         }
@@ -932,10 +932,10 @@ mod tests {
 
     fn path_thresholds() -> PathHealthThresholds {
         PathHealthThresholds {
-            degraded_trigger_pct: 0.05,
+            degraded_trigger_ratio: 0.05,
             degraded_trigger_sec: 120,
             degraded_min_samples: 30,
-            normal_recovery_pct: 0.02,
+            normal_recovery_ratio: 0.02,
             normal_recovery_sec: 300,
         }
     }
@@ -1004,7 +1004,7 @@ mod tests {
     fn path_does_not_recover_from_degraded_on_empty_window() {
         // H1 regression: once the primary's window empties, FastSummary
         // reports failure_rate = 0.0 and sample_count = 0. Without the
-        // evidence floor, `failure_rate <= normal_recovery_pct` would
+        // evidence floor, `failure_rate <= normal_recovery_ratio` would
         // hold, the dwell timer would start, and after normal_recovery_sec
         // the path would flip back to Normal with zero evidence of real
         // recovery — exactly the oscillation MIN_TRANSITION_SAMPLES
@@ -1202,30 +1202,30 @@ mod tests {
                 ],
                 rates,
                 icmp_thresholds: Some(ProtocolThresholds {
-                    unhealthy_trigger_pct: 0.9,
-                    healthy_recovery_pct: 0.1,
+                    unhealthy_trigger_ratio: 0.9,
+                    healthy_recovery_ratio: 0.1,
                     // Fire the ICMP unhealthy transition immediately so the
                     // primary swings on the second tick.
                     unhealthy_hysteresis_sec: 0,
                     healthy_hysteresis_sec: 0,
                 }),
                 tcp_thresholds: Some(ProtocolThresholds {
-                    unhealthy_trigger_pct: 0.5,
-                    healthy_recovery_pct: 0.05,
+                    unhealthy_trigger_ratio: 0.5,
+                    healthy_recovery_ratio: 0.05,
                     unhealthy_hysteresis_sec: 30,
                     healthy_hysteresis_sec: 60,
                 }),
                 udp_thresholds: Some(ProtocolThresholds {
-                    unhealthy_trigger_pct: 0.5,
-                    healthy_recovery_pct: 0.05,
+                    unhealthy_trigger_ratio: 0.5,
+                    healthy_recovery_ratio: 0.05,
                     unhealthy_hysteresis_sec: 30,
                     healthy_hysteresis_sec: 60,
                 }),
                 path_health_thresholds: Some(PathHealthThresholds {
-                    degraded_trigger_pct: 0.05,
+                    degraded_trigger_ratio: 0.05,
                     degraded_trigger_sec: 5,
                     degraded_min_samples: 3,
-                    normal_recovery_pct: 0.02,
+                    normal_recovery_ratio: 0.02,
                     normal_recovery_sec: 30,
                 }),
                 ..Default::default()
@@ -1434,10 +1434,10 @@ mod tests {
                 priority,
                 rates: rates.clone(),
                 path_health_thresholds: Some(PathHealthThresholds {
-                    degraded_trigger_pct: 0.05,
+                    degraded_trigger_ratio: 0.05,
                     degraded_trigger_sec: 5,
                     degraded_min_samples: 3,
-                    normal_recovery_pct: 0.02,
+                    normal_recovery_ratio: 0.02,
                     normal_recovery_sec: 30,
                 }),
                 ..Default::default()
