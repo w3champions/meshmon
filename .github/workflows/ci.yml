@@ -57,16 +57,26 @@ jobs:
 
       # shared-key meshmon-debug is shared with rust-test + rust-e2e so
       # the workspace's debug-profile target/ is restored once and reused
-      # across all three. prefix-key v1 invalidates the registry-only
-      # tarballs left behind by an earlier sccache experiment whose key
-      # collided with this one (GHA cache entries are immutable, so a
-      # write under the same key would be silently rejected).
+      # across all three.
+      #
+      # cache-on-failure is intentionally left at the action's default
+      # (false): a cancelled or failed job that has only partly built
+      # target/ would otherwise become the canonical tarball under this
+      # key — and because actions/cache treats keys as immutable, every
+      # subsequent run inherits the half-baked state until the prefix-
+      # key is bumped or the entry is deleted. Only successful runs
+      # write the cache. prefix-key v2 evicts the v1 tarball that was
+      # poisoned exactly that way (cancelled main run on 8c89bf8 saved
+      # ~548 MB of half-built target/ via cache-on-failure: true; every
+      # subsequent run hit the immutable key and inherited the bad
+      # state). v1 itself superseded v0, which carried registry-only
+      # tarballs from an earlier sccache experiment whose key collided
+      # with this one.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: meshmon-debug
-          cache-on-failure: true
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -106,9 +116,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: meshmon-debug
-          cache-on-failure: true
 
       - name: Install cargo-nextest (prebuilt)
         uses: taiki-e/install-action@nextest
@@ -234,9 +243,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: meshmon-release
-          cache-on-failure: true
 
       - name: cargo build --release
         run: cargo build --release -p meshmon-service
@@ -286,9 +294,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: meshmon-debug
-          cache-on-failure: true
 
       - name: Stage deploy/.env
         working-directory: deploy
