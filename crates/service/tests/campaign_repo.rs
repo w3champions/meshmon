@@ -58,6 +58,39 @@ async fn create_persists_campaign_and_cross_product_pairs() {
 }
 
 #[tokio::test]
+async fn create_uses_ratio_space_default_loss_threshold() {
+    // Regression for T54-04: after the `_pct → _ratio` column rename, the
+    // application-level `COALESCE` must match the DB-level `DEFAULT 0.02`
+    // (2 % loss). A stale 2.0 default would be 200 % — effectively
+    // disabling the evaluator's loss gate on campaigns created without an
+    // explicit threshold.
+    let pool = common::shared_migrated_pool().await;
+    let mut input = make_input("t-create-default-loss");
+    input.loss_threshold_ratio = None;
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Row returned from INSERT ... RETURNING.
+    assert!(
+        (row.loss_threshold_ratio - 0.02).abs() < f32::EPSILON,
+        "default loss_threshold_ratio must be 0.02 (2 %), got {}",
+        row.loss_threshold_ratio,
+    );
+
+    // And the same when re-read from the DB.
+    let persisted = repo::get(&pool, row.id)
+        .await
+        .unwrap()
+        .expect("row present");
+    assert!(
+        (persisted.loss_threshold_ratio - 0.02).abs() < f32::EPSILON,
+        "persisted loss_threshold_ratio must be 0.02 (2 %), got {}",
+        persisted.loss_threshold_ratio,
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn get_returns_none_for_unknown_id() {
     let pool = common::shared_migrated_pool().await;
     let fresh = uuid::Uuid::new_v4();

@@ -112,7 +112,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         VALUES ($1, $2, $3::probe_protocol,
                 COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),
                 COALESCE($6, 2000), COALESCE($7, 100),
-                $8, COALESCE($9, 2.0::real), COALESCE($10, 1.0::real),
+                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),
                 COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),
                 $12)
         RETURNING id, title, notes,

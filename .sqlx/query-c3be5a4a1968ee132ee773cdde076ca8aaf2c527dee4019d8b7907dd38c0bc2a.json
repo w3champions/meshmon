@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 2.0::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
+  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -192,5 +192,5 @@
       true
     ]
   },
-  "hash": "61e3b0ff59de0ee70ee5eb87bda94a1ba20dab9ac9f2160d6809369353fac6b2"
+  "hash": "c3be5a4a1968ee132ee773cdde076ca8aaf2c527dee4019d8b7907dd38c0bc2a"
 }
