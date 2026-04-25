@@ -180,3 +180,12 @@ export function parseNullableKnob(
   if (!Number.isFinite(n)) return prev;
   return clampKnob(key, n, prev ?? KNOB_BOUNDS[key].min);
 }
+
+/**
+ * Render a nullable guardrail knob as a controlled `<input type="number">`
+ * value: `null` → `""` so the field renders empty (matching the "off"
+ * sentinel), any number passes through unchanged.
+ */
+export function nullableKnobInputValue(n: number | null): number | string {
+  return n === null ? "" : n;
+}

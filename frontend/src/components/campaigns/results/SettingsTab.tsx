@@ -17,6 +17,7 @@ import {
 import {
   clampKnob,
   KNOB_BOUNDS,
+  nullableKnobInputValue,
   parseNullableKnob,
   ratioToPercentInput,
 } from "@/lib/campaign-config";
@@ -152,8 +153,6 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
         [key]: parseNullableKnob(key, event.target.value, prev[key]),
       }));
     };
-
-  const nullableValue = (n: number | null): number | string => (n === null ? "" : n);
 
   // Loss threshold: input is percent-facing for UX, but the wire value is a
   // ratio — convert at the form boundary so the submitted body stays in
@@ -332,7 +331,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
               type="number"
               min={KNOB_BOUNDS.max_transit_rtt_ms.min}
               max={KNOB_BOUNDS.max_transit_rtt_ms.max}
-              value={nullableValue(form.max_transit_rtt_ms)}
+              value={nullableKnobInputValue(form.max_transit_rtt_ms)}
               placeholder="e.g. 200"
               onChange={handleNullable("max_transit_rtt_ms")}
               disabled={!isEligible || isPending}
@@ -345,7 +344,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
               type="number"
               min={KNOB_BOUNDS.max_transit_stddev_ms.min}
               max={KNOB_BOUNDS.max_transit_stddev_ms.max}
-              value={nullableValue(form.max_transit_stddev_ms)}
+              value={nullableKnobInputValue(form.max_transit_stddev_ms)}
               placeholder="e.g. 50"
               onChange={handleNullable("max_transit_stddev_ms")}
               disabled={!isEligible || isPending}
@@ -359,7 +358,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
               step="0.1"
               min={KNOB_BOUNDS.min_improvement_ms.min}
               max={KNOB_BOUNDS.min_improvement_ms.max}
-              value={nullableValue(form.min_improvement_ms)}
+              value={nullableKnobInputValue(form.min_improvement_ms)}
               placeholder="e.g. 5 (negative values allowed)"
               onChange={handleNullable("min_improvement_ms")}
               disabled={!isEligible || isPending}
@@ -373,7 +372,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
               step="0.01"
               min={KNOB_BOUNDS.min_improvement_ratio.min}
               max={KNOB_BOUNDS.min_improvement_ratio.max}
-              value={nullableValue(form.min_improvement_ratio)}
+              value={nullableKnobInputValue(form.min_improvement_ratio)}
               placeholder="e.g. 0.1 (10%)"
               onChange={handleNullable("min_improvement_ratio")}
               disabled={!isEligible || isPending}

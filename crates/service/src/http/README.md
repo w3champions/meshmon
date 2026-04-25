@@ -40,7 +40,7 @@ probe_count DESC, measured_at DESC)` — no index is added.
 | `GET` | `/api/history/sources` | Agents that have produced at least one `measurements` row, alphabetised by catalogue display name. |
 | `GET` | `/api/history/destinations` | Destinations reachable from `?source=<agent_id>`, optionally narrowed by `?q=<partial>`. Catalogue join is `LEFT JOIN` so deleted rows surface as raw IPs with null metadata. |
 | `GET` | `/api/history/measurements` | Measurement rows + inline `mtr_traces.hops` for a `(source, destination)` over an optional protocol list and time window. Hard-capped at **5 000 rows**; the frontend shows an explicit notice when the cap is hit. |
-| `GET` | `/api/campaigns/{id}/measurements` | Raw-tab feed: `campaign_pairs` LEFT JOIN `measurements` LEFT JOIN `mtr_traces`. Keyset pagination on `(measured_at DESC NULLS LAST, pair_id DESC)`; cursor is base64-encoded JSON. Pending / dispatched pairs stay visible and accumulate at the bottom of the first page; they are unreachable via cursor, which is acceptable — the filter chips funnel pending-only views through `?resolution_state=pending`. A `?measurement_id=` shortcut resolves one row for the DrilldownDrawer's MTR lookup. |
+| `GET` | `/api/campaigns/{id}/measurements` | Raw-tab feed: `campaign_pairs` LEFT JOIN `measurements` LEFT JOIN `mtr_traces`. Keyset pagination on `(measured_at DESC NULLS LAST, pair_id DESC)`; cursor is base64-encoded JSON. Pending / dispatched pairs stay visible and accumulate at the bottom of the first page; they are unreachable via cursor, which is acceptable — the filter chips funnel pending-only views through `?resolution_state=pending`. A `?measurement_id=` shortcut resolves one row for the DrilldownDialog's MTR lookup. |
 
 ### DTOs
 

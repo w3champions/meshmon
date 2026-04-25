@@ -3,10 +3,9 @@
  *
  * Composes the `CandidateTable` (summary KPIs + sortable table), the
  * `DrilldownDialog` (centered modal with paginated pair-detail rows
- * and per-pair MTR), per-row actions (force pair, dispatch detail for
- * a pair), and the tab-level `OverflowMenu` (Detail: all / Detail:
- * good candidates / Re-evaluate, with the cost-preview dialog wired
- * in for the Detail scopes).
+ * and per-pair MTR), and the tab-level `OverflowMenu` (Detail: all /
+ * Detail: good candidates / Re-evaluate, with the cost-preview dialog
+ * wired in for the Detail scopes).
  */
 
 import { useNavigate, useSearch } from "@tanstack/react-router";

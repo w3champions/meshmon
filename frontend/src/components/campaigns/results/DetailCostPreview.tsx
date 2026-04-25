@@ -321,10 +321,10 @@ export function DetailCostPreview({
         <dl className="grid grid-cols-2 gap-3 rounded-md border p-3 text-sm">
           <div className="flex flex-col gap-0.5">
             <dt className="text-xs uppercase tracking-wide text-muted-foreground">
-              Pairs enqueued
+              Pairs enqueued (max)
             </dt>
             <dd className="text-2xl font-semibold tabular-nums" data-testid="cost-preview-pairs">
-              {estimate.pairs_enqueued.toLocaleString()}
+              ≤&nbsp;{estimate.pairs_enqueued.toLocaleString()}
             </dd>
           </div>
           <div className="flex flex-col gap-0.5">

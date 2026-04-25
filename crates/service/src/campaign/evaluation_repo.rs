@@ -242,11 +242,12 @@ pub async fn insert_evaluation(
 /// when the campaign has never been evaluated.
 ///
 /// Runs three queries (parent, candidates, unqualified_reasons) and
-/// joins in Rust. Pair-detail rows are NOT loaded here — the wire DTO
-/// no longer carries them; they are served only via the paginated
-/// `…/candidates/{ip}/pair_details` endpoint. The candidate-level
-/// `avg_loss_ratio` is read from the persisted column so this path
-/// stays JOIN-free.
+/// joins in Rust. Pair-detail rows are NOT shipped on the wire — they
+/// stream through the paginated
+/// `…/candidates/{ip}/pair_details` endpoint instead. The candidates
+/// query does aggregate `avg_loss_ratio` over the per-pair table via
+/// a `LEFT JOIN … GROUP BY`, but the JOIN collapses to one row per
+/// candidate — the per-pair row fanout never leaves the database.
 pub async fn latest_evaluation_for_campaign(
     pool: &PgPool,
     campaign_id: Uuid,

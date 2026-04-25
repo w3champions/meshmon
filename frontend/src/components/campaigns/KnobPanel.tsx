@@ -8,6 +8,7 @@ import {
   clampKnob,
   KNOB_BOUNDS,
   type KnobProtocol,
+  nullableKnobInputValue,
   parseNullableKnob,
   ratioToPercentInput,
 } from "@/lib/campaign-config";
@@ -71,10 +72,6 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
     const next = parseNullableKnob(key, event.target.value, value[key]);
     patch({ [key]: next } as Partial<CampaignKnobs>);
   };
-
-  // `<input type="number" value={…}>` cannot accept `null`; collapse the
-  // sentinel to an empty string so React stays controlled.
-  const nullableValue = (n: number | null): number | string => (n === null ? "" : n);
 
   // `loss_threshold_ratio` is wire-format ratio (0.0–1.0), but the form UX
   // presents percent — convert at the form boundary so the DTO stays in
@@ -284,7 +281,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             type="number"
             min={KNOB_BOUNDS.max_transit_rtt_ms.min}
             max={KNOB_BOUNDS.max_transit_rtt_ms.max}
-            value={nullableValue(value.max_transit_rtt_ms)}
+            value={nullableKnobInputValue(value.max_transit_rtt_ms)}
             placeholder="e.g. 200"
             onChange={handleNullable("max_transit_rtt_ms")}
             disabled={disabled}
@@ -297,7 +294,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             type="number"
             min={KNOB_BOUNDS.max_transit_stddev_ms.min}
             max={KNOB_BOUNDS.max_transit_stddev_ms.max}
-            value={nullableValue(value.max_transit_stddev_ms)}
+            value={nullableKnobInputValue(value.max_transit_stddev_ms)}
             placeholder="e.g. 50"
             onChange={handleNullable("max_transit_stddev_ms")}
             disabled={disabled}
@@ -311,7 +308,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             step="0.1"
             min={KNOB_BOUNDS.min_improvement_ms.min}
             max={KNOB_BOUNDS.min_improvement_ms.max}
-            value={nullableValue(value.min_improvement_ms)}
+            value={nullableKnobInputValue(value.min_improvement_ms)}
             placeholder="e.g. 5 (negative values allowed)"
             onChange={handleNullable("min_improvement_ms")}
             disabled={disabled}
@@ -325,7 +322,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             step="0.01"
             min={KNOB_BOUNDS.min_improvement_ratio.min}
             max={KNOB_BOUNDS.min_improvement_ratio.max}
-            value={nullableValue(value.min_improvement_ratio)}
+            value={nullableKnobInputValue(value.min_improvement_ratio)}
             placeholder="e.g. 0.1 (10%)"
             onChange={handleNullable("min_improvement_ratio")}
             disabled={disabled}
