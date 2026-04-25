@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, notes,\n               state AS \"state: CampaignState\",\n               protocol AS \"protocol: ProbeProtocol\",\n               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n               force_measurement, loss_threshold_ratio, stddev_weight,\n               evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n          FROM measurement_campaigns\n         WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)\n           AND ($2::campaign_state IS NULL OR state = $2)\n           AND ($3::text IS NULL OR created_by = $3)\n         ORDER BY created_at DESC\n         LIMIT $4\n        ",
+  "query": "\n            UPDATE measurement_campaigns SET state = $2, evaluated_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 max_transit_rtt_ms, max_transit_stddev_ms,\n                 min_improvement_ms, min_improvement_ratio,\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -104,38 +104,58 @@
       },
       {
         "ordinal": 13,
+        "name": "max_transit_rtt_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "max_transit_stddev_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "min_improvement_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "min_improvement_ratio",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 14,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 19,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 16,
+        "ordinal": 20,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 17,
+        "ordinal": 21,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 18,
+        "ordinal": 22,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
+        "Uuid",
         {
           "Custom": {
             "name": "campaign_state",
@@ -150,8 +170,27 @@
             }
           }
         },
-        "Text",
-        "Int8"
+        {
+          "Custom": {
+            "name": "campaign_state[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "campaign_state",
+                  "kind": {
+                    "Enum": [
+                      "draft",
+                      "running",
+                      "completed",
+                      "evaluated",
+                      "stopped"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
       ]
     },
     "nullable": [
@@ -169,6 +208,10 @@
       false,
       false,
       true,
+      true,
+      true,
+      true,
+      true,
       false,
       true,
       true,
@@ -176,5 +219,5 @@
       true
     ]
   },
-  "hash": "6172b402e0ee6498da8f8afa0b44b88fd625ccff57695e8a0b6649f0a9fc5467"
+  "hash": "ab705108de4dbd610ccac9ee652fa4928f85155b138e7e9cb79132d6fea4753f"
 }

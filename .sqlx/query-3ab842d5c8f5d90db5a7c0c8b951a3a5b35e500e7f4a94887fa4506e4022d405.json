@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT destination_ip\n             FROM campaign_evaluation_candidates\n            WHERE evaluation_id = $1 AND destination_ip = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Inet"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3ab842d5c8f5d90db5a7c0c8b951a3a5b35e500e7f4a94887fa4506e4022d405"
+}

@@ -46,7 +46,6 @@ function makeCandidate(overrides: Partial<Candidate> & { destination_ip: string 
     avg_improvement_ms: overrides.avg_improvement_ms ?? null,
     avg_loss_ratio: overrides.avg_loss_ratio ?? null,
     composite_score: overrides.composite_score ?? 0,
-    pair_details: overrides.pair_details ?? [],
   };
 }
 

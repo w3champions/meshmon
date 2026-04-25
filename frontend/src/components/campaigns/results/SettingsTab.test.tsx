@@ -52,6 +52,10 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     probe_count_detail: overrides.probe_count_detail ?? 250,
     probe_stagger_ms: overrides.probe_stagger_ms ?? 100,
     timeout_ms: overrides.timeout_ms ?? 2000,
+    max_transit_rtt_ms: overrides.max_transit_rtt_ms ?? null,
+    max_transit_stddev_ms: overrides.max_transit_stddev_ms ?? null,
+    min_improvement_ms: overrides.min_improvement_ms ?? null,
+    min_improvement_ratio: overrides.min_improvement_ratio ?? null,
     created_at: overrides.created_at ?? "2026-04-01T12:00:00Z",
     created_by: overrides.created_by ?? "alice",
     started_at: overrides.started_at ?? null,
@@ -247,6 +251,14 @@ describe("SettingsTab — submit flow", () => {
         loss_threshold_ratio: 0.045,
         stddev_weight: 1,
         evaluation_mode: "diversity",
+        // Guardrails default to `null` on a campaign that never had
+        // them set, and ride along on every PATCH. The backend's
+        // COALESCE semantics preserve the column when the wire value
+        // is `null`.
+        max_transit_rtt_ms: null,
+        max_transit_stddev_ms: null,
+        min_improvement_ms: null,
+        min_improvement_ratio: null,
       },
     });
 
@@ -412,5 +424,255 @@ describe("SettingsTab — submit flow", () => {
     // Form values reflect the submitted knobs.
     expect((screen.getByLabelText(/loss threshold/i) as HTMLInputElement).value).toBe("4.5");
     expect(screen.getByRole("radio", { name: /diversity/i })).toHaveAttribute("data-state", "on");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guardrail knobs — round-trip, clearing, and footgun warning
+// ---------------------------------------------------------------------------
+
+describe("SettingsTab — guardrail knobs", () => {
+  test("seeds guardrail inputs from the campaign when no evaluation row exists", () => {
+    renderTab(
+      makeCampaign({
+        state: "completed",
+        max_transit_rtt_ms: 250,
+        max_transit_stddev_ms: 40,
+        min_improvement_ms: 5,
+        min_improvement_ratio: 0.1,
+      }),
+    );
+
+    expect((screen.getByLabelText(/max transit rtt \(ms\)/i) as HTMLInputElement).value).toBe(
+      "250",
+    );
+    expect(
+      (screen.getByLabelText(/max transit rtt stddev \(ms\)/i) as HTMLInputElement).value,
+    ).toBe("40");
+    expect((screen.getByLabelText(/min improvement \(ms\)/i) as HTMLInputElement).value).toBe("5");
+    expect((screen.getByLabelText(/min improvement ratio/i) as HTMLInputElement).value).toBe("0.1");
+  });
+
+  test("prefers the evaluation snapshot over the campaign for guardrail inputs", () => {
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-g1",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-12T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        // Snapshot wins over campaign-row values below.
+        max_transit_rtt_ms: 150,
+        max_transit_stddev_ms: null,
+        min_improvement_ms: null,
+        min_improvement_ratio: 0.25,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(
+      makeCampaign({
+        state: "evaluated",
+        max_transit_rtt_ms: 999,
+        min_improvement_ratio: 0.99,
+      }),
+    );
+
+    expect((screen.getByLabelText(/max transit rtt \(ms\)/i) as HTMLInputElement).value).toBe(
+      "150",
+    );
+    expect((screen.getByLabelText(/min improvement ratio/i) as HTMLInputElement).value).toBe(
+      "0.25",
+    );
+    // Empty snapshot fields render as empty inputs.
+    expect((screen.getByLabelText(/min improvement \(ms\)/i) as HTMLInputElement).value).toBe("");
+  });
+
+  test("submitting with a guardrail value carries it on the PATCH body", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    fireEvent.change(screen.getByLabelText(/max transit rtt \(ms\)/i), {
+      target: { value: "200" },
+    });
+    fireEvent.change(screen.getByLabelText(/min improvement \(ms\)/i), {
+      target: { value: "5" },
+    });
+
+    patchStub.mutate.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: (result: unknown) => void }) => {
+        opts?.onSuccess?.({});
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
+
+    expect(patchStub.mutate).toHaveBeenCalledTimes(1);
+    const [patchVars] = patchStub.mutate.mock.calls[0];
+    expect(patchVars).toEqual({
+      id: CAMPAIGN_ID,
+      body: {
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "optimization",
+        max_transit_rtt_ms: 200,
+        max_transit_stddev_ms: null,
+        min_improvement_ms: 5,
+        min_improvement_ratio: null,
+      },
+    });
+  });
+
+  test("accepts a negative min_improvement_ms and round-trips it on submit", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    // Negative improvement floor is accepted by spec — operators can keep
+    // "near-baseline" rows that are fractionally slower but more stable.
+    fireEvent.change(screen.getByLabelText(/min improvement \(ms\)/i), {
+      target: { value: "-10" },
+    });
+
+    patchStub.mutate.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: (result: unknown) => void }) => {
+        opts?.onSuccess?.({});
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
+
+    const [patchVars] = patchStub.mutate.mock.calls[0];
+    expect(
+      (patchVars as { body: { min_improvement_ms: number | null } }).body.min_improvement_ms,
+    ).toBe(-10);
+  });
+
+  test("clearing a guardrail input resets the local form state to null", async () => {
+    const user = userEvent.setup();
+    renderTab(
+      makeCampaign({
+        state: "completed",
+        max_transit_rtt_ms: 250,
+      }),
+    );
+
+    const input = screen.getByLabelText(/max transit rtt \(ms\)/i) as HTMLInputElement;
+    expect(input.value).toBe("250");
+
+    // Empty input → null in form state. The PATCH body carries the
+    // local form's `null`; the backend's COALESCE semantics preserve
+    // the existing column value rather than nulling it. The
+    // assertion below verifies the wire shape; the limitation is
+    // documented in the form copy.
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input.value).toBe("");
+
+    patchStub.mutate.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: (result: unknown) => void }) => {
+        opts?.onSuccess?.({});
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
+
+    const [patchVars] = patchStub.mutate.mock.calls[0];
+    expect(
+      (patchVars as { body: { max_transit_rtt_ms: number | null } }).body.max_transit_rtt_ms,
+    ).toBeNull();
+  });
+
+  test("clamps guardrail input when the operator types out-of-range", () => {
+    renderTab(makeCampaign({ state: "completed" }));
+
+    const input = screen.getByLabelText(/max transit rtt \(ms\)/i) as HTMLInputElement;
+
+    // Above max (10000) clamps to max.
+    fireEvent.change(input, { target: { value: "999999" } });
+    expect(input.value).toBe("10000");
+
+    // Below min (1) clamps to min.
+    fireEvent.change(input, { target: { value: "-5" } });
+    expect(input.value).toBe("1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Operator-footgun warning — fires when guardrails dropped every candidate
+// ---------------------------------------------------------------------------
+
+function evaluationStub(overrides: {
+  candidates_total: number;
+  candidates_good?: number;
+  max_transit_rtt_ms?: number | null;
+  max_transit_stddev_ms?: number | null;
+  min_improvement_ms?: number | null;
+  min_improvement_ratio?: number | null;
+}) {
+  return {
+    data: {
+      id: "eval-warn",
+      campaign_id: CAMPAIGN_ID,
+      evaluated_at: "2026-04-15T12:00:00Z",
+      loss_threshold_ratio: 0.02,
+      stddev_weight: 1,
+      evaluation_mode: "optimization",
+      baseline_pair_count: 4,
+      candidates_total: overrides.candidates_total,
+      candidates_good: overrides.candidates_good ?? 0,
+      avg_improvement_ms: 0,
+      max_transit_rtt_ms: overrides.max_transit_rtt_ms ?? null,
+      max_transit_stddev_ms: overrides.max_transit_stddev_ms ?? null,
+      min_improvement_ms: overrides.min_improvement_ms ?? null,
+      min_improvement_ratio: overrides.min_improvement_ratio ?? null,
+      results: { candidates: [], unqualified_reasons: {} },
+    },
+    isLoading: false,
+    isError: false,
+  } as unknown as ReturnType<typeof useEvaluation>;
+}
+
+describe("SettingsTab — guardrail footgun warning", () => {
+  test("renders when candidates_total is 0 AND a guardrail is set", () => {
+    vi.mocked(useEvaluation).mockReturnValue(
+      evaluationStub({ candidates_total: 0, max_transit_rtt_ms: 50 }),
+    );
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.getByText(/dropped every candidate/i)).toBeInTheDocument();
+  });
+
+  test("does NOT render when candidates_total is 0 but no guardrail is set", () => {
+    vi.mocked(useEvaluation).mockReturnValue(evaluationStub({ candidates_total: 0 }));
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.queryByText(/dropped every candidate/i)).not.toBeInTheDocument();
+  });
+
+  test("does NOT render when candidates_total > 0", () => {
+    vi.mocked(useEvaluation).mockReturnValue(
+      evaluationStub({
+        candidates_total: 3,
+        candidates_good: 2,
+        max_transit_rtt_ms: 50,
+      }),
+    );
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.queryByText(/dropped every candidate/i)).not.toBeInTheDocument();
+  });
+
+  test("does NOT render when no evaluation row exists yet", () => {
+    // Default mock: no evaluation snapshot. The warning depends on the
+    // snapshot, so it must not render in this state.
+    renderTab(makeCampaign({ state: "completed", max_transit_rtt_ms: 50 }));
+
+    expect(screen.queryByText(/dropped every candidate/i)).not.toBeInTheDocument();
   });
 });

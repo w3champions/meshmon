@@ -69,6 +69,10 @@ async fn late_settle_is_dropped_when_pair_was_reset() {
             loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
             created_by: None,
         },
     )
@@ -242,6 +246,10 @@ async fn scheduler_revert_does_not_clobber_concurrent_reset() {
             loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
             created_by: None,
         },
     )

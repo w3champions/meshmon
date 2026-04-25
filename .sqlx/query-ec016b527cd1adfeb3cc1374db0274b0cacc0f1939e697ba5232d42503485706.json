@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT candidate_destination_ip, source_agent_id, destination_agent_id\n             FROM campaign_evaluation_qualifying_legs\n            WHERE evaluation_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "candidate_destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_agent_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "destination_agent_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ec016b527cd1adfeb3cc1374db0274b0cacc0f1939e697ba5232d42503485706"
+}

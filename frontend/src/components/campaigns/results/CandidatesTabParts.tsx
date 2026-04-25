@@ -1,81 +1,16 @@
 /**
  * Presentational sub-components for {@link CandidatesTab}. Kept in a
- * sibling file so the tab module itself stays under the 400-line ceiling
- * and the per-row / tab-level action UIs can evolve independently.
+ * sibling file so the tab module itself stays under the 400-line ceiling.
+ *
+ * Per-pair operator actions (force re-measure, dispatch detail for a
+ * single pair) live inside the drilldown dialog instead of on every
+ * candidate row — the action requires a `(source_agent_id,
+ * destination_ip)` tuple, which is reachable only from the paginated
+ * `…/candidates/{ip}/pair_details` endpoint that the dialog already
+ * fetches.
  */
 
-import type { Evaluation } from "@/api/hooks/evaluation";
-import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-
-// ---------------------------------------------------------------------------
-// Row-level action menu (per candidate)
-// ---------------------------------------------------------------------------
-
-export interface RowActionPair {
-  source_agent_id: string;
-  destination_ip: string;
-}
-
-export interface RowActionMenuProps {
-  candidate: Evaluation["results"]["candidates"][number];
-  onForcePair: (pair: RowActionPair) => void;
-  onTriggerPairDetail: (pair: RowActionPair) => void;
-}
-
-/**
- * Per-row dropdown with the "force re-measure" + "dispatch detail for
- * this pair" actions. The server-side pair row is keyed by
- * `(source_agent_id, destination_ip)`; this row-level action targets
- * `pair_details[0]` as a one-click shortcut. The PairsTab (Task 16 /
- * Batch 5) is the operator's lever for per-pair dispatch across the
- * full pair list — the drilldown drawer here only renders per-pair
- * metrics, not per-pair action buttons.
- */
-export function RowActionMenu({ candidate, onForcePair, onTriggerPairDetail }: RowActionMenuProps) {
-  const firstPair = candidate.pair_details[0];
-  if (!firstPair) return null;
-
-  const pair: RowActionPair = {
-    source_agent_id: firstPair.source_agent_id,
-    destination_ip: candidate.destination_ip,
-  };
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-label={`Actions for ${candidate.destination_ip}`}
-        >
-          ⋯
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {/*
-         * `onSelect` (not `onClick`) — Radix's Menu primitive fires the
-         * former on both pointer clicks AND keyboard activation (Enter /
-         * Space). `onClick` binds the DOM event directly and misses the
-         * keyboard path that reaches the item via arrow-key focus.
-         */}
-        <DropdownMenuItem onSelect={() => onForcePair(pair)}>
-          Force re-measure pair
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onTriggerPairDetail(pair)}>
-          Dispatch detail for this pair
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Unqualified-reasons card

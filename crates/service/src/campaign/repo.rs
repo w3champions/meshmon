@@ -69,6 +69,14 @@ pub struct CreateInput {
     pub stddev_weight: Option<f32>,
     /// Optional evaluation strategy.
     pub evaluation_mode: Option<EvaluationMode>,
+    /// Optional eligibility cap on composed transit RTT (ms).
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms).
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction 0.0–1.0).
+    pub min_improvement_ratio: Option<f64>,
     /// Session principal that created the row; audit-only.
     pub created_by: Option<String>,
 }
@@ -108,19 +116,23 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         INSERT INTO measurement_campaigns
             (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,
              probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,
-             evaluation_mode, created_by)
+             evaluation_mode, max_transit_rtt_ms, max_transit_stddev_ms,
+             min_improvement_ms, min_improvement_ratio, created_by)
         VALUES ($1, $2, $3::probe_protocol,
                 COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),
                 COALESCE($6, 2000), COALESCE($7, 100),
                 $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),
                 COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),
-                $12)
+                $12, $13, $14, $15,
+                $16)
         RETURNING id, title, notes,
                   state AS "state: CampaignState",
                   protocol AS "protocol: ProbeProtocol",
                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                   force_measurement, loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
+                  max_transit_rtt_ms, max_transit_stddev_ms,
+                  min_improvement_ms, min_improvement_ratio,
                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         input.title,
@@ -134,6 +146,10 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         input.loss_threshold_ratio,
         input.stddev_weight,
         input.evaluation_mode as _,
+        input.max_transit_rtt_ms,
+        input.max_transit_stddev_ms,
+        input.min_improvement_ms,
+        input.min_improvement_ratio,
         input.created_by.as_deref(),
     )
     .fetch_one(&mut *tx)
@@ -166,6 +182,8 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoErr
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
+               max_transit_rtt_ms, max_transit_stddev_ms,
+               min_improvement_ms, min_improvement_ratio,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE id = $1
@@ -200,6 +218,8 @@ pub async fn list(
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
+               max_transit_rtt_ms, max_transit_stddev_ms,
+               min_improvement_ms, min_improvement_ratio,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)
@@ -221,6 +241,7 @@ pub async fn list(
 /// Partially update an editable campaign. `None`-valued arguments leave
 /// the existing column untouched. Returns [`RepoError::NotFound`] if the
 /// id is unknown.
+#[allow(clippy::too_many_arguments)]
 pub async fn patch(
     pool: &PgPool,
     id: Uuid,
@@ -229,16 +250,24 @@ pub async fn patch(
     loss_threshold_ratio: Option<f32>,
     stddev_weight: Option<f32>,
     evaluation_mode: Option<EvaluationMode>,
+    max_transit_rtt_ms: Option<f64>,
+    max_transit_stddev_ms: Option<f64>,
+    min_improvement_ms: Option<f64>,
+    min_improvement_ratio: Option<f64>,
 ) -> Result<CampaignRow, RepoError> {
     let raw = sqlx::query_as!(
         CampaignRowRaw,
         r#"
         UPDATE measurement_campaigns
-           SET title              = COALESCE($2, title),
-               notes              = COALESCE($3, notes),
-               loss_threshold_ratio = COALESCE($4, loss_threshold_ratio),
-               stddev_weight      = COALESCE($5, stddev_weight),
-               evaluation_mode    = COALESCE($6::evaluation_mode, evaluation_mode)
+           SET title                  = COALESCE($2, title),
+               notes                  = COALESCE($3, notes),
+               loss_threshold_ratio   = COALESCE($4, loss_threshold_ratio),
+               stddev_weight          = COALESCE($5, stddev_weight),
+               evaluation_mode        = COALESCE($6::evaluation_mode, evaluation_mode),
+               max_transit_rtt_ms     = COALESCE($7, max_transit_rtt_ms),
+               max_transit_stddev_ms  = COALESCE($8, max_transit_stddev_ms),
+               min_improvement_ms     = COALESCE($9, min_improvement_ms),
+               min_improvement_ratio  = COALESCE($10, min_improvement_ratio)
          WHERE id = $1
          RETURNING id, title, notes,
                    state AS "state: CampaignState",
@@ -246,6 +275,8 @@ pub async fn patch(
                    probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                    force_measurement, loss_threshold_ratio, stddev_weight,
                    evaluation_mode AS "evaluation_mode: EvaluationMode",
+                   max_transit_rtt_ms, max_transit_stddev_ms,
+                   min_improvement_ms, min_improvement_ratio,
                    created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         id,
@@ -254,6 +285,10 @@ pub async fn patch(
         loss_threshold_ratio,
         stddev_weight,
         evaluation_mode as Option<EvaluationMode>,
+        max_transit_rtt_ms,
+        max_transit_stddev_ms,
+        min_improvement_ms,
+        min_improvement_ratio,
     )
     .fetch_optional(pool)
     .await?;
@@ -757,6 +792,8 @@ pub async fn get_raw_for_scheduler(
                probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                force_measurement, loss_threshold_ratio, stddev_weight,
                evaluation_mode AS "evaluation_mode: EvaluationMode",
+               max_transit_rtt_ms, max_transit_stddev_ms,
+               min_improvement_ms, min_improvement_ratio,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE id = $1
@@ -1119,6 +1156,8 @@ pub(crate) async fn transition_state_in_tx(
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                  force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                 max_transit_rtt_ms, max_transit_stddev_ms,
+                 min_improvement_ms, min_improvement_ratio,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1140,6 +1179,8 @@ pub(crate) async fn transition_state_in_tx(
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                  force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                 max_transit_rtt_ms, max_transit_stddev_ms,
+                 min_improvement_ms, min_improvement_ratio,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1161,6 +1202,8 @@ pub(crate) async fn transition_state_in_tx(
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                  force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                 max_transit_rtt_ms, max_transit_stddev_ms,
+                 min_improvement_ms, min_improvement_ratio,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1182,6 +1225,8 @@ pub(crate) async fn transition_state_in_tx(
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                  force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                 max_transit_rtt_ms, max_transit_stddev_ms,
+                 min_improvement_ms, min_improvement_ratio,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1203,6 +1248,8 @@ pub(crate) async fn transition_state_in_tx(
                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,
                  force_measurement, loss_threshold_ratio, stddev_weight,
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                 max_transit_rtt_ms, max_transit_stddev_ms,
+                 min_improvement_ms, min_improvement_ratio,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1285,6 +1332,10 @@ struct CampaignRowRaw {
     loss_threshold_ratio: f32,
     stddev_weight: f32,
     evaluation_mode: EvaluationMode,
+    max_transit_rtt_ms: Option<f64>,
+    max_transit_stddev_ms: Option<f64>,
+    min_improvement_ms: Option<f64>,
+    min_improvement_ratio: Option<f64>,
     created_by: Option<String>,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -1309,6 +1360,10 @@ impl From<CampaignRowRaw> for CampaignRow {
             loss_threshold_ratio: r.loss_threshold_ratio,
             stddev_weight: r.stddev_weight,
             evaluation_mode: r.evaluation_mode,
+            max_transit_rtt_ms: r.max_transit_rtt_ms,
+            max_transit_stddev_ms: r.max_transit_stddev_ms,
+            min_improvement_ms: r.min_improvement_ms,
+            min_improvement_ratio: r.min_improvement_ratio,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,
@@ -1408,7 +1463,9 @@ pub async fn measurements_for_campaign(
 ) -> Result<EvaluationInputs, RepoError> {
     let campaign = sqlx::query!(
         r#"SELECT loss_threshold_ratio, stddev_weight,
-                  evaluation_mode AS "evaluation_mode: EvaluationMode"
+                  evaluation_mode AS "evaluation_mode: EvaluationMode",
+                  max_transit_rtt_ms, max_transit_stddev_ms,
+                  min_improvement_ms, min_improvement_ratio
              FROM measurement_campaigns WHERE id = $1"#,
         campaign_id,
     )
@@ -1522,6 +1579,10 @@ pub async fn measurements_for_campaign(
         loss_threshold_ratio: campaign.loss_threshold_ratio,
         stddev_weight: campaign.stddev_weight,
         mode: campaign.evaluation_mode,
+        max_transit_rtt_ms: campaign.max_transit_rtt_ms,
+        max_transit_stddev_ms: campaign.max_transit_stddev_ms,
+        min_improvement_ms: campaign.min_improvement_ms,
+        min_improvement_ratio: campaign.min_improvement_ratio,
     })
 }
 

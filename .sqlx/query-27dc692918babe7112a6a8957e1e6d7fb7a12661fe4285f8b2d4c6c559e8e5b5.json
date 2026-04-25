@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns SET state = $2, evaluated_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n            UPDATE measurement_campaigns SET state = $2, stopped_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 max_transit_rtt_ms, max_transit_stddev_ms,\n                 min_improvement_ms, min_improvement_ratio,\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -104,31 +104,51 @@
       },
       {
         "ordinal": 13,
+        "name": "max_transit_rtt_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "max_transit_stddev_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "min_improvement_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "min_improvement_ratio",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 14,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 19,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 16,
+        "ordinal": 20,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 17,
+        "ordinal": 21,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 18,
+        "ordinal": 22,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
@@ -188,6 +208,10 @@
       false,
       false,
       true,
+      true,
+      true,
+      true,
+      true,
       false,
       true,
       true,
@@ -195,5 +219,5 @@
       true
     ]
   },
-  "hash": "cbd934ead794df96800c4170f980e75e4894e023a2843c24e097b67653dbbc5a"
+  "hash": "27dc692918babe7112a6a8957e1e6d7fb7a12661fe4285f8b2d4c6c559e8e5b5"
 }

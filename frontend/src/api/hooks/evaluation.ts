@@ -54,17 +54,16 @@ export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation
       return data as Evaluation;
     },
   });
-  // Seed the shared hostname map from every response. Flattens
-  // `results.candidates[*]` (destination_ip + hostname) and their nested
-  // `pair_details[*]` (destination_ip + destination_hostname). Null (404 /
-  // not-yet-evaluated) produces no entries.
+  // Seed the shared hostname map from every response. Pair-detail rows
+  // moved off the candidate's wire shape in T55 — they live behind the
+  // paginated `…/candidates/{ip}/pair_details` endpoint, where
+  // [`useCandidatePairDetails`] runs its own `useSeedHostnamesOnResponse`
+  // pass. Here we only yield the candidate IP + hostname pair. Null
+  // (404 / not-yet-evaluated) produces no entries.
   useSeedHostnamesOnResponse(query.data, function* (evaluation) {
     if (!evaluation) return;
     for (const candidate of evaluation.results.candidates) {
       yield { ip: candidate.destination_ip, hostname: candidate.hostname };
-      for (const detail of candidate.pair_details) {
-        yield { ip: detail.destination_ip, hostname: detail.destination_hostname };
-      }
     }
   });
   return query;

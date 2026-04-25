@@ -57,6 +57,24 @@ pub struct CampaignDto {
     pub stddev_weight: f32,
     /// Evaluation strategy.
     pub evaluation_mode: EvaluationMode,
+    /// Optional eligibility cap on composed transit RTT (ms). When
+    /// set, the evaluator drops `(A, X, B)` triples whose
+    /// `transit_rtt_ms` exceeds the cap before counter accumulation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms). Combined
+    /// with [`Self::min_improvement_ratio`] under OR semantics; the
+    /// evaluator persists a `pair_details` row only when at least one
+    /// set knob's threshold is cleared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction
+    /// 0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_improvement_ratio: Option<f64>,
     /// Session principal that created the row; audit-only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
@@ -95,6 +113,10 @@ impl From<CampaignRow> for CampaignDto {
             loss_threshold_ratio: r.loss_threshold_ratio,
             stddev_weight: r.stddev_weight,
             evaluation_mode: r.evaluation_mode,
+            max_transit_rtt_ms: r.max_transit_rtt_ms,
+            max_transit_stddev_ms: r.max_transit_stddev_ms,
+            min_improvement_ms: r.min_improvement_ms,
+            min_improvement_ratio: r.min_improvement_ratio,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,
@@ -146,6 +168,18 @@ pub struct CreateCampaignRequest {
     /// Optional evaluation strategy.
     #[serde(default)]
     pub evaluation_mode: Option<EvaluationMode>,
+    /// Optional eligibility cap on composed transit RTT (ms).
+    #[serde(default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    #[serde(default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms).
+    #[serde(default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction 0.0–1.0).
+    #[serde(default)]
+    pub min_improvement_ratio: Option<f64>,
 }
 
 /// PATCH body for `/api/campaigns/{id}`.
@@ -170,6 +204,18 @@ pub struct PatchCampaignRequest {
     /// Replacement evaluation strategy.
     #[serde(default)]
     pub evaluation_mode: Option<EvaluationMode>,
+    /// Replacement eligibility cap on composed transit RTT (ms).
+    #[serde(default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Replacement eligibility cap on composed transit RTT stddev (ms).
+    #[serde(default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Replacement storage floor on absolute improvement (ms).
+    #[serde(default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Replacement storage floor on relative improvement (fraction 0.0–1.0).
+    #[serde(default)]
+    pub min_improvement_ratio: Option<f64>,
 }
 
 /// A single `(source_agent, destination_ip)` pair identifier used by
@@ -361,6 +407,22 @@ pub struct EvaluationDto {
     pub stddev_weight: f32,
     /// Evaluation strategy that produced this result.
     pub evaluation_mode: EvaluationMode,
+    /// Snapshot of [`CampaignDto::max_transit_rtt_ms`] at `/evaluate`
+    /// time. `None` means the eligibility cap was disabled for this
+    /// evaluation pass. Persisted on `campaign_evaluations` so each
+    /// historical evaluation row carries the guardrails that produced
+    /// it, even after later PATCHes change the campaign-level value.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Snapshot of [`CampaignDto::max_transit_stddev_ms`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Snapshot of [`CampaignDto::min_improvement_ms`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Snapshot of [`CampaignDto::min_improvement_ratio`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_improvement_ratio: Option<f64>,
     /// Number of `(source, destination)` baseline pairs considered.
     pub baseline_pair_count: i32,
     /// Total candidate transit destinations scored.
@@ -432,8 +494,6 @@ pub struct EvaluationCandidateDto {
     /// avg_improvement_ms`; higher is better. Candidates are returned
     /// in descending composite-score order.
     pub composite_score: f32,
-    /// Per-pair scoring detail for this candidate.
-    pub pair_details: Vec<EvaluationPairDetailDto>,
     /// Reverse-DNS hostname for the transit destination IP, when cached.
     /// Absent on cold miss and negative-cached IPs (skip-none).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -488,6 +548,128 @@ pub struct EvaluationPairDetailDto {
     pub destination_hostname: Option<String>,
 }
 
+/// Sortable columns for the paginated pair_details endpoint
+/// (`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`).
+///
+/// The set is closed: every variant maps to a hardcoded SQL fragment in
+/// [`crate::campaign::evaluation_repo::latest_pair_details_for_candidate`]
+/// so user input never reaches the SQL string. Adding a sort column
+/// requires extending the enum, the SQL builder's `match`, and the
+/// composite-index migration if a new index is justified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairDetailSortCol {
+    /// `improvement_ms` — default sort. Composite-indexed.
+    ImprovementMs,
+    /// `direct_rtt_ms`.
+    DirectRttMs,
+    /// `direct_stddev_ms`.
+    DirectStddevMs,
+    /// `transit_rtt_ms`.
+    TransitRttMs,
+    /// `transit_stddev_ms`.
+    TransitStddevMs,
+    /// `direct_loss_ratio`.
+    DirectLossRatio,
+    /// `transit_loss_ratio`.
+    TransitLossRatio,
+    /// `source_agent_id`.
+    SourceAgentId,
+    /// `destination_agent_id`.
+    DestinationAgentId,
+    /// `qualifies` — boolean column.
+    Qualifies,
+}
+
+/// Sort direction for [`PairDetailSortCol`]. The composite-PK tiebreak
+/// `(source_agent_id, destination_agent_id)` is always ascending; only
+/// the leading column flips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairDetailSortDir {
+    /// Ascending (smallest values first).
+    Asc,
+    /// Descending (largest values first). Default for the endpoint.
+    Desc,
+}
+
+/// Default page size for [`EvaluationPairDetailQuery::limit`].
+fn default_pair_detail_limit() -> u32 {
+    100
+}
+
+fn default_pair_detail_sort() -> PairDetailSortCol {
+    PairDetailSortCol::ImprovementMs
+}
+
+fn default_pair_detail_dir() -> PairDetailSortDir {
+    PairDetailSortDir::Desc
+}
+
+/// Query parameters for
+/// `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`.
+///
+/// Defaults: sort = `improvement_ms`, dir = `desc`, limit = 100.
+/// `limit` > 500 surfaces as `400 invalid_filter`. Filter values that
+/// are non-finite (`NaN` / `Infinity`) likewise — the handler validates
+/// them up front so the SQL plan never sees a garbage threshold.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct EvaluationPairDetailQuery {
+    /// Sort column. See [`PairDetailSortCol`] for the closed list.
+    #[serde(default = "default_pair_detail_sort")]
+    pub sort: PairDetailSortCol,
+    /// Sort direction. Default `desc`.
+    #[serde(default = "default_pair_detail_dir")]
+    pub dir: PairDetailSortDir,
+    /// Opaque keyset cursor returned by the previous page's
+    /// `next_cursor`. Absent on the first page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page size. Default 100; cap 500. Zero is allowed (returns an
+    /// empty `entries` page, useful for "just give me the total").
+    #[serde(default = "default_pair_detail_limit")]
+    pub limit: u32,
+    /// Runtime filter: minimum `improvement_ms` (inclusive).
+    #[serde(default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Runtime filter: minimum `improvement_ms / direct_rtt_ms` ratio
+    /// (inclusive). Rows with `direct_rtt_ms <= 0` auto-pass — mirrors
+    /// the I2 evaluator's storage-filter semantics.
+    #[serde(default)]
+    pub min_improvement_ratio: Option<f64>,
+    /// Runtime filter: maximum `transit_rtt_ms` (inclusive).
+    #[serde(default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Runtime filter: maximum `transit_stddev_ms` (inclusive).
+    #[serde(default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Runtime filter: when `Some(true)`, restricts to rows where
+    /// `qualifies = true`. `Some(false)` selects unqualifying rows;
+    /// `None` (default) is unconstrained.
+    #[serde(default)]
+    pub qualifies_only: Option<bool>,
+}
+
+/// Wire response body for
+/// `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`.
+///
+/// `total` reflects the runtime filter set but ignores the cursor — it
+/// is the size of the full filtered result set across pages, not the
+/// remaining-after-cursor count, so a UI status bar can render
+/// "showing N of TOTAL" with one number that doesn't drift mid-scroll.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct EvaluationPairDetailListResponse {
+    /// Pair-detail rows for this page.
+    pub entries: Vec<EvaluationPairDetailDto>,
+    /// Total rows across the full filtered result set, ignoring the
+    /// cursor. Renderable as the "of TOTAL" half of a status bar.
+    pub total: u64,
+    /// Opaque cursor for the next page, or `None` at end-of-result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// Which slice of candidates the detail-trigger handler should re-measure.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -540,6 +722,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             evaluation_mode: EvaluationMode::Optimization,
+            max_transit_rtt_ms: Some(200.0),
+            max_transit_stddev_ms: None,
+            min_improvement_ms: Some(5.0),
+            min_improvement_ratio: Some(0.1),
             baseline_pair_count: 24,
             candidates_total: 10,
             candidates_good: 3,
@@ -552,6 +738,10 @@ mod tests {
         let j = serde_json::to_string(&v).unwrap();
         let r: EvaluationDto = serde_json::from_str(&j).unwrap();
         assert_eq!(r.baseline_pair_count, 24);
+        assert_eq!(r.max_transit_rtt_ms, Some(200.0));
+        assert_eq!(r.max_transit_stddev_ms, None);
+        assert_eq!(r.min_improvement_ms, Some(5.0));
+        assert_eq!(r.min_improvement_ratio, Some(0.1));
     }
 
     #[test]

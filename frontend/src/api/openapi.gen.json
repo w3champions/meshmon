@@ -920,6 +920,169 @@
         }
       }
     },
+    "/api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`\n— paginated detail breakdown of a single transit candidate's\nper-baseline-pair scoring rows.",
+        "description": "Replaces the unbounded `EvaluationCandidateDto.pair_details` array\nthe wire used to ship inline. The endpoint applies server-side sort\n(10-column whitelist), four optional runtime filters\n(`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,\n`max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset\ncursor for forward pagination. The cursor's tiebreak rides on the\npost-T54 composite primary key\n`(source_agent_id, destination_agent_id)`, which is unique within a\nsingle `(evaluation_id, candidate_destination_ip)` tuple.\n\nError vocabulary:\n- `not_found` (404): the campaign id does not exist.\n- `no_evaluation` (404): the campaign has never been evaluated.\n- `not_a_candidate` (404): the latest evaluation does not include\n  `destination_ip` as a candidate.\n- `invalid_filter` (400): `limit > 500`, or any filter value is\n  non-finite (`NaN` / `Infinity`).\n- `invalid_cursor` (400): cursor undecodable, or its sort column\n  does not match the request's `sort` parameter.\n- `invalid_sort` (400): `sort` is not one of the whitelisted columns\n  (handled by serde at deserialization time).",
+        "operationId": "get_candidate_pair_details",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Campaign id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "destination_ip",
+            "in": "path",
+            "description": "Transit candidate destination IP",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort column. See [`PairDetailSortCol`] for the closed list.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PairDetailSortCol"
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "Sort direction. Default `desc`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PairDetailSortDir"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque keyset cursor returned by the previous page's\n`next_cursor`. Absent on the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size. Default 100; cap 500. Zero is allowed (returns an\nempty `entries` page, useful for \"just give me the total\").",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "min_improvement_ms",
+            "in": "query",
+            "description": "Runtime filter: minimum `improvement_ms` (inclusive).",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "min_improvement_ratio",
+            "in": "query",
+            "description": "Runtime filter: minimum `improvement_ms / direct_rtt_ms` ratio\n(inclusive). Rows with `direct_rtt_ms <= 0` auto-pass — mirrors\nthe I2 evaluator's storage-filter semantics.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "max_transit_rtt_ms",
+            "in": "query",
+            "description": "Runtime filter: maximum `transit_rtt_ms` (inclusive).",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "max_transit_stddev_ms",
+            "in": "query",
+            "description": "Runtime filter: maximum `transit_stddev_ms` (inclusive).",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "qualifies_only",
+            "in": "query",
+            "description": "Runtime filter: when `Some(true)`, restricts to rows where\n`qualifies = true`. `Some(false)` selects unqualifying rows;\n`None` (default) is unconstrained.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pair-detail page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationPairDetailListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter / cursor / sort",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No active session"
+          },
+          "404": {
+            "description": "Campaign / evaluation / candidate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/campaigns/{id}/force_pair": {
       "post": {
         "tags": [
@@ -1078,7 +1241,7 @@
           {
             "name": "measurement_id",
             "in": "query",
-            "description": "Resolve a single (pair, measurement) row by measurement id —\nused by the DrilldownDrawer for MTR lookup.",
+            "description": "Resolve a single (pair, measurement) row by measurement id —\nused by the DrilldownDialog for MTR lookup.",
             "required": false,
             "schema": {
               "type": [
@@ -3131,6 +3294,38 @@
             "format": "float",
             "description": "Loss-rate threshold (fraction 0.0–1.0) used by the evaluator."
           },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT (ms). When\nset, the evaluator drops `(A, X, B)` triples whose\n`transit_rtt_ms` exceeds the cap before counter accumulation."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT stddev (ms)."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on absolute improvement (ms). Combined\nwith [`Self::min_improvement_ratio`] under OR semantics; the\nevaluator persists a `pair_details` row only when at least one\nset knob's threshold is cleared."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on relative improvement (fraction\n0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics."
+          },
           "notes": {
             "type": "string",
             "description": "Free-form operator notes."
@@ -3218,7 +3413,7 @@
       },
       "CampaignMeasurementDto": {
         "type": "object",
-        "description": "One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDrawer can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON array on the wire.",
+        "description": "One row for the Raw tab OR for the DrilldownDialog's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDialog can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON array on the wire.",
         "required": [
           "pair_id",
           "source_agent_id",
@@ -3773,6 +3968,38 @@
             "format": "float",
             "description": "Optional loss-rate threshold for the evaluator (fraction 0.0–1.0)."
           },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT (ms)."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT stddev (ms)."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on absolute improvement (ms)."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on relative improvement (fraction 0.0–1.0)."
+          },
           "notes": {
             "type": [
               "string",
@@ -3990,8 +4217,7 @@
           "is_mesh_member",
           "pairs_improved",
           "pairs_total_considered",
-          "composite_score",
-          "pair_details"
+          "composite_score"
         ],
         "properties": {
           "asn": {
@@ -4066,13 +4292,6 @@
             ],
             "description": "Catalogue network operator, when present."
           },
-          "pair_details": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EvaluationPairDetailDto"
-            },
-            "description": "Per-pair scoring detail for this candidate."
-          },
           "pairs_improved": {
             "type": "integer",
             "format": "int32",
@@ -4141,6 +4360,38 @@
             "type": "number",
             "format": "float",
             "description": "Loss-rate threshold (fraction 0.0–1.0) that was applied."
+          },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::max_transit_rtt_ms`] at `/evaluate`\ntime. `None` means the eligibility cap was disabled for this\nevaluation pass. Persisted on `campaign_evaluations` so each\nhistorical evaluation row carries the guardrails that produced\nit, even after later PATCHes change the campaign-level value."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::max_transit_stddev_ms`]."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::min_improvement_ms`]."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::min_improvement_ratio`]."
           },
           "results": {
             "$ref": "#/components/schemas/EvaluationResultsDto",
@@ -4256,6 +4507,36 @@
             "type": "number",
             "format": "float",
             "description": "Composed A→X→B transit RTT stddev (ms)."
+          }
+        }
+      },
+      "EvaluationPairDetailListResponse": {
+        "type": "object",
+        "description": "Wire response body for\n`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`.\n\n`total` reflects the runtime filter set but ignores the cursor — it\nis the size of the full filtered result set across pages, not the\nremaining-after-cursor count, so a UI status bar can render\n\"showing N of TOTAL\" with one number that doesn't drift mid-scroll.",
+        "required": [
+          "entries",
+          "total"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvaluationPairDetailDto"
+            },
+            "description": "Pair-detail rows for this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or `None` at end-of-result."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total rows across the full filtered result set, ignoring the\ncursor. Renderable as the \"of TOTAL\" half of a status bar.",
+            "minimum": 0
           }
         }
       },
@@ -4876,6 +5157,30 @@
           }
         }
       },
+      "PairDetailSortCol": {
+        "type": "string",
+        "description": "Sortable columns for the paginated pair_details endpoint\n(`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`).\n\nThe set is closed: every variant maps to a hardcoded SQL fragment in\n[`crate::campaign::evaluation_repo::latest_pair_details_for_candidate`]\nso user input never reaches the SQL string. Adding a sort column\nrequires extending the enum, the SQL builder's `match`, and the\ncomposite-index migration if a new index is justified.",
+        "enum": [
+          "improvement_ms",
+          "direct_rtt_ms",
+          "direct_stddev_ms",
+          "transit_rtt_ms",
+          "transit_stddev_ms",
+          "direct_loss_ratio",
+          "transit_loss_ratio",
+          "source_agent_id",
+          "destination_agent_id",
+          "qualifies"
+        ]
+      },
+      "PairDetailSortDir": {
+        "type": "string",
+        "description": "Sort direction for [`PairDetailSortCol`]. The composite-PK tiebreak\n`(source_agent_id, destination_agent_id)` is always ascending; only\nthe leading column flips.",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
       "PairDto": {
         "type": "object",
         "description": "Wire shape for a single pair in `GET /api/campaigns/{id}/pairs`.",
@@ -5179,6 +5484,38 @@
             ],
             "format": "float",
             "description": "Replacement loss-rate threshold (fraction 0.0–1.0)."
+          },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement eligibility cap on composed transit RTT (ms)."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement eligibility cap on composed transit RTT stddev (ms)."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement storage floor on absolute improvement (ms)."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement storage floor on relative improvement (fraction 0.0–1.0)."
           },
           "notes": {
             "type": [

@@ -1116,6 +1116,139 @@ pub async fn seed_settled_pair(
     (pair_id, measurement_id)
 }
 
+/// Seed a `campaign_evaluations` parent row directly (skipping the
+/// evaluator) so paginated-pair_details endpoint tests can shape exact
+/// row layouts. Returns the generated evaluation id.
+///
+/// Mirrors what [`meshmon_service::campaign::evaluation_repo::insert_evaluation`]
+/// would write at `/evaluate` time, minus the candidates/pair_details
+/// children — those are seeded by [`seed_pair_detail_candidate`] and
+/// [`seed_pair_detail_row`].
+pub async fn seed_evaluation_row(pool: &PgPool, campaign_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO campaign_evaluations \
+             (campaign_id, loss_threshold_ratio, stddev_weight, \
+              evaluation_mode, baseline_pair_count, candidates_total, \
+              candidates_good, evaluated_at) \
+         VALUES ($1, 0.05, 1.0, 'optimization'::evaluation_mode, 0, 0, 0, now()) \
+         RETURNING id",
+    )
+    .bind(campaign_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_evaluation_row({campaign_id}): {e}"))
+}
+
+/// Seed a `campaign_evaluation_candidates` row directly. The
+/// `(evaluation_id, destination_ip)` pair is the FK target for
+/// pair_detail rows.
+pub async fn seed_pair_detail_candidate(
+    pool: &PgPool,
+    evaluation_id: Uuid,
+    destination_ip: IpAddr,
+) {
+    let ip_net = sqlx::types::ipnetwork::IpNetwork::from(destination_ip);
+    sqlx::query(
+        "INSERT INTO campaign_evaluation_candidates \
+             (evaluation_id, destination_ip, is_mesh_member, \
+              pairs_improved, pairs_total_considered) \
+         VALUES ($1, $2::inet, false, 0, 0)",
+    )
+    .bind(evaluation_id)
+    .bind(ip_net)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| {
+        panic!("seed_pair_detail_candidate({evaluation_id}, {destination_ip}): {e}")
+    });
+}
+
+/// Inputs for [`seed_pair_detail_row`].
+#[derive(Debug, Clone)]
+pub struct PairDetailSeed<'a> {
+    pub source_agent_id: &'a str,
+    pub destination_agent_id: &'a str,
+    pub direct_rtt_ms: f32,
+    pub direct_stddev_ms: f32,
+    pub direct_loss_ratio: f32,
+    pub transit_rtt_ms: f32,
+    pub transit_stddev_ms: f32,
+    pub transit_loss_ratio: f32,
+    pub improvement_ms: f32,
+    pub qualifies: bool,
+}
+
+impl<'a> PairDetailSeed<'a> {
+    /// Build a "default-ish" pair_detail seed where transit values are
+    /// derived from the improvement (direct_rtt − improvement = transit_rtt).
+    /// Tests that need finer control overwrite the relevant fields.
+    pub fn baseline(
+        source: &'a str,
+        destination: &'a str,
+        improvement_ms: f32,
+        qualifies: bool,
+    ) -> Self {
+        let direct_rtt_ms = 200.0;
+        let transit_rtt_ms = direct_rtt_ms - improvement_ms;
+        Self {
+            source_agent_id: source,
+            destination_agent_id: destination,
+            direct_rtt_ms,
+            direct_stddev_ms: 5.0,
+            direct_loss_ratio: 0.0,
+            transit_rtt_ms,
+            transit_stddev_ms: 5.0,
+            transit_loss_ratio: 0.0,
+            improvement_ms,
+            qualifies,
+        }
+    }
+}
+
+/// Seed a single `campaign_evaluation_pair_details` row directly. The
+/// candidate must already exist (call [`seed_pair_detail_candidate`]
+/// first).
+pub async fn seed_pair_detail_row(
+    pool: &PgPool,
+    evaluation_id: Uuid,
+    candidate_destination_ip: IpAddr,
+    seed: &PairDetailSeed<'_>,
+) {
+    let ip_net = sqlx::types::ipnetwork::IpNetwork::from(candidate_destination_ip);
+    sqlx::query(
+        "INSERT INTO campaign_evaluation_pair_details \
+             (evaluation_id, candidate_destination_ip, source_agent_id, \
+              destination_agent_id, direct_rtt_ms, direct_stddev_ms, \
+              direct_loss_ratio, direct_source, transit_rtt_ms, \
+              transit_stddev_ms, transit_loss_ratio, improvement_ms, qualifies) \
+         VALUES ($1, $2::inet, $3, $4, $5, $6, $7, \
+                 'active_probe'::pair_detail_direct_source, \
+                 $8, $9, $10, $11, $12)",
+    )
+    .bind(evaluation_id)
+    .bind(ip_net)
+    .bind(seed.source_agent_id)
+    .bind(seed.destination_agent_id)
+    .bind(seed.direct_rtt_ms)
+    .bind(seed.direct_stddev_ms)
+    .bind(seed.direct_loss_ratio)
+    .bind(seed.transit_rtt_ms)
+    .bind(seed.transit_stddev_ms)
+    .bind(seed.transit_loss_ratio)
+    .bind(seed.improvement_ms)
+    .bind(seed.qualifies)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "seed_pair_detail_row({evaluation_id}, {candidate_destination_ip}, \
+             {src}->{dest}): {e}",
+            src = seed.source_agent_id,
+            dest = seed.destination_agent_id,
+        )
+    });
+}
+
 /// Insert a dispatched campaign_pair with no joined measurement — models
 /// an in-flight detail run for the Raw-tab LEFT-JOIN coverage.
 pub async fn seed_pending_pair(

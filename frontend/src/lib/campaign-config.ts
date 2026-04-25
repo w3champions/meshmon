@@ -47,6 +47,28 @@ export interface CampaignKnobs {
   stddev_weight: number;
   /** Evaluation strategy. */
   evaluation_mode: EvaluationMode;
+  /**
+   * Optional eligibility cap on composed transit RTT (ms). `null` disables
+   * the gate. Pruning happens before counter accumulation.
+   */
+  max_transit_rtt_ms: number | null;
+  /**
+   * Optional eligibility cap on composed transit RTT stddev (ms). `null`
+   * disables the gate.
+   */
+  max_transit_stddev_ms: number | null;
+  /**
+   * Optional storage floor on absolute improvement (ms). `null` disables
+   * the gate. Combined with `min_improvement_ratio` under OR semantics.
+   * Negative values are accepted to allow "near-baseline" rows through.
+   */
+  min_improvement_ms: number | null;
+  /**
+   * Optional storage floor on relative improvement (fraction). `null`
+   * disables the gate. Negative values are accepted by parity with the
+   * absolute knob.
+   */
+  min_improvement_ratio: number | null;
   /** When true, the scheduler ignores the 24 h reuse cache. */
   force_measurement: boolean;
 }
@@ -58,6 +80,14 @@ export interface CampaignKnobs {
  *
  * `loss_threshold_ratio` is clamped in ratio units (0.0–1.0); the composer
  * input is percent-facing and converts at the form boundary.
+ *
+ * The four guardrail knobs are nullable on the wire (`null` means "gate
+ * disabled"). The bounds below clamp non-null user input; the form layer
+ * preserves `null` as an out-of-band "off" value via `parseNullableKnob`.
+ * `min_improvement_ms` / `min_improvement_ratio` accept negative input —
+ * the spec deliberately allows operators to keep "near-baseline" rows
+ * (e.g. transit X is 5 ms slower but more stable) by setting a negative
+ * floor.
  */
 export const KNOB_BOUNDS: Record<
   | "probe_count"
@@ -65,7 +95,11 @@ export const KNOB_BOUNDS: Record<
   | "timeout_ms"
   | "probe_stagger_ms"
   | "loss_threshold_ratio"
-  | "stddev_weight",
+  | "stddev_weight"
+  | "max_transit_rtt_ms"
+  | "max_transit_stddev_ms"
+  | "min_improvement_ms"
+  | "min_improvement_ratio",
   { min: number; max: number }
 > = {
   probe_count: { min: 1, max: 1000 },
@@ -74,11 +108,19 @@ export const KNOB_BOUNDS: Record<
   probe_stagger_ms: { min: 0, max: 60000 },
   loss_threshold_ratio: { min: 0, max: 1 },
   stddev_weight: { min: 0, max: 10 },
+  max_transit_rtt_ms: { min: 1, max: 10000 },
+  max_transit_stddev_ms: { min: 0, max: 5000 },
+  min_improvement_ms: { min: -10000, max: 10000 },
+  min_improvement_ratio: { min: -1, max: 1 },
 };
 
 /**
  * Fresh knob draft used when the composer mounts. Never mutated — callers
  * that need to edit a field produce a shallow copy via spread.
+ *
+ * The four guardrail knobs default to `null` (gate disabled) on a fresh
+ * draft. Operators opt in per-knob; an unset guardrail mirrors the
+ * backend default of "no eligibility cap, no storage floor".
  */
 export const DEFAULT_KNOBS: CampaignKnobs = {
   title: "",
@@ -91,6 +133,10 @@ export const DEFAULT_KNOBS: CampaignKnobs = {
   loss_threshold_ratio: 0.02,
   stddev_weight: 1.0,
   evaluation_mode: "optimization",
+  max_transit_rtt_ms: null,
+  max_transit_stddev_ms: null,
+  min_improvement_ms: null,
+  min_improvement_ratio: null,
   force_measurement: false,
 };
 
@@ -114,4 +160,32 @@ export function clampKnob(key: keyof typeof KNOB_BOUNDS, value: number, fallback
  */
 export function ratioToPercentInput(ratio: number): number {
   return Math.round(ratio * 1_000_000) / 10_000;
+}
+
+/**
+ * Parse a guardrail-style knob whose "off" value is `null` rather than a
+ * numeric default. Empty input collapses to `null`, non-finite input
+ * holds the previous value, and finite input is clamped to the knob's
+ * configured bounds. The `prev ?? KNOB_BOUNDS[key].min` fallback gives
+ * `clampKnob` something sensible when transitioning from `null` →
+ * a typed value.
+ */
+export function parseNullableKnob(
+  key: keyof typeof KNOB_BOUNDS,
+  raw: string,
+  prev: number | null,
+): number | null {
+  if (raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return prev;
+  return clampKnob(key, n, prev ?? KNOB_BOUNDS[key].min);
+}
+
+/**
+ * Render a nullable guardrail knob as a controlled `<input type="number">`
+ * value: `null` → `""` so the field renders empty (matching the "off"
+ * sentinel), any number passes through unchanged.
+ */
+export function nullableKnobInputValue(n: number | null): number | string {
+  return n === null ? "" : n;
 }

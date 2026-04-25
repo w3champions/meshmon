@@ -578,7 +578,7 @@ pub struct CampaignMeasurementsQuery {
     #[serde(default)]
     pub cursor: Option<String>,
     /// Resolve a single (pair, measurement) row by measurement id —
-    /// used by the DrilldownDrawer for MTR lookup.
+    /// used by the DrilldownDialog for MTR lookup.
     #[serde(default)]
     pub measurement_id: Option<i64>,
     /// Page size. Defaults to 200, clamped to `[1, 1000]`.
@@ -586,7 +586,7 @@ pub struct CampaignMeasurementsQuery {
     pub limit: Option<i64>,
 }
 
-/// One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.
+/// One row for the Raw tab OR for the DrilldownDialog's MTR resolution.
 ///
 /// Every field but `pair_id`, `source_agent_id`, `destination_ip`,
 /// `resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`
@@ -595,7 +595,7 @@ pub struct CampaignMeasurementsQuery {
 /// in-flight detail work.
 ///
 /// `mtr_hops` is inlined rather than referenced by id so the
-/// DrilldownDrawer can render MTR directly from this endpoint — there
+/// DrilldownDialog can render MTR directly from this endpoint — there
 /// is no separate `GET /api/measurements/:id` in the service. The
 /// `Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding
 /// JSONB; serde renders it as a bare JSON array on the wire.
@@ -841,7 +841,7 @@ async fn fetch_campaign_measurements(
           AND ($3::probe_protocol        IS NULL OR m.protocol IS NULL OR m.protocol = $3)
           AND ($4::measurement_kind      IS NULL OR cp.kind = $4)
           -- measurement_id filter short-circuits to the single pair that
-          -- owns the requested measurement (DrilldownDrawer MTR resolver).
+          -- owns the requested measurement (DrilldownDialog MTR resolver).
           AND ($5::bigint                IS NULL OR m.id = $5)
           -- Cursor predicate: rows with NULL measured_at can never be
           -- reached via keyset once the first page scrolls past them.

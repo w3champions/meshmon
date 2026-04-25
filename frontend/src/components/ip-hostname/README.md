@@ -100,7 +100,7 @@ Every page and component that renders an IP address goes through this module.
 | `AlertRow` | See "Convention exceptions" below. |
 | `CandidateTable` | Destination IP column. |
 | `DestinationPanel` | Source and destination IPs. |
-| `DrilldownDrawer` | Transit-candidate IP in heading + description, dest IP in each pair row. |
+| `DrilldownDialog` | Transit-candidate IP in heading + description; pair rows in `CandidatePairTable` render source / destination agent IPs via `<IpHostname>`. |
 | `HistoryPairFilters` | Destination picker rows render IP via `<IpHostname>`. |
 | `HopDetailCard` | Hop IP set via `<IpHostname>`. |
 | `PairTable` | Destination IP column. |

@@ -7,6 +7,7 @@
 //! implementation, to be shipped by T45.
 
 pub mod broker;
+pub mod cursor;
 pub mod dispatch;
 pub mod dto;
 pub mod eval;

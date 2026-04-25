@@ -73,6 +73,13 @@ function applyEvent(queryClient: QueryClient, event: CampaignStream): void {
       // (key may have no subscriber until the eval hook ships in T49 — safe
       // no-op in that case), the campaign shell (state / evaluated_at move),
       // and the list (sort order depends on evaluated_at).
+      //
+      // Load-bearing: `campaignEvaluationCandidatePairsKey` (the
+      // drilldown dialog's paginated pair-detail feed) prepends
+      // `campaignEvaluationKey(id)`, so this prefix invalidation
+      // cascades to every cached drilldown variant. Do not narrow the
+      // key here without updating `evaluation-pairs.ts` to add its
+      // own SSE branch.
       queryClient.invalidateQueries({ queryKey: campaignEvaluationKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: campaignKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: CAMPAIGNS_LIST_KEY });

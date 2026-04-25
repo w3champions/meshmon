@@ -57,6 +57,10 @@ async fn seed_dispatched_pair(pool: &PgPool) -> (uuid::Uuid, i64, IpAddr) {
             loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
             created_by: None,
         },
     )

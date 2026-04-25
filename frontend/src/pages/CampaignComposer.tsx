@@ -179,6 +179,12 @@ export default function CampaignComposer() {
       loss_threshold_ratio: knobs.loss_threshold_ratio,
       stddev_weight: knobs.stddev_weight,
       evaluation_mode: knobs.evaluation_mode,
+      // Guardrail knobs are nullable on the wire — `null` means "gate
+      // disabled" on CREATE (the backend leaves the column NULL).
+      max_transit_rtt_ms: knobs.max_transit_rtt_ms,
+      max_transit_stddev_ms: knobs.max_transit_stddev_ms,
+      min_improvement_ms: knobs.min_improvement_ms,
+      min_improvement_ratio: knobs.min_improvement_ratio,
       force_measurement: knobs.force_measurement,
       source_agent_ids: Array.from(sourceSet),
       destination_ips: Array.from(destSet),

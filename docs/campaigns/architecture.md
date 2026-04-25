@@ -403,6 +403,8 @@ Campaign header row. Columns (selected):
 | `force_measurement` | `BOOLEAN` | When `true`, reuse lookup is skipped. |
 | `loss_threshold_ratio`, `stddev_weight` | `REAL` | Evaluator knobs. |
 | `evaluation_mode` | `evaluation_mode` enum | `diversity` or `optimization`. |
+| `max_transit_rtt_ms`, `max_transit_stddev_ms` | `DOUBLE PRECISION`, nullable | Eligibility caps on the composed transit path. NULL → off. |
+| `min_improvement_ms`, `min_improvement_ratio` | `DOUBLE PRECISION`, nullable | Storage floors for per-pair scoring rows; combine with OR semantics. NULL → off. |
 | `created_by`, `created_at` | `TEXT` / `TIMESTAMPTZ` | Audit. |
 | `started_at`, `stopped_at`, `completed_at`, `evaluated_at` | `TIMESTAMPTZ` | Lifecycle timestamps. |
 
@@ -974,7 +976,7 @@ inherit session authentication from the user-API middleware layer.
 | `GET` | `/api/history/sources` | Every agent that has produced at least one `measurements` row. Alphabetised by catalogue display name. |
 | `GET` | `/api/history/destinations` | Every destination IP reachable from `?source=<agent_id>`, optionally narrowed by `?q=<partial>`. Catalogue-derived metadata (city, country, ASN, mesh-member flag) joins via `LEFT JOIN`, so deleted catalogue rows surface as raw IPs. |
 | `GET` | `/api/history/measurements` | Measurement rows (+ inline `mtr_traces.hops`) for a `(source, destination)` over an optional protocol list and time window. Hard-capped at 5 000 rows — the frontend surfaces the cap explicitly when hit. |
-| `GET` | `/api/campaigns/{id}/measurements` | Raw-tab feed: joins `campaign_pairs` to `measurements` and `mtr_traces` via `LEFT JOIN` so pending / dispatched pairs remain visible. Keyset-paginated on `(measured_at DESC NULLS LAST, pair_id DESC)`; cursor is base64-encoded JSON. Pending rows accumulate at the bottom of the first page and are unreachable via the cursor — operators narrow by `resolution_state` when they want pending-only views. A `?measurement_id=` query param short-circuits to a single row for the DrilldownDrawer's MTR lookup. |
+| `GET` | `/api/campaigns/{id}/measurements` | Raw-tab feed: joins `campaign_pairs` to `measurements` and `mtr_traces` via `LEFT JOIN` so pending / dispatched pairs remain visible. Keyset-paginated on `(measured_at DESC NULLS LAST, pair_id DESC)`; cursor is base64-encoded JSON. Pending rows accumulate at the bottom of the first page and are unreachable via the cursor — operators narrow by `resolution_state` when they want pending-only views. A `?measurement_id=` query param short-circuits to a single row for the DrilldownDialog's MTR lookup. |
 
 All four hit the `measurements` hypertable through the existing
 `measurements_reuse_idx
@@ -1112,7 +1114,10 @@ The row set is relational. Four tables, all chained to
 
 - **`campaign_evaluations`** — parent row. Holds the run's metadata
   (`evaluated_at`, `evaluation_mode`) and the thresholds that were
-  applied (`loss_threshold_ratio`, `stddev_weight`), plus aggregate
+  applied (`loss_threshold_ratio`, `stddev_weight`,
+  `max_transit_rtt_ms`, `max_transit_stddev_ms`, `min_improvement_ms`,
+  `min_improvement_ratio` — the four guardrails are nullable and
+  snapshotted from the campaign row at evaluate time), plus aggregate
   counters (`baseline_pair_count`, `candidates_total`,
   `candidates_good`, `avg_improvement_ms`). PK `id UUID`; FK
   `campaign_id → measurement_campaigns(id) ON DELETE CASCADE`. Index
@@ -1149,10 +1154,12 @@ tears down its entire evaluation history.
 child tables inside a single transaction and, when the campaign was in
 `completed`, promotes it to `evaluated` in the same tx.
 `evaluation_repo::latest_evaluation_for_campaign` is the read path;
-it joins the four tables and assembles the wire
-`EvaluationDto` — the DTO shape is otherwise unchanged from the
-pre-refactor JSONB layout, modulo the new `direct_source` field on
-every `pair_detail`.
+it loads the parent row, the per-candidate aggregates, and the
+unqualified-reason map, and assembles the wire `EvaluationDto`. The
+DTO carries no per-pair rows: `pair_details` for a candidate ships via
+the paginated
+`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`
+endpoint (cursor pagination, server-side sort and filter).
 
 ### Evaluator error envelope
 

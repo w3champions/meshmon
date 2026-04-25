@@ -210,6 +210,24 @@ pub struct CampaignRow {
     pub stddev_weight: f32,
     /// Evaluation strategy (see [`EvaluationMode`]).
     pub evaluation_mode: EvaluationMode,
+    /// Optional eligibility cap on composed transit RTT (ms). When
+    /// `Some`, the evaluator drops `(A, X, B)` triples whose
+    /// `transit_rtt_ms` exceeds the cap before counter accumulation.
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    /// Same semantics as [`Self::max_transit_rtt_ms`] but on the
+    /// variance-additive composed stddev.
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms). When
+    /// `Some`, the evaluator persists a `pair_details` row only when
+    /// the triple's `improvement_ms` clears the floor (OR-combined
+    /// with [`Self::min_improvement_ratio`]).
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction
+    /// 0.0–1.0). When `Some`, the evaluator persists a `pair_details`
+    /// row only when `improvement_ms / direct_rtt_ms` clears the floor
+    /// (OR-combined with [`Self::min_improvement_ms`]).
+    pub min_improvement_ratio: Option<f64>,
     /// Optional principal string (session username) that created the row.
     pub created_by: Option<String>,
     /// Row creation timestamp.

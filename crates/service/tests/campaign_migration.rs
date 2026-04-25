@@ -310,3 +310,87 @@ async fn campaign_evaluation_relational_migration_shape() {
 
     db.close().await;
 }
+
+#[tokio::test]
+async fn campaign_evaluation_guardrails_migration_up_down_round_trips() {
+    // T55-I1: the four optional guardrail knobs land on
+    // `measurement_campaigns` (operator-set) and
+    // `campaign_evaluations` (snapshot stamped at /evaluate time).
+    // All four columns are nullable with no default, so historic rows
+    // backfill to NULL (knob disabled). The down migration drops them
+    // again, leaving the post-T54 schema untouched.
+    use sqlx::Executor;
+
+    const GUARDRAIL_COLS: [&str; 4] = [
+        "max_transit_rtt_ms",
+        "max_transit_stddev_ms",
+        "min_improvement_ms",
+        "min_improvement_ratio",
+    ];
+
+    async fn column_exists(pool: &sqlx::PgPool, table: &str, col: &str) -> bool {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+               SELECT 1 FROM information_schema.columns
+                WHERE table_name = $1 AND column_name = $2
+             )",
+        )
+        .bind(table)
+        .bind(col)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    let db = acquire(/*with_timescale=*/ false).await;
+    meshmon_service::db::run_migrations(&db.pool)
+        .await
+        .expect("migrations apply");
+
+    // --- After up migration: every guardrail column lands on both
+    //     tables, nullable, no default.
+    for table in ["measurement_campaigns", "campaign_evaluations"] {
+        for col in GUARDRAIL_COLS {
+            assert!(
+                column_exists(&db.pool, table, col).await,
+                "{table}.{col} missing after up migration",
+            );
+
+            // Nullable + no default — operator-disabled knob backfills
+            // to NULL on historic rows.
+            let (is_nullable, has_default): (String, bool) = sqlx::query_as(
+                "SELECT is_nullable, column_default IS NOT NULL
+                   FROM information_schema.columns
+                  WHERE table_name = $1 AND column_name = $2",
+            )
+            .bind(table)
+            .bind(col)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(is_nullable, "YES", "{table}.{col} must be nullable");
+            assert!(!has_default, "{table}.{col} must not carry a DEFAULT");
+        }
+    }
+
+    // --- Apply the down migration directly. The migrator only runs
+    //     up-files; the down side ships in the same directory and is
+    //     applied here as a sanity check for the round-trip shape.
+    let down_sql =
+        include_str!("../migrations/20260425000000_campaign_evaluation_guardrails.down.sql");
+    db.pool
+        .execute(down_sql)
+        .await
+        .expect("down migration applies");
+
+    for table in ["measurement_campaigns", "campaign_evaluations"] {
+        for col in GUARDRAIL_COLS {
+            assert!(
+                !column_exists(&db.pool, table, col).await,
+                "{table}.{col} still present after down migration",
+            );
+        }
+    }
+
+    db.close().await;
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT destination_ip, display_name, city, country_code, asn,\n                  network_operator, is_mesh_member, pairs_improved,\n                  pairs_total_considered, avg_improvement_ms\n             FROM campaign_evaluation_candidates\n            WHERE evaluation_id = $1\n            ORDER BY pairs_improved DESC,\n                     COALESCE(avg_improvement_ms, 0.0) DESC,\n                     destination_ip ASC",
+  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  c.avg_loss_ratio\n             FROM campaign_evaluation_candidates c\n            WHERE c.evaluation_id = $1\n            ORDER BY c.pairs_improved DESC,\n                     COALESCE(c.avg_improvement_ms, 0.0) DESC,\n                     c.destination_ip ASC",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,11 @@
         "ordinal": 9,
         "name": "avg_improvement_ms",
         "type_info": "Float4"
+      },
+      {
+        "ordinal": 10,
+        "name": "avg_loss_ratio",
+        "type_info": "Float4"
       }
     ],
     "parameters": {
@@ -69,8 +74,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "b760aa76d22cbabc45df8e6efe037987d2aeb318ee42399e3b078ffe72ea0fa1"
+  "hash": "eece49d80e55b57cf75d672c84ddddd53b44b1b524505c9c946e4cf08a06d2e4"
 }

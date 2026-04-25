@@ -60,6 +60,10 @@ fn create_input(title: &str, agent: &str, destinations: Vec<IpAddr>) -> CreateIn
         loss_threshold_ratio: None,
         stddev_weight: None,
         evaluation_mode: None,
+        max_transit_rtt_ms: None,
+        max_transit_stddev_ms: None,
+        min_improvement_ms: None,
+        min_improvement_ratio: None,
         created_by: None,
     }
 }
@@ -550,6 +554,10 @@ async fn scheduler_splits_batches_by_kind_with_kind_specific_probe_count() {
         loss_threshold_ratio: None,
         stddev_weight: None,
         evaluation_mode: None,
+        max_transit_rtt_ms: None,
+        max_transit_stddev_ms: None,
+        min_improvement_ms: None,
+        min_improvement_ratio: None,
         created_by: None,
     };
     let row = repo::create(&db.pool, input).await.unwrap();

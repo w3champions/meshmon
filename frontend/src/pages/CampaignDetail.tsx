@@ -118,14 +118,26 @@ function StatCard({ label, value, isLoading }: StatCardProps) {
 
 interface KnobRowProps {
   label: string;
-  value: string | number | boolean;
+  /**
+   * `null` is rendered as the em-dash "off" sentinel — used for the
+   * optional guardrail knobs (`max_transit_rtt_ms`, etc.) where an
+   * unset column means "gate disabled".
+   */
+  value: string | number | boolean | null;
 }
 
 function KnobRow({ label, value }: KnobRowProps) {
   // Booleans read as `"false" / "true"` under a plain `String()`, which scans
-  // poorly in a knob grid. Render a human label instead; numeric and string
-  // values pass through verbatim.
-  const display = typeof value === "boolean" ? (value ? "Yes" : "No") : String(value);
+  // poorly in a knob grid. Render a human label instead; `null` collapses to
+  // an em-dash; numeric and string values pass through verbatim.
+  let display: string;
+  if (value === null) {
+    display = "—";
+  } else if (typeof value === "boolean") {
+    display = value ? "Yes" : "No";
+  } else {
+    display = String(value);
+  }
   return (
     <div className="flex items-center justify-between gap-3 text-sm">
       <dt className="text-muted-foreground">{label}</dt>
@@ -313,6 +325,13 @@ export default function CampaignDetail() {
         loss_threshold_ratio: cloneCampaign.loss_threshold_ratio,
         stddev_weight: cloneCampaign.stddev_weight,
         evaluation_mode: cloneCampaign.evaluation_mode,
+        // Carry guardrail knobs forward — Clone preserves the original
+        // operator intent. `?? null` collapses `undefined` (older campaign
+        // rows where the field never landed) to `null`.
+        max_transit_rtt_ms: cloneCampaign.max_transit_rtt_ms ?? null,
+        max_transit_stddev_ms: cloneCampaign.max_transit_stddev_ms ?? null,
+        min_improvement_ms: cloneCampaign.min_improvement_ms ?? null,
+        min_improvement_ratio: cloneCampaign.min_improvement_ratio ?? null,
         // Reset `force_measurement` — clones default to reuse-cache
         // friendly so a tweak-and-rerun doesn't silently re-measure
         // every pair. Operator opts in via the knob panel.
@@ -540,6 +559,17 @@ export default function CampaignDetail() {
           <KnobRow label="Stddev weight" value={campaign.stddev_weight} />
           <KnobRow label="Evaluation mode" value={campaign.evaluation_mode} />
           <KnobRow label="Force measurement" value={campaign.force_measurement} />
+          {/*
+           * Guardrail knobs. Optional on the campaign row — `?? null`
+           * collapses `undefined` (legacy campaigns predating the
+           * columns) to the em-dash sentinel rendered by `KnobRow`.
+           * Labels match the SettingsTab inputs verbatim for at-a-
+           * glance parity.
+           */}
+          <KnobRow label="Max transit RTT (ms)" value={campaign.max_transit_rtt_ms ?? null} />
+          <KnobRow label="Max transit stddev (ms)" value={campaign.max_transit_stddev_ms ?? null} />
+          <KnobRow label="Min improvement (ms)" value={campaign.min_improvement_ms ?? null} />
+          <KnobRow label="Min improvement ratio" value={campaign.min_improvement_ratio ?? null} />
         </dl>
       </Card>
 

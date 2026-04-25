@@ -2,42 +2,29 @@
  * Candidates tab — the default landing panel on `/campaigns/:id`.
  *
  * Composes the `CandidateTable` (summary KPIs + sortable table), the
- * `DrilldownDrawer` (right-side sheet with per-pair MTR), per-row actions
- * (force pair, dispatch detail for a pair), and the tab-level
- * `OverflowMenu` (Detail: all / Detail: good candidates / Re-evaluate,
- * with the cost-preview dialog wired in for the Detail scopes).
+ * `DrilldownDialog` (centered modal with paginated pair-detail rows
+ * and per-pair MTR), and the tab-level `OverflowMenu` (Detail: all /
+ * Detail: good candidates / Re-evaluate, with the cost-preview dialog
+ * wired in for the Detail scopes).
  */
 
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";
 import type { Campaign } from "@/api/hooks/campaigns";
-import { useForcePair } from "@/api/hooks/campaigns";
-import { useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
-import {
-  RowActionMenu,
-  type RowActionPair,
-  UnqualifiedReasons,
-} from "@/components/campaigns/results/CandidatesTabParts";
+import { useEvaluation } from "@/api/hooks/evaluation";
+import { UnqualifiedReasons } from "@/components/campaigns/results/CandidatesTabParts";
 import {
   type CandidateSortColumn,
   CandidateTable,
   type CandidateTableSort,
   type SortDirection,
 } from "@/components/campaigns/results/CandidateTable";
-import { DrilldownDrawer } from "@/components/campaigns/results/DrilldownDrawer";
+import { DrilldownDialog } from "@/components/campaigns/results/DrilldownDialog";
 import { OverflowMenu } from "@/components/campaigns/results/OverflowMenu";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  extractCampaignErrorCode,
-  isIllegalStateTransition,
-  isInvalidDestinationIp,
-  isMissingPair,
-  isNoPairsSelected,
-} from "@/lib/campaign";
 import type { CampaignDetailSearch } from "@/router/index";
-import { useToastStore } from "@/stores/toast";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,8 +48,6 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
   const search = useSearch({ strict: false }) as CampaignDetailSearch;
 
   const evaluationQuery = useEvaluation(campaign.id);
-  const forcePairMutation = useForcePair();
-  const triggerDetailMutation = useTriggerDetail();
 
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
 
@@ -94,109 +79,9 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
     setSelectedIp(ip);
   }, []);
 
-  const handleCloseDrawer = useCallback((): void => {
+  const handleCloseDialog = useCallback((): void => {
     setSelectedIp(null);
   }, []);
-
-  // -------------------------------------------------------------------------
-  // Row actions
-  // -------------------------------------------------------------------------
-
-  const handleForcePair = useCallback(
-    (pair: RowActionPair): void => {
-      const { pushToast } = useToastStore.getState();
-      forcePairMutation.mutate(
-        { id: campaign.id, body: pair },
-        {
-          onSuccess: () => {
-            pushToast({
-              kind: "success",
-              message: `Queued force re-measure for ${pair.destination_ip}.`,
-            });
-          },
-          onError: (err) => {
-            if (isIllegalStateTransition(err)) {
-              pushToast({
-                kind: "error",
-                message: "Can't force pair — campaign advanced before the request landed.",
-              });
-              return;
-            }
-            if (isMissingPair(err)) {
-              pushToast({
-                kind: "error",
-                message: `Pair ${pair.destination_ip} no longer exists on this campaign.`,
-              });
-              return;
-            }
-            const code = extractCampaignErrorCode(err);
-            pushToast({
-              kind: "error",
-              message: code ? `Force pair failed: ${code}` : `Force pair failed: ${err.message}`,
-            });
-          },
-        },
-      );
-    },
-    [forcePairMutation, campaign.id],
-  );
-
-  const handleTriggerPairDetail = useCallback(
-    (pair: RowActionPair): void => {
-      const { pushToast } = useToastStore.getState();
-      triggerDetailMutation.mutate(
-        {
-          id: campaign.id,
-          body: {
-            scope: "pair",
-            pair: {
-              source_agent_id: pair.source_agent_id,
-              destination_ip: pair.destination_ip,
-            },
-          },
-        },
-        {
-          onSuccess: (data) => {
-            pushToast({
-              kind: "success",
-              message: `Enqueued ${data.pairs_enqueued} detail measurements for ${pair.destination_ip}.`,
-            });
-          },
-          onError: (err) => {
-            if (isInvalidDestinationIp(err)) {
-              pushToast({
-                kind: "error",
-                message: `Can't dispatch detail — destination IP ${pair.destination_ip} is malformed.`,
-              });
-              return;
-            }
-            if (isMissingPair(err)) {
-              pushToast({
-                kind: "error",
-                message: `Pair ${pair.destination_ip} no longer exists on this campaign.`,
-              });
-              return;
-            }
-            if (isNoPairsSelected(err)) {
-              pushToast({
-                kind: "error",
-                message: "No pairs qualified for detail dispatch — nothing to remeasure.",
-              });
-              return;
-            }
-            const code = extractCampaignErrorCode(err);
-            pushToast({
-              kind: "error",
-              message: code
-                ? `Detail dispatch failed: ${code}`
-                : `Detail dispatch failed: ${err.message}`,
-            });
-          },
-        },
-      );
-    },
-    [triggerDetailMutation, campaign.id],
-  );
 
   // -------------------------------------------------------------------------
   // Empty + error branches
@@ -283,13 +168,6 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
         onSelectCandidate={handleSelectCandidate}
         sort={sort}
         onSortChange={setSort}
-        renderRowActions={(candidate) => (
-          <RowActionMenu
-            candidate={candidate}
-            onForcePair={handleForcePair}
-            onTriggerPairDetail={handleTriggerPairDetail}
-          />
-        )}
       />
 
       {Object.keys(evaluation.results.unqualified_reasons ?? {}).length > 0 &&
@@ -297,10 +175,11 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
         <UnqualifiedReasons reasons={evaluation.results.unqualified_reasons ?? {}} />
       ) : null}
 
-      <DrilldownDrawer
+      <DrilldownDialog
         candidate={selectedCandidate}
         campaign={campaign}
-        onClose={handleCloseDrawer}
+        evaluation={evaluation}
+        onClose={handleCloseDialog}
         unqualifiedReason={unqualifiedReason}
       />
     </section>
