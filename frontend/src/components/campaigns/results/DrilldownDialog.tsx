@@ -319,12 +319,35 @@ function DialogBody({
               Retry
             </Button>
           </Card>
+        ) : filteredHook.isLoading ? (
+          // Initial network round-trip — `filteredTotal` resolves to 0
+          // until the first page lands, so without this branch the chain
+          // below would flash the "all scored rows dropped" empty state
+          // for a few hundred ms. Render a muted loading card instead;
+          // the caption already shows "Loading pair details…" and the
+          // spinner keeps both surfaces in lockstep.
+          <Card
+            className="p-4 text-sm text-muted-foreground"
+            role="status"
+            aria-busy="true"
+            data-testid="drilldown-loading"
+          >
+            Loading pair details…
+          </Card>
         ) : filteredTotal === 0 && filterIsActive ? (
-          <Card className="p-4 text-sm text-muted-foreground" role="status">
+          <Card
+            className="p-4 text-sm text-muted-foreground"
+            role="status"
+            data-testid="drilldown-empty-filters"
+          >
             No rows match these filters. Clear filters or re-evaluate with looser guardrails.
           </Card>
         ) : filteredTotal === 0 && !filterIsActive ? (
-          <Card className="p-4 text-sm text-muted-foreground" role="status">
+          <Card
+            className="p-4 text-sm text-muted-foreground"
+            role="status"
+            data-testid="drilldown-empty-guardrails"
+          >
             All scored rows for this candidate were dropped by the active guardrails. Re-evaluate
             with looser guardrails to inspect them.
           </Card>

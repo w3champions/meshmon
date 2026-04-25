@@ -303,32 +303,73 @@ describe("DrilldownDialog — caption math", () => {
 });
 
 describe("DrilldownDialog — empty / error states", () => {
-  test("filtered total = 0 with active toolbar filter shows 'no rows match' card", () => {
+  test("initial load shows the loading card, not an empty-state card", async () => {
+    // First render lands with `isLoading=true` and `data===undefined`,
+    // so `filteredTotal` resolves to 0 — without the explicit loading
+    // branch the empty-state chain would flash the wrong copy for the
+    // duration of the first network round-trip. This test pins the
+    // loading branch in place so a future refactor can't regress it.
+    const { rerender, container } = renderDialog(
+      {},
+      pairsReturn({ isLoading: true, data: undefined }),
+      pairsReturn({ isLoading: true, data: undefined }),
+    );
+    expect(screen.getByTestId("drilldown-loading")).toBeInTheDocument();
+    // Neither empty-state card may appear during loading.
+    expect(screen.queryByTestId("drilldown-empty-filters")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-empty-guardrails")).not.toBeInTheDocument();
+
+    // Once the query lands, the table renders.
+    vi.mocked(useCandidatePairDetails).mockImplementation((_id, _ip, q: PairDetailsQuery) => {
+      const r =
+        q.limit === 0
+          ? pairsReturn({ data: { pages: [pageOf([], 1)], pageParams: [null] } })
+          : pairsReturn({ data: { pages: [pageOf([makeEntry(1)], 1)], pageParams: [null] } });
+      return r as unknown as ReturnType<typeof useCandidatePairDetails>;
+    });
+    rerender(
+      <DrilldownDialog
+        candidate={makeCandidate()}
+        campaign={makeCampaign()}
+        evaluation={null}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("drilldown-loading")).not.toBeInTheDocument();
+    expect(screen.getByTestId("candidate-pair-row-0")).toBeInTheDocument();
+    expect(container).toBeTruthy();
+  });
+
+  test("filtered total = 0 with no toolbar filter shows the all-dropped-by-guardrails card", () => {
+    // Both hooks return total=0 and no toolbar filter has been
+    // touched, so the chain falls through to the
+    // "all scored rows dropped by the active guardrails" branch.
+    renderDialog(
+      {},
+      pairsReturn({ data: { pages: [pageOf([], 0)], pageParams: [null] } }),
+      pairsReturn({ data: { pages: [pageOf([], 0)], pageParams: [null] } }),
+    );
+    expect(screen.getByTestId("drilldown-empty-guardrails")).toBeInTheDocument();
+    // Sanity: the filter-active branch must not co-render.
+    expect(screen.queryByTestId("drilldown-empty-filters")).not.toBeInTheDocument();
+  });
+
+  test("filtered total = 0 with an active toolbar filter shows the 'no rows match' card", async () => {
+    // The internal query state defaults to DEFAULT_QUERY (no toolbar
+    // filters), so `filterIsActive===false` until the operator
+    // touches a control. Click the Qualifies-only switch so
+    // `qualifies_only===true` and `filterIsActive===true`, which
+    // routes the empty-state chain to the filter-active branch.
     renderDialog(
       {},
       pairsReturn({ data: { pages: [pageOf([], 0)], pageParams: [null] } }),
       pairsReturn({ data: { pages: [pageOf([], 50)], pageParams: [null] } }),
     );
-    // The dialog body controls the empty-state copy when filters are
-    // active. We surface the toolbar filter by rerendering with
-    // qualifies-only on. Simplest: the rendering is gated on
-    // `filterIsActive`; since the default query has no filters this
-    // case requires an explicit fixture below — see the next test.
-    // Here we just verify the alternative empty state appears.
-    expect(
-      screen.getByText(/all scored rows for this candidate were dropped by the active guardrails/i),
-    ).toBeInTheDocument();
-  });
-
-  test("filtered total = 0 with no toolbar filter shows the all-dropped-by-guardrails card", () => {
-    renderDialog(
-      {},
-      pairsReturn({ data: { pages: [pageOf([], 0)], pageParams: [null] } }),
-      pairsReturn({ data: { pages: [pageOf([], 0)], pageParams: [null] } }),
-    );
-    expect(
-      screen.getByText(/all scored rows for this candidate were dropped/i),
-    ).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("filter-qualifies-only"));
+    expect(screen.getByTestId("drilldown-empty-filters")).toBeInTheDocument();
+    // Sanity: the guardrail-dropped branch must not co-render.
+    expect(screen.queryByTestId("drilldown-empty-guardrails")).not.toBeInTheDocument();
   });
 
   test("network failure renders a destructive card with a Retry button", async () => {
