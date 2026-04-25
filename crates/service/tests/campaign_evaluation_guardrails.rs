@@ -9,18 +9,18 @@
 //! never collide on the shared `agents`/`measurements`/`campaign_pairs`
 //! tables.
 //!
-//! | Test                                | Agents              | IPs (TEST-NET-2)             |
-//! |-------------------------------------|---------------------|------------------------------|
-//! | `default_knobs_baseline`            | t55-1-{a,b,c}       | `.11`, `.12`, `.13`, `.99`   |
-//! | `max_rtt_drops_candidate_via_l2`    | t55-2-{a,b}         | `.21`, `.22`, `.71`, `.79`   |
-//! | `max_rtt_filters_triples_in_loop`   | t55-3-{a,b,c}       | `.31`, `.32`, `.33`, `.99`   |
-//! | `max_stddev_filters_triples`        | t55-4-{a,b,c}       | `.41`, `.42`, `.43`, `.99`   |
-//! | `min_improvement_ms_filters_rows`   | t55-5-{a,b,c}       | `.51`, `.52`, `.53`, `.99`   |
-//! | `or_semantics_storage_filter`       | t55-6-{a,b,c}       | `.61`, `.62`, `.63`, `.99`   |
-//! | `direct_rtt_zero_ratio_auto_passes` | t55-7-{a,b,c}       | `.71`, `.72`, `.73`, `.99`   |
-//! | `negative_min_improvement_ms`       | t55-8-{a,b,c}       | `.81`, `.82`, `.83`, `.99`   |
-//! | `negative_min_improvement_ratio`    | t55-9-{a,b,c}       | `.91`, `.92`, `.93`, `.99`   |
-//! | `recovery_on_re_evaluate`           | t55-10-{a,b,c}      | `.101`, `.102`, `.103`,`.199`|
+//! | Test                                | Agents              | IPs (TEST-NET-2)                          |
+//! |-------------------------------------|---------------------|-------------------------------------------|
+//! | `default_knobs_baseline`            | t55-1-{a,b,c}       | `.11`, `.12`, `.13`, `.99`                |
+//! | `max_rtt_drops_candidate_via_l2`    | t55-2-{a,b}         | `.21`, `.22`, `.79`                       |
+//! | `max_rtt_filters_triples_in_loop`   | t55-3-{a,b,c}       | `.31`, `.32`, `.33`, `.99`                |
+//! | `max_stddev_filters_triples`        | t55-4-{a,b,c}       | `.41`, `.42`, `.43`, `.99`                |
+//! | `min_improvement_ms_filters_rows`   | t55-5-{a,b,c}       | `.51`, `.52`, `.53`, `.99`                |
+//! | `or_semantics_storage_filter`       | t55-6-{a,b,c}       | `.61`, `.62`, `.63`, `.91`, `.92`, `.93`  |
+//! | `direct_rtt_zero_ratio_auto_passes` | t55-7-{a,b,c}       | `.71`, `.72`, `.73`, `.94`, `.95`, `.96`  |
+//! | `negative_min_improvement_ms`       | t55-8-{a,b,c}       | `.81`, `.82`, `.83`, `.99`                |
+//! | `negative_min_improvement_ratio`    | t55-9-{a,b,c}       | `.91`, `.92`, `.93`, `.99`                |
+//! | `recovery_on_re_evaluate`           | t55-10-{a,b,c}      | `.101`, `.102`, `.103`, `.199`            |
 
 mod common;
 
@@ -393,15 +393,15 @@ async fn min_improvement_ms_filters_rows() {
     let improved = cand["pairs_improved"].as_i64().expect("improved");
     // All 6 triples are eligible (no RTT/stddev cap), so all 6 count.
     assert_eq!(total, 6, "every eligible triple still counts: {cand}");
-    // All 6 yield positive improvement (40 ms or ~1 ms), so all 6 are
+    // All 6 yield positive improvement (50 ms or 4 ms), so all 6 are
     // marked qualifies — counter reflects the full set.
     assert_eq!(
         improved, 6,
         "every model-improved triple counts toward pairs_improved: {cand}"
     );
 
-    // Storage filter: only the a↔b pair (improvement ≈ 40) passes the
-    // 5 ms gate. The four a↔c / b↔c rows (improvement ≈ 1) are dropped.
+    // Storage filter: only the a↔b pair (improvement = 50) passes the
+    // 5 ms gate. The four a↔c / b↔c rows (improvement = 4) are dropped.
     let pair_details = cand["pair_details"].as_array().expect("pair_details");
     assert_eq!(
         pair_details.len(),
@@ -595,6 +595,14 @@ async fn direct_rtt_zero_ratio_auto_passes() {
         x1["pair_details"].as_array().unwrap().len(),
         1,
         "X1: direct_rtt_ms = 0 ⇒ ratio auto-pass ⇒ row stored: {x1}"
+    );
+    // X1's improvement is `0 − 20 = −20`, so it does NOT qualify under
+    // diversity mode (`improvement_ms > 0` is false). The storage gate
+    // is independent of qualification — a stored row with
+    // qualifies=false must NOT bump pairs_improved.
+    assert_eq!(
+        x1["pairs_improved"], 0,
+        "X1: stored-but-non-qualifying row must not count as improved: {x1}"
     );
 
     let x2 = find_candidate(&eval, "198.51.100.95")
