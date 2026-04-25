@@ -426,6 +426,49 @@ useful for redundancy planning. Use **Optimization** (default) when
 you want only destinations that beat every alternative the mesh
 already has — useful for "should we acquire this server?"
 
+## Evaluation guardrails
+
+Four optional knobs gate the evaluator's output. All default to "off"
+(NULL); enabling any one is purely additive over the default
+behaviour.
+
+### Eligibility caps
+
+`max_transit_rtt_ms` and `max_transit_stddev_ms` express absolute caps
+on the *composed* transit A→X→B. A pair where the composed RTT or
+stddev exceeds the cap is excluded from the candidate's scoring
+entirely — it doesn't bias `composite_score`, doesn't count in
+`pairs_total_considered`, and doesn't appear in the per-pair drilldown.
+
+Use eligibility caps to express "I don't care about routes slower
+than X ms (or jitterier than X ms) regardless of how they compare to
+the direct path."
+
+### Storage floors
+
+`min_improvement_ms` and `min_improvement_ratio` express minimum
+improvements (signed — negatives allowed) for a per-pair scoring row
+to be persisted. The candidate is still scored against the pair —
+`pairs_improved` and `pairs_total_considered` reflect the full set —
+but rows below either threshold aren't written to storage.
+
+The two floors combine with **OR** semantics: a row is stored if
+*either* threshold passes. "X ms or Y % better" — pick whichever
+matches the operator framing.
+
+### Tightening vs loosening
+
+Tightening a knob between evaluations drops more rows from the new
+pass. Loosening recovers them: the underlying inputs (active probe
+measurements + VM-sourced direct baselines) are durable, so a re-
+evaluate with looser knobs re-computes from the same inputs and
+surfaces the previously-dropped data.
+
+The drilldown's runtime filters can only tighten beyond the active
+guardrails — they can't recover rows that the guardrails already
+dropped from storage. Each filter input shows the active guardrail
+value as placeholder text so the floor is visible.
+
 ## Detail measurements
 
 Detail measurements re-run one or more pairs with one MTR trace plus

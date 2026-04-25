@@ -26,6 +26,20 @@ Per-tab sub-components mounted inside `/campaigns/:id`. The tab shell lives in
 | `DetailCostPreview.tsx` | Confirmation dialog for every Detail scope (`all`, `good_candidates`, `pair`) with the expected `pairs_enqueued` count. |
 | `OverflowMenu.tsx` | Page-level menu that launches **Detail: all** / **Detail: good candidates** / **Re-evaluate** via the cost-preview dialog. |
 
+## DrilldownDialog tree
+
+`DrilldownDialog` is a centered modal that hosts:
+- A sticky filter toolbar (`CandidatePairFilters`) with four numeric
+  filter inputs and a qualifies-only toggle.
+- A virtualized, sortable table (`CandidatePairTable`) of per-pair
+  scoring rows fetched via `useCandidatePairDetails` (cursor-paginated).
+- An inline `MtrPanel` rendered below the table when the operator
+  clicks an MTR icon button on a row.
+
+The dialog reads candidate aggregates and active guardrails from the
+parent's `useEvaluation` cache; the per-pair rows come from the
+paginated endpoint via the dedicated hook.
+
 ## Lazy mounting
 
 Radix `TabsContent` renders every panel into the DOM by default. The tab shell
