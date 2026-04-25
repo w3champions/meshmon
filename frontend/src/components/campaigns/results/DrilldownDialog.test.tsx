@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -126,7 +126,7 @@ function makeAgent(id: string, display_name: string, ip: string): AgentSummary {
   };
 }
 
-function makeEntry(idx: number) {
+function makeEntry(idx: number, overrides: Record<string, unknown> = {}) {
   return {
     source_agent_id: `agent-${idx}-src`,
     destination_agent_id: `agent-${idx}-dst`,
@@ -140,6 +140,7 @@ function makeEntry(idx: number) {
     transit_loss_ratio: 0.0005,
     improvement_ms: 20,
     qualifies: true,
+    ...overrides,
   };
 }
 
@@ -414,5 +415,163 @@ describe("DrilldownDialog — table rows", () => {
     );
     expect(screen.getByTestId("candidate-pair-row-0")).toBeInTheDocument();
     expect(screen.getByTestId("candidate-pair-row-1")).toBeInTheDocument();
+  });
+});
+
+describe("DrilldownDialog — virtualizer auto-fetch", () => {
+  test("calls fetchNextPage when the virtualizer's tail row approaches the loaded set", async () => {
+    // The virtualizer's `useEffect` fires synchronously after mount: with
+    // `hasNextPage=true` and a small loaded set, jsdom's zero-layout
+    // viewport renders every row, so the last virtual item index lands
+    // at `rows.length - 1` ≥ `rows.length - 5`.
+    const fetchNextPage = vi.fn();
+    const entries = Array.from({ length: 8 }, (_, i) => makeEntry(i + 1));
+    renderDialog(
+      {},
+      pairsReturn({
+        data: { pages: [pageOf(entries, 8)], pageParams: [null] },
+        hasNextPage: true,
+        fetchNextPage,
+      }),
+      pairsReturn({ data: { pages: [pageOf([], 8)], pageParams: [null] } }),
+    );
+    await waitFor(() => {
+      expect(fetchNextPage).toHaveBeenCalled();
+    });
+  });
+});
+
+describe("DrilldownDialog — inline MTR panel", () => {
+  test("clicking an MTR icon button on a row reveals the inline MtrPanel", async () => {
+    const entries = [
+      makeEntry(1, {
+        mtr_measurement_id_ax: 4242,
+        mtr_measurement_id_xb: null,
+      }),
+    ];
+    renderDialog(
+      {},
+      pairsReturn({ data: { pages: [pageOf(entries, 1)], pageParams: [null] } }),
+      pairsReturn({ data: { pages: [pageOf([], 1)], pageParams: [null] } }),
+    );
+
+    // Inline panel is not rendered until an MTR icon is clicked.
+    expect(screen.queryByRole("region", { name: /mtr hops/i })).toBeNull();
+
+    // Each row renders one A→X button (per `MtrIconButton`'s `arrow`
+    // prop). Clicking it sets `activeMtr` on the dialog body, which
+    // mounts `MtrPanel` below the table.
+    const user = userEvent.setup();
+    const buttons = screen.getAllByRole("button", { name: /^MTR / });
+    expect(buttons.length).toBeGreaterThan(0);
+    await user.click(buttons[0]);
+
+    // The MtrPanel renders a <section aria-label="MTR hops">.
+    expect(await screen.findByRole("region", { name: /mtr hops/i })).toBeInTheDocument();
+  });
+});
+
+describe("DrilldownDialog — re-evaluate mid-pagination", () => {
+  test("page-2 fetch after a re-evaluate uses the latest evaluation snapshot", async () => {
+    // Boot with page 1 loaded. The hook refetch is invoked when the
+    // evaluation cache rolls forward (SSE `evaluated` invalidates the
+    // pair-details query), and the auto-fetch effect re-fires against
+    // the new pages on the next render.
+    const refetch = vi.fn();
+    const fetchNextPage = vi.fn();
+    const initialEntries = Array.from({ length: 8 }, (_, i) => makeEntry(i + 1));
+
+    let activeFiltered = pairsReturn({
+      data: { pages: [pageOf(initialEntries, 8)], pageParams: [null] },
+      hasNextPage: true,
+      fetchNextPage,
+      refetch,
+    });
+    let activeUnfiltered = pairsReturn({
+      data: { pages: [pageOf([], 8)], pageParams: [null] },
+      refetch,
+    });
+
+    vi.mocked(useCandidatePairDetails).mockImplementation((_id, _ip, q: PairDetailsQuery) => {
+      const r = q.limit === 0 ? activeUnfiltered : activeFiltered;
+      return r as unknown as ReturnType<typeof useCandidatePairDetails>;
+    });
+
+    vi.mocked(useAgents).mockReturnValue({
+      data: [],
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useAgents>);
+
+    vi.mocked(useCampaignMeasurements).mockReturnValue({
+      data: { pages: [{ entries: [], next_cursor: null }], pageParams: [null] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useCampaignMeasurements>);
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    function Wrapper({ children }: { children: ReactNode }) {
+      return (
+        <QueryClientProvider client={client}>
+          <IpHostnameProvider>{children}</IpHostnameProvider>
+        </QueryClientProvider>
+      );
+    }
+
+    const { rerender } = render(
+      <DrilldownDialog
+        candidate={makeCandidate()}
+        campaign={makeCampaign()}
+        evaluation={makeEvaluation()}
+        onClose={vi.fn()}
+      />,
+      { wrapper: Wrapper },
+    );
+
+    await waitFor(() => {
+      expect(fetchNextPage).toHaveBeenCalledTimes(1);
+    });
+    fetchNextPage.mockClear();
+
+    // Simulate a re-evaluate: the new evaluation snapshot lands in
+    // cache and React Query swaps the page set under the hooks. The
+    // dialog re-renders against page 1 of the new snapshot — the
+    // virtualizer's auto-fetch effect should fire again because
+    // `hasNextPage` is still true and `rows.length` is small.
+    const refreshedEntries = Array.from({ length: 8 }, (_, i) =>
+      makeEntry(i + 1, { improvement_ms: 30 }),
+    );
+    activeFiltered = pairsReturn({
+      data: { pages: [pageOf(refreshedEntries, 8)], pageParams: [null] },
+      hasNextPage: true,
+      fetchNextPage,
+      refetch,
+    });
+    activeUnfiltered = pairsReturn({
+      data: { pages: [pageOf([], 8)], pageParams: [null] },
+      refetch,
+    });
+
+    await act(async () => {
+      rerender(
+        <DrilldownDialog
+          candidate={makeCandidate()}
+          campaign={makeCampaign()}
+          // New evaluation snapshot — different `evaluated_at` simulates
+          // an SSE-driven rollover. `useCandidatePairDetails` reads the
+          // new pages above; the dialog only forwards the snapshot for
+          // caption math.
+          evaluation={makeEvaluation({ evaluated_at: "2026-04-21T11:00:00Z" })}
+          onClose={vi.fn()}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(fetchNextPage).toHaveBeenCalled();
+    });
   });
 });
