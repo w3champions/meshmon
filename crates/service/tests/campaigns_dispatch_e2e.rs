@@ -127,6 +127,10 @@ async fn scheduler_dispatches_five_batches_end_to_end() {
             loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
             created_by: None,
         },
     )

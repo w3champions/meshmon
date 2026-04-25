@@ -32,6 +32,10 @@ fn make_input(title: &str) -> CreateInput {
         loss_threshold_ratio: None,
         stddev_weight: None,
         evaluation_mode: None,
+        max_transit_rtt_ms: None,
+        max_transit_stddev_ms: None,
+        min_improvement_ms: None,
+        min_improvement_ratio: None,
         created_by: Some("tester".into()),
     }
 }
@@ -186,6 +190,10 @@ async fn patch_updates_provided_fields_only() {
         Some(0.05_f32),
         None,
         Some(EvaluationMode::Diversity),
+        Some(220.0_f64),
+        None,
+        Some(7.5_f64),
+        None,
     )
     .await
     .unwrap();
@@ -194,6 +202,13 @@ async fn patch_updates_provided_fields_only() {
     assert_eq!(patched.notes, row.notes, "notes untouched when None");
     assert!((patched.loss_threshold_ratio - 0.05).abs() < f32::EPSILON);
     assert_eq!(patched.evaluation_mode, EvaluationMode::Diversity);
+    assert_eq!(patched.max_transit_rtt_ms, Some(220.0));
+    assert_eq!(
+        patched.max_transit_stddev_ms, None,
+        "absent guardrail leaves stored column untouched"
+    );
+    assert_eq!(patched.min_improvement_ms, Some(7.5));
+    assert_eq!(patched.min_improvement_ratio, None);
 
     repo::delete(&pool, row.id).await.unwrap();
 }
@@ -202,9 +217,21 @@ async fn patch_updates_provided_fields_only() {
 async fn patch_returns_not_found_for_unknown_id() {
     let pool = common::shared_migrated_pool().await;
     let fresh = uuid::Uuid::new_v4();
-    let err = repo::patch(&pool, fresh, Some("x"), None, None, None, None)
-        .await
-        .unwrap_err();
+    let err = repo::patch(
+        &pool,
+        fresh,
+        Some("x"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, RepoError::NotFound(id) if id == fresh));
 }
 
@@ -1471,6 +1498,10 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
         0.025,
         1.25,
         EvaluationMode::Diversity,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -1517,6 +1548,10 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
         0.03,
         0.5,
         EvaluationMode::Optimization,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -1610,6 +1645,10 @@ async fn persist_evaluation_rejects_running_campaign() {
         1.0,
         1.0,
         EvaluationMode::Optimization,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect_err("persist_evaluation must reject running state");
@@ -1709,6 +1748,10 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         0.05,
         1.0,
         EvaluationMode::Optimization,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect_err("unparseable candidate destination_ip must abort the tx");
@@ -1916,6 +1959,10 @@ async fn apply_edit_preserves_detail_rows() {
             loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
             created_by: None,
         },
     )
@@ -1997,6 +2044,10 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
             loss_threshold_ratio: None,
             stddev_weight: None,
             evaluation_mode: None,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
             created_by: None,
         },
     )
@@ -2093,6 +2144,10 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
         2.0,
         1.0,
         EvaluationMode::Optimization,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();

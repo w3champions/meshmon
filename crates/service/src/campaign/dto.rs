@@ -57,6 +57,24 @@ pub struct CampaignDto {
     pub stddev_weight: f32,
     /// Evaluation strategy.
     pub evaluation_mode: EvaluationMode,
+    /// Optional eligibility cap on composed transit RTT (ms). When
+    /// set, the evaluator drops `(A, X, B)` triples whose
+    /// `transit_rtt_ms` exceeds the cap before counter accumulation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms). Combined
+    /// with [`Self::min_improvement_ratio`] under OR semantics; the
+    /// evaluator persists a `pair_details` row only when at least one
+    /// set knob's threshold is cleared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction
+    /// 0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_improvement_ratio: Option<f64>,
     /// Session principal that created the row; audit-only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
@@ -95,6 +113,10 @@ impl From<CampaignRow> for CampaignDto {
             loss_threshold_ratio: r.loss_threshold_ratio,
             stddev_weight: r.stddev_weight,
             evaluation_mode: r.evaluation_mode,
+            max_transit_rtt_ms: r.max_transit_rtt_ms,
+            max_transit_stddev_ms: r.max_transit_stddev_ms,
+            min_improvement_ms: r.min_improvement_ms,
+            min_improvement_ratio: r.min_improvement_ratio,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,
@@ -146,6 +168,18 @@ pub struct CreateCampaignRequest {
     /// Optional evaluation strategy.
     #[serde(default)]
     pub evaluation_mode: Option<EvaluationMode>,
+    /// Optional eligibility cap on composed transit RTT (ms).
+    #[serde(default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    #[serde(default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms).
+    #[serde(default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction 0.0–1.0).
+    #[serde(default)]
+    pub min_improvement_ratio: Option<f64>,
 }
 
 /// PATCH body for `/api/campaigns/{id}`.
@@ -170,6 +204,18 @@ pub struct PatchCampaignRequest {
     /// Replacement evaluation strategy.
     #[serde(default)]
     pub evaluation_mode: Option<EvaluationMode>,
+    /// Replacement eligibility cap on composed transit RTT (ms).
+    #[serde(default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Replacement eligibility cap on composed transit RTT stddev (ms).
+    #[serde(default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Replacement storage floor on absolute improvement (ms).
+    #[serde(default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Replacement storage floor on relative improvement (fraction 0.0–1.0).
+    #[serde(default)]
+    pub min_improvement_ratio: Option<f64>,
 }
 
 /// A single `(source_agent, destination_ip)` pair identifier used by
@@ -361,6 +407,22 @@ pub struct EvaluationDto {
     pub stddev_weight: f32,
     /// Evaluation strategy that produced this result.
     pub evaluation_mode: EvaluationMode,
+    /// Snapshot of [`CampaignDto::max_transit_rtt_ms`] at `/evaluate`
+    /// time. `None` means the eligibility cap was disabled for this
+    /// evaluation pass. Persisted on `campaign_evaluations` so each
+    /// historical evaluation row carries the guardrails that produced
+    /// it, even after later PATCHes change the campaign-level value.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Snapshot of [`CampaignDto::max_transit_stddev_ms`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Snapshot of [`CampaignDto::min_improvement_ms`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Snapshot of [`CampaignDto::min_improvement_ratio`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_improvement_ratio: Option<f64>,
     /// Number of `(source, destination)` baseline pairs considered.
     pub baseline_pair_count: i32,
     /// Total candidate transit destinations scored.
@@ -540,6 +602,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             evaluation_mode: EvaluationMode::Optimization,
+            max_transit_rtt_ms: Some(200.0),
+            max_transit_stddev_ms: None,
+            min_improvement_ms: Some(5.0),
+            min_improvement_ratio: Some(0.1),
             baseline_pair_count: 24,
             candidates_total: 10,
             candidates_good: 3,
@@ -552,6 +618,10 @@ mod tests {
         let j = serde_json::to_string(&v).unwrap();
         let r: EvaluationDto = serde_json::from_str(&j).unwrap();
         assert_eq!(r.baseline_pair_count, 24);
+        assert_eq!(r.max_transit_rtt_ms, Some(200.0));
+        assert_eq!(r.max_transit_stddev_ms, None);
+        assert_eq!(r.min_improvement_ms, Some(5.0));
+        assert_eq!(r.min_improvement_ratio, Some(0.1));
     }
 
     #[test]

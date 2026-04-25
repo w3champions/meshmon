@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms\n             FROM campaign_evaluations\n            WHERE campaign_id = $1\n            ORDER BY evaluated_at DESC\n            LIMIT 1",
+  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  max_transit_rtt_ms, max_transit_stddev_ms,\n                  min_improvement_ms, min_improvement_ratio,\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms\n             FROM campaign_evaluations\n            WHERE campaign_id = $1\n            ORDER BY evaluated_at DESC\n            LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -45,21 +45,41 @@
       },
       {
         "ordinal": 6,
+        "name": "max_transit_rtt_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_transit_stddev_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "min_improvement_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "min_improvement_ratio",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
         "name": "baseline_pair_count",
         "type_info": "Int4"
       },
       {
-        "ordinal": 7,
+        "ordinal": 11,
         "name": "candidates_total",
         "type_info": "Int4"
       },
       {
-        "ordinal": 8,
+        "ordinal": 12,
         "name": "candidates_good",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 13,
         "name": "avg_improvement_ms",
         "type_info": "Float4"
       }
@@ -76,11 +96,15 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
+      true,
       false,
       false,
       false,
       true
     ]
   },
-  "hash": "1e089257b831d69eec309700fbfa0ee13ef22adb7a01062577df3ce915f14e81"
+  "hash": "c74fdb550326a248efe41cb4e77ab1827fd55795c3c6ad177381311a85cad1bb"
 }

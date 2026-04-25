@@ -3131,6 +3131,38 @@
             "format": "float",
             "description": "Loss-rate threshold (fraction 0.0–1.0) used by the evaluator."
           },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT (ms). When\nset, the evaluator drops `(A, X, B)` triples whose\n`transit_rtt_ms` exceeds the cap before counter accumulation."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT stddev (ms)."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on absolute improvement (ms). Combined\nwith [`Self::min_improvement_ratio`] under OR semantics; the\nevaluator persists a `pair_details` row only when at least one\nset knob's threshold is cleared."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on relative improvement (fraction\n0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics."
+          },
           "notes": {
             "type": "string",
             "description": "Free-form operator notes."
@@ -3773,6 +3805,38 @@
             "format": "float",
             "description": "Optional loss-rate threshold for the evaluator (fraction 0.0–1.0)."
           },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT (ms)."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional eligibility cap on composed transit RTT stddev (ms)."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on absolute improvement (ms)."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional storage floor on relative improvement (fraction 0.0–1.0)."
+          },
           "notes": {
             "type": [
               "string",
@@ -4141,6 +4205,38 @@
             "type": "number",
             "format": "float",
             "description": "Loss-rate threshold (fraction 0.0–1.0) that was applied."
+          },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::max_transit_rtt_ms`] at `/evaluate`\ntime. `None` means the eligibility cap was disabled for this\nevaluation pass. Persisted on `campaign_evaluations` so each\nhistorical evaluation row carries the guardrails that produced\nit, even after later PATCHes change the campaign-level value."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::max_transit_stddev_ms`]."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::min_improvement_ms`]."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Snapshot of [`CampaignDto::min_improvement_ratio`]."
           },
           "results": {
             "$ref": "#/components/schemas/EvaluationResultsDto",
@@ -5179,6 +5275,38 @@
             ],
             "format": "float",
             "description": "Replacement loss-rate threshold (fraction 0.0–1.0)."
+          },
+          "max_transit_rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement eligibility cap on composed transit RTT (ms)."
+          },
+          "max_transit_stddev_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement eligibility cap on composed transit RTT stddev (ms)."
+          },
+          "min_improvement_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement storage floor on absolute improvement (ms)."
+          },
+          "min_improvement_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Replacement storage floor on relative improvement (fraction 0.0–1.0)."
           },
           "notes": {
             "type": [

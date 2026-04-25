@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns\n               SET state = $2\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n        UPDATE measurement_campaigns\n           SET title                  = COALESCE($2, title),\n               notes                  = COALESCE($3, notes),\n               loss_threshold_ratio   = COALESCE($4, loss_threshold_ratio),\n               stddev_weight          = COALESCE($5, stddev_weight),\n               evaluation_mode        = COALESCE($6::evaluation_mode, evaluation_mode),\n               max_transit_rtt_ms     = COALESCE($7, max_transit_rtt_ms),\n               max_transit_stddev_ms  = COALESCE($8, max_transit_stddev_ms),\n               min_improvement_ms     = COALESCE($9, min_improvement_ms),\n               min_improvement_ratio  = COALESCE($10, min_improvement_ratio)\n         WHERE id = $1\n         RETURNING id, title, notes,\n                   state AS \"state: CampaignState\",\n                   protocol AS \"protocol: ProbeProtocol\",\n                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                   force_measurement, loss_threshold_ratio, stddev_weight,\n                   evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                   max_transit_rtt_ms, max_transit_stddev_ms,\n                   min_improvement_ms, min_improvement_ratio,\n                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -104,31 +104,51 @@
       },
       {
         "ordinal": 13,
+        "name": "max_transit_rtt_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "max_transit_stddev_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "min_improvement_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "min_improvement_ratio",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 14,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 19,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 16,
+        "ordinal": 20,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 17,
+        "ordinal": 21,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 18,
+        "ordinal": 22,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
@@ -136,41 +156,25 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
+        "Float4",
+        "Float4",
         {
           "Custom": {
-            "name": "campaign_state",
+            "name": "evaluation_mode",
             "kind": {
               "Enum": [
-                "draft",
-                "running",
-                "completed",
-                "evaluated",
-                "stopped"
+                "diversity",
+                "optimization"
               ]
             }
           }
         },
-        {
-          "Custom": {
-            "name": "campaign_state[]",
-            "kind": {
-              "Array": {
-                "Custom": {
-                  "name": "campaign_state",
-                  "kind": {
-                    "Enum": [
-                      "draft",
-                      "running",
-                      "completed",
-                      "evaluated",
-                      "stopped"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        }
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8"
       ]
     },
     "nullable": [
@@ -188,6 +192,10 @@
       false,
       false,
       true,
+      true,
+      true,
+      true,
+      true,
       false,
       true,
       true,
@@ -195,5 +203,5 @@
       true
     ]
   },
-  "hash": "748a287bebe8ac8852d140cae8f07e0328f3155b76dc4d4face05229d3e3346f"
+  "hash": "0d256a27341cd6b5f9fd940f7cdd986e061779efbca0deb53985fef71dc5bef8"
 }

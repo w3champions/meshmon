@@ -1181,6 +1181,32 @@ export interface components {
              * @description Loss-rate threshold (fraction 0.0–1.0) used by the evaluator.
              */
             loss_threshold_ratio: number;
+            /**
+             * Format: double
+             * @description Optional eligibility cap on composed transit RTT (ms). When
+             *     set, the evaluator drops `(A, X, B)` triples whose
+             *     `transit_rtt_ms` exceeds the cap before counter accumulation.
+             */
+            max_transit_rtt_ms?: number | null;
+            /**
+             * Format: double
+             * @description Optional eligibility cap on composed transit RTT stddev (ms).
+             */
+            max_transit_stddev_ms?: number | null;
+            /**
+             * Format: double
+             * @description Optional storage floor on absolute improvement (ms). Combined
+             *     with [`Self::min_improvement_ratio`] under OR semantics; the
+             *     evaluator persists a `pair_details` row only when at least one
+             *     set knob's threshold is cleared.
+             */
+            min_improvement_ms?: number | null;
+            /**
+             * Format: double
+             * @description Optional storage floor on relative improvement (fraction
+             *     0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics.
+             */
+            min_improvement_ratio?: number | null;
             /** @description Free-form operator notes. */
             notes: string;
             /** @description Per-state pair counts. Empty on list responses; populated on single-row GET. */
@@ -1535,6 +1561,26 @@ export interface components {
              * @description Optional loss-rate threshold for the evaluator (fraction 0.0–1.0).
              */
             loss_threshold_ratio?: number | null;
+            /**
+             * Format: double
+             * @description Optional eligibility cap on composed transit RTT (ms).
+             */
+            max_transit_rtt_ms?: number | null;
+            /**
+             * Format: double
+             * @description Optional eligibility cap on composed transit RTT stddev (ms).
+             */
+            max_transit_stddev_ms?: number | null;
+            /**
+             * Format: double
+             * @description Optional storage floor on absolute improvement (ms).
+             */
+            min_improvement_ms?: number | null;
+            /**
+             * Format: double
+             * @description Optional storage floor on relative improvement (fraction 0.0–1.0).
+             */
+            min_improvement_ratio?: number | null;
             /** @description Optional free-form notes. */
             notes?: string | null;
             /**
@@ -1755,6 +1801,30 @@ export interface components {
              * @description Loss-rate threshold (fraction 0.0–1.0) that was applied.
              */
             loss_threshold_ratio: number;
+            /**
+             * Format: double
+             * @description Snapshot of [`CampaignDto::max_transit_rtt_ms`] at `/evaluate`
+             *     time. `None` means the eligibility cap was disabled for this
+             *     evaluation pass. Persisted on `campaign_evaluations` so each
+             *     historical evaluation row carries the guardrails that produced
+             *     it, even after later PATCHes change the campaign-level value.
+             */
+            max_transit_rtt_ms?: number | null;
+            /**
+             * Format: double
+             * @description Snapshot of [`CampaignDto::max_transit_stddev_ms`].
+             */
+            max_transit_stddev_ms?: number | null;
+            /**
+             * Format: double
+             * @description Snapshot of [`CampaignDto::min_improvement_ms`].
+             */
+            min_improvement_ms?: number | null;
+            /**
+             * Format: double
+             * @description Snapshot of [`CampaignDto::min_improvement_ratio`].
+             */
+            min_improvement_ratio?: number | null;
             /** @description Full candidate breakdown + unqualified-reason map. */
             results: components["schemas"]["EvaluationResultsDto"];
             /**
@@ -2395,6 +2465,26 @@ export interface components {
              * @description Replacement loss-rate threshold (fraction 0.0–1.0).
              */
             loss_threshold_ratio?: number | null;
+            /**
+             * Format: double
+             * @description Replacement eligibility cap on composed transit RTT (ms).
+             */
+            max_transit_rtt_ms?: number | null;
+            /**
+             * Format: double
+             * @description Replacement eligibility cap on composed transit RTT stddev (ms).
+             */
+            max_transit_stddev_ms?: number | null;
+            /**
+             * Format: double
+             * @description Replacement storage floor on absolute improvement (ms).
+             */
+            min_improvement_ms?: number | null;
+            /**
+             * Format: double
+             * @description Replacement storage floor on relative improvement (fraction 0.0–1.0).
+             */
+            min_improvement_ratio?: number | null;
             /** @description Replacement notes (when present). */
             notes?: string | null;
             /**

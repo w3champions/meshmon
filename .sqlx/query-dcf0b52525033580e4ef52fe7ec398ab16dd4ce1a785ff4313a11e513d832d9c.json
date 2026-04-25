@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
+  "query": "\n        SELECT id, title, notes,\n               state AS \"state: CampaignState\",\n               protocol AS \"protocol: ProbeProtocol\",\n               probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n               force_measurement, loss_threshold_ratio, stddev_weight,\n               evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n               max_transit_rtt_ms, max_transit_stddev_ms,\n               min_improvement_ms, min_improvement_ratio,\n               created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n          FROM measurement_campaigns\n         WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -104,70 +104,58 @@
       },
       {
         "ordinal": 13,
+        "name": "max_transit_rtt_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "max_transit_stddev_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "min_improvement_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "min_improvement_ratio",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 14,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 15,
+        "ordinal": 19,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 16,
+        "ordinal": 20,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 17,
+        "ordinal": 21,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 18,
+        "ordinal": 22,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text",
-        {
-          "Custom": {
-            "name": "probe_protocol",
-            "kind": {
-              "Enum": [
-                "icmp",
-                "tcp",
-                "udp"
-              ]
-            }
-          }
-        },
-        "Int2",
-        "Int2",
-        "Int4",
-        "Int4",
-        "Bool",
-        "Float4",
-        "Float4",
-        {
-          "Custom": {
-            "name": "evaluation_mode",
-            "kind": {
-              "Enum": [
-                "diversity",
-                "optimization"
-              ]
-            }
-          }
-        },
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -185,6 +173,10 @@
       false,
       false,
       true,
+      true,
+      true,
+      true,
+      true,
       false,
       true,
       true,
@@ -192,5 +184,5 @@
       true
     ]
   },
-  "hash": "c3be5a4a1968ee132ee773cdde076ca8aaf2c527dee4019d8b7907dd38c0bc2a"
+  "hash": "dcf0b52525033580e4ef52fe7ec398ab16dd4ce1a785ff4313a11e513d832d9c"
 }

@@ -146,6 +146,10 @@ pub async fn create(
         loss_threshold_ratio: body.loss_threshold_ratio,
         stddev_weight: body.stddev_weight,
         evaluation_mode: body.evaluation_mode,
+        max_transit_rtt_ms: body.max_transit_rtt_ms,
+        max_transit_stddev_ms: body.max_transit_stddev_ms,
+        min_improvement_ms: body.min_improvement_ms,
+        min_improvement_ratio: body.min_improvement_ratio,
         created_by: Some(principal.username.clone()),
     };
 
@@ -293,6 +297,10 @@ pub async fn patch(
         body.loss_threshold_ratio,
         body.stddev_weight,
         body.evaluation_mode,
+        body.max_transit_rtt_ms,
+        body.max_transit_stddev_ms,
+        body.min_improvement_ms,
+        body.min_improvement_ratio,
     )
     .await
     {
@@ -831,6 +839,10 @@ pub async fn evaluate(
     let loss_threshold_ratio = inputs.loss_threshold_ratio;
     let stddev_weight = inputs.stddev_weight;
     let evaluation_mode = inputs.mode;
+    let max_transit_rtt_ms = inputs.max_transit_rtt_ms;
+    let max_transit_stddev_ms = inputs.max_transit_stddev_ms;
+    let min_improvement_ms = inputs.min_improvement_ms;
+    let min_improvement_ratio = inputs.min_improvement_ratio;
 
     // T54-03: layer VM continuous-mesh baselines on top of the active-
     // probe rows for agent→agent pairs the campaign did not cover.
@@ -922,6 +934,10 @@ pub async fn evaluate(
         loss_threshold_ratio,
         stddev_weight,
         evaluation_mode,
+        max_transit_rtt_ms,
+        max_transit_stddev_ms,
+        min_improvement_ms,
+        min_improvement_ratio,
     )
     .await
     {

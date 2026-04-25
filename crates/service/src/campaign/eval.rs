@@ -85,6 +85,19 @@ pub struct EvaluationInputs {
     pub stddev_weight: f32,
     /// Diversity vs. Optimization arbitration (spec §2.4).
     pub mode: EvaluationMode,
+    /// Optional eligibility cap on composed transit RTT (ms). The
+    /// evaluator drops `(A, X, B)` triples whose `transit_rtt_ms`
+    /// exceeds the cap before counter accumulation.
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Optional eligibility cap on composed transit RTT stddev (ms).
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Optional storage floor on absolute improvement (ms). Combined
+    /// with [`Self::min_improvement_ratio`] under OR semantics.
+    pub min_improvement_ms: Option<f64>,
+    /// Optional storage floor on relative improvement (fraction
+    /// 0.0–1.0). Combined with [`Self::min_improvement_ms`] under OR
+    /// semantics.
+    pub min_improvement_ratio: Option<f64>,
 }
 
 /// Full evaluator output: summary counters plus the JSONB-bound DTO.
@@ -465,6 +478,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
         }
     }
 
@@ -489,6 +506,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Optimization,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
         };
         let err = evaluate(i).unwrap_err();
         assert!(matches!(err, EvalError::NoBaseline));
@@ -517,6 +538,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Optimization,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
         };
         let err = evaluate(i).expect_err("RTT-less baseline must not register");
         assert!(matches!(err, EvalError::NoBaseline));
@@ -596,6 +621,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Optimization,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
         };
         let out = evaluate(inputs).unwrap();
         let x_cand = out
@@ -648,6 +677,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Diversity,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
         };
         let out = evaluate(inputs).unwrap();
         let cand = out
@@ -680,6 +713,10 @@ mod tests {
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
             mode: EvaluationMode::Diversity,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
         };
         let out = evaluate(inputs).unwrap();
         let cand = out

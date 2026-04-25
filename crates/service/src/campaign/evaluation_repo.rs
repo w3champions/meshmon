@@ -51,6 +51,7 @@ use uuid::Uuid;
 /// [`sqlx::Error::Protocol`] so the caller's tx rolls back the
 /// already-inserted parent row rather than persisting skewed
 /// counters.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_evaluation(
     tx: &mut Transaction<'_, Postgres>,
     campaign_id: Uuid,
@@ -58,6 +59,10 @@ pub async fn insert_evaluation(
     loss_threshold_ratio: f32,
     stddev_weight: f32,
     mode: EvaluationMode,
+    max_transit_rtt_ms: Option<f64>,
+    max_transit_stddev_ms: Option<f64>,
+    min_improvement_ms: Option<f64>,
+    min_improvement_ratio: Option<f64>,
 ) -> sqlx::Result<Uuid> {
     // Parent row. `evaluated_at` stamps the write wall-clock so the
     // read-path's `ORDER BY evaluated_at DESC` picks up the freshest
@@ -65,14 +70,20 @@ pub async fn insert_evaluation(
     let evaluation_id: Uuid = sqlx::query_scalar!(
         r#"INSERT INTO campaign_evaluations
               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+               max_transit_rtt_ms, max_transit_stddev_ms,
+               min_improvement_ms, min_improvement_ratio,
                baseline_pair_count, candidates_total, candidates_good,
                avg_improvement_ms, evaluated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
            RETURNING id"#,
         campaign_id,
         loss_threshold_ratio,
         stddev_weight,
         mode as EvaluationMode,
+        max_transit_rtt_ms,
+        max_transit_stddev_ms,
+        min_improvement_ms,
+        min_improvement_ratio,
         outputs.baseline_pair_count,
         outputs.candidates_total,
         outputs.candidates_good,
@@ -212,6 +223,8 @@ pub async fn latest_evaluation_for_campaign(
     let parent = sqlx::query!(
         r#"SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
+                  max_transit_rtt_ms, max_transit_stddev_ms,
+                  min_improvement_ms, min_improvement_ratio,
                   baseline_pair_count, candidates_total, candidates_good,
                   avg_improvement_ms
              FROM campaign_evaluations
@@ -357,6 +370,10 @@ pub async fn latest_evaluation_for_campaign(
         loss_threshold_ratio: parent.loss_threshold_ratio,
         stddev_weight: parent.stddev_weight,
         evaluation_mode: parent.evaluation_mode,
+        max_transit_rtt_ms: parent.max_transit_rtt_ms,
+        max_transit_stddev_ms: parent.max_transit_stddev_ms,
+        min_improvement_ms: parent.min_improvement_ms,
+        min_improvement_ratio: parent.min_improvement_ratio,
         baseline_pair_count: parent.baseline_pair_count,
         candidates_total: parent.candidates_total,
         candidates_good: parent.candidates_good,
@@ -382,6 +399,7 @@ pub async fn latest_evaluation_for_campaign(
 /// [`latest_evaluation_for_campaign`] — it's one extra read, but the
 /// alternative (returning the just-written child rows) duplicates the
 /// assembly logic without real benefit.
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_evaluation(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -389,6 +407,10 @@ pub async fn persist_evaluation(
     loss_threshold_ratio: f32,
     stddev_weight: f32,
     mode: EvaluationMode,
+    max_transit_rtt_ms: Option<f64>,
+    max_transit_stddev_ms: Option<f64>,
+    min_improvement_ms: Option<f64>,
+    min_improvement_ratio: Option<f64>,
 ) -> Result<Uuid, RepoError> {
     let mut tx = pool.begin().await?;
 
@@ -428,6 +450,10 @@ pub async fn persist_evaluation(
         loss_threshold_ratio,
         stddev_weight,
         mode,
+        max_transit_rtt_ms,
+        max_transit_stddev_ms,
+        min_improvement_ms,
+        min_improvement_ratio,
     )
     .await?;
 
