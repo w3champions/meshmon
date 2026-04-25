@@ -140,10 +140,19 @@ function DialogBody({
 
   const onSortChange = (col: PairDetailSortCol | null, dir: "asc" | "desc" | null) => {
     if (col === null || dir === null) {
-      // The three-state cycle's "none" rests on the default — we keep
-      // the column but flip the direction back to desc so the table
-      // never renders an empty sort indicator next to data.
-      setQuery((prev) => ({ ...prev, ...DEFAULT_QUERY }));
+      // Three-state cycle reached "no sort". The dialog has no
+      // representation for an unsorted view — the table always
+      // renders against some sort. We fall back to the default,
+      // except when the current state already IS the default: in
+      // that case the fallback would loop the operator back to the
+      // same view, and they could never reach the opposite direction
+      // by clicking the active column. Flip the direction instead so
+      // the active column toggles asc ↔ desc indefinitely.
+      setQuery((prev) =>
+        prev.sort === DEFAULT_QUERY.sort && prev.dir === DEFAULT_QUERY.dir
+          ? { ...prev, dir: prev.dir === "asc" ? "desc" : "asc" }
+          : { ...prev, ...DEFAULT_QUERY },
+      );
     } else {
       setQuery((prev) => ({ ...prev, sort: col, dir }));
     }

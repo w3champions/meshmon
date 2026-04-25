@@ -418,6 +418,36 @@ describe("DrilldownDialog — table rows", () => {
   });
 });
 
+describe("DrilldownDialog — sort toggle", () => {
+  test("clicking the active default-sort header flips direction instead of looping back to the same state", async () => {
+    // Default sort is improvement_ms desc. The three-state cycle's
+    // "no sort" state would normally fall back to default, which on
+    // the active column is identical to the current state — so the
+    // operator could never reach asc by clicking. The dialog detects
+    // the loopback case and flips direction instead.
+    renderDialog(
+      {},
+      pairsReturn({ data: { pages: [pageOf([makeEntry(1)], 1)], pageParams: [null] } }),
+      pairsReturn({ data: { pages: [pageOf([], 1)], pageParams: [null] } }),
+    );
+
+    const improvementHeader = screen.getByText("Δ ms").closest("button");
+    expect(improvementHeader).not.toBeNull();
+
+    // First click: cycle desc → null → "loopback" → flips to asc.
+    const user = userEvent.setup();
+    await user.click(improvementHeader as HTMLElement);
+
+    // The Δ ms header cell's aria-sort should be ascending now.
+    const improvementCell = improvementHeader?.closest("[aria-sort]");
+    expect(improvementCell).toHaveAttribute("aria-sort", "ascending");
+
+    // Second click: cycle null/asc → asc → desc.
+    await user.click(improvementHeader as HTMLElement);
+    expect(improvementCell).toHaveAttribute("aria-sort", "descending");
+  });
+});
+
 describe("DrilldownDialog — virtualizer auto-fetch", () => {
   test("calls fetchNextPage when the virtualizer's tail row approaches the loaded set", async () => {
     // The virtualizer's `useEffect` fires synchronously after mount: with
