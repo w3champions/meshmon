@@ -357,6 +357,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`
+         *     — paginated detail breakdown of a single transit candidate's
+         *     per-baseline-pair scoring rows.
+         * @description Replaces the unbounded `EvaluationCandidateDto.pair_details` array
+         *     the wire used to ship inline. The endpoint applies server-side sort
+         *     (10-column whitelist), four optional runtime filters
+         *     (`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,
+         *     `max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset
+         *     cursor for forward pagination. The cursor's tiebreak rides on the
+         *     post-T54 composite primary key
+         *     `(source_agent_id, destination_agent_id)`, which is unique within a
+         *     single `(evaluation_id, candidate_destination_ip)` tuple.
+         *
+         *     Error vocabulary:
+         *     - `not_found` (404): the campaign id does not exist.
+         *     - `no_evaluation` (404): the campaign has never been evaluated.
+         *     - `not_a_candidate` (404): the latest evaluation does not include
+         *       `destination_ip` as a candidate.
+         *     - `invalid_filter` (400): `limit > 500`, or any filter value is
+         *       non-finite (`NaN` / `Infinity`).
+         *     - `invalid_cursor` (400): cursor undecodable, or its sort column
+         *       does not match the request's `sort` parameter.
+         *     - `invalid_sort` (400): `sort` is not one of the whitelisted columns
+         *       (handled by serde at deserialization time).
+         */
+        get: operations["get_candidate_pair_details"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/campaigns/{id}/force_pair": {
         parameters: {
             query?: never;
@@ -1914,6 +1956,27 @@ export interface components {
             transit_stddev_ms: number;
         };
         /**
+         * @description Wire response body for
+         *     `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`.
+         *
+         *     `total` reflects the runtime filter set but ignores the cursor — it
+         *     is the size of the full filtered result set across pages, not the
+         *     remaining-after-cursor count, so a UI status bar can render
+         *     "showing N of TOTAL" with one number that doesn't drift mid-scroll.
+         */
+        EvaluationPairDetailListResponse: {
+            /** @description Pair-detail rows for this page. */
+            entries: components["schemas"]["EvaluationPairDetailDto"][];
+            /** @description Opaque cursor for the next page, or `None` at end-of-result. */
+            next_cursor?: string | null;
+            /**
+             * Format: int64
+             * @description Total rows across the full filtered result set, ignoring the
+             *     cursor. Renderable as the "of TOTAL" half of a status bar.
+             */
+            total: number;
+        };
+        /**
          * @description Candidate breakdown assembled from
          *     `campaign_evaluation_candidates` and
          *     `campaign_evaluation_unqualified_reasons`.
@@ -2267,6 +2330,25 @@ export interface components {
             /** @description Network operator / ISP name. */
             name: string;
         };
+        /**
+         * @description Sortable columns for the paginated pair_details endpoint
+         *     (`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`).
+         *
+         *     The set is closed: every variant maps to a hardcoded SQL fragment in
+         *     [`crate::campaign::evaluation_repo::latest_pair_details_for_candidate`]
+         *     so user input never reaches the SQL string. Adding a sort column
+         *     requires extending the enum, the SQL builder's `match`, and the
+         *     composite-index migration if a new index is justified.
+         * @enum {string}
+         */
+        PairDetailSortCol: "improvement_ms" | "direct_rtt_ms" | "direct_stddev_ms" | "transit_rtt_ms" | "transit_stddev_ms" | "direct_loss_ratio" | "transit_loss_ratio" | "source_agent_id" | "destination_agent_id" | "qualifies";
+        /**
+         * @description Sort direction for [`PairDetailSortCol`]. The composite-PK tiebreak
+         *     `(source_agent_id, destination_agent_id)` is always ascending; only
+         *     the leading column flips.
+         * @enum {string}
+         */
+        PairDetailSortDir: "asc" | "desc";
         /** @description Wire shape for a single pair in `GET /api/campaigns/{id}/pairs`. */
         PairDto: {
             /**
@@ -3524,6 +3606,98 @@ export interface operations {
                 content?: never;
             };
             /** @description Campaign not evaluated */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_candidate_pair_details: {
+        parameters: {
+            query?: {
+                /** @description Sort column. See [`PairDetailSortCol`] for the closed list. */
+                sort?: components["schemas"]["PairDetailSortCol"];
+                /** @description Sort direction. Default `desc`. */
+                dir?: components["schemas"]["PairDetailSortDir"];
+                /**
+                 * @description Opaque keyset cursor returned by the previous page's
+                 *     `next_cursor`. Absent on the first page.
+                 */
+                cursor?: string;
+                /**
+                 * @description Page size. Default 100; cap 500. Zero is allowed (returns an
+                 *     empty `entries` page, useful for "just give me the total").
+                 */
+                limit?: number;
+                /** @description Runtime filter: minimum `improvement_ms` (inclusive). */
+                min_improvement_ms?: number;
+                /**
+                 * @description Runtime filter: minimum `improvement_ms / direct_rtt_ms` ratio
+                 *     (inclusive). Rows with `direct_rtt_ms <= 0` auto-pass — mirrors
+                 *     the I2 evaluator's storage-filter semantics.
+                 */
+                min_improvement_ratio?: number;
+                /** @description Runtime filter: maximum `transit_rtt_ms` (inclusive). */
+                max_transit_rtt_ms?: number;
+                /** @description Runtime filter: maximum `transit_stddev_ms` (inclusive). */
+                max_transit_stddev_ms?: number;
+                /**
+                 * @description Runtime filter: when `Some(true)`, restricts to rows where
+                 *     `qualifies = true`. `Some(false)` selects unqualifying rows;
+                 *     `None` (default) is unconstrained.
+                 */
+                qualifies_only?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+                /** @description Transit candidate destination IP */
+                destination_ip: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pair-detail page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluationPairDetailListResponse"];
+                };
+            };
+            /** @description Invalid filter / cursor / sort */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Campaign / evaluation / candidate not found */
             404: {
                 headers: {
                     [name: string]: unknown;

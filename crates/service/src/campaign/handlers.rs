@@ -7,13 +7,15 @@
 //! (snake_case `error` key) so the SPA's shared error-handling layer
 //! applies without extra branching.
 
+use super::cursor::{CursorError, PairDetailCursor};
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
-    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto, ForcePairRequest,
-    PairDto, PairListQuery, PatchCampaignRequest, PreviewDispatchResponse,
+    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
+    EvaluationPairDetailListResponse, EvaluationPairDetailQuery, ForcePairRequest, PairDto,
+    PairListQuery, PatchCampaignRequest, PreviewDispatchResponse,
 };
 use super::eval::{self, AttributedMeasurement, EvalError};
-use super::evaluation_repo;
+use super::evaluation_repo::{self, PairDetailLookup};
 use super::model::{CampaignState, DirectSource, PairResolutionState, ProbeProtocol};
 use super::repo::{self, CreateInput, EditInput, RepoError};
 use crate::hostname::session_id_from_auth;
@@ -1200,4 +1202,151 @@ pub async fn detail(
         }),
     )
         .into_response()
+}
+
+/// Maximum `limit` accepted by the paginated pair_details endpoint.
+/// Exceeding the cap surfaces as `400 invalid_filter` — the wire is
+/// rate-limited by `total` rather than per-request size.
+const PAIR_DETAILS_MAX_LIMIT: u32 = 500;
+
+/// `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`
+/// — paginated detail breakdown of a single transit candidate's
+/// per-baseline-pair scoring rows.
+///
+/// Replaces the unbounded `EvaluationCandidateDto.pair_details` array
+/// the wire used to ship inline. The endpoint applies server-side sort
+/// (10-column whitelist), four optional runtime filters
+/// (`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,
+/// `max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset
+/// cursor for forward pagination. The cursor's tiebreak rides on the
+/// post-T54 composite primary key
+/// `(source_agent_id, destination_agent_id)`, which is unique within a
+/// single `(evaluation_id, candidate_destination_ip)` tuple.
+///
+/// Error vocabulary:
+/// - `not_found` (404): the campaign id does not exist.
+/// - `no_evaluation` (404): the campaign has never been evaluated.
+/// - `not_a_candidate` (404): the latest evaluation does not include
+///   `destination_ip` as a candidate.
+/// - `invalid_filter` (400): `limit > 500`, or any filter value is
+///   non-finite (`NaN` / `Infinity`).
+/// - `invalid_cursor` (400): cursor undecodable, or its sort column
+///   does not match the request's `sort` parameter.
+/// - `invalid_sort` (400): `sort` is not one of the whitelisted columns
+///   (handled by serde at deserialization time).
+#[utoipa::path(
+    get,
+    path = "/api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details",
+    tag = "campaigns",
+    params(
+        ("id" = Uuid, Path, description = "Campaign id"),
+        ("destination_ip" = String, Path, description = "Transit candidate destination IP"),
+        EvaluationPairDetailQuery,
+    ),
+    responses(
+        (status = 200, description = "Pair-detail page", body = EvaluationPairDetailListResponse),
+        (status = 400, description = "Invalid filter / cursor / sort", body = ErrorEnvelope),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "Campaign / evaluation / candidate not found", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn get_candidate_pair_details(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path((id, destination_ip)): Path<(Uuid, String)>,
+    Query(query): Query<EvaluationPairDetailQuery>,
+) -> Response {
+    // Validate up-front so the SQL planner never sees a NaN threshold
+    // and the cursor decode happens before the (cheap) campaign /
+    // evaluation existence checks.
+    if query.limit > PAIR_DETAILS_MAX_LIMIT {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_filter" })),
+        )
+            .into_response();
+    }
+    let finite_filters_ok = [
+        query.min_improvement_ms,
+        query.min_improvement_ratio,
+        query.max_transit_rtt_ms,
+        query.max_transit_stddev_ms,
+    ]
+    .iter()
+    .all(|v| v.map(|x| x.is_finite()).unwrap_or(true));
+    if !finite_filters_ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_filter" })),
+        )
+            .into_response();
+    }
+
+    // Cursor validation runs before the DB roundtrip so a stale page-2
+    // cursor with the wrong sort surfaces as 400 without consuming a
+    // pool connection.
+    if let Some(raw) = &query.cursor {
+        if let Err(err) = PairDetailCursor::decode(raw, query.sort) {
+            tracing::debug!(%err, "campaign::pair_details: invalid cursor");
+            // CursorError::{Decode, SortMismatch, InvalidEnum} all map
+            // to `invalid_cursor` on the wire — operator never sees the
+            // distinction, telemetry does.
+            let _ = matches!(
+                err,
+                CursorError::Decode(_) | CursorError::SortMismatch | CursorError::InvalidEnum
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_cursor" })),
+            )
+                .into_response();
+        }
+    }
+
+    let dest_ip = match IpAddr::from_str(&destination_ip) {
+        Ok(ip) => ip,
+        Err(_) => {
+            // Path segment didn't parse as an IP — surface the same
+            // 404 the candidate-not-found path returns. The candidate
+            // table can only carry `INET` rows, so an unparseable
+            // string can never match anything anyway.
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "not_a_candidate" })),
+            )
+                .into_response();
+        }
+    };
+
+    match evaluation_repo::latest_pair_details_for_candidate(&state.pool, id, dest_ip, &query).await
+    {
+        Ok(PairDetailLookup::Found {
+            entries,
+            total,
+            next_cursor,
+        }) => (
+            StatusCode::OK,
+            Json(EvaluationPairDetailListResponse {
+                entries,
+                total,
+                next_cursor,
+            }),
+        )
+            .into_response(),
+        Ok(PairDetailLookup::CampaignNotFound) => {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
+        }
+        Ok(PairDetailLookup::NoEvaluation) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no_evaluation" })),
+        )
+            .into_response(),
+        Ok(PairDetailLookup::NotACandidate) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "not_a_candidate" })),
+        )
+            .into_response(),
+        Err(e) => db_error("campaign::get_candidate_pair_details", e),
+    }
 }

@@ -550,6 +550,128 @@ pub struct EvaluationPairDetailDto {
     pub destination_hostname: Option<String>,
 }
 
+/// Sortable columns for the paginated pair_details endpoint
+/// (`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`).
+///
+/// The set is closed: every variant maps to a hardcoded SQL fragment in
+/// [`crate::campaign::evaluation_repo::latest_pair_details_for_candidate`]
+/// so user input never reaches the SQL string. Adding a sort column
+/// requires extending the enum, the SQL builder's `match`, and the
+/// composite-index migration if a new index is justified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairDetailSortCol {
+    /// `improvement_ms` — default sort. Composite-indexed.
+    ImprovementMs,
+    /// `direct_rtt_ms`.
+    DirectRttMs,
+    /// `direct_stddev_ms`.
+    DirectStddevMs,
+    /// `transit_rtt_ms`.
+    TransitRttMs,
+    /// `transit_stddev_ms`.
+    TransitStddevMs,
+    /// `direct_loss_ratio`.
+    DirectLossRatio,
+    /// `transit_loss_ratio`.
+    TransitLossRatio,
+    /// `source_agent_id`.
+    SourceAgentId,
+    /// `destination_agent_id`.
+    DestinationAgentId,
+    /// `qualifies` — boolean column.
+    Qualifies,
+}
+
+/// Sort direction for [`PairDetailSortCol`]. The composite-PK tiebreak
+/// `(source_agent_id, destination_agent_id)` is always ascending; only
+/// the leading column flips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairDetailSortDir {
+    /// Ascending (smallest values first).
+    Asc,
+    /// Descending (largest values first). Default for the endpoint.
+    Desc,
+}
+
+/// Default page size for [`EvaluationPairDetailQuery::limit`].
+fn default_pair_detail_limit() -> u32 {
+    100
+}
+
+fn default_pair_detail_sort() -> PairDetailSortCol {
+    PairDetailSortCol::ImprovementMs
+}
+
+fn default_pair_detail_dir() -> PairDetailSortDir {
+    PairDetailSortDir::Desc
+}
+
+/// Query parameters for
+/// `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`.
+///
+/// Defaults: sort = `improvement_ms`, dir = `desc`, limit = 100.
+/// `limit` > 500 surfaces as `400 invalid_filter`. Filter values that
+/// are non-finite (`NaN` / `Infinity`) likewise — the handler validates
+/// them up front so the SQL plan never sees a garbage threshold.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct EvaluationPairDetailQuery {
+    /// Sort column. See [`PairDetailSortCol`] for the closed list.
+    #[serde(default = "default_pair_detail_sort")]
+    pub sort: PairDetailSortCol,
+    /// Sort direction. Default `desc`.
+    #[serde(default = "default_pair_detail_dir")]
+    pub dir: PairDetailSortDir,
+    /// Opaque keyset cursor returned by the previous page's
+    /// `next_cursor`. Absent on the first page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page size. Default 100; cap 500. Zero is allowed (returns an
+    /// empty `entries` page, useful for "just give me the total").
+    #[serde(default = "default_pair_detail_limit")]
+    pub limit: u32,
+    /// Runtime filter: minimum `improvement_ms` (inclusive).
+    #[serde(default)]
+    pub min_improvement_ms: Option<f64>,
+    /// Runtime filter: minimum `improvement_ms / direct_rtt_ms` ratio
+    /// (inclusive). Rows with `direct_rtt_ms <= 0` auto-pass — mirrors
+    /// the I2 evaluator's storage-filter semantics.
+    #[serde(default)]
+    pub min_improvement_ratio: Option<f64>,
+    /// Runtime filter: maximum `transit_rtt_ms` (inclusive).
+    #[serde(default)]
+    pub max_transit_rtt_ms: Option<f64>,
+    /// Runtime filter: maximum `transit_stddev_ms` (inclusive).
+    #[serde(default)]
+    pub max_transit_stddev_ms: Option<f64>,
+    /// Runtime filter: when `Some(true)`, restricts to rows where
+    /// `qualifies = true`. `Some(false)` selects unqualifying rows;
+    /// `None` (default) is unconstrained.
+    #[serde(default)]
+    pub qualifies_only: Option<bool>,
+}
+
+/// Wire response body for
+/// `GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`.
+///
+/// `total` reflects the runtime filter set but ignores the cursor — it
+/// is the size of the full filtered result set across pages, not the
+/// remaining-after-cursor count, so a UI status bar can render
+/// "showing N of TOTAL" with one number that doesn't drift mid-scroll.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct EvaluationPairDetailListResponse {
+    /// Pair-detail rows for this page.
+    pub entries: Vec<EvaluationPairDetailDto>,
+    /// Total rows across the full filtered result set, ignoring the
+    /// cursor. Renderable as the "of TOTAL" half of a status bar.
+    pub total: u64,
+    /// Opaque cursor for the next page, or `None` at end-of-result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// Which slice of candidates the detail-trigger handler should re-measure.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]

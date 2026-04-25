@@ -20,14 +20,16 @@
 //! read-path surfaces the most recent row via `ORDER BY evaluated_at
 //! DESC LIMIT 1`.
 
+use super::cursor::{PairDetailCursor, SortValue};
 use super::dto::{
-    EvaluationCandidateDto, EvaluationDto, EvaluationPairDetailDto, EvaluationResultsDto,
+    EvaluationCandidateDto, EvaluationDto, EvaluationPairDetailDto, EvaluationPairDetailQuery,
+    EvaluationResultsDto, PairDetailSortCol, PairDetailSortDir,
 };
 use super::eval::EvaluationOutputs;
 use super::model::{CampaignState, DirectSource, EvaluationMode};
 use super::repo::RepoError;
 use sqlx::types::ipnetwork::IpNetwork;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -493,4 +495,396 @@ pub async fn persist_evaluation(
 
     tx.commit().await?;
     Ok(evaluation_id)
+}
+
+/// Outcome of [`latest_pair_details_for_candidate`], discriminating the
+/// "campaign exists / has been evaluated / has the candidate" path from
+/// the three 404 paths the handler renders distinct error codes for.
+#[derive(Debug)]
+pub enum PairDetailLookup {
+    /// Happy path — the page-and-total result. `next_cursor` is `Some`
+    /// when the underlying scan returned `limit` rows (a strict-less-
+    /// than test would also be defensible; this conservative variant
+    /// can yield one redundant empty page on the boundary, which the
+    /// frontend already handles).
+    Found {
+        /// Pair-detail rows for this page, ordered per the request.
+        entries: Vec<EvaluationPairDetailDto>,
+        /// Total rows across the full filtered result set, ignoring
+        /// the cursor.
+        total: u64,
+        /// Opaque cursor for the next page, or `None` at end-of-result.
+        next_cursor: Option<String>,
+    },
+    /// `measurement_campaigns.id = $campaign_id` not found.
+    CampaignNotFound,
+    /// Campaign exists but has never been evaluated. Maps to 404
+    /// `no_evaluation` on the wire.
+    NoEvaluation,
+    /// Latest evaluation does not include `dest_ip` as a candidate.
+    /// Maps to 404 `not_a_candidate`.
+    NotACandidate,
+}
+
+/// SQL fragment for the requested sort column. Returned as a `&'static str`
+/// so the format!() that splices it into the query never sees user input.
+fn sort_col_sql(c: PairDetailSortCol) -> &'static str {
+    match c {
+        PairDetailSortCol::ImprovementMs => "improvement_ms",
+        PairDetailSortCol::DirectRttMs => "direct_rtt_ms",
+        PairDetailSortCol::DirectStddevMs => "direct_stddev_ms",
+        PairDetailSortCol::TransitRttMs => "transit_rtt_ms",
+        PairDetailSortCol::TransitStddevMs => "transit_stddev_ms",
+        PairDetailSortCol::DirectLossRatio => "direct_loss_ratio",
+        PairDetailSortCol::TransitLossRatio => "transit_loss_ratio",
+        PairDetailSortCol::SourceAgentId => "source_agent_id",
+        PairDetailSortCol::DestinationAgentId => "destination_agent_id",
+        PairDetailSortCol::Qualifies => "qualifies",
+    }
+}
+
+/// Page through the most recent evaluation's `campaign_evaluation_pair_details`
+/// rows for a given candidate destination, with server-side sort,
+/// runtime filters, and an opaque keyset cursor for pagination.
+///
+/// The cursor predicate is hand-built per sort direction:
+/// - `desc`: `(col < cursor_v) OR (col = cursor_v AND src > cursor_src) OR
+///   (col = cursor_v AND src = cursor_src AND dest > cursor_dest)`
+/// - `asc`: flip the leading `<` to `>`. The
+///   `(source_agent_id, destination_agent_id)` tiebreak stays `>` in
+///   both directions because the composite PK uniqueness inside a single
+///   `(evaluation, candidate)` is what terminates the walk.
+///
+/// `total` comes from a sibling `COUNT(*)` query that shares every
+/// non-cursor WHERE term, so the operator-facing "showing N of TOTAL"
+/// stays stable across pages.
+///
+/// The ratio gate uses `direct_rtt_ms <= 0` as an auto-pass — mirrors
+/// the I2 evaluator's storage-filter semantics. A `NULLIF(direct_rtt_ms, 0)`
+/// formulation would silently drop degenerate-baseline rows, which the
+/// `direct_rtt_zero_ratio_auto_passes` regression test covers.
+pub async fn latest_pair_details_for_candidate(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    dest_ip: IpAddr,
+    query: &EvaluationPairDetailQuery,
+) -> sqlx::Result<PairDetailLookup> {
+    // Cheap existence check up-front so the three 404 codes the wire
+    // surface promises never collapse into a single "no results" path.
+    let campaign_exists: Option<Uuid> = sqlx::query_scalar!(
+        r#"SELECT id FROM measurement_campaigns WHERE id = $1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if campaign_exists.is_none() {
+        return Ok(PairDetailLookup::CampaignNotFound);
+    }
+
+    let evaluation_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"SELECT id FROM campaign_evaluations
+            WHERE campaign_id = $1
+            ORDER BY evaluated_at DESC
+            LIMIT 1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(evaluation_id) = evaluation_id else {
+        return Ok(PairDetailLookup::NoEvaluation);
+    };
+
+    let dest_inet = IpNetwork::from(dest_ip);
+    let candidate_exists: Option<IpNetwork> = sqlx::query_scalar!(
+        r#"SELECT destination_ip
+             FROM campaign_evaluation_candidates
+            WHERE evaluation_id = $1 AND destination_ip = $2"#,
+        evaluation_id,
+        dest_inet,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if candidate_exists.is_none() {
+        return Ok(PairDetailLookup::NotACandidate);
+    }
+
+    // Build the filter WHERE fragment with five always-bound parameters.
+    // The `$N::TYPE IS NULL` form lets the planner constant-fold absent
+    // filters without us branching the SQL builder per filter.
+    //
+    // Ratio gate uses `<= 0 OR ratio >= $N` — the `<= 0` arm is the
+    // auto-pass for degenerate-baseline rows. NULLIF would silently
+    // drop them.
+    let filter_sql = "\
+        AND ($3::float8 IS NULL OR pd.improvement_ms >= $3) \
+        AND ($4::float8 IS NULL \
+             OR pd.direct_rtt_ms <= 0 \
+             OR pd.improvement_ms / pd.direct_rtt_ms >= $4) \
+        AND ($5::float8 IS NULL OR pd.transit_rtt_ms <= $5) \
+        AND ($6::float8 IS NULL OR pd.transit_stddev_ms <= $6) \
+        AND ($7::bool   IS NULL OR pd.qualifies = $7)";
+
+    let sort_col = sort_col_sql(query.sort);
+    let sort_dir_kw = match query.dir {
+        PairDetailSortDir::Asc => "ASC",
+        PairDetailSortDir::Desc => "DESC",
+    };
+    // For `asc`, the leading inequality on the sort column flips to `>`;
+    // for `desc`, it stays `<`. The tiebreak on
+    // `(source_agent_id, destination_agent_id)` is always `>` because
+    // we always walk forward through the unique composite-PK tail.
+    let leading_cmp = match query.dir {
+        PairDetailSortDir::Asc => ">",
+        PairDetailSortDir::Desc => "<",
+    };
+
+    // Cursor predicate: bound to $8 ($9, $10) with type-specific casts
+    // so the planner doesn't reject the comparison. We always emit the
+    // same three placeholders and bind a typed-value or a typed-NULL —
+    // keeps the parameter count constant across cursor / no-cursor.
+    let cursor_predicate = if query.cursor.is_some() {
+        format!(
+            "AND ( pd.{col} {cmp} $8 \
+                OR (pd.{col} = $8 AND pd.source_agent_id > $9) \
+                OR (pd.{col} = $8 AND pd.source_agent_id = $9 AND pd.destination_agent_id > $10) )",
+            col = sort_col,
+            cmp = leading_cmp,
+        )
+    } else {
+        // Three throwaway parameter slots so the builder below stays
+        // constant-arity. Casting NULL keeps the planner happy.
+        "AND ($8::text IS NULL AND $9::text IS NULL AND $10::text IS NULL)".to_string()
+    };
+
+    // Decode the cursor into typed parts. Decoding is the handler's job
+    // (it owns the wire-error mapping); here we receive an already-
+    // decoded `PairDetailCursor` via the query's pre-validated form.
+    // The handler validates the `sort_col` matches before we get here —
+    // the `expect` is unreachable in operational code but defends a
+    // future refactor that wires this function up directly.
+    let cursor = query.cursor.as_ref().map(|raw| {
+        PairDetailCursor::decode(raw, query.sort)
+            .expect("handler must validate cursor before calling latest_pair_details_for_candidate")
+    });
+
+    // Bind the cursor's leading sort value into one of three optional
+    // placeholders typed to the column's SQL type. Only one is ever
+    // bound to a real value at a time; the others stay NULL.
+    let (cursor_f64, cursor_text, cursor_bool) = match cursor.as_ref() {
+        Some(c) => match &c.sort_value {
+            SortValue::F64(v) => (Some(*v), None, None),
+            SortValue::String(s) => (None, Some(s.clone()), None),
+            SortValue::Bool(b) => (None, None, Some(*b)),
+        },
+        None => (None, None, None),
+    };
+    let cursor_src: Option<String> = cursor.as_ref().map(|c| c.source_agent_id.clone());
+    let cursor_dest: Option<String> = cursor.as_ref().map(|c| c.destination_agent_id.clone());
+
+    // Single value column: pick the typed bind that matches the sort
+    // column. The cursor's typed variant must agree with the column's
+    // SQL type — the handler enforces this match via the sort whitelist
+    // and the cursor's `sort_col` field already validated above.
+    //
+    // We splice the typed cast into the SQL so a numeric column is
+    // compared against a numeric placeholder, not a coerced text.
+    let cursor_value_sql_cast = match query.sort {
+        PairDetailSortCol::SourceAgentId | PairDetailSortCol::DestinationAgentId => "$8::text",
+        PairDetailSortCol::Qualifies => "$8::bool",
+        _ => "$8::float8",
+    };
+
+    // Substitute the typed `$8` placeholder so the casts in the cursor
+    // predicate match the column type. We do this by string replacement
+    // on the predicate string (the only `$8` reference), since the
+    // surrounding parameter binding stays at slot 8 for every sort.
+    let cursor_predicate = cursor_predicate.replace("$8", cursor_value_sql_cast);
+
+    let sql = format!(
+        "SELECT \
+            candidate_destination_ip, source_agent_id, destination_agent_id, \
+            direct_rtt_ms, direct_stddev_ms, direct_loss_ratio, \
+            direct_source::text AS direct_source_text, \
+            transit_rtt_ms, transit_stddev_ms, transit_loss_ratio, \
+            improvement_ms, qualifies, \
+            mtr_measurement_id_ax, mtr_measurement_id_xb \
+         FROM campaign_evaluation_pair_details pd \
+         WHERE pd.evaluation_id = $1 AND pd.candidate_destination_ip = $2 \
+         {filters} {cursor} \
+         ORDER BY pd.{sort_col} {dir}, pd.source_agent_id ASC, pd.destination_agent_id ASC \
+         LIMIT $11",
+        filters = filter_sql,
+        cursor = cursor_predicate,
+        sort_col = sort_col,
+        dir = sort_dir_kw,
+    );
+
+    // Cap the limit at 500 rows. The handler validates `> 500` as
+    // `invalid_filter` already, so any oversize value reaching here is
+    // a defense-in-depth issue, not a 400.
+    let bound_limit = query.limit.min(500) as i64;
+
+    let mut q = sqlx::query(&sql)
+        .bind(evaluation_id)
+        .bind(dest_inet)
+        .bind(query.min_improvement_ms)
+        .bind(query.min_improvement_ratio)
+        .bind(query.max_transit_rtt_ms)
+        .bind(query.max_transit_stddev_ms)
+        .bind(query.qualifies_only);
+    // Slot 8 — typed by sort column.
+    q = match query.sort {
+        PairDetailSortCol::SourceAgentId | PairDetailSortCol::DestinationAgentId => {
+            q.bind(cursor_text.clone())
+        }
+        PairDetailSortCol::Qualifies => q.bind(cursor_bool),
+        _ => q.bind(cursor_f64),
+    };
+    let q = q
+        .bind(cursor_src.clone())
+        .bind(cursor_dest.clone())
+        .bind(bound_limit);
+
+    let rows = q.fetch_all(pool).await?;
+
+    // NaN-guard pass. Stored data should never carry non-finite values
+    // — the evaluator guards against them at write time — but a corrupt
+    // upstream feed must not propagate NaN/Infinity into the React `Δ %`
+    // formatter and crash the render. Skip the row, log, continue.
+    let mut entries: Vec<EvaluationPairDetailDto> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let cand_inet: IpNetwork = row.try_get("candidate_destination_ip")?;
+        let direct_rtt_ms: f32 = row.try_get("direct_rtt_ms")?;
+        let direct_stddev_ms: f32 = row.try_get("direct_stddev_ms")?;
+        let direct_loss_ratio: f32 = row.try_get("direct_loss_ratio")?;
+        let transit_rtt_ms: f32 = row.try_get("transit_rtt_ms")?;
+        let transit_stddev_ms: f32 = row.try_get("transit_stddev_ms")?;
+        let transit_loss_ratio: f32 = row.try_get("transit_loss_ratio")?;
+        let improvement_ms: f32 = row.try_get("improvement_ms")?;
+        let qualifies: bool = row.try_get("qualifies")?;
+        let source_agent_id: String = row.try_get("source_agent_id")?;
+        let destination_agent_id: String = row.try_get("destination_agent_id")?;
+        let direct_source_text: String = row.try_get("direct_source_text")?;
+        let mtr_measurement_id_ax: Option<i64> = row.try_get("mtr_measurement_id_ax")?;
+        let mtr_measurement_id_xb: Option<i64> = row.try_get("mtr_measurement_id_xb")?;
+
+        let finite_ok = [
+            direct_rtt_ms,
+            direct_stddev_ms,
+            direct_loss_ratio,
+            transit_rtt_ms,
+            transit_stddev_ms,
+            transit_loss_ratio,
+            improvement_ms,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite_ok {
+            tracing::warn!(
+                %campaign_id,
+                %evaluation_id,
+                %source_agent_id,
+                %destination_agent_id,
+                "campaign::pair_details: skipping row with non-finite numeric field",
+            );
+            continue;
+        }
+
+        // Parse the enum from text so we don't have to type-erase it
+        // through dynamic sqlx::query. A bad value here would be a
+        // schema bug, not operator input.
+        let direct_source = match direct_source_text.as_str() {
+            "active_probe" => DirectSource::ActiveProbe,
+            "vm_continuous" => DirectSource::VmContinuous,
+            other => {
+                tracing::error!(
+                    %campaign_id,
+                    %evaluation_id,
+                    direct_source = %other,
+                    "campaign::pair_details: unknown direct_source enum text",
+                );
+                return Err(sqlx::Error::Protocol(format!(
+                    "unknown direct_source enum text {other:?}"
+                )));
+            }
+        };
+
+        entries.push(EvaluationPairDetailDto {
+            source_agent_id,
+            destination_agent_id,
+            destination_ip: cand_inet.ip().to_string(),
+            direct_rtt_ms,
+            direct_stddev_ms,
+            direct_loss_ratio,
+            direct_source,
+            transit_rtt_ms,
+            transit_stddev_ms,
+            transit_loss_ratio,
+            improvement_ms,
+            qualifies,
+            mtr_measurement_id_ax,
+            mtr_measurement_id_xb,
+            destination_hostname: None,
+        });
+    }
+
+    // Sibling COUNT(*). Same WHERE as the page query, minus the cursor
+    // predicate. Counting the unfiltered total would defeat the
+    // operator's status bar; counting the cursor-filtered total would
+    // make the bar move under the operator's feet.
+    let count_sql = format!(
+        "SELECT COUNT(*) AS c \
+         FROM campaign_evaluation_pair_details pd \
+         WHERE pd.evaluation_id = $1 AND pd.candidate_destination_ip = $2 \
+         {filters}",
+        filters = filter_sql,
+    );
+    let total: i64 = sqlx::query_scalar(&count_sql)
+        .bind(evaluation_id)
+        .bind(dest_inet)
+        .bind(query.min_improvement_ms)
+        .bind(query.min_improvement_ratio)
+        .bind(query.max_transit_rtt_ms)
+        .bind(query.max_transit_stddev_ms)
+        .bind(query.qualifies_only)
+        .fetch_one(pool)
+        .await?;
+
+    // Mint the next-page cursor from the last entry of this page when
+    // we delivered a full page. An empty page implies end-of-result;
+    // a short page (`< limit`) likewise.
+    let next_cursor = if entries.is_empty() || entries.len() < bound_limit as usize {
+        None
+    } else {
+        let last = entries.last().expect("len >= 1 here");
+        let sort_value = match query.sort {
+            PairDetailSortCol::ImprovementMs => SortValue::F64(last.improvement_ms as f64),
+            PairDetailSortCol::DirectRttMs => SortValue::F64(last.direct_rtt_ms as f64),
+            PairDetailSortCol::DirectStddevMs => SortValue::F64(last.direct_stddev_ms as f64),
+            PairDetailSortCol::TransitRttMs => SortValue::F64(last.transit_rtt_ms as f64),
+            PairDetailSortCol::TransitStddevMs => SortValue::F64(last.transit_stddev_ms as f64),
+            PairDetailSortCol::DirectLossRatio => SortValue::F64(last.direct_loss_ratio as f64),
+            PairDetailSortCol::TransitLossRatio => SortValue::F64(last.transit_loss_ratio as f64),
+            PairDetailSortCol::SourceAgentId => SortValue::String(last.source_agent_id.clone()),
+            PairDetailSortCol::DestinationAgentId => {
+                SortValue::String(last.destination_agent_id.clone())
+            }
+            PairDetailSortCol::Qualifies => SortValue::Bool(last.qualifies),
+        };
+        Some(
+            PairDetailCursor {
+                sort_col: query.sort,
+                sort_value,
+                source_agent_id: last.source_agent_id.clone(),
+                destination_agent_id: last.destination_agent_id.clone(),
+            }
+            .encode(),
+        )
+    };
+
+    Ok(PairDetailLookup::Found {
+        entries,
+        total: total.max(0) as u64,
+        next_cursor,
+    })
 }

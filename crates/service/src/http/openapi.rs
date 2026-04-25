@@ -56,7 +56,10 @@ use utoipa_swagger_ui::SwaggerUi;
         crate::campaign::dto::EvaluationCandidateDto,
         crate::campaign::dto::EvaluationDto,
         crate::campaign::dto::EvaluationPairDetailDto,
+        crate::campaign::dto::EvaluationPairDetailListResponse,
         crate::campaign::dto::EvaluationResultsDto,
+        crate::campaign::dto::PairDetailSortCol,
+        crate::campaign::dto::PairDetailSortDir,
         crate::campaign::dto::ForcePairRequest,
         crate::campaign::dto::PairDto,
         crate::campaign::dto::PatchCampaignRequest,
@@ -213,6 +216,14 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(crate::campaign::handlers::evaluate))
         .routes(utoipa_axum::routes!(
             crate::campaign::handlers::get_evaluation
+        ))
+        // Static `/evaluation/candidates/{destination_ip}/pair_details`
+        // segment runs after `get_evaluation` for readability — `matchit`
+        // resolves the longer static prefix regardless of registration
+        // order. The handler is the wire-paginated replacement for the
+        // pre-T55 inline `EvaluationCandidateDto.pair_details` array.
+        .routes(utoipa_axum::routes!(
+            crate::campaign::handlers::get_candidate_pair_details
         ))
         .routes(utoipa_axum::routes!(crate::campaign::handlers::detail))
         // SSE stream carries campaign lifecycle + pair-settle events. The
