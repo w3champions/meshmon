@@ -403,8 +403,8 @@ Campaign header row. Columns (selected):
 | `force_measurement` | `BOOLEAN` | When `true`, reuse lookup is skipped. |
 | `loss_threshold_ratio`, `stddev_weight` | `REAL` | Evaluator knobs. |
 | `evaluation_mode` | `evaluation_mode` enum | `diversity` or `optimization`. |
-| `max_transit_rtt_ms`, `max_transit_stddev_ms` | `REAL`, nullable | Eligibility caps on the composed transit path. NULL → off. |
-| `min_improvement_ms`, `min_improvement_ratio` | `REAL`, nullable | Storage floors for per-pair scoring rows; combine with OR semantics. NULL → off. |
+| `max_transit_rtt_ms`, `max_transit_stddev_ms` | `DOUBLE PRECISION`, nullable | Eligibility caps on the composed transit path. NULL → off. |
+| `min_improvement_ms`, `min_improvement_ratio` | `DOUBLE PRECISION`, nullable | Storage floors for per-pair scoring rows; combine with OR semantics. NULL → off. |
 | `created_by`, `created_at` | `TEXT` / `TIMESTAMPTZ` | Audit. |
 | `started_at`, `stopped_at`, `completed_at`, `evaluated_at` | `TIMESTAMPTZ` | Lifecycle timestamps. |
 
