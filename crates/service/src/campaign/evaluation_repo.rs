@@ -688,10 +688,21 @@ pub async fn latest_pair_details_for_candidate(
     //
     // We splice the typed cast into the SQL so a numeric column is
     // compared against a numeric placeholder, not a coerced text.
+    //
+    // Exhaustive match (no wildcard) so adding a new
+    // [`PairDetailSortCol`] variant is a hard compile-time decision —
+    // a wildcard would silently absorb a future non-numeric column
+    // into the float8 cast and produce wrong-type cursor binds.
     let cursor_value_sql_cast = match query.sort {
         PairDetailSortCol::SourceAgentId | PairDetailSortCol::DestinationAgentId => "$8::text",
         PairDetailSortCol::Qualifies => "$8::bool",
-        _ => "$8::float8",
+        PairDetailSortCol::ImprovementMs
+        | PairDetailSortCol::DirectRttMs
+        | PairDetailSortCol::DirectStddevMs
+        | PairDetailSortCol::TransitRttMs
+        | PairDetailSortCol::TransitStddevMs
+        | PairDetailSortCol::DirectLossRatio
+        | PairDetailSortCol::TransitLossRatio => "$8::float8",
     };
 
     // Substitute the typed `$8` placeholder so the casts in the cursor
@@ -732,13 +743,21 @@ pub async fn latest_pair_details_for_candidate(
         .bind(query.max_transit_rtt_ms)
         .bind(query.max_transit_stddev_ms)
         .bind(query.qualifies_only);
-    // Slot 8 — typed by sort column.
+    // Slot 8 — typed by sort column. Exhaustive (no wildcard) for the
+    // same reason as `cursor_value_sql_cast`: a future non-numeric
+    // sort column must not silently fall through into the float8 bind.
     q = match query.sort {
         PairDetailSortCol::SourceAgentId | PairDetailSortCol::DestinationAgentId => {
             q.bind(cursor_text.clone())
         }
         PairDetailSortCol::Qualifies => q.bind(cursor_bool),
-        _ => q.bind(cursor_f64),
+        PairDetailSortCol::ImprovementMs
+        | PairDetailSortCol::DirectRttMs
+        | PairDetailSortCol::DirectStddevMs
+        | PairDetailSortCol::TransitRttMs
+        | PairDetailSortCol::TransitStddevMs
+        | PairDetailSortCol::DirectLossRatio
+        | PairDetailSortCol::TransitLossRatio => q.bind(cursor_f64),
     };
     let q = q
         .bind(cursor_src.clone())

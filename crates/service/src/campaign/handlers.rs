@@ -1285,16 +1285,20 @@ pub async fn get_candidate_pair_details(
 
     // Cursor validation runs before the DB roundtrip so a stale page-2
     // cursor with the wrong sort surfaces as 400 without consuming a
-    // pool connection.
+    // pool connection. Every [`CursorError`] variant maps to the same
+    // `invalid_cursor` wire code; the discriminant is captured as a
+    // structured `error_kind` field on the debug log for telemetry.
     if let Some(raw) = &query.cursor {
         if let Err(err) = PairDetailCursor::decode(raw, query.sort) {
-            tracing::debug!(%err, "campaign::pair_details: invalid cursor");
-            // CursorError::{Decode, SortMismatch, InvalidEnum} all map
-            // to `invalid_cursor` on the wire — operator never sees the
-            // distinction, telemetry does.
-            let _ = matches!(
-                err,
-                CursorError::Decode(_) | CursorError::SortMismatch | CursorError::InvalidEnum
+            let error_kind = match err {
+                CursorError::Decode(_) => "decode",
+                CursorError::SortMismatch => "sort_mismatch",
+                CursorError::InvalidEnum => "invalid_enum",
+            };
+            tracing::debug!(
+                error_kind = %error_kind,
+                %err,
+                "campaign::pair_details: invalid cursor",
             );
             return (
                 StatusCode::BAD_REQUEST,

@@ -508,7 +508,22 @@ async fn error_vocabulary_400_paths() {
 async fn re_evaluate_during_pagination() {
     // Page 1 from evaluation_a; then a second evaluation row (same
     // campaign) lands; page 2 with the page-1 cursor must read against
-    // the NEW snapshot, in well-ordered fashion.
+    // the NEW snapshot, well-ordered.
+    //
+    // Eval A seeds improvements [0.0, 1.0, 2.0, 3.0, 4.0]; page 1 with
+    // limit=2 desc → entries (4.0, 3.0) → cursor minted at improvement
+    // = 3.0. Eval B then replaces the row set with improvements that
+    // span the cursor: three below (0.5, 1.5, 2.5) and two above
+    // (10.0, 20.0). The cursor predicate `improvement_ms < 3.0 OR
+    // (eq + tiebreak)` keeps only the below-cursor rows. Page 2 must
+    // therefore return exactly the 3 eval-B rows below the cursor —
+    // and ZERO eval-A rows.
+    //
+    // The disjoint source-id prefixes (`p13a-src-*` vs `p13b-src-*`)
+    // let the test verify the snapshot every entry is drawn from
+    // without inspecting improvement values alone (which would let an
+    // accidental eval-A leakage at the same numeric value slip
+    // through).
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t55-pde-13").await;
     let cid = create_campaign(&h, "t55-pde-reeval", "t55-pde-13").await;
@@ -521,11 +536,29 @@ async fn re_evaluate_during_pagination() {
         ))
         .await;
     let cursor = body1["next_cursor"].as_str().unwrap().to_string();
+    // Sanity: page 1's cursor row must be at improvement = 3.0 (second
+    // entry under desc sort over [0..=4]). If this drifts, the spans
+    // below need to be retuned.
+    let page1_entries = body1["entries"].as_array().unwrap();
+    assert_eq!(page1_entries.len(), 2);
+    assert_eq!(
+        page1_entries[1]["improvement_ms"].as_f64().unwrap() as f32,
+        3.0,
+        "page-1 cursor row sits at improvement_ms=3.0",
+    );
 
-    // New evaluation row replaces the candidate set. Use disjoint
-    // improvements (100..) so any cross-snapshot leakage would be
-    // visible in `improvement_ms`.
-    seed_n_pair_details(&h.state.pool, cid, cand, 5, "p13b", |i| 100.0 + i as f32).await;
+    // Eval B: spans the cursor. Three below, two above. Distinct
+    // source prefix so the test can verify provenance.
+    let evaluation_id_b = common::seed_evaluation_row(&h.state.pool, cid).await;
+    common::seed_pair_detail_candidate(&h.state.pool, evaluation_id_b, cand).await;
+    let below = [0.5_f32, 1.5, 2.5];
+    let above = [10.0_f32, 20.0];
+    for (i, imp) in below.iter().chain(above.iter()).enumerate() {
+        let src = format!("p13b-src-{i:04}");
+        let dst = format!("p13b-dst-{i:04}");
+        let s = common::PairDetailSeed::baseline(&src, &dst, *imp, true);
+        common::seed_pair_detail_row(&h.state.pool, evaluation_id_b, cand, &s).await;
+    }
 
     let body2: Value = h
         .get_json(&format!(
@@ -533,16 +566,42 @@ async fn re_evaluate_during_pagination() {
         ))
         .await;
     let entries = body2["entries"].as_array().unwrap();
-    // Every returned row must be from the new snapshot (improvements
-    // ≥ 100 because those are the seeded values), and the page must
-    // be desc-ordered.
+
+    // Page 2 must surface exactly the three below-cursor eval-B rows.
+    // An empty page (which the prior version of this test trivially
+    // accepted) now fails this assertion.
+    assert_eq!(
+        entries.len(),
+        below.len(),
+        "page 2 returns only below-cursor eval-B rows: {entries:?}",
+    );
+
+    // Every entry must come from eval B (verified by source-id prefix),
+    // be below the cursor's improvement value (3.0), and form a
+    // desc-ordered run.
     let mut last = f64::INFINITY;
+    let mut seen_imps: Vec<f32> = Vec::new();
     for e in entries {
+        let src = e["source_agent_id"].as_str().unwrap();
+        assert!(
+            src.starts_with("p13b-"),
+            "entry must be from new snapshot; src={src}",
+        );
         let imp = e["improvement_ms"].as_f64().unwrap();
-        assert!(imp >= 100.0, "row from new snapshot: imp={imp}");
+        assert!(imp < 3.0, "row sits below cursor; imp={imp}");
         assert!(imp <= last, "desc order maintained: {imp} <= {last}");
         last = imp;
+        seen_imps.push(imp as f32);
     }
+    // Set-equality with the seeded below-cursor improvements.
+    let mut seen_sorted = seen_imps.clone();
+    seen_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut expected_sorted = below.to_vec();
+    expected_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(
+        seen_sorted, expected_sorted,
+        "page 2 = below-cursor eval-B rows exactly",
+    );
 }
 
 #[tokio::test]
@@ -551,13 +610,22 @@ async fn default_sort_index_used_via_explain() {
     // `campaign_evaluation_pair_details_default_sort_idx` covers the
     // default sort (`improvement_ms` desc) + leading filter columns.
     // Run an EXPLAIN at the SQL level and assert the planner picks an
-    // Index Scan with `improvement_ms` in the plan (not the exact
-    // index name — planner strategy can vary).
+    // Index Scan (or Index Only Scan) — proves the index is reachable,
+    // not just that the ORDER BY mentions the column. The plain
+    // "ORDER BY contains improvement_ms" check would have passed even
+    // for a seq scan because EXPLAIN echoes the sort columns
+    // regardless of access method.
+    //
+    // We force `enable_seqscan = OFF` for the EXPLAIN so the assertion
+    // isolates index reachability from planner heuristics on small
+    // datasets. The seed count is also bumped (to 200 rows) so the
+    // planner has enough cardinality to even consider the index when
+    // not forced.
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t55-pde-14").await;
     let cid = create_campaign(&h, "t55-pde-explain", "t55-pde-14").await;
     let cand: IpAddr = "198.51.100.63".parse().unwrap();
-    seed_n_pair_details(&h.state.pool, cid, cand, 50, "p14", |i| i as f32).await;
+    seed_n_pair_details(&h.state.pool, cid, cand, 200, "p14", |i| i as f32).await;
 
     // Pull the latest evaluation id so the EXPLAIN matches the handler's
     // shape exactly.
@@ -571,7 +639,17 @@ async fn default_sort_index_used_via_explain() {
     .await
     .unwrap();
 
+    // Pin to a single connection so `SET LOCAL`'s effect spans the
+    // EXPLAIN. Reaching for `LOCAL` keeps the toggle scoped to the
+    // implicit transaction, so other parallel tests on the shared pool
+    // are untouched.
     use sqlx::Row as _;
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     let plan_rows = sqlx::query(
         "EXPLAIN \
          SELECT improvement_ms, source_agent_id, destination_agent_id \
@@ -582,9 +660,10 @@ async fn default_sort_index_used_via_explain() {
     )
     .bind(evaluation_id)
     .bind(sqlx::types::ipnetwork::IpNetwork::from(cand))
-    .fetch_all(&h.state.pool)
+    .fetch_all(&mut *conn)
     .await
     .unwrap();
+    sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
 
     // Concatenate plan lines so a multi-line plan still matches.
     let plan: String = plan_rows
@@ -592,11 +671,23 @@ async fn default_sort_index_used_via_explain() {
         .map(|r| r.try_get::<String, _>(0).expect("EXPLAIN line"))
         .collect::<Vec<_>>()
         .join("\n");
-
-    // Tolerant assertion: plan must reference improvement_ms or the
-    // default-sort index. Either signal proves the planner knows about
-    // the new composite index.
     let plan_lower = plan.to_lowercase();
+
+    // Strong assertion #1: plan SHAPE — must use an index access path,
+    // not a seq scan. With `enable_seqscan = OFF` the planner is
+    // forced to pick an index scan if any covers the query; the
+    // assertion fails loudly if the index is missing or not usable.
+    let uses_index = plan_lower.contains("index scan") || plan_lower.contains("index only scan");
+    assert!(
+        uses_index,
+        "plan must use an index scan (seqscan disabled); plan was:\n{plan}",
+    );
+
+    // Strong assertion #2: plan must reference the sorted column so a
+    // future regression that drops the trailing `improvement_ms DESC`
+    // from the index (and degrades to a leading-columns-only scan +
+    // explicit Sort node) is caught. Tolerant on the exact index name
+    // — planner strategy can vary on the EXPLAIN format.
     assert!(
         plan_lower.contains("improvement_ms") || plan_lower.contains("default_sort_idx"),
         "plan must mention improvement_ms or default-sort idx; plan was:\n{plan}",
