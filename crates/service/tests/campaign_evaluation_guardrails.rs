@@ -21,6 +21,8 @@
 //! | `negative_min_improvement_ms`       | t55-8-{a,b,c}       | `.81`, `.82`, `.83`, `.99`                |
 //! | `negative_min_improvement_ratio`    | t55-9-{a,b,c}       | `.91`, `.92`, `.93`, `.99`                |
 //! | `recovery_on_re_evaluate`           | t55-10-{a,b,c}      | `.101`, `.102`, `.103`, `.199`            |
+//! | `avg_loss_ratio_reflects_pre_storage_filter_set` | t55-11-{a,b,c} | `.111`, `.112`, `.113`, `.199`        |
+//! | `good_candidates_detail_covers_storage_filtered_qualifying_legs` | t55-12-{a,b,c} | `.121`, `.122`, `.123`, `.199` |
 
 mod common;
 
@@ -907,5 +909,214 @@ async fn recovery_on_re_evaluate() {
     assert_eq!(
         total, 6,
         "loose knob restores the full triple count: {cand}"
+    );
+}
+
+#[tokio::test]
+async fn avg_loss_ratio_reflects_pre_storage_filter_set() {
+    // T55 review fix (P2-1): the candidate-level `avg_loss_ratio` must
+    // be computed across the full post-eligibility, pre-storage-filter
+    // set. A tight `min_improvement_ms` drops some pair_detail rows
+    // from storage; the headline loss reading must NOT be biased by
+    // that storage-side pruning. Mirror the `min_improvement_ms_filters_rows`
+    // shape: the X candidate has 6 eligible triples, only 2 of them
+    // clear the 5 ms storage gate, so the persisted detail rows cover
+    // 2 of 6 triples — but `avg_loss_ratio` still averages over all 6.
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "198.51.100.111".parse().unwrap();
+    let b_ip: IpAddr = "198.51.100.112".parse().unwrap();
+    let c_ip: IpAddr = "198.51.100.113".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "t55-11-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "t55-11-b", b_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "t55-11-c", c_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "t55-avg-loss-pre-filter",
+                "protocol": "icmp",
+                "source_agent_ids": ["t55-11-a", "t55-11-b", "t55-11-c"],
+                "destination_ips": [
+                    "198.51.100.112", "198.51.100.113", "198.51.100.111",
+                    "198.51.100.199",
+                ],
+                "loss_threshold_ratio": 0.5,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "diversity",
+                "min_improvement_ms": 5.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+
+    // a↔b: direct=250, transit composes to 200 ⇒ improvement=50 (above 5 ms gate).
+    // a↔c, b↔c: direct=204, transit composes to 200 ⇒ improvement=4 (below gate).
+    // Loss ratios: distinct on each transit leg so the candidate-level
+    // average is a known number.
+    //   compound_loss = 1 − (1 − leg1) × (1 − leg2)
+    //   AX losses on .199: 0.10 / 0.20 / 0.30
+    //   XB losses on .199: 0.10 / 0.20 / 0.30
+    //
+    // The 6 triples produce 6 distinct compound_loss values — averaged
+    // over all 6 they sum to a value that's only reachable when the
+    // headline aggregate sees the storage-filter-dropped rows too.
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("t55-11-a", "198.51.100.112", 250.0, 0.0, 0.0),
+            ("t55-11-b", "198.51.100.111", 250.0, 0.0, 0.0),
+            ("t55-11-a", "198.51.100.113", 204.0, 0.0, 0.0),
+            ("t55-11-c", "198.51.100.111", 204.0, 0.0, 0.0),
+            ("t55-11-b", "198.51.100.113", 204.0, 0.0, 0.0),
+            ("t55-11-c", "198.51.100.112", 204.0, 0.0, 0.0),
+            // Transit legs through X = .199. Distinct loss ratios so the
+            // pre vs post split is observable. Loss thresholds are 0.5,
+            // so every compound_loss < 0.51 passes the eligibility gate.
+            ("t55-11-a", "198.51.100.199", 100.0, 0.0, 0.10),
+            ("t55-11-b", "198.51.100.199", 100.0, 0.0, 0.20),
+            ("t55-11-c", "198.51.100.199", 100.0, 0.0, 0.30),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    let cand = find_candidate(&eval, "198.51.100.199")
+        .unwrap_or_else(|| panic!("X candidate must survive: {eval}"));
+    let total = cand["pairs_total_considered"].as_i64().expect("total");
+    assert_eq!(total, 6, "every eligible triple counts: {cand}");
+
+    // Storage filter drops 4 of the 6 rows (those with improvement=4 ms).
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.199").await;
+    let stored = entries.as_array().unwrap();
+    assert_eq!(
+        stored.len(),
+        2,
+        "storage filter drops the four small-improvement rows: {entries}"
+    );
+
+    // The wire field carries the pre-storage-filter average: averaged
+    // over ALL 6 compound_loss values, not just the 2 stored ones.
+    let avg_loss = cand["avg_loss_ratio"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("avg_loss_ratio must be present: {cand}"));
+    let stored_avg_loss = {
+        let mut sum = 0.0;
+        let mut n = 0;
+        for pd in stored {
+            sum += pd["transit_loss_ratio"].as_f64().unwrap();
+            n += 1;
+        }
+        sum / n as f64
+    };
+    let abs_delta = (avg_loss - stored_avg_loss).abs();
+    assert!(
+        abs_delta > 1e-3,
+        "headline avg_loss_ratio ({avg_loss}) must NOT equal the average over only \
+         the stored rows ({stored_avg_loss}); the difference proves the headline \
+         covers the storage-filter-dropped rows too: {cand}"
+    );
+}
+
+#[tokio::test]
+async fn good_candidates_detail_covers_storage_filtered_qualifying_legs() {
+    // T55 review fix (P2-2): `Detail: good candidates` expansion must
+    // see every qualifying triple, even when the storage filter drops
+    // its `pair_details` mirror row. Set `min_improvement_ms` tight
+    // enough that some `qualifies = true` triples are dropped from
+    // `campaign_evaluation_pair_details`, then dispatch detail and
+    // assert the dispatch covers those qualifying legs.
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "198.51.100.121".parse().unwrap();
+    let b_ip: IpAddr = "198.51.100.122".parse().unwrap();
+    let c_ip: IpAddr = "198.51.100.123".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "t55-12-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "t55-12-b", b_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "t55-12-c", c_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "t55-good-cands-storage-filter",
+                "protocol": "icmp",
+                "source_agent_ids": ["t55-12-a", "t55-12-b", "t55-12-c"],
+                "destination_ips": [
+                    "198.51.100.122", "198.51.100.123", "198.51.100.121",
+                    "198.51.100.199",
+                ],
+                "loss_threshold_ratio": 0.05,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "diversity",
+                // Tight enough that improvement=4 ms triples qualify
+                // (`improvement_ms > 0` under diversity mode) but are
+                // dropped from `pair_details` storage.
+                "min_improvement_ms": 50.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+
+    // 6 eligible triples, 6 qualifying triples (every one has
+    // `improvement_ms > 0`), only 1 stored (the a↔b pair with
+    // improvement=50 clears the 50 ms gate; everything else falls in).
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("t55-12-a", "198.51.100.122", 250.0, 0.0, 0.0),
+            ("t55-12-b", "198.51.100.121", 250.0, 0.0, 0.0),
+            ("t55-12-a", "198.51.100.123", 204.0, 0.0, 0.0),
+            ("t55-12-c", "198.51.100.121", 204.0, 0.0, 0.0),
+            ("t55-12-b", "198.51.100.123", 204.0, 0.0, 0.0),
+            ("t55-12-c", "198.51.100.122", 204.0, 0.0, 0.0),
+            ("t55-12-a", "198.51.100.199", 100.0, 0.0, 0.0),
+            ("t55-12-b", "198.51.100.199", 100.0, 0.0, 0.0),
+            ("t55-12-c", "198.51.100.199", 100.0, 0.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let _eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // Sanity: only the a↔b pair survives the storage filter.
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.199").await;
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        1,
+        "tight storage filter drops 5 of 6 qualifying rows: {entries}"
+    );
+
+    // Detail: good_candidates expansion must cover every qualifying
+    // triple. With 6 qualifying triples (1 stored, 5 storage-dropped),
+    // the dispatch must enqueue the full set: 6 triples × 2 legs each
+    // = 12 (source, candidate_ip) targets, then × 2 detail kinds
+    // (icmp + mtr) = 24 dispatch rows.
+    //
+    // The legs from each triple share the X = .199 destination, but the
+    // source agents differ per leg. Across all 6 qualifying triples the
+    // (source, X) target set is exactly {a, b, c} × {.199} = 3 unique
+    // targets, dispatched as ping + mtr = 6 rows total.
+    let res: Value = h
+        .post_json(
+            &format!("/api/campaigns/{campaign_id}/detail"),
+            &json!({ "scope": "good_candidates" }),
+        )
+        .await;
+    let pairs_enqueued = res["pairs_enqueued"].as_i64().expect("pairs_enqueued");
+    assert_eq!(
+        pairs_enqueued, 6,
+        "every qualifying leg must dispatch — storage filter must NOT \
+         hide qualifying legs from `Detail: good candidates`: {res}"
     );
 }

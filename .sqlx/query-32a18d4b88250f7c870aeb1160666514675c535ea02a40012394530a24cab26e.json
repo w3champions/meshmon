@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_evaluation_qualifying_legs\n                      (evaluation_id, candidate_destination_ip,\n                       source_agent_id, destination_agent_id)\n                   VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Inet",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32a18d4b88250f7c870aeb1160666514675c535ea02a40012394530a24cab26e"
+}

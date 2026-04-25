@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT pd.candidate_destination_ip, pd.source_agent_id, pd.destination_agent_id\n             FROM campaign_evaluation_pair_details pd\n             JOIN campaign_evaluation_candidates c\n               ON c.evaluation_id = pd.evaluation_id\n              AND c.destination_ip = pd.candidate_destination_ip\n            WHERE pd.evaluation_id = $1\n              AND pd.qualifies = true\n              AND c.pairs_improved >= 1",
+  "query": "SELECT candidate_destination_ip, source_agent_id, destination_agent_id\n             FROM campaign_evaluation_qualifying_legs\n            WHERE evaluation_id = $1",
   "describe": {
     "columns": [
       {
@@ -30,5 +30,5 @@
       false
     ]
   },
-  "hash": "26e9085dbfcbd812cdb6bc5a4f769847e86341efd740d878f71bebafd1d750c5"
+  "hash": "ec016b527cd1adfeb3cc1374db0274b0cacc0f1939e697ba5232d42503485706"
 }

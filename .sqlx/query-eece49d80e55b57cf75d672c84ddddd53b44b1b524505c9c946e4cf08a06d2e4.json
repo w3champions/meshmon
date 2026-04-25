@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  AVG(pd.transit_loss_ratio)::REAL AS avg_loss_ratio\n             FROM campaign_evaluation_candidates c\n        LEFT JOIN campaign_evaluation_pair_details pd\n               ON pd.evaluation_id = c.evaluation_id\n              AND pd.candidate_destination_ip = c.destination_ip\n            WHERE c.evaluation_id = $1\n         GROUP BY c.evaluation_id, c.destination_ip, c.display_name, c.city,\n                  c.country_code, c.asn, c.network_operator, c.is_mesh_member,\n                  c.pairs_improved, c.pairs_total_considered, c.avg_improvement_ms\n            ORDER BY c.pairs_improved DESC,\n                     COALESCE(c.avg_improvement_ms, 0.0) DESC,\n                     c.destination_ip ASC",
+  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  c.avg_loss_ratio\n             FROM campaign_evaluation_candidates c\n            WHERE c.evaluation_id = $1\n            ORDER BY c.pairs_improved DESC,\n                     COALESCE(c.avg_improvement_ms, 0.0) DESC,\n                     c.destination_ip ASC",
   "describe": {
     "columns": [
       {
@@ -75,8 +75,8 @@
       false,
       false,
       true,
-      null
+      true
     ]
   },
-  "hash": "61789aab3ee117904e13fa74d703e1a77eebbb3957e8e14c4b338d41e73fec3f"
+  "hash": "eece49d80e55b57cf75d672c84ddddd53b44b1b524505c9c946e4cf08a06d2e4"
 }

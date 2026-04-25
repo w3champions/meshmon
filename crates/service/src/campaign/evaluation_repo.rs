@@ -149,8 +149,9 @@ pub async fn insert_evaluation(
             r#"INSERT INTO campaign_evaluation_candidates
                   (evaluation_id, destination_ip, display_name, city,
                    country_code, asn, network_operator, is_mesh_member,
-                   pairs_improved, pairs_total_considered, avg_improvement_ms)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+                   pairs_improved, pairs_total_considered, avg_improvement_ms,
+                   avg_loss_ratio)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
             evaluation_id,
             destination_ip,
             cand.display_name.as_deref(),
@@ -162,9 +163,31 @@ pub async fn insert_evaluation(
             cand.pairs_improved,
             cand.pairs_total_considered,
             cand.avg_improvement_ms,
+            cand.avg_loss_ratio,
         )
         .execute(&mut **tx)
         .await?;
+
+        // Persist the qualifying-leg set for this candidate. The
+        // evaluator captures these BEFORE the storage filter so the
+        // `Detail: good candidates` expansion sees every qualifying
+        // triple — the post-storage `pair_details` table can drop
+        // qualifying rows when `min_improvement_ms` /
+        // `min_improvement_ratio` are tight.
+        for (source_agent_id, destination_agent_id) in &bundle.qualifying_legs {
+            sqlx::query!(
+                r#"INSERT INTO campaign_evaluation_qualifying_legs
+                      (evaluation_id, candidate_destination_ip,
+                       source_agent_id, destination_agent_id)
+                   VALUES ($1, $2, $3, $4)"#,
+                evaluation_id,
+                destination_ip,
+                source_agent_id,
+                destination_agent_id,
+            )
+            .execute(&mut **tx)
+            .await?;
+        }
 
         // Pair-detail rows FK to the (evaluation_id, destination_ip)
         // tuple on `campaign_evaluation_candidates`, so the insert
@@ -242,12 +265,12 @@ pub async fn insert_evaluation(
 /// when the campaign has never been evaluated.
 ///
 /// Runs three queries (parent, candidates, unqualified_reasons) and
-/// joins in Rust. Pair-detail rows are NOT shipped on the wire — they
-/// stream through the paginated
-/// `…/candidates/{ip}/pair_details` endpoint instead. The candidates
-/// query does aggregate `avg_loss_ratio` over the per-pair table via
-/// a `LEFT JOIN … GROUP BY`, but the JOIN collapses to one row per
-/// candidate — the per-pair row fanout never leaves the database.
+/// joins in Rust. The candidate read path is JOIN-free: every
+/// candidate-level aggregate (including `avg_loss_ratio`) is sourced
+/// from the persisted column on `campaign_evaluation_candidates`.
+/// Per-pair detail rows are not shipped on the wire — they stream
+/// through the paginated `…/candidates/{ip}/pair_details` endpoint
+/// instead.
 pub async fn latest_evaluation_for_campaign(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -280,9 +303,10 @@ pub async fn latest_evaluation_for_campaign(
     // sort beyond "good candidates first"; the tiebreaker falls back
     // to `destination_ip` so the order is deterministic across reads.
     //
-    // `avg_loss_ratio` is recomputed here from the persisted
-    // pair-detail rows so a candidate row that suppressed every detail
-    // via storage filters still surfaces a meaningful headline loss.
+    // `avg_loss_ratio` is sourced from the persisted column — the
+    // evaluator computes it from the pre-storage-filter accumulator
+    // so the headline reading is independent of how aggressively
+    // `min_improvement_ms` / `min_improvement_ratio` prune detail rows.
     let candidate_rows = sqlx::query!(
         r#"SELECT c.destination_ip,
                   c.display_name,
@@ -294,15 +318,9 @@ pub async fn latest_evaluation_for_campaign(
                   c.pairs_improved,
                   c.pairs_total_considered,
                   c.avg_improvement_ms,
-                  AVG(pd.transit_loss_ratio)::REAL AS avg_loss_ratio
+                  c.avg_loss_ratio
              FROM campaign_evaluation_candidates c
-        LEFT JOIN campaign_evaluation_pair_details pd
-               ON pd.evaluation_id = c.evaluation_id
-              AND pd.candidate_destination_ip = c.destination_ip
             WHERE c.evaluation_id = $1
-         GROUP BY c.evaluation_id, c.destination_ip, c.display_name, c.city,
-                  c.country_code, c.asn, c.network_operator, c.is_mesh_member,
-                  c.pairs_improved, c.pairs_total_considered, c.avg_improvement_ms
             ORDER BY c.pairs_improved DESC,
                      COALESCE(c.avg_improvement_ms, 0.0) DESC,
                      c.destination_ip ASC"#,
@@ -914,18 +932,18 @@ pub struct GoodCandidatePairLeg {
     pub destination_agent_id: String,
 }
 
-/// Read every `qualifies = true` pair-detail row attached to the
-/// campaign's most recent evaluation. Used by
-/// [`crate::campaign::handlers::detail`]'s
-/// `DetailScope::GoodCandidates` branch to expand qualifying triples
-/// into measurement targets without round-tripping through the wire
-/// DTO. Returns `Ok(None)` when the campaign has never been evaluated.
+/// Expand the qualifying-leg set for the campaign's most recent
+/// evaluation. Used by [`crate::campaign::handlers::detail`]'s
+/// `DetailScope::GoodCandidates` branch to drive measurement-target
+/// dispatch. Returns `Ok(None)` when the campaign has never been
+/// evaluated.
 ///
-/// Only candidates with `pairs_improved >= 1` are considered — the
-/// pre-T55 implementation read this flag off the assembled
-/// [`EvaluationCandidateDto`] before drilling into its nested
-/// `pair_details`. We mirror the same gate in SQL via a `JOIN` on
-/// `campaign_evaluation_candidates`.
+/// Reads `campaign_evaluation_qualifying_legs` directly — the
+/// evaluator populates that table from the pre-storage-filter
+/// qualifying set, so the dispatch sees every triple a candidate
+/// scored as `qualifies = true` regardless of how aggressively
+/// `min_improvement_ms` / `min_improvement_ratio` prune the
+/// `campaign_evaluation_pair_details` mirror table.
 pub async fn good_candidate_pair_legs(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -944,14 +962,9 @@ pub async fn good_candidate_pair_legs(
     };
 
     let rows = sqlx::query!(
-        r#"SELECT pd.candidate_destination_ip, pd.source_agent_id, pd.destination_agent_id
-             FROM campaign_evaluation_pair_details pd
-             JOIN campaign_evaluation_candidates c
-               ON c.evaluation_id = pd.evaluation_id
-              AND c.destination_ip = pd.candidate_destination_ip
-            WHERE pd.evaluation_id = $1
-              AND pd.qualifies = true
-              AND c.pairs_improved >= 1"#,
+        r#"SELECT candidate_destination_ip, source_agent_id, destination_agent_id
+             FROM campaign_evaluation_qualifying_legs
+            WHERE evaluation_id = $1"#,
         evaluation_id,
     )
     .fetch_all(pool)

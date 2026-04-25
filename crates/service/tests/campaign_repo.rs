@@ -1742,6 +1742,7 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             mtr_measurement_id_xb: None,
             destination_hostname: None,
         }],
+        qualifying_legs: Vec::new(),
     };
     let outputs = EvaluationOutputs {
         baseline_pair_count: 1,

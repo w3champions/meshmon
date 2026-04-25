@@ -136,20 +136,28 @@ pub struct EvaluationOutputs {
     pub pair_details_by_candidate: Vec<PairDetailsForCandidate>,
 }
 
-/// Sidecar bundle of pair-detail rows for a single candidate, used to
-/// thread the evaluator's per-pair scoring through to
-/// `insert_evaluation` without nesting it in the wire DTO. The
-/// candidate at the same index in `EvaluationOutputs.results.candidates`
-/// owns `destination_ip` as a string; this struct repeats the parsed
-/// IP so persistence can FK off it directly.
+/// Sidecar bundle of per-candidate persistence rows. Threads the
+/// evaluator's per-pair scoring through to `insert_evaluation` without
+/// nesting it in the wire DTO. The candidate at the same index in
+/// `EvaluationOutputs.results.candidates` owns `destination_ip` as a
+/// string; this struct repeats the parsed IP so persistence can FK off
+/// it directly.
 #[derive(Debug, Clone)]
 pub struct PairDetailsForCandidate {
     /// Transit destination IP — same value as the matching candidate's
     /// `destination_ip`, parsed.
     pub destination_ip: IpAddr,
     /// Pair-detail rows the storage filter let through for this
-    /// candidate.
+    /// candidate. Used for the paginated drilldown surface and the
+    /// candidate-level loss aggregate.
     pub pair_details: Vec<EvaluationPairDetailDto>,
+    /// Every `(source_agent_id, destination_agent_id)` pair whose
+    /// triple qualified for this candidate, captured BEFORE the storage
+    /// filter runs. Persisted to `campaign_evaluation_qualifying_legs`
+    /// so `Detail: good candidates` expands the full qualifying set
+    /// regardless of how aggressively the storage floors prune
+    /// `pair_details`.
+    pub qualifying_legs: Vec<(String, String)>,
 }
 
 /// Errors surfaced by [`evaluate`].
@@ -724,6 +732,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             xb_legs.iter().map(|l| (l.b_id.as_str(), l)).collect();
 
         let mut pair_details: Vec<EvaluationPairDetailDto> = Vec::new();
+        let mut qualifying_legs: Vec<(String, String)> = Vec::new();
         let mut pairs_improved = 0i32;
         let mut pairs_total_considered = 0i32;
         let mut improvements: Vec<f32> = Vec::new();
@@ -821,6 +830,11 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             if qualifies {
                 pairs_improved += 1;
                 improvements.push(improvement_ms);
+                // Capture the qualifying leg for `Detail: good candidates`
+                // BEFORE the storage filter runs — `Detail: good candidates`
+                // expands every qualifying triple, and a tight storage floor
+                // would otherwise drop legs from the dispatch's view.
+                qualifying_legs.push((a_id.clone(), b_id.clone()));
             }
             compound_losses.push(compound_loss_ratio);
 
@@ -893,6 +907,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
         pair_details_per_candidate.push(PairDetailsForCandidate {
             destination_ip: *x_ip,
             pair_details,
+            qualifying_legs,
         });
     }
 
