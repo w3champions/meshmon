@@ -1089,12 +1089,15 @@ async fn good_candidates_detail_covers_storage_filtered_qualifying_legs() {
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
 
-    // Sanity: only the a↔b pair survives the storage filter.
+    // Sanity: only the a↔b pair survives the storage filter — both
+    // directions (a→b and b→a) clear the 50 ms gate; the four
+    // a/b↔c triples have improvement=4 and get dropped.
     let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.199").await;
     assert_eq!(
         entries.as_array().unwrap().len(),
-        1,
-        "tight storage filter drops 5 of 6 qualifying rows: {entries}"
+        2,
+        "tight storage filter drops 4 of 6 qualifying rows (the a↔b pair \
+         clears 50 ms in both directions): {entries}"
     );
 
     // Detail: good_candidates expansion must cover every qualifying
