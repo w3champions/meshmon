@@ -81,56 +81,6 @@ function makeEvaluation(): Evaluation {
           avg_improvement_ms: 30,
           avg_loss_ratio: 0.001,
           composite_score: 20,
-          pair_details: [
-            {
-              source_agent_id: "agent-a",
-              destination_agent_id: "agent-b",
-              destination_ip: "10.0.0.1",
-              direct_rtt_ms: 50,
-              direct_stddev_ms: 2,
-              direct_loss_ratio: 0.001,
-              direct_source: "active_probe",
-              transit_rtt_ms: 20,
-              transit_stddev_ms: 1,
-              transit_loss_ratio: 0.0005,
-              improvement_ms: 30,
-              qualifies: true,
-              mtr_measurement_id_ax: null,
-              mtr_measurement_id_xb: null,
-            },
-            {
-              source_agent_id: "agent-b",
-              destination_agent_id: "agent-c",
-              destination_ip: "10.0.0.1",
-              direct_rtt_ms: 50,
-              direct_stddev_ms: 2,
-              direct_loss_ratio: 0.001,
-              direct_source: "active_probe",
-              transit_rtt_ms: 20,
-              transit_stddev_ms: 1,
-              transit_loss_ratio: 0.0005,
-              improvement_ms: 30,
-              qualifies: true,
-              mtr_measurement_id_ax: null,
-              mtr_measurement_id_xb: null,
-            },
-            {
-              source_agent_id: "agent-a",
-              destination_agent_id: "agent-d",
-              destination_ip: "10.0.0.1",
-              direct_rtt_ms: 50,
-              direct_stddev_ms: 2,
-              direct_loss_ratio: 0.001,
-              direct_source: "active_probe",
-              transit_rtt_ms: 20,
-              transit_stddev_ms: 1,
-              transit_loss_ratio: 0.0005,
-              improvement_ms: -5,
-              qualifies: false,
-              mtr_measurement_id_ax: null,
-              mtr_measurement_id_xb: null,
-            },
-          ],
         },
       ],
       unqualified_reasons: {},
@@ -299,7 +249,7 @@ describe("OverflowMenu — Detail: all dialog", () => {
 });
 
 describe("OverflowMenu — Detail: good candidates dialog", () => {
-  test("good-candidates preview matches the backend's (agent, transit_ip) dedup", async () => {
+  test("good-candidates preview shows the upper-bound count", async () => {
     const user = userEvent.setup();
     renderMenu(makeCampaign({ state: "evaluated" }), makeEvaluation());
 
@@ -309,12 +259,15 @@ describe("OverflowMenu — Detail: good candidates dialog", () => {
     await waitFor(() => {
       expect(screen.getByTestId("detail-cost-preview")).toBeInTheDocument();
     });
-    // Qualifying pair_details at transit 10.0.0.1:
-    //   (agent-a → agent-b), (agent-b → agent-c)
-    // Dedupe on `(agent, transit_ip)` yields {(a, .1), (b, .1), (c, .1)}
-    // — agent-b appears in both triples against the same transit, so it
-    // collapses. 3 deduped entries × 2 measurements = 6.
-    expect(screen.getByTestId("cost-preview-pairs")).toHaveTextContent("6");
+    // T55: pair-detail rows live behind the paginated endpoint, so the
+    // preview can no longer mirror the exact `(agent, transit_ip)`
+    // dedup client-side. The estimator returns
+    // `4 × Σ candidate.pairs_improved` as an upper bound: each
+    // qualifying triple contributes one source-side and one
+    // destination-side `(agent, transit)` entry pre-dedup, each of
+    // which expands into ping + MTR. Fixture has one candidate with
+    // `pairs_improved = 2` ⇒ 4 × 2 = 8.
+    expect(screen.getByTestId("cost-preview-pairs")).toHaveTextContent("8");
   });
 
   test("confirm dispatches a scope=good_candidates detail request", async () => {

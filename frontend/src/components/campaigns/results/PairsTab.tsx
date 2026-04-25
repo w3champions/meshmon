@@ -5,7 +5,7 @@
  * options (A→X→B), this tab surfaces every configured baseline pair (A→B)
  * alongside its resolution state and dispatch history. The row action menu
  * is the operator's lever for per-pair re-measurement and detail dispatch —
- * Candidates' DrilldownDrawer is read-only per pair and deliberately does
+ * Candidates' DrilldownDialog is read-only per pair and deliberately does
  * not carry these buttons.
  */
 

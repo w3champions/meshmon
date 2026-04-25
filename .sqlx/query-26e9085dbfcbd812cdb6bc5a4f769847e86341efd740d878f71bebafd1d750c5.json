@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pd.candidate_destination_ip, pd.source_agent_id, pd.destination_agent_id\n             FROM campaign_evaluation_pair_details pd\n             JOIN campaign_evaluation_candidates c\n               ON c.evaluation_id = pd.evaluation_id\n              AND c.destination_ip = pd.candidate_destination_ip\n            WHERE pd.evaluation_id = $1\n              AND pd.qualifies = true\n              AND c.pairs_improved >= 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "candidate_destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_agent_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "destination_agent_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "26e9085dbfcbd812cdb6bc5a4f769847e86341efd740d878f71bebafd1d750c5"
+}

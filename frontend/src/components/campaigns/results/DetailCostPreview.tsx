@@ -93,33 +93,33 @@ function countSettledPairs(campaign: Campaign): number {
 }
 
 /**
- * Enqueue count for `scope=good_candidates`, matching the backend's
- * `POST /detail` handler exactly. For each qualifying triple
- * `(source, destination_agent, transit_ip)` the handler appends two
- * entries — `(source, transit_ip)` and `(destination_agent, transit_ip)` —
- * into a set that is then sort+deduped, and finally expanded into
- * `detail_ping + detail_mtr` rows (× 2 measurements per deduped entry).
+ * Upper-bound enqueue count for `scope=good_candidates`.
  *
- * The dedup is `(agent, transit_ip)` — NOT `(source, destination_agent,
- * transit_ip)` — so triples that share an agent against the same transit
- * collapse to one enqueue, not four. Mirroring that dedup here keeps the
- * preview count aligned with the actual `DetailResponse.pairs_enqueued`
- * the server returns.
+ * Pre-T55 the candidate DTO carried every pair_detail row, so the
+ * preview could mirror the backend's exact `(agent, transit_ip)` dedup
+ * locally. Since T55 the wire DTO no longer nests pair_details — they
+ * live behind the paginated endpoint — and reproducing the exact dedup
+ * would require fetching every page of every qualifying candidate's
+ * pair-detail set just to render a preview number.
  *
- * Also gates candidates on `pairs_improved >= 1` to match the backend's
+ * The estimate is therefore an upper bound: each qualifying triple
+ * contributes one source-side and one destination-side
+ * `(agent, transit_ip)` entry pre-dedup, each expanding to a
+ * ping + MTR pair. So `4 × Σ candidate.pairs_improved` is the worst
+ * case; the actual server count after `(agent, transit_ip)` dedup is
+ * usually lower. The dialog labels the figure as a "≤ N" upper bound
+ * so the operator knows the real cost can come in under that.
+ *
+ * Gates candidates on `pairs_improved >= 1` to match the backend's
  * `results.candidates.iter().filter(|c| c.pairs_improved >= 1)`.
  */
 function countGoodCandidateMeasurements(evaluation: Evaluation): number {
-  const seen = new Set<string>();
+  let pairs_improved_total = 0;
   for (const candidate of evaluation.results.candidates) {
     if (candidate.pairs_improved < 1) continue;
-    for (const pd of candidate.pair_details) {
-      if (!pd.qualifies) continue;
-      seen.add(`${pd.source_agent_id}|${candidate.destination_ip}`);
-      seen.add(`${pd.destination_agent_id}|${candidate.destination_ip}`);
-    }
+    pairs_improved_total += candidate.pairs_improved;
   }
-  return 2 * seen.size;
+  return 4 * pairs_improved_total;
 }
 
 interface CostEstimate {
@@ -156,7 +156,7 @@ export function computeCostEstimate(
         pairs_enqueued: pairsEnqueued,
         description:
           pairsEnqueued > 0
-            ? `Expands qualifying triples into ${pairsEnqueued.toLocaleString()} detail measurements (ping + MTR per de-duped agent → transit leg).`
+            ? `Upper bound: up to ${pairsEnqueued.toLocaleString()} detail measurements (ping + MTR per agent → transit leg, before server-side (agent, transit) dedup).`
             : "No qualifying pairs in the current evaluation — re-run Evaluate if the thresholds changed.",
       };
     }

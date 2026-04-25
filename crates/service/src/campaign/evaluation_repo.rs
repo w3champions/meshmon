@@ -95,8 +95,26 @@ pub async fn insert_evaluation(
     .await?;
 
     // Candidates — keyed on `(evaluation_id, destination_ip)` so the
-    // child `pair_details` FK can chain off the same tuple.
-    for cand in &outputs.results.candidates {
+    // child `pair_details` FK can chain off the same tuple. The
+    // evaluator emits the candidate row and its pair-detail rows in
+    // lockstep `Vec`s indexed identically — see [`EvaluationOutputs`].
+    if outputs.results.candidates.len() != outputs.pair_details_by_candidate.len() {
+        // Defensive: the evaluator builds these in parallel inside
+        // `evaluate()` so a length mismatch would be a writer-side
+        // bug, not operator input. Aborting the tx is preferable to
+        // silently persisting only one half.
+        return Err(sqlx::Error::Protocol(format!(
+            "evaluator output length mismatch: candidates={}, pair_details_by_candidate={}",
+            outputs.results.candidates.len(),
+            outputs.pair_details_by_candidate.len()
+        )));
+    }
+    for (cand, bundle) in outputs
+        .results
+        .candidates
+        .iter()
+        .zip(outputs.pair_details_by_candidate.iter())
+    {
         // The evaluator owns `destination_ip` string formatting so an
         // unparseable value would be a bug in this service, not
         // operator input. Abort the transaction rather than silently
@@ -117,6 +135,15 @@ pub async fn insert_evaluation(
                 cand.destination_ip
             ))
         })?;
+        // Defensive: the parallel-Vec contract requires the bundle's
+        // parsed IP to match the candidate's stringified one. A
+        // mismatch would point pair_details at the wrong candidate row.
+        if bundle.destination_ip != ip {
+            return Err(sqlx::Error::Protocol(format!(
+                "evaluator pair_details_by_candidate IP mismatch: candidate={ip}, bundle={}",
+                bundle.destination_ip
+            )));
+        }
         let destination_ip = IpNetwork::from(ip);
         sqlx::query!(
             r#"INSERT INTO campaign_evaluation_candidates
@@ -142,7 +169,7 @@ pub async fn insert_evaluation(
         // Pair-detail rows FK to the (evaluation_id, destination_ip)
         // tuple on `campaign_evaluation_candidates`, so the insert
         // only succeeds once the candidate is in place.
-        for pd in &cand.pair_details {
+        for pd in &bundle.pair_details {
             sqlx::query!(
                 r#"INSERT INTO campaign_evaluation_pair_details
                       (evaluation_id, candidate_destination_ip,
@@ -214,10 +241,12 @@ pub async fn insert_evaluation(
 /// parent + child rows into an [`EvaluationDto`]. Returns `Ok(None)`
 /// when the campaign has never been evaluated.
 ///
-/// Runs one query per table (parent, candidates, pair_details,
-/// unqualified_reasons) and joins in Rust. The join key is the parent
-/// evaluation's `id`; all child queries filter on that single value so
-/// the common case is four index-scan round-trips.
+/// Runs three queries (parent, candidates, unqualified_reasons) and
+/// joins in Rust. Pair-detail rows are NOT loaded here — the wire DTO
+/// no longer carries them; they are served only via the paginated
+/// `…/candidates/{ip}/pair_details` endpoint. The candidate-level
+/// `avg_loss_ratio` is read from the persisted column so this path
+/// stays JOIN-free.
 pub async fn latest_evaluation_for_campaign(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -249,32 +278,33 @@ pub async fn latest_evaluation_for_campaign(
     // a stable approximation. The frontend doesn't rely on an exact
     // sort beyond "good candidates first"; the tiebreaker falls back
     // to `destination_ip` so the order is deterministic across reads.
+    //
+    // `avg_loss_ratio` is recomputed here from the persisted
+    // pair-detail rows so a candidate row that suppressed every detail
+    // via storage filters still surfaces a meaningful headline loss.
     let candidate_rows = sqlx::query!(
-        r#"SELECT destination_ip, display_name, city, country_code, asn,
-                  network_operator, is_mesh_member, pairs_improved,
-                  pairs_total_considered, avg_improvement_ms
-             FROM campaign_evaluation_candidates
-            WHERE evaluation_id = $1
-            ORDER BY pairs_improved DESC,
-                     COALESCE(avg_improvement_ms, 0.0) DESC,
-                     destination_ip ASC"#,
-        parent.id,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let pair_detail_rows = sqlx::query!(
-        r#"SELECT candidate_destination_ip, source_agent_id, destination_agent_id,
-                  direct_rtt_ms, direct_stddev_ms, direct_loss_ratio,
-                  direct_source AS "direct_source: DirectSource",
-                  transit_rtt_ms, transit_stddev_ms, transit_loss_ratio,
-                  improvement_ms, qualifies,
-                  mtr_measurement_id_ax, mtr_measurement_id_xb
-             FROM campaign_evaluation_pair_details
-            WHERE evaluation_id = $1
-            ORDER BY candidate_destination_ip ASC,
-                     source_agent_id ASC,
-                     destination_agent_id ASC"#,
+        r#"SELECT c.destination_ip,
+                  c.display_name,
+                  c.city,
+                  c.country_code,
+                  c.asn,
+                  c.network_operator,
+                  c.is_mesh_member,
+                  c.pairs_improved,
+                  c.pairs_total_considered,
+                  c.avg_improvement_ms,
+                  AVG(pd.transit_loss_ratio)::REAL AS avg_loss_ratio
+             FROM campaign_evaluation_candidates c
+        LEFT JOIN campaign_evaluation_pair_details pd
+               ON pd.evaluation_id = c.evaluation_id
+              AND pd.candidate_destination_ip = c.destination_ip
+            WHERE c.evaluation_id = $1
+         GROUP BY c.evaluation_id, c.destination_ip, c.display_name, c.city,
+                  c.country_code, c.asn, c.network_operator, c.is_mesh_member,
+                  c.pairs_improved, c.pairs_total_considered, c.avg_improvement_ms
+            ORDER BY c.pairs_improved DESC,
+                     COALESCE(c.avg_improvement_ms, 0.0) DESC,
+                     c.destination_ip ASC"#,
         parent.id,
     )
     .fetch_all(pool)
@@ -289,59 +319,18 @@ pub async fn latest_evaluation_for_campaign(
     .fetch_all(pool)
     .await?;
 
-    // Group pair_details by their candidate IP so the assembly loop
-    // below is O(candidates + pair_details), not O(candidates *
-    // pair_details).
-    let mut pair_details_by_ip: std::collections::HashMap<IpAddr, Vec<EvaluationPairDetailDto>> =
-        std::collections::HashMap::new();
-    for pd in pair_detail_rows {
-        let cand_ip = pd.candidate_destination_ip.ip();
-        pair_details_by_ip
-            .entry(cand_ip)
-            .or_default()
-            .push(EvaluationPairDetailDto {
-                source_agent_id: pd.source_agent_id,
-                destination_agent_id: pd.destination_agent_id,
-                destination_ip: cand_ip.to_string(),
-                direct_rtt_ms: pd.direct_rtt_ms,
-                direct_stddev_ms: pd.direct_stddev_ms,
-                direct_loss_ratio: pd.direct_loss_ratio,
-                direct_source: pd.direct_source,
-                transit_rtt_ms: pd.transit_rtt_ms,
-                transit_stddev_ms: pd.transit_stddev_ms,
-                transit_loss_ratio: pd.transit_loss_ratio,
-                improvement_ms: pd.improvement_ms,
-                qualifies: pd.qualifies,
-                mtr_measurement_id_ax: pd.mtr_measurement_id_ax,
-                mtr_measurement_id_xb: pd.mtr_measurement_id_xb,
-                destination_hostname: None,
-            });
-    }
-
-    // Assemble candidates. `avg_loss_ratio` and `composite_score`
-    // aren't persisted (they're derivable); recompute them from the
-    // pair_details here so the wire DTO stays backwards-compatible.
+    // Assemble candidates. `composite_score` isn't persisted (it's a
+    // derivable read-time value); recompute it from the persisted
+    // counters so the wire DTO matches what the evaluator emits at
+    // `/evaluate` time.
     let mut candidates: Vec<EvaluationCandidateDto> = Vec::with_capacity(candidate_rows.len());
     for c in candidate_rows {
         let cand_ip = c.destination_ip.ip();
-        let pair_details = pair_details_by_ip.remove(&cand_ip).unwrap_or_default();
         let composite_score = if parent.baseline_pair_count > 0 {
             (c.pairs_improved as f32 / parent.baseline_pair_count as f32)
                 * c.avg_improvement_ms.unwrap_or(0.0)
         } else {
             0.0
-        };
-        // Mean compound loss across transit rows that cleared the loss
-        // gate (`qualifies==true` implies loss_ok, but the evaluator
-        // also stores pair_details where the qualify predicate failed
-        // for non-loss reasons — those still carry a valid
-        // transit_loss_ratio). Mirror the evaluator's definition in
-        // `eval::evaluate`.
-        let avg_loss_ratio = if pair_details.is_empty() {
-            None
-        } else {
-            let losses: Vec<f32> = pair_details.iter().map(|p| p.transit_loss_ratio).collect();
-            Some(losses.iter().sum::<f32>() / losses.len() as f32)
         };
         candidates.push(EvaluationCandidateDto {
             destination_ip: cand_ip.to_string(),
@@ -354,9 +343,8 @@ pub async fn latest_evaluation_for_campaign(
             pairs_improved: c.pairs_improved,
             pairs_total_considered: c.pairs_total_considered,
             avg_improvement_ms: c.avg_improvement_ms,
-            avg_loss_ratio,
+            avg_loss_ratio: c.avg_loss_ratio,
             composite_score,
-            pair_details,
             hostname: None,
         });
     }
@@ -906,4 +894,75 @@ pub async fn latest_pair_details_for_candidate(
         total: total.max(0) as u64,
         next_cursor,
     })
+}
+
+/// One row of `(candidate_destination_ip, source_agent_id, destination_agent_id)`
+/// for every qualifying pair-detail attached to the campaign's most
+/// recent evaluation. Used by the `/detail?scope=good_candidates`
+/// handler to expand a candidate's qualifying triples into
+/// `(source_agent_id, transit_ip)` and `(destination_agent_id,
+/// transit_ip)` measurement targets.
+#[derive(Debug, Clone)]
+pub struct GoodCandidatePairLeg {
+    /// Transit candidate destination IP (X). Equal to the matching
+    /// candidate's `destination_ip`.
+    pub candidate_destination_ip: IpAddr,
+    /// Source agent of the baseline pair (A).
+    pub source_agent_id: String,
+    /// Destination agent of the baseline pair (B).
+    pub destination_agent_id: String,
+}
+
+/// Read every `qualifies = true` pair-detail row attached to the
+/// campaign's most recent evaluation. Used by
+/// [`crate::campaign::handlers::detail`]'s
+/// `DetailScope::GoodCandidates` branch to expand qualifying triples
+/// into measurement targets without round-tripping through the wire
+/// DTO. Returns `Ok(None)` when the campaign has never been evaluated.
+///
+/// Only candidates with `pairs_improved >= 1` are considered — the
+/// pre-T55 implementation read this flag off the assembled
+/// [`EvaluationCandidateDto`] before drilling into its nested
+/// `pair_details`. We mirror the same gate in SQL via a `JOIN` on
+/// `campaign_evaluation_candidates`.
+pub async fn good_candidate_pair_legs(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> sqlx::Result<Option<Vec<GoodCandidatePairLeg>>> {
+    let evaluation_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"SELECT id FROM campaign_evaluations
+            WHERE campaign_id = $1
+            ORDER BY evaluated_at DESC
+            LIMIT 1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(evaluation_id) = evaluation_id else {
+        return Ok(None);
+    };
+
+    let rows = sqlx::query!(
+        r#"SELECT pd.candidate_destination_ip, pd.source_agent_id, pd.destination_agent_id
+             FROM campaign_evaluation_pair_details pd
+             JOIN campaign_evaluation_candidates c
+               ON c.evaluation_id = pd.evaluation_id
+              AND c.destination_ip = pd.candidate_destination_ip
+            WHERE pd.evaluation_id = $1
+              AND pd.qualifies = true
+              AND c.pairs_improved >= 1"#,
+        evaluation_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Some(
+        rows.into_iter()
+            .map(|r| GoodCandidatePairLeg {
+                candidate_destination_ip: r.candidate_destination_ip.ip(),
+                source_agent_id: r.source_agent_id,
+                destination_agent_id: r.destination_agent_id,
+            })
+            .collect(),
+    ))
 }

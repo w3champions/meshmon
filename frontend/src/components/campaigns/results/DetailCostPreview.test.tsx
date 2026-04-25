@@ -58,7 +58,9 @@ function makeEvaluation(candidates: Evaluation["results"]["candidates"]): Evalua
     evaluation_mode: "optimization",
     baseline_pair_count: 6,
     candidates_total: candidates.length,
-    candidates_good: candidates.filter((c) => c.pair_details.some((pd) => pd.qualifies)).length,
+    // T55: pair-detail rows live behind the paginated endpoint, so
+    // candidates_good is approximated from `pairs_improved >= 1`.
+    candidates_good: candidates.filter((c) => c.pairs_improved >= 1).length,
     avg_improvement_ms: 0,
     results: { candidates, unqualified_reasons: {} },
   };
@@ -66,8 +68,7 @@ function makeEvaluation(candidates: Evaluation["results"]["candidates"]): Evalua
 
 function qualifyingCandidate(
   destinationIp: string,
-  triples: Array<[string, string]>,
-  qualifies: boolean = true,
+  pairs_improved: number,
 ): Evaluation["results"]["candidates"][number] {
   return {
     destination_ip: destinationIp,
@@ -77,27 +78,11 @@ function qualifyingCandidate(
     asn: null,
     network_operator: null,
     is_mesh_member: false,
-    pairs_improved: triples.length,
-    pairs_total_considered: triples.length,
+    pairs_improved,
+    pairs_total_considered: pairs_improved,
     avg_improvement_ms: 10,
     avg_loss_ratio: 0.001,
     composite_score: 10,
-    pair_details: triples.map(([src, dst]) => ({
-      source_agent_id: src,
-      destination_agent_id: dst,
-      destination_ip: destinationIp,
-      direct_rtt_ms: 50,
-      direct_stddev_ms: 2,
-      direct_loss_ratio: 0.001,
-      direct_source: "active_probe",
-      transit_rtt_ms: 20,
-      transit_stddev_ms: 1,
-      transit_loss_ratio: 0.0005,
-      improvement_ms: 30,
-      qualifies,
-      mtr_measurement_id_ax: null,
-      mtr_measurement_id_xb: null,
-    })),
   };
 }
 
@@ -158,31 +143,25 @@ describe("computeCostEstimate", () => {
     expect(est.pairs_enqueued).toBe(20);
   });
 
-  test("scope=good_candidates mirrors the backend's (agent, transit_ip) dedup", () => {
-    // The backend's `POST /detail` handler appends `(source, transit)`
-    // and `(destination_agent, transit)` per qualifying triple, then
-    // sort+dedupes on that tuple (not on triple identity) before
-    // expanding into ping+MTR rows. Two triples sharing an agent against
-    // the same transit must collapse to one (agent, transit) entry.
+  test("scope=good_candidates returns the upper-bound 4 × Σ pairs_improved", () => {
+    // T55 dropped pair-detail rows from the candidate's wire shape, so
+    // the preview no longer mirrors the backend's exact
+    // `(agent, transit_ip)` dedup — that requires fetching every page
+    // of every candidate's pair-details, which is too expensive for a
+    // preview render. The estimator returns
+    // `4 × Σ candidate.pairs_improved` as an upper bound: each
+    // qualifying triple contributes one source-side and one
+    // destination-side `(agent, transit)` entry pre-dedup, each
+    // expanding into ping + MTR.
     //
-    // Fixture:
-    //  - candidate-one (transit=10.0.0.1): triples (a→b), (c→d)
-    //      contributes {(a, .1), (b, .1), (c, .1), (d, .1)} = 4 entries
-    //  - candidate-two (transit=10.0.0.2): triples (a→b), (a→d)
-    //      contributes {(a, .2), (b, .2), (d, .2)} = 3 entries
-    //      (agent `a` against transit .2 appears in both triples → dedup)
-    //  - candidate-three (transit=10.0.0.3): one unqualified triple → 0 entries
-    // Total deduped = 7 entries × 2 measurements (ping+MTR) = 14.
+    // Fixture: pairs_improved totals 5 (2 + 2 + 1) — but the third
+    // candidate is filtered out by the qualifying-triple test below.
+    // Without the qualifying gate the upper bound is `4 × (2 + 2) = 16`.
     const candidates = [
-      qualifyingCandidate("10.0.0.1", [
-        ["agent-a", "agent-b"],
-        ["agent-c", "agent-d"],
-      ]),
-      qualifyingCandidate("10.0.0.2", [
-        ["agent-a", "agent-b"],
-        ["agent-a", "agent-d"],
-      ]),
-      qualifyingCandidate("10.0.0.3", [["agent-a", "agent-b"]], false),
+      qualifyingCandidate("10.0.0.1", 2),
+      qualifyingCandidate("10.0.0.2", 2),
+      // pairs_improved = 0 ⇒ filtered out (per the backend rule).
+      { ...qualifyingCandidate("10.0.0.3", 1), pairs_improved: 0 },
     ];
     const evaluation = makeEvaluation(candidates);
     const est = computeCostEstimate(
@@ -191,19 +170,14 @@ describe("computeCostEstimate", () => {
       evaluation,
       undefined,
     );
-    expect(est.pairs_enqueued).toBe(14);
+    expect(est.pairs_enqueued).toBe(16);
   });
 
   test("scope=good_candidates skips candidates with pairs_improved=0", () => {
     // The backend filters `candidates.iter().filter(|c| c.pairs_improved >= 1)`
-    // before expanding. A candidate with qualifying pair_details but
-    // `pairs_improved=0` must be ignored.
-    const candidates = [
-      {
-        ...qualifyingCandidate("10.0.0.1", [["agent-a", "agent-b"]]),
-        pairs_improved: 0,
-      },
-    ];
+    // before expanding. A candidate with `pairs_improved=0` contributes
+    // nothing to the upper-bound estimate.
+    const candidates = [{ ...qualifyingCandidate("10.0.0.1", 1), pairs_improved: 0 }];
     const evaluation = makeEvaluation(candidates);
     const est = computeCostEstimate(
       "good_candidates",
@@ -259,7 +233,7 @@ describe("DetailCostPreview — dialog behaviour", () => {
     // enabled so the server can reach its `no_evaluation` branch — the race
     // the toast is designed for (evaluation disappeared between the UI
     // rendering and the server-side dispatch).
-    const evaluation = makeEvaluation([qualifyingCandidate("10.0.0.1", [["agent-a", "agent-b"]])]);
+    const evaluation = makeEvaluation([qualifyingCandidate("10.0.0.1", 1)]);
     renderDialog({ scope: "good_candidates", evaluation });
 
     await user.click(screen.getByTestId("cost-preview-confirm"));
@@ -288,8 +262,10 @@ describe("DetailCostPreview — dialog behaviour", () => {
   });
 
   test("scope=good_candidates with zero qualifying triples shows no-pairs label", () => {
+    // pairs_improved = 0 ⇒ candidate is filtered out of the upper-bound
+    // estimate, mirroring the backend's `pairs_improved >= 1` gate.
     const evaluation = makeEvaluation([
-      qualifyingCandidate("10.0.0.1", [["agent-a", "agent-b"]], false),
+      { ...qualifyingCandidate("10.0.0.1", 1), pairs_improved: 0 },
     ]);
     renderDialog({
       scope: "good_candidates",

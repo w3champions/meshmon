@@ -445,30 +445,26 @@ async fn stamp_pair_dtos(
     }
 }
 
-/// Stamp `hostname` on [`EvaluationDto`] candidates and
-/// `destination_hostname` on their nested `pair_details`.
+/// Stamp `hostname` on [`EvaluationDto`] candidates.
 ///
-/// Collects all destination IPs from the full nested structure, bulk-
-/// resolves in one DB round-trip, and writes matched hostnames back.
-/// Non-fatal: on DB error, logs at `warn!` and returns without hostnames.
+/// Collects every candidate's `destination_ip`, bulk-resolves in one DB
+/// round-trip, and writes matched hostnames back. Pair-detail rows are
+/// no longer carried on the wire DTO — the paginated
+/// `…/candidates/{ip}/pair_details` endpoint stamps its own page-level
+/// hostnames in `get_candidate_pair_details`.
+///
+/// Non-fatal: on DB error, logs at `warn!` and returns without
+/// hostnames.
 async fn stamp_evaluation_dto(
     state: &AppState,
     session: &crate::hostname::SessionId,
     dto: &mut EvaluationDto,
 ) {
-    // Collect all unique IPs in one flat pass.
     let ips: Vec<IpAddr> = dto
         .results
         .candidates
         .iter()
-        .flat_map(|c| {
-            let cand_ip = c.destination_ip.parse::<IpAddr>().ok();
-            let detail_ips = c
-                .pair_details
-                .iter()
-                .filter_map(|pd| pd.destination_ip.parse::<IpAddr>().ok());
-            cand_ip.into_iter().chain(detail_ips)
-        })
+        .filter_map(|c| c.destination_ip.parse::<IpAddr>().ok())
         .collect();
 
     if ips.is_empty() {
@@ -481,13 +477,6 @@ async fn stamp_evaluation_dto(
                 if let Ok(ip) = cand.destination_ip.parse::<IpAddr>() {
                     if let Some(Some(h)) = map.get(&ip) {
                         cand.hostname = Some(h.clone());
-                    }
-                }
-                for pd in cand.pair_details.iter_mut() {
-                    if let Ok(ip) = pd.destination_ip.parse::<IpAddr>() {
-                        if let Some(Some(h)) = map.get(&ip) {
-                            pd.destination_hostname = Some(h.clone());
-                        }
                     }
                 }
             }
@@ -1114,8 +1103,12 @@ pub async fn detail(
                 )
                     .into_response();
             }
-            let dto = match evaluation_repo::latest_evaluation_for_campaign(&state.pool, id).await {
-                Ok(Some(r)) => r,
+            // Pair-detail rows live only in `campaign_evaluation_pair_details` —
+            // they are not nested on the wire DTO since T55, so the
+            // expansion reads them directly from the DB instead of
+            // round-tripping through `latest_evaluation_for_campaign`.
+            let legs = match evaluation_repo::good_candidate_pair_legs(&state.pool, id).await {
+                Ok(Some(rows)) => rows,
                 Ok(None) => {
                     // Defensive: `state=evaluated` implies a row exists
                     // (persist_evaluation is the only writer that sets
@@ -1131,24 +1124,12 @@ pub async fn detail(
                 Err(e) => return db_error("campaign::detail::eval", e),
             };
             let mut acc: Vec<(String, IpAddr)> = Vec::new();
-            for cand in dto
-                .results
-                .candidates
-                .iter()
-                .filter(|c| c.pairs_improved >= 1)
-            {
-                let Ok(transit_ip) = IpAddr::from_str(&cand.destination_ip) else {
-                    tracing::warn!(
-                        campaign_id = %id,
-                        destination_ip = %cand.destination_ip,
-                        "campaign::detail: skipping candidate with unparseable destination_ip"
-                    );
-                    continue;
-                };
-                for pd in cand.pair_details.iter().filter(|p| p.qualifies) {
-                    acc.push((pd.source_agent_id.clone(), transit_ip));
-                    acc.push((pd.destination_agent_id.clone(), transit_ip));
-                }
+            for leg in &legs {
+                acc.push((leg.source_agent_id.clone(), leg.candidate_destination_ip));
+                acc.push((
+                    leg.destination_agent_id.clone(),
+                    leg.candidate_destination_ip,
+                ));
             }
             acc.sort();
             acc.dedup();
@@ -1253,7 +1234,7 @@ const PAIR_DETAILS_MAX_LIMIT: u32 = 500;
 )]
 pub async fn get_candidate_pair_details(
     State(state): State<AppState>,
-    _auth: AuthSession,
+    auth: AuthSession,
     Path((id, destination_ip)): Path<(Uuid, String)>,
     Query(query): Query<EvaluationPairDetailQuery>,
 ) -> Response {
@@ -1326,18 +1307,43 @@ pub async fn get_candidate_pair_details(
     match evaluation_repo::latest_pair_details_for_candidate(&state.pool, id, dest_ip, &query).await
     {
         Ok(PairDetailLookup::Found {
-            entries,
+            mut entries,
             total,
             next_cursor,
-        }) => (
-            StatusCode::OK,
-            Json(EvaluationPairDetailListResponse {
-                entries,
-                total,
-                next_cursor,
-            }),
-        )
-            .into_response(),
+        }) => {
+            // Stamp `destination_hostname` on every entry. Each row's
+            // `destination_ip` mirrors the candidate transit IP (`X`),
+            // so a single bulk lookup keyed on the path-segment IP
+            // covers every entry on the page. Non-fatal: on DB error,
+            // log a warning and emit the page without hostnames.
+            if !entries.is_empty() {
+                let session = session_id_from_auth(&auth);
+                match bulk_hostnames_and_enqueue(&state, &session, &[dest_ip]).await {
+                    Ok(map) => {
+                        if let Some(Some(h)) = map.get(&dest_ip) {
+                            for entry in entries.iter_mut() {
+                                entry.destination_hostname = Some(h.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "campaign::pair_details: hostname stamp failed; returning unhostnamed page"
+                        );
+                    }
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(EvaluationPairDetailListResponse {
+                    entries,
+                    total,
+                    next_cursor,
+                }),
+            )
+                .into_response()
+        }
         Ok(PairDetailLookup::CampaignNotFound) => {
             (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
         }

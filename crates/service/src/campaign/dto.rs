@@ -494,8 +494,6 @@ pub struct EvaluationCandidateDto {
     /// avg_improvement_ms`; higher is better. Candidates are returned
     /// in descending composite-score order.
     pub composite_score: f32,
-    /// Per-pair scoring detail for this candidate.
-    pub pair_details: Vec<EvaluationPairDetailDto>,
     /// Reverse-DNS hostname for the transit destination IP, when cached.
     /// Absent on cold miss and negative-cached IPs (skip-none).
     #[serde(skip_serializing_if = "Option::is_none")]

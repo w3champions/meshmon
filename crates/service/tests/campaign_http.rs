@@ -358,12 +358,14 @@ async fn pairs_endpoint_cold_miss_omits_destination_hostname_and_enqueues_resolv
 
 #[tokio::test]
 async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
-    // Verifies both nested stamp paths on `/api/campaigns/{id}/evaluation`:
-    //   - `results.candidates[*].hostname`            (candidate IP)
-    //   - `results.candidates[*].pair_details[*].destination_hostname`
-    //     (candidate transit IP — evaluator renders it as the
-    //     pair_detail.destination_ip too, so one hostname entry
-    //     lights up both fields)
+    // Verifies both stamp paths now that pair-detail rows live behind
+    // the paginated endpoint instead of nested on the candidate DTO:
+    //   - `/evaluation`                               → candidate hostname
+    //   - `/evaluation/.../pair_details`              → pair-detail
+    //                                                   destination_hostname
+    //
+    // The candidate transit IP is identical to the pair_detail's
+    // destination_ip, so one positive-cache record covers both stamps.
     //
     // Also proves the stamp is response-time only: the child tables
     // carry no hostname columns, so the response-time join is the
@@ -460,18 +462,32 @@ async fn get_evaluation_stamps_candidate_and_pair_detail_hostnames() {
         cand["hostname"], "candidate.example.com",
         "candidate hostname must be stamped from positive cache: {body}"
     );
-    let pd = &cand["pair_details"][0];
+    assert!(
+        cand.get("pair_details").is_none(),
+        "T55: pair_details must NOT appear on the candidate's wire shape: {body}"
+    );
+
+    // Pair-detail hostname stamp now happens on the paginated
+    // endpoint. The candidate transit IP doubles as the
+    // pair_detail.destination_ip, so the same positive-cache record
+    // covers both stamps.
+    let page: serde_json::Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id_str}/evaluation/candidates/{cand_ip_str}/pair_details?limit=10"
+        ))
+        .await;
+    let pd = &page["entries"][0];
     assert_eq!(
         pd["destination_ip"], cand_ip_str,
-        "pair_detail's destination_ip mirrors the candidate transit IP: {body}"
+        "pair_detail's destination_ip mirrors the candidate transit IP: {page}"
     );
     assert_eq!(
         pd["destination_hostname"], "candidate.example.com",
-        "pair_detail destination_hostname must be stamped from positive cache: {body}"
+        "pair_detail destination_hostname must be stamped from positive cache: {page}"
     );
     assert_eq!(
         pd["direct_source"], "active_probe",
-        "pair_detail direct_source stamped by the evaluator defaults to active_probe: {body}"
+        "pair_detail direct_source stamped by the evaluator defaults to active_probe: {page}"
     );
 
     // Stamp-invariant: the relational child tables carry no hostname

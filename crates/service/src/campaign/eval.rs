@@ -100,7 +100,18 @@ pub struct EvaluationInputs {
     pub min_improvement_ratio: Option<f64>,
 }
 
-/// Full evaluator output: summary counters plus the JSONB-bound DTO.
+/// Full evaluator output: summary counters plus the wire-bound DTO and
+/// the per-candidate pair-detail rows persisted into
+/// `campaign_evaluation_pair_details`.
+///
+/// `pair_details` is intentionally NOT nested inside
+/// [`EvaluationCandidateDto`]: that DTO is the wire shape served by
+/// `GET /api/campaigns/{id}/evaluation`, and pair-detail rows are only
+/// reachable on the wire via the paginated
+/// `…/candidates/{ip}/pair_details` endpoint. Keeping pair-detail rows
+/// in a sidecar `Vec` lets the evaluator hand them straight to
+/// `insert_evaluation` for persistence without round-tripping them
+/// through the wire DTO.
 #[derive(Debug, Clone)]
 pub struct EvaluationOutputs {
     /// Total baseline (A, B) agent pairs the evaluator scored against.
@@ -113,10 +124,32 @@ pub struct EvaluationOutputs {
     pub avg_improvement_ms: Option<f32>,
     /// Serialisable results payload. Persisted by
     /// [`crate::campaign::evaluation_repo::insert_evaluation`] into the
-    /// `campaign_evaluation_candidates`,
-    /// `campaign_evaluation_pair_details`, and
+    /// `campaign_evaluation_candidates` and
     /// `campaign_evaluation_unqualified_reasons` child tables.
     pub results: EvaluationResultsDto,
+    /// Per-candidate pair-detail rows in the same order as
+    /// [`Self::results`].`candidates`. Each entry's
+    /// [`PairDetailsForCandidate::destination_ip`] matches the
+    /// candidate at the same index. Persisted by
+    /// [`crate::campaign::evaluation_repo::insert_evaluation`] into
+    /// `campaign_evaluation_pair_details`.
+    pub pair_details_by_candidate: Vec<PairDetailsForCandidate>,
+}
+
+/// Sidecar bundle of pair-detail rows for a single candidate, used to
+/// thread the evaluator's per-pair scoring through to
+/// `insert_evaluation` without nesting it in the wire DTO. The
+/// candidate at the same index in `EvaluationOutputs.results.candidates`
+/// owns `destination_ip` as a string; this struct repeats the parsed
+/// IP so persistence can FK off it directly.
+#[derive(Debug, Clone)]
+pub struct PairDetailsForCandidate {
+    /// Transit destination IP — same value as the matching candidate's
+    /// `destination_ip`, parsed.
+    pub destination_ip: IpAddr,
+    /// Pair-detail rows the storage filter let through for this
+    /// candidate.
+    pub pair_details: Vec<EvaluationPairDetailDto>,
 }
 
 /// Errors surfaced by [`evaluate`].
@@ -474,7 +507,6 @@ fn build_candidate_row(
     pairs_total_considered: i32,
     improvements: &[f32],
     compound_losses: &[f32],
-    pair_details: Vec<EvaluationPairDetailDto>,
     total_baseline: i32,
     enrichment: &HashMap<IpAddr, CatalogueLookup>,
     agent_by_ip: &HashMap<IpAddr, String>,
@@ -509,7 +541,6 @@ fn build_candidate_row(
         avg_improvement_ms,
         avg_loss_ratio,
         composite_score,
-        pair_details,
         hostname: None,
     }
 }
@@ -653,6 +684,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
 
     let total_baseline = baselines.len() as i32;
     let mut candidate_rows: Vec<EvaluationCandidateDto> = Vec::new();
+    let mut pair_details_per_candidate: Vec<PairDetailsForCandidate> = Vec::new();
     let mut unqualified_reasons: BTreeMap<String, String> = BTreeMap::new();
 
     // T55 eligibility / storage knobs (snake-cased locally for the
@@ -854,14 +886,28 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             pairs_total_considered,
             &improvements,
             &compound_losses,
-            pair_details,
             total_baseline,
             &inputs.enrichment,
             &agent_by_ip,
         ));
+        pair_details_per_candidate.push(PairDetailsForCandidate {
+            destination_ip: *x_ip,
+            pair_details,
+        });
     }
 
-    candidate_rows.sort_by(candidate_order);
+    // Sort candidates by composite score, carrying the matching
+    // pair-detail bundle along so the parallel `Vec`s stay aligned by
+    // index for `insert_evaluation`'s persistence loop.
+    let mut zipped: Vec<(EvaluationCandidateDto, PairDetailsForCandidate)> = candidate_rows
+        .into_iter()
+        .zip(pair_details_per_candidate)
+        .collect();
+    zipped.sort_by(|a, b| candidate_order(&a.0, &b.0));
+    let (candidate_rows, pair_details_by_candidate): (
+        Vec<EvaluationCandidateDto>,
+        Vec<PairDetailsForCandidate>,
+    ) = zipped.into_iter().unzip();
 
     let candidates_total = candidate_rows.len() as i32;
     let candidates_good = candidate_rows
@@ -882,6 +928,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
             candidates: candidate_rows,
             unqualified_reasons,
         },
+        pair_details_by_candidate,
     })
 }
 
@@ -1073,15 +1120,16 @@ mod tests {
             min_improvement_ratio: None,
         };
         let out = evaluate(inputs).unwrap();
-        let x_cand = out
+        let (x_idx, x_cand) = out
             .results
             .candidates
             .iter()
-            .find(|c| c.destination_ip == "203.0.113.7")
+            .enumerate()
+            .find(|(_, c)| c.destination_ip == "203.0.113.7")
             .expect("X must appear as a candidate (triple is fully measured)");
         // X's pair_details entry for (A,B) must be present (triple is
         // fully measured) but qualifies=false because Y beats X.
-        let ab_detail = x_cand
+        let ab_detail = out.pair_details_by_candidate[x_idx]
             .pair_details
             .iter()
             .find(|p| p.source_agent_id == "a" && p.destination_agent_id == "b")
@@ -1129,14 +1177,15 @@ mod tests {
             min_improvement_ratio: None,
         };
         let out = evaluate(inputs).unwrap();
-        let cand = out
+        let (cand_idx, _cand) = out
             .results
             .candidates
             .iter()
-            .find(|c| c.destination_ip == "203.0.113.7")
+            .enumerate()
+            .find(|(_, c)| c.destination_ip == "203.0.113.7")
             .expect("candidate present");
         assert_eq!(
-            cand.pair_details[0].direct_source,
+            out.pair_details_by_candidate[cand_idx].pair_details[0].direct_source,
             DirectSource::VmContinuous,
             "pair_detail must carry the baseline row's direct_source"
         );

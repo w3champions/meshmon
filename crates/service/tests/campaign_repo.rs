@@ -1490,6 +1490,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
             candidates: Vec::new(),
             unqualified_reasons: Default::default(),
         },
+        pair_details_by_candidate: Vec::new(),
     };
     let first_id = evaluation_repo::persist_evaluation(
         &pool,
@@ -1540,6 +1541,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
             candidates: Vec::new(),
             unqualified_reasons: Default::default(),
         },
+        pair_details_by_candidate: Vec::new(),
     };
     let second_id = evaluation_repo::persist_evaluation(
         &pool,
@@ -1636,6 +1638,7 @@ async fn persist_evaluation_rejects_running_campaign() {
             candidates: Vec::new(),
             unqualified_reasons: Default::default(),
         },
+        pair_details_by_candidate: Vec::new(),
     };
 
     let err = evaluation_repo::persist_evaluation(
@@ -1686,7 +1689,7 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
     use meshmon_service::campaign::dto::{
         EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto,
     };
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, PairDetailsForCandidate};
     use meshmon_service::campaign::evaluation_repo;
     use meshmon_service::campaign::model::DirectSource;
     let pool = common::shared_migrated_pool().await;
@@ -1711,6 +1714,17 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         avg_improvement_ms: Some(0.0),
         avg_loss_ratio: Some(0.0),
         composite_score: 0.0,
+        hostname: None,
+    };
+    // Sidecar pair-detail bundle. The bundle's `destination_ip` is
+    // intentionally a real IP — the evaluator sets this from the
+    // parsed candidate IP, and the writer is supposed to abort BEFORE
+    // it reaches the bundle's mismatch check (the candidate's
+    // unparseable string trips the IpAddr::from_str guard first).
+    // Using `1.2.3.4` here keeps the test exclusively about the
+    // candidate-string parse failure.
+    let bundle = PairDetailsForCandidate {
+        destination_ip: "1.2.3.4".parse().unwrap(),
         pair_details: vec![EvaluationPairDetailDto {
             source_agent_id: "a".into(),
             destination_agent_id: "b".into(),
@@ -1728,7 +1742,6 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             mtr_measurement_id_xb: None,
             destination_hostname: None,
         }],
-        hostname: None,
     };
     let outputs = EvaluationOutputs {
         baseline_pair_count: 1,
@@ -1739,6 +1752,7 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             candidates: vec![garbage_candidate],
             unqualified_reasons: Default::default(),
         },
+        pair_details_by_candidate: vec![bundle],
     };
 
     let err = evaluation_repo::persist_evaluation(
@@ -2136,6 +2150,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
             candidates: Vec::new(),
             unqualified_reasons: Default::default(),
         },
+        pair_details_by_candidate: Vec::new(),
     };
     evaluation_repo::persist_evaluation(
         &pool,

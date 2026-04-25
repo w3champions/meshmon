@@ -2,9 +2,10 @@
  * MTR hop visualization panel — lazy single-row measurements fetch wired
  * into the existing `RouteTopology` component.
  *
- * Lifted out of `DrilldownDrawer.tsx` so the I5 paginated pair-details
- * dialog can consume the same component without duplicating the four-state
- * (loading / error / empty / data) card pattern. Behaviour is unchanged.
+ * Mounted by the candidates `DrilldownDialog` below the pair-details
+ * table when an operator clicks an MTR icon button. Stays self-contained
+ * so the same four-state (loading / error / empty / data) card pattern
+ * can be reused by other surfaces without duplication.
  */
 
 import type { Campaign } from "@/api/hooks/campaigns";

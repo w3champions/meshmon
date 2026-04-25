@@ -44,6 +44,13 @@ vi.mock("@/api/hooks/evaluation", async () => {
   return { ...actual, useEvaluation: vi.fn(), useTriggerDetail: vi.fn() };
 });
 
+vi.mock("@/api/hooks/evaluation-pairs", async () => {
+  const actual = await vi.importActual<typeof import("@/api/hooks/evaluation-pairs")>(
+    "@/api/hooks/evaluation-pairs",
+  );
+  return { ...actual, useCandidatePairDetails: vi.fn() };
+});
+
 // Stub RouteTopology to keep cytoscape out of jsdom.
 vi.mock("@/components/RouteTopology", () => ({
   RouteTopology: () => <div data-testid="route-topology" />,
@@ -52,6 +59,7 @@ vi.mock("@/components/RouteTopology", () => ({
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignMeasurements, useForcePair } from "@/api/hooks/campaigns";
 import { useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
+import { useCandidatePairDetails } from "@/api/hooks/evaluation-pairs";
 import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
 
 // ---------------------------------------------------------------------------
@@ -111,24 +119,6 @@ function makeEvaluation(): Evaluation {
           avg_improvement_ms: 30,
           avg_loss_ratio: 0.001,
           composite_score: 20,
-          pair_details: [
-            {
-              source_agent_id: "agent-a",
-              destination_agent_id: "agent-b",
-              destination_ip: "10.0.0.1",
-              direct_rtt_ms: 50,
-              direct_stddev_ms: 2,
-              direct_loss_ratio: 0.001,
-              direct_source: "active_probe",
-              transit_rtt_ms: 20,
-              transit_stddev_ms: 1,
-              transit_loss_ratio: 0.0005,
-              improvement_ms: 30,
-              qualifies: true,
-              mtr_measurement_id_ax: null,
-              mtr_measurement_id_xb: null,
-            },
-          ],
         },
       ],
       unqualified_reasons: { "192.168.1.1": "Transit path exceeded loss threshold." },
@@ -186,6 +176,16 @@ function setupMocks(evaluation: Evaluation | null, opts?: { isLoading?: boolean 
     isError: false,
     error: null,
   } as unknown as ReturnType<typeof useCampaignMeasurements>);
+  vi.mocked(useCandidatePairDetails).mockReturnValue({
+    data: { pages: [{ entries: [], next_cursor: null, total: 0 }], pageParams: [null] },
+    isLoading: false,
+    isError: false,
+    isFetchingNextPage: false,
+    hasNextPage: false,
+    error: null,
+    fetchNextPage: vi.fn(),
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useCandidatePairDetails>);
 }
 
 class NoopEventSource {
@@ -262,33 +262,21 @@ describe("CandidatesTab — happy path", () => {
     expect(screen.getByTestId("candidate-row-10.0.0.1")).toBeInTheDocument();
   });
 
-  test("clicking a candidate row opens the drawer", async () => {
+  test("clicking a candidate row opens the dialog", async () => {
     setupMocks(makeEvaluation());
     const user = userEvent.setup();
     renderTab(makeCampaign({ state: "evaluated" }));
 
     await user.click(screen.getByTestId("candidate-row-10.0.0.1"));
 
-    // Drawer description is drawer-unique — the candidate row shows the
-    // display name, but only the drawer prints the baseline-pair summary.
-    // The IP is rendered via `<IpHostname>`, which splits the text across
-    // nested spans — match on concatenated textContent, scoped to the
-    // leaf-ish node that owns the full string (i.e. the rendered element
-    // whose `textContent` matches AND whose children don't individually
-    // satisfy the match).
-    expect(
-      screen.getByText((_, node) => {
-        if (node === null) return false;
-        const re = /transit candidate 10\.0\.0\.1 — 2 of 3 baseline pairs improved/i;
-        if (!re.test(node.textContent ?? "")) return false;
-        const childMatches = Array.from(node.children).some((child) =>
-          re.test(child.textContent ?? ""),
-        );
-        return !childMatches;
-      }),
-    ).toBeInTheDocument();
-    // Pair-scoring list mounts when pair_details is non-empty.
-    expect(screen.getByText(/per-pair scoring/i)).toBeInTheDocument();
+    // The dialog renders the candidate's headline counters in its
+    // description ("X of Y baseline pairs improved"). Using
+    // findByTestId waits for the dialog body to mount once the
+    // pair-details fetch is in flight (the body is gated on the
+    // candidate prop being non-null, which the click installs).
+    expect(await screen.findByTestId("drilldown-body")).toBeInTheDocument();
+    // The filter toolbar mounts inside the dialog.
+    expect(screen.getByTestId("filter-min-improvement-ms")).toBeInTheDocument();
   });
 
   test("unqualified reasons surface in the tab body when none is selected", () => {
@@ -322,105 +310,11 @@ describe("CandidatesTab — overflow menu state gating", () => {
   });
 });
 
-describe("CandidatesTab — row actions", () => {
-  test("force re-measure pair fires useForcePair with (source, destination) from the first pair", async () => {
-    setupMocks(makeEvaluation());
-    const user = userEvent.setup();
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    await user.click(screen.getByLabelText(/actions for 10\.0\.0\.1/i));
-    await user.click(screen.getByText(/force re-measure pair/i));
-
-    expect(forcePairStub.mutate).toHaveBeenCalledTimes(1);
-    const [vars] = forcePairStub.mutate.mock.calls[0];
-    expect(vars).toEqual({
-      id: CAMPAIGN_ID,
-      body: { source_agent_id: "agent-a", destination_ip: "10.0.0.1" },
-    });
-  });
-
-  test("dispatch detail for pair fires useTriggerDetail with scope=pair", async () => {
-    setupMocks(makeEvaluation());
-    const user = userEvent.setup();
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    await user.click(screen.getByLabelText(/actions for 10\.0\.0\.1/i));
-    await user.click(screen.getByText(/dispatch detail for this pair/i));
-
-    expect(triggerDetailStub.mutate).toHaveBeenCalledTimes(1);
-    const [vars] = triggerDetailStub.mutate.mock.calls[0];
-    expect(vars).toEqual({
-      id: CAMPAIGN_ID,
-      body: {
-        scope: "pair",
-        pair: { source_agent_id: "agent-a", destination_ip: "10.0.0.1" },
-      },
-    });
-  });
-
-  test("no_pairs_selected error surfaces a dedicated toast", async () => {
-    setupMocks(makeEvaluation());
-    const user = userEvent.setup();
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    const err = new Error("failed", { cause: { error: "no_pairs_selected" } });
-    triggerDetailStub.mutate.mockImplementation(
-      (_vars: unknown, opts?: { onError?: (err: Error) => void }) => {
-        opts?.onError?.(err);
-      },
-    );
-
-    await user.click(screen.getByLabelText(/actions for 10\.0\.0\.1/i));
-    await user.click(screen.getByText(/dispatch detail for this pair/i));
-
-    await waitFor(() => {
-      expect(screen.getByText(/no pairs qualified/i)).toBeInTheDocument();
-    });
-  });
-
-  test("keyboard activation (Enter) on 'Force re-measure pair' fires the mutation", async () => {
-    // Radix `DropdownMenuItem` uses `onSelect` — not `onClick` — so the
-    // keyboard path (ArrowDown + Enter) activates the item. `onClick`
-    // binds the DOM event and misses the keyboard path; this test
-    // guards that regression.
-    setupMocks(makeEvaluation());
-    const user = userEvent.setup();
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    const trigger = screen.getByLabelText(/actions for 10\.0\.0\.1/i);
-    trigger.focus();
-    await user.keyboard("{Enter}");
-    // Focus lands on the first menu item on open; Enter commits it.
-    await user.keyboard("{Enter}");
-
-    expect(forcePairStub.mutate).toHaveBeenCalledTimes(1);
-    const [vars] = forcePairStub.mutate.mock.calls[0];
-    expect(vars).toEqual({
-      id: CAMPAIGN_ID,
-      body: { source_agent_id: "agent-a", destination_ip: "10.0.0.1" },
-    });
-  });
-
-  test("illegal_state_transition on force_pair surfaces a dedicated toast", async () => {
-    setupMocks(makeEvaluation());
-    const user = userEvent.setup();
-    renderTab(makeCampaign({ state: "evaluated" }));
-
-    const err = new Error("failed", { cause: { error: "illegal_state_transition" } });
-    forcePairStub.mutate.mockImplementation(
-      (_vars: unknown, opts?: { onError?: (err: Error) => void }) => {
-        opts?.onError?.(err);
-      },
-    );
-
-    await user.click(screen.getByLabelText(/actions for 10\.0\.0\.1/i));
-    await user.click(screen.getByText(/force re-measure pair/i));
-
-    await waitFor(() => {
-      expect(screen.getByText(/campaign advanced before the request landed/i)).toBeInTheDocument();
-    });
-  });
-});
+// T55: per-row force-pair / dispatch-pair actions moved into the
+// drilldown dialog. The tab itself no longer renders a per-row action
+// menu — the action requires a `(source_agent_id, destination_ip)`
+// tuple that is reachable only via the paginated pair-details endpoint
+// the dialog already fetches.
 
 describe("CandidatesTab — sort URL state", () => {
   test("sort header click emits navigate with cand_sort + cand_dir", () => {

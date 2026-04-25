@@ -323,15 +323,30 @@ async fn reused_pair_surfaces_in_baseline() {
         .find(|c| c["destination_ip"] == "192.0.2.59")
         .unwrap_or_else(|| panic!("candidate for 192.0.2.59 missing: {eval}"));
 
-    let pair_details = candidate["pair_details"]
+    // Pair-detail rows live behind the paginated endpoint since T55;
+    // they are no longer nested on the candidate's wire shape.
+    assert!(
+        candidate.get("pair_details").is_none(),
+        "T55: pair_details must NOT appear on the candidate's wire shape: {candidate}"
+    );
+    let cand_ip = candidate["destination_ip"]
+        .as_str()
+        .expect("destination_ip");
+    let pair_page: Value = h
+        .get_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluation/candidates/{cand_ip}/pair_details?limit=500"),
+            200,
+        )
+        .await;
+    let pair_details = pair_page["entries"]
         .as_array()
-        .unwrap_or_else(|| panic!("pair_details missing on candidate: {candidate}"));
+        .unwrap_or_else(|| panic!("pair_details endpoint missing entries: {pair_page}"));
     let has_reused_leg = pair_details.iter().any(|pd| {
         pd["source_agent_id"] == "eval-t5-a" && pd["destination_agent_id"] == "eval-t5-b"
     });
     assert!(
         has_reused_leg,
-        "reused measurement's source/destination must appear in pair_details: {candidate}"
+        "reused measurement's source/destination must appear in pair_details: {pair_page}"
     );
     // This test seeds only active-probe data and never contacts VM, so
     // every pair_detail should stamp `direct_source='active_probe'`.
@@ -637,15 +652,22 @@ async fn vm_fills_missing_baselines() {
         .iter()
         .find(|c| c["destination_ip"] == "192.0.2.139")
         .unwrap_or_else(|| panic!("transit candidate missing: {eval}"));
-    let pair_details = cand["pair_details"]
+    let cand_ip = cand["destination_ip"].as_str().expect("destination_ip");
+    let pair_page: Value = h
+        .get_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluation/candidates/{cand_ip}/pair_details?limit=500"),
+            200,
+        )
+        .await;
+    let pair_details = pair_page["entries"]
         .as_array()
-        .unwrap_or_else(|| panic!("pair_details missing: {cand}"));
+        .unwrap_or_else(|| panic!("pair_details endpoint missing entries: {pair_page}"));
     let vm_leg = pair_details
         .iter()
         .find(|pd| {
             pd["source_agent_id"] == "eval-t7-a" && pd["destination_agent_id"] == "eval-t7-b"
         })
-        .unwrap_or_else(|| panic!("A→B VM-backed pair_detail missing: {cand}"));
+        .unwrap_or_else(|| panic!("A→B VM-backed pair_detail missing: {pair_page}"));
     assert_eq!(
         vm_leg["direct_source"], "vm_continuous",
         "VM-filled A→B baseline must carry direct_source=vm_continuous"
@@ -784,7 +806,14 @@ async fn vm_not_configured_falls_back_to_active() {
         .iter()
         .find(|c| c["destination_ip"] == "192.0.2.159")
         .unwrap_or_else(|| panic!("transit candidate missing: {eval}"));
-    for pd in cand["pair_details"].as_array().expect("pair_details") {
+    let cand_ip = cand["destination_ip"].as_str().expect("destination_ip");
+    let pair_page: Value = h
+        .get_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluation/candidates/{cand_ip}/pair_details?limit=500"),
+            200,
+        )
+        .await;
+    for pd in pair_page["entries"].as_array().expect("pair_details") {
         assert_eq!(
             pd["direct_source"], "active_probe",
             "VM-unset path must stamp every pair_detail with active_probe: {pd}"
@@ -901,7 +930,14 @@ async fn active_probe_wins_over_vm() {
         .find(|c| c["destination_ip"] == "192.0.2.179")
         .expect("transit candidate present")
         .clone();
-    let leg = cand["pair_details"]
+    let cand_ip = cand["destination_ip"].as_str().expect("destination_ip");
+    let pair_page: Value = h
+        .get_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluation/candidates/{cand_ip}/pair_details?limit=500"),
+            200,
+        )
+        .await;
+    let leg = pair_page["entries"]
         .as_array()
         .unwrap()
         .iter()

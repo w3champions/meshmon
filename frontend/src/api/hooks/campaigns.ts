@@ -320,8 +320,8 @@ export interface ForcePairVariables {
  * Cursor is intentionally absent — it's threaded through `useInfiniteQuery`'s
  * `pageParam` so every page of a single filter permutation collapses onto
  * one cache entry, and `fetchNextPage()` drives the scroll-append flow in
- * the Raw tab's virtualized list. `measurement_id` supports the
- * DrilldownDrawer's single-row MTR resolution.
+ * the Raw tab's virtualized list. `measurement_id` supports the inline
+ * `MtrPanel`'s single-row MTR resolution.
  */
 export interface CampaignMeasurementsFilter {
   resolution_state?: PairResolutionState;

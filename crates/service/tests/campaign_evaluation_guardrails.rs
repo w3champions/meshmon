@@ -35,6 +35,23 @@ fn find_candidate<'a>(eval: &'a Value, ip: &str) -> Option<&'a Value> {
         .and_then(|cs| cs.iter().find(|c| c["destination_ip"] == ip))
 }
 
+/// Fetch the full `pair_details` page for a candidate (limit=500
+/// covers every test fixture in this file). Returns the raw entries
+/// array as a [`Value`] to keep the call sites' assertion patterns
+/// stable across the wire-shape cutover (T55).
+async fn fetch_pair_details(
+    h: &common::HttpHarness,
+    campaign_id: &str,
+    candidate_ip: &str,
+) -> Value {
+    let body: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{campaign_id}/evaluation/candidates/{candidate_ip}/pair_details?limit=500"
+        ))
+        .await;
+    body["entries"].clone()
+}
+
 #[tokio::test]
 async fn default_knobs_baseline() {
     // All four guardrails NULL ⇒ output behaves like the pre-T55
@@ -106,11 +123,12 @@ async fn default_knobs_baseline() {
     // Six baselines (a↔b, a↔c, b↔c — both directions), all triples
     // measurable through X. Pre-T55 behaviour: all six counted.
     assert_eq!(total, 6, "default-knobs path counts every triple: {cand}");
-    let pair_details = cand["pair_details"].as_array().expect("pair_details");
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.99").await;
+    let pair_details = entries.as_array().expect("pair_details entries");
     assert_eq!(
         pair_details.len(),
         6,
-        "default-knobs path stores every pair_detail: {cand}"
+        "default-knobs path stores every pair_detail: {entries}"
     );
 }
 
@@ -241,7 +259,8 @@ async fn max_rtt_filters_triples_in_loop() {
         "only the (a,b) and (b,a) triples through X must count: {cand}"
     );
     // Every stored row must respect the cap.
-    let pair_details = cand["pair_details"].as_array().expect("pair_details");
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.99").await;
+    let pair_details = entries.as_array().expect("pair_details entries");
     for pd in pair_details {
         let composed = pd["transit_rtt_ms"].as_f64().expect("transit_rtt_ms");
         assert!(
@@ -315,7 +334,8 @@ async fn max_stddev_filters_triples() {
     // L1 drops c. Surviving (a,b) compositions: stddev =
     // sqrt(25 + 64) ≈ 9.43 ≤ 15. Two triples count.
     assert_eq!(total, 2, "stddev cap must drop c-bearing triples: {cand}");
-    let pair_details = cand["pair_details"].as_array().expect("pair_details");
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.99").await;
+    let pair_details = entries.as_array().expect("pair_details entries");
     for pd in pair_details {
         let composed = pd["transit_stddev_ms"].as_f64().expect("transit_stddev_ms");
         assert!(
@@ -402,11 +422,12 @@ async fn min_improvement_ms_filters_rows() {
 
     // Storage filter: only the a↔b pair (improvement = 50) passes the
     // 5 ms gate. The four a↔c / b↔c rows (improvement = 4) are dropped.
-    let pair_details = cand["pair_details"].as_array().expect("pair_details");
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.99").await;
+    let pair_details = entries.as_array().expect("pair_details entries");
     assert_eq!(
         pair_details.len(),
         2,
-        "only large-improvement rows persist: {cand}"
+        "only large-improvement rows persist: {entries}"
     );
     for pd in pair_details {
         let imp = pd["improvement_ms"].as_f64().expect("improvement_ms");
@@ -489,20 +510,22 @@ async fn or_semantics_storage_filter() {
     let x1 = find_candidate(&eval, "198.51.100.91")
         .unwrap_or_else(|| panic!("X1 candidate present: {eval}"));
     assert_eq!(x1["pairs_total_considered"], 1, "X1 has one triple: {x1}");
+    let x1_entries = fetch_pair_details(&h, &campaign_id, "198.51.100.91").await;
     assert_eq!(
-        x1["pair_details"].as_array().unwrap().len(),
+        x1_entries.as_array().unwrap().len(),
         1,
-        "X1: ratio-passing row stored under OR semantics: {x1}"
+        "X1: ratio-passing row stored under OR semantics: {x1_entries}"
     );
 
     // X2: ms passes ⇒ row stored.
     let x2 = find_candidate(&eval, "198.51.100.92")
         .unwrap_or_else(|| panic!("X2 candidate present: {eval}"));
     assert_eq!(x2["pairs_total_considered"], 1, "X2 has one triple: {x2}");
+    let x2_entries = fetch_pair_details(&h, &campaign_id, "198.51.100.92").await;
     assert_eq!(
-        x2["pair_details"].as_array().unwrap().len(),
+        x2_entries.as_array().unwrap().len(),
         1,
-        "X2: ms-passing row stored under OR semantics: {x2}"
+        "X2: ms-passing row stored under OR semantics: {x2_entries}"
     );
 
     // X3: both gates fail ⇒ row dropped (but candidate row still present
@@ -510,10 +533,11 @@ async fn or_semantics_storage_filter() {
     let x3 = find_candidate(&eval, "198.51.100.93")
         .unwrap_or_else(|| panic!("X3 candidate present even with empty pair_details: {eval}"));
     assert_eq!(x3["pairs_total_considered"], 1, "X3 has one triple: {x3}");
+    let x3_entries = fetch_pair_details(&h, &campaign_id, "198.51.100.93").await;
     assert_eq!(
-        x3["pair_details"].as_array().unwrap().len(),
+        x3_entries.as_array().unwrap().len(),
         0,
-        "X3: both-fail row dropped, leaving empty pair_details on the candidate row: {x3}"
+        "X3: both-fail row dropped, leaving empty pair_details for this candidate: {x3_entries}"
     );
     // pairs_improved still reflects the model-improved triple — the
     // storage gate only suppresses the persisted row, not the counter.
@@ -591,10 +615,11 @@ async fn direct_rtt_zero_ratio_auto_passes() {
 
     let x1 = find_candidate(&eval, "198.51.100.94")
         .unwrap_or_else(|| panic!("X1 candidate present: {eval}"));
+    let x1_entries = fetch_pair_details(&h, &campaign_id, "198.51.100.94").await;
     assert_eq!(
-        x1["pair_details"].as_array().unwrap().len(),
+        x1_entries.as_array().unwrap().len(),
         1,
-        "X1: direct_rtt_ms = 0 ⇒ ratio auto-pass ⇒ row stored: {x1}"
+        "X1: direct_rtt_ms = 0 ⇒ ratio auto-pass ⇒ row stored: {x1_entries}"
     );
     // X1's improvement is `0 − 20 = −20`, so it does NOT qualify under
     // diversity mode (`improvement_ms > 0` is false). The storage gate
@@ -605,20 +630,22 @@ async fn direct_rtt_zero_ratio_auto_passes() {
         "X1: stored-but-non-qualifying row must not count as improved: {x1}"
     );
 
-    let x2 = find_candidate(&eval, "198.51.100.95")
+    let _x2 = find_candidate(&eval, "198.51.100.95")
         .unwrap_or_else(|| panic!("X2 candidate present: {eval}"));
+    let x2_entries = fetch_pair_details(&h, &campaign_id, "198.51.100.95").await;
     assert_eq!(
-        x2["pair_details"].as_array().unwrap().len(),
+        x2_entries.as_array().unwrap().len(),
         1,
-        "X2: ratio = 0.7 ⇒ stored: {x2}"
+        "X2: ratio = 0.7 ⇒ stored: {x2_entries}"
     );
 
     let x3 = find_candidate(&eval, "198.51.100.96")
         .unwrap_or_else(|| panic!("X3 candidate present (counter > 0): {eval}"));
+    let x3_entries = fetch_pair_details(&h, &campaign_id, "198.51.100.96").await;
     assert_eq!(
-        x3["pair_details"].as_array().unwrap().len(),
+        x3_entries.as_array().unwrap().len(),
         0,
-        "X3: ratio = 0.1 ⇒ dropped: {x3}"
+        "X3: ratio = 0.1 ⇒ dropped: {x3_entries}"
     );
     assert_eq!(
         x3["pairs_total_considered"], 1,
@@ -682,9 +709,10 @@ async fn negative_min_improvement_ms() {
     let eval: Value = h
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
-    let cand = find_candidate(&eval, "198.51.100.99")
+    let _cand = find_candidate(&eval, "198.51.100.99")
         .unwrap_or_else(|| panic!("X candidate must survive: {eval}"));
-    let pair_details = cand["pair_details"].as_array().expect("pair_details");
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.99").await;
+    let pair_details = entries.as_array().expect("pair_details entries");
     let stored_pairs: Vec<(String, String)> = pair_details
         .iter()
         .map(|pd| {
@@ -773,9 +801,10 @@ async fn negative_min_improvement_ratio() {
     let eval: Value = h
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
-    let cand = find_candidate(&eval, "198.51.100.99")
+    let _cand = find_candidate(&eval, "198.51.100.99")
         .unwrap_or_else(|| panic!("X candidate must survive: {eval}"));
-    let pair_details = cand["pair_details"].as_array().expect("pair_details");
+    let entries = fetch_pair_details(&h, &campaign_id, "198.51.100.99").await;
+    let pair_details = entries.as_array().expect("pair_details entries");
     let stored_pairs: Vec<(String, String)> = pair_details
         .iter()
         .map(|pd| {

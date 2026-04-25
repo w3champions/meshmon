@@ -1241,7 +1241,7 @@
           {
             "name": "measurement_id",
             "in": "query",
-            "description": "Resolve a single (pair, measurement) row by measurement id —\nused by the DrilldownDrawer for MTR lookup.",
+            "description": "Resolve a single (pair, measurement) row by measurement id —\nused by the DrilldownDialog for MTR lookup.",
             "required": false,
             "schema": {
               "type": [
@@ -3413,7 +3413,7 @@
       },
       "CampaignMeasurementDto": {
         "type": "object",
-        "description": "One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDrawer can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON array on the wire.",
+        "description": "One row for the Raw tab OR for the DrilldownDialog's MTR resolution.\n\nEvery field but `pair_id`, `source_agent_id`, `destination_ip`,\n`resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`\nrow with `pending` or `dispatched` state has no joined `measurements`\nrow yet, but the Raw tab still renders it so operators can monitor\nin-flight detail work.\n\n`mtr_hops` is inlined rather than referenced by id so the\nDrilldownDialog can render MTR directly from this endpoint — there\nis no separate `GET /api/measurements/:id` in the service. The\n`Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding\nJSONB; serde renders it as a bare JSON array on the wire.",
         "required": [
           "pair_id",
           "source_agent_id",
@@ -4217,8 +4217,7 @@
           "is_mesh_member",
           "pairs_improved",
           "pairs_total_considered",
-          "composite_score",
-          "pair_details"
+          "composite_score"
         ],
         "properties": {
           "asn": {
@@ -4292,13 +4291,6 @@
               "null"
             ],
             "description": "Catalogue network operator, when present."
-          },
-          "pair_details": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EvaluationPairDetailDto"
-            },
-            "description": "Per-pair scoring detail for this candidate."
           },
           "pairs_improved": {
             "type": "integer",

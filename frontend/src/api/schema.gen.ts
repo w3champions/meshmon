@@ -1299,7 +1299,7 @@ export interface components {
             title: string;
         };
         /**
-         * @description One row for the Raw tab OR for the DrilldownDrawer's MTR resolution.
+         * @description One row for the Raw tab OR for the DrilldownDialog's MTR resolution.
          *
          *     Every field but `pair_id`, `source_agent_id`, `destination_ip`,
          *     `resolution_state`, and `pair_kind` is nullable — a `campaign_pairs`
@@ -1308,7 +1308,7 @@ export interface components {
          *     in-flight detail work.
          *
          *     `mtr_hops` is inlined rather than referenced by id so the
-         *     DrilldownDrawer can render MTR directly from this endpoint — there
+         *     DrilldownDialog can render MTR directly from this endpoint — there
          *     is no separate `GET /api/measurements/:id` in the service. The
          *     `Option<sqlx::types::Json<_>>` wrapper is mandatory for decoding
          *     JSONB; serde renders it as a bare JSON array on the wire.
@@ -1776,8 +1776,6 @@ export interface components {
             is_mesh_member: boolean;
             /** @description Catalogue network operator, when present. */
             network_operator?: string | null;
-            /** @description Per-pair scoring detail for this candidate. */
-            pair_details: components["schemas"]["EvaluationPairDetailDto"][];
             /**
              * Format: int32
              * @description Number of baseline pairs this candidate improved.
@@ -3798,7 +3796,7 @@ export interface operations {
                 cursor?: string | null;
                 /**
                  * @description Resolve a single (pair, measurement) row by measurement id —
-                 *     used by the DrilldownDrawer for MTR lookup.
+                 *     used by the DrilldownDialog for MTR lookup.
                  */
                 measurement_id?: number | null;
                 /** @description Page size. Defaults to 200, clamped to `[1, 1000]`. */
