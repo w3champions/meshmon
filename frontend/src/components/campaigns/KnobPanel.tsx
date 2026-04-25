@@ -8,6 +8,7 @@ import {
   clampKnob,
   KNOB_BOUNDS,
   type KnobProtocol,
+  parseNullableKnob,
   ratioToPercentInput,
 } from "@/lib/campaign-config";
 
@@ -39,14 +40,41 @@ export interface KnobPanelProps {
 export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps) {
   const patch = (delta: Partial<CampaignKnobs>) => onChange({ ...value, ...delta });
 
-  const handleNumber =
-    (key: keyof typeof KNOB_BOUNDS) => (event: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = event.target.value;
-      // When the operator clears the field, preserve the fallback so the
-      // knob stays at the current value rather than becoming NaN.
-      const parsed = raw === "" ? value[key] : Number(raw);
-      patch({ [key]: clampKnob(key, parsed, value[key]) } as Partial<CampaignKnobs>);
-    };
+  // Keys whose backing state is a plain `number` (loss_threshold_ratio is
+  // wired through its own percent-aware handler below).
+  type NumericKey =
+    | "probe_count"
+    | "probe_count_detail"
+    | "timeout_ms"
+    | "probe_stagger_ms"
+    | "stddev_weight";
+
+  const handleNumber = (key: NumericKey) => (event: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = event.target.value;
+    // When the operator clears the field, preserve the fallback so the
+    // knob stays at the current value rather than becoming NaN.
+    const parsed = raw === "" ? value[key] : Number(raw);
+    patch({ [key]: clampKnob(key, parsed, value[key]) } as Partial<CampaignKnobs>);
+  };
+
+  // Keys whose backing state is `number | null`. Empty input clears the
+  // local form state to `null`; on submit, `null` flows through to the
+  // wire as `null` and the backend keeps the prior column value (PATCH
+  // semantics) or omits the gate (CREATE semantics).
+  type NullableKey =
+    | "max_transit_rtt_ms"
+    | "max_transit_stddev_ms"
+    | "min_improvement_ms"
+    | "min_improvement_ratio";
+
+  const handleNullable = (key: NullableKey) => (event: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseNullableKnob(key, event.target.value, value[key]);
+    patch({ [key]: next } as Partial<CampaignKnobs>);
+  };
+
+  // `<input type="number" value={…}>` cannot accept `null`; collapse the
+  // sentinel to an empty string so React stays controlled.
+  const nullableValue = (n: number | null): number | string => (n === null ? "" : n);
 
   // `loss_threshold_ratio` is wire-format ratio (0.0–1.0), but the form UX
   // presents percent — convert at the form boundary so the DTO stays in
@@ -230,6 +258,76 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             max={KNOB_BOUNDS.stddev_weight.max}
             value={value.stddev_weight}
             onChange={handleNumber("stddev_weight")}
+            disabled={disabled}
+          />
+        </div>
+      </div>
+
+      {/*
+       * Guardrail knobs (eligibility caps + storage floors). Optional —
+       * leaving an input blank disables that gate. The two improvement
+       * knobs accept negative values per spec. See `campaign-config.ts`
+       * for bounds.
+       */}
+      <div className="space-y-1">
+        <Label className="text-sm font-semibold">Evaluation guardrails (optional)</Label>
+        <p id="knob-guardrails-hint" className="text-xs text-muted-foreground">
+          Eligibility caps prune transit candidates before scoring; storage floors gate which
+          per-pair rows are persisted (combined under OR semantics). Leave blank to disable.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2" aria-describedby="knob-guardrails-hint">
+        <div className="space-y-1">
+          <Label htmlFor="knob-max-transit-rtt-ms">Max transit RTT (ms)</Label>
+          <Input
+            id="knob-max-transit-rtt-ms"
+            type="number"
+            min={KNOB_BOUNDS.max_transit_rtt_ms.min}
+            max={KNOB_BOUNDS.max_transit_rtt_ms.max}
+            value={nullableValue(value.max_transit_rtt_ms)}
+            placeholder="e.g. 200"
+            onChange={handleNullable("max_transit_rtt_ms")}
+            disabled={disabled}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="knob-max-transit-stddev-ms">Max transit RTT stddev (ms)</Label>
+          <Input
+            id="knob-max-transit-stddev-ms"
+            type="number"
+            min={KNOB_BOUNDS.max_transit_stddev_ms.min}
+            max={KNOB_BOUNDS.max_transit_stddev_ms.max}
+            value={nullableValue(value.max_transit_stddev_ms)}
+            placeholder="e.g. 50"
+            onChange={handleNullable("max_transit_stddev_ms")}
+            disabled={disabled}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="knob-min-improvement-ms">Min improvement (ms)</Label>
+          <Input
+            id="knob-min-improvement-ms"
+            type="number"
+            step="0.1"
+            min={KNOB_BOUNDS.min_improvement_ms.min}
+            max={KNOB_BOUNDS.min_improvement_ms.max}
+            value={nullableValue(value.min_improvement_ms)}
+            placeholder="e.g. 5 (negative values allowed)"
+            onChange={handleNullable("min_improvement_ms")}
+            disabled={disabled}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="knob-min-improvement-ratio">Min improvement ratio</Label>
+          <Input
+            id="knob-min-improvement-ratio"
+            type="number"
+            step="0.01"
+            min={KNOB_BOUNDS.min_improvement_ratio.min}
+            max={KNOB_BOUNDS.min_improvement_ratio.max}
+            value={nullableValue(value.min_improvement_ratio)}
+            placeholder="e.g. 0.1 (10%)"
+            onChange={handleNullable("min_improvement_ratio")}
             disabled={disabled}
           />
         </div>

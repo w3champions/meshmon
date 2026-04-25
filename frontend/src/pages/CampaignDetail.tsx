@@ -313,6 +313,13 @@ export default function CampaignDetail() {
         loss_threshold_ratio: cloneCampaign.loss_threshold_ratio,
         stddev_weight: cloneCampaign.stddev_weight,
         evaluation_mode: cloneCampaign.evaluation_mode,
+        // Carry guardrail knobs forward — Clone preserves the original
+        // operator intent. `?? null` collapses `undefined` (older campaign
+        // rows where the field never landed) to `null`.
+        max_transit_rtt_ms: cloneCampaign.max_transit_rtt_ms ?? null,
+        max_transit_stddev_ms: cloneCampaign.max_transit_stddev_ms ?? null,
+        min_improvement_ms: cloneCampaign.min_improvement_ms ?? null,
+        min_improvement_ratio: cloneCampaign.min_improvement_ratio ?? null,
         // Reset `force_measurement` — clones default to reuse-cache
         // friendly so a tweak-and-rerun doesn't silently re-measure
         // every pair. Operator opts in via the knob panel.

@@ -14,7 +14,12 @@ import {
   isNoBaselinePairs,
   isVmUpstream,
 } from "@/lib/campaign";
-import { clampKnob, KNOB_BOUNDS, ratioToPercentInput } from "@/lib/campaign-config";
+import {
+  clampKnob,
+  KNOB_BOUNDS,
+  parseNullableKnob,
+  ratioToPercentInput,
+} from "@/lib/campaign-config";
 import { useToastStore } from "@/stores/toast";
 
 /**
@@ -34,6 +39,37 @@ interface EvaluationKnobs {
   loss_threshold_ratio: number;
   stddev_weight: number;
   evaluation_mode: EvaluationMode;
+  /**
+   * Guardrail knobs. `null` means "gate disabled" — the input is empty
+   * and the submit body sends `null`. Note: the PATCH backend uses
+   * `COALESCE($n, col)` for these columns, so a `null` payload preserves
+   * whatever value the column already holds rather than clearing it back
+   * to NULL — clearing the input only resets the local form state.
+   */
+  max_transit_rtt_ms: number | null;
+  max_transit_stddev_ms: number | null;
+  min_improvement_ms: number | null;
+  min_improvement_ratio: number | null;
+}
+
+/**
+ * True when the evaluation snapshot has at least one guardrail knob set.
+ * Used to gate the "guardrails dropped every candidate" footgun warning —
+ * the warning is meaningful only when an active gate could explain the
+ * empty result set.
+ */
+function hasAnyGuardrailSet(snapshot: {
+  max_transit_rtt_ms?: number | null;
+  max_transit_stddev_ms?: number | null;
+  min_improvement_ms?: number | null;
+  min_improvement_ratio?: number | null;
+}): boolean {
+  return (
+    snapshot.max_transit_rtt_ms != null ||
+    snapshot.max_transit_stddev_ms != null ||
+    snapshot.min_improvement_ms != null ||
+    snapshot.min_improvement_ratio != null
+  );
 }
 
 const DIVERSITY_HINT =
@@ -64,6 +100,13 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       loss_threshold_ratio: source.loss_threshold_ratio,
       stddev_weight: source.stddev_weight,
       evaluation_mode: source.evaluation_mode,
+      // `?? null` collapses `undefined` (campaigns created before the
+      // guardrail columns shipped) to the canonical "off" sentinel so
+      // the form never holds an out-of-band value.
+      max_transit_rtt_ms: source.max_transit_rtt_ms ?? null,
+      max_transit_stddev_ms: source.max_transit_stddev_ms ?? null,
+      min_improvement_ms: source.min_improvement_ms ?? null,
+      min_improvement_ratio: source.min_improvement_ratio ?? null,
     };
   }, [campaign, evaluationQuery.data]);
 
@@ -89,6 +132,28 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       const parsed = raw === "" ? form[key] : Number(raw);
       setForm((prev) => ({ ...prev, [key]: clampKnob(key, parsed, prev[key]) }));
     };
+
+  // Guardrail handler. Empty input collapses to `null` in the local
+  // form state. On submit, `null` flows through to the wire — the
+  // backend's `COALESCE` semantics mean the existing column value is
+  // preserved rather than cleared, which matches the existing knob
+  // convention.
+  type NullableGuardrailKey =
+    | "max_transit_rtt_ms"
+    | "max_transit_stddev_ms"
+    | "min_improvement_ms"
+    | "min_improvement_ratio";
+
+  const handleNullable =
+    (key: NullableGuardrailKey) =>
+    (event: React.ChangeEvent<HTMLInputElement>): void => {
+      setForm((prev) => ({
+        ...prev,
+        [key]: parseNullableKnob(key, event.target.value, prev[key]),
+      }));
+    };
+
+  const nullableValue = (n: number | null): number | string => (n === null ? "" : n);
 
   // Loss threshold: input is percent-facing for UX, but the wire value is a
   // ratio — convert at the form boundary so the submitted body stays in
@@ -160,6 +225,14 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
           loss_threshold_ratio: form.loss_threshold_ratio,
           stddev_weight: form.stddev_weight,
           evaluation_mode: form.evaluation_mode,
+          // Guardrails ride along on every PATCH so a re-evaluate runs
+          // against the operator's current intent. `null` is the wire
+          // representation of "leave the column untouched" via the
+          // backend's `COALESCE($n, col)` PATCH semantics.
+          max_transit_rtt_ms: form.max_transit_rtt_ms,
+          max_transit_stddev_ms: form.max_transit_stddev_ms,
+          min_improvement_ms: form.min_improvement_ms,
+          min_improvement_ratio: form.min_improvement_ratio,
         },
       },
       {
@@ -234,6 +307,80 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
           </p>
         </div>
 
+        {/*
+         * Guardrail knobs. Optional — empty input clears the local form
+         * state. NOTE: PATCH semantics on the backend use `COALESCE($n,
+         * col)` for these columns, mirroring `loss_threshold_ratio` and
+         * `stddev_weight`; clearing an input here does NOT push the
+         * column back to NULL on the server. To disable a guardrail
+         * after it has been set, clone the campaign and start fresh.
+         */}
+        <div className="space-y-1">
+          <Label className="text-sm font-semibold">Evaluation guardrails (optional)</Label>
+          <p id="settings-guardrails-hint" className="text-xs text-muted-foreground">
+            Eligibility caps prune transit candidates before scoring; storage floors gate which
+            per-pair rows are persisted (combined under OR semantics). Clearing an input only resets
+            the local form — operators cannot disable a guardrail once set; clone the campaign to
+            start fresh.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2" aria-describedby="settings-guardrails-hint">
+          <div className="space-y-1">
+            <Label htmlFor="settings-max-transit-rtt-ms">Max transit RTT (ms)</Label>
+            <Input
+              id="settings-max-transit-rtt-ms"
+              type="number"
+              min={KNOB_BOUNDS.max_transit_rtt_ms.min}
+              max={KNOB_BOUNDS.max_transit_rtt_ms.max}
+              value={nullableValue(form.max_transit_rtt_ms)}
+              placeholder="e.g. 200"
+              onChange={handleNullable("max_transit_rtt_ms")}
+              disabled={!isEligible || isPending}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="settings-max-transit-stddev-ms">Max transit RTT stddev (ms)</Label>
+            <Input
+              id="settings-max-transit-stddev-ms"
+              type="number"
+              min={KNOB_BOUNDS.max_transit_stddev_ms.min}
+              max={KNOB_BOUNDS.max_transit_stddev_ms.max}
+              value={nullableValue(form.max_transit_stddev_ms)}
+              placeholder="e.g. 50"
+              onChange={handleNullable("max_transit_stddev_ms")}
+              disabled={!isEligible || isPending}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="settings-min-improvement-ms">Min improvement (ms)</Label>
+            <Input
+              id="settings-min-improvement-ms"
+              type="number"
+              step="0.1"
+              min={KNOB_BOUNDS.min_improvement_ms.min}
+              max={KNOB_BOUNDS.min_improvement_ms.max}
+              value={nullableValue(form.min_improvement_ms)}
+              placeholder="e.g. 5 (negative values allowed)"
+              onChange={handleNullable("min_improvement_ms")}
+              disabled={!isEligible || isPending}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="settings-min-improvement-ratio">Min improvement ratio</Label>
+            <Input
+              id="settings-min-improvement-ratio"
+              type="number"
+              step="0.01"
+              min={KNOB_BOUNDS.min_improvement_ratio.min}
+              max={KNOB_BOUNDS.min_improvement_ratio.max}
+              value={nullableValue(form.min_improvement_ratio)}
+              placeholder="e.g. 0.1 (10%)"
+              onChange={handleNullable("min_improvement_ratio")}
+              disabled={!isEligible || isPending}
+            />
+          </div>
+        </div>
+
         <div className="flex items-center gap-3">
           <Button type="submit" disabled={!isEligible || isPending}>
             {isPending ? "Re-evaluating…" : "Re-evaluate"}
@@ -251,6 +398,23 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
           Last evaluated {evaluationQuery.data.evaluated_at} —{" "}
           {evaluationQuery.data.candidates_good} of {evaluationQuery.data.candidates_total}{" "}
           candidates qualified.
+        </p>
+      ) : null}
+
+      {/*
+       * Operator-footgun warning. A tight guardrail set against a sparse
+       * baseline can drop every candidate; the operator sees "0 of 0"
+       * above and may assume the campaign produced no useful data. The
+       * warning fires only when at least one guardrail is set on the
+       * snapshot — an empty result set with no guardrails is a different
+       * shape (likely no baseline pairs).
+       */}
+      {evaluationQuery.data &&
+      evaluationQuery.data.candidates_total === 0 &&
+      hasAnyGuardrailSet(evaluationQuery.data) ? (
+        <p className="text-xs text-amber-600 dark:text-amber-400" role="status">
+          The active guardrails dropped every candidate. Loosen one or more knobs and re-evaluate to
+          see results.
         </p>
       ) : null}
     </Card>
