@@ -7,13 +7,14 @@ import {
   type VisibilityState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, ChevronsUpDown, ChevronUp, RefreshCw, Settings2 } from "lucide-react";
+import { RefreshCw, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogueEntry, CatalogueSortBy, CatalogueSortDir } from "@/api/hooks/catalogue";
 import { IpHostname } from "@/components/ip-hostname";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SortableHeader } from "@/components/ui/sortable-header";
 import { lookupCountryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 import { StatusChip } from "./StatusChip";
@@ -233,60 +234,8 @@ function getInitialVisibility(): VisibilityState {
 }
 
 // ---------------------------------------------------------------------------
-// SortIcon / SortableHeader
+// aria-sort helper
 // ---------------------------------------------------------------------------
-
-interface SortIconProps {
-  active: CatalogueSortDir | null;
-}
-
-function SortIcon({ active }: SortIconProps) {
-  if (active === "asc") return <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />;
-  if (active === "desc") return <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />;
-  return <ChevronsUpDown className="h-3.5 w-3.5 opacity-50" aria-hidden="true" />;
-}
-
-interface SortableHeaderProps {
-  col: CatalogueSortCol;
-  label: string;
-  sort: CatalogueTableSort;
-  onSortChange: CatalogueTableProps["onSortChange"];
-}
-
-/**
- * Returns the next sort tuple in the three-state cycle
- * `none → asc → desc → none` for the given column.
- */
-function nextSort(
-  col: CatalogueSortCol,
-  active: CatalogueSortDir | null,
-): [CatalogueSortCol | null, CatalogueSortDir | null] {
-  if (active === null) return [col, "asc"];
-  if (active === "asc") return [col, "desc"];
-  return [null, null];
-}
-
-/**
- * Interactive header contents. `aria-sort` lives on the enclosing `<th>`
- * (see call site) so assistive tech tracks the active column; this button
- * only owns the click + focus ring. Negative left margin lines the
- * chevron up with plain-text column titles.
- */
-function SortableHeader({ col, label, sort, onSortChange }: SortableHeaderProps) {
-  const active = sort.col === col ? sort.dir : null;
-  const [nextCol, nextDir] = nextSort(col, active);
-
-  return (
-    <button
-      type="button"
-      onClick={() => onSortChange(nextCol, nextDir)}
-      className="-ml-1 flex items-center gap-1 rounded-sm px-1 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      {label}
-      <SortIcon active={active} />
-    </button>
-  );
-}
 
 /**
  * `aria-sort` value for a header cell given the active column and direction.
