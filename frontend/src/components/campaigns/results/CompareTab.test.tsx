@@ -347,7 +347,7 @@ describe("P3: pick role radio", () => {
 describe("P4: candidate sub-picker", () => {
   test("candidate sub-picker is hidden before any agent is picked", () => {
     renderCompareTab(makeEvaluation());
-    expect(screen.queryByTestId("candidate-sub-picker")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("candidate-sub-picker-details")).not.toBeInTheDocument();
   });
 
   test("candidate sub-picker appears after at least one agent is checked", async () => {
@@ -355,7 +355,17 @@ describe("P4: candidate sub-picker", () => {
     const checkbox = screen.getByTestId("agent-picker-agent-a");
     fireEvent.click(checkbox);
     await waitFor(() => {
-      expect(screen.getByTestId("candidate-sub-picker")).toBeInTheDocument();
+      expect(screen.getByTestId("candidate-sub-picker-details")).toBeInTheDocument();
+    });
+  });
+
+  test("candidate sub-picker is initially closed (details element not open)", async () => {
+    renderCompareTab(makeEvaluation(), { source_agent_ids: ["agent-a"] });
+    const checkbox = screen.getByTestId("agent-picker-agent-a");
+    fireEvent.click(checkbox);
+    await waitFor(() => {
+      const details = screen.getByTestId("candidate-sub-picker-details") as HTMLDetailsElement;
+      expect(details).not.toHaveAttribute("open");
     });
   });
 });

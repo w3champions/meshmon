@@ -44,6 +44,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { CampaignDetailSearch } from "@/router/index";
+import type { EdgePairsQuery } from "@/api/hooks/campaigns";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,6 +59,11 @@ type PickRole = "both" | "source" | "destination";
 
 const STORAGE_FILTER_CAVEAT =
   "Compare reads the rows actually persisted. If you set tight min_improvement_* storage filters, sub-threshold rows are invisible here.";
+
+const EDGE_PAIR_QUERY: EdgePairsQuery = { limit: 500 };
+
+const CWP_TOOLTIP =
+  "Coverage-weighted ping is computed against the full agent set; not recomputed in Compare. Pick fewer agents to reason about CWP separately via the Heatmap tab.";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -190,7 +196,7 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
   useEffect(() => {
     const csv = Array.from(pickedAgents).join(",") || undefined;
     setSearchParam({ picked: csv });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setSearchParam derives from a stable navigate reference; only re-run when pickedAgents actually changes
   }, [pickedAgents]);
 
   // ------------------------------------------------------------------
@@ -225,11 +231,9 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
   // Edge-pair data feed (edge_candidate only)
   // ------------------------------------------------------------------
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const emptyQuery = useMemo(() => ({ limit: 500 }), []);
   const edgePairQuery = useEdgePairDetails(
     isEdgeMode ? campaign.id : undefined,
-    emptyQuery,
+    EDGE_PAIR_QUERY,
   );
 
   const allEdgeRows = useMemo<EvaluationEdgePairDetailDto[]>(
@@ -320,7 +324,6 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
         agentIds={sourceAgentIds}
         picked={pickedAgents}
         onToggle={handleAgentToggle}
-        campaignId={campaign.id}
       />
 
       {/* Candidate sub-picker (shown only when at least one agent is picked) */}
@@ -402,7 +405,6 @@ interface AgentPickerProps {
   agentIds: string[];
   picked: Set<string>;
   onToggle: (agentId: string) => void;
-  campaignId: string;
 }
 
 function AgentPicker({ agentIds, picked, onToggle }: AgentPickerProps) {
@@ -458,42 +460,51 @@ interface CandidateSubPickerProps {
 }
 
 function CandidateSubPicker({ candidates, pickedIps, onToggle }: CandidateSubPickerProps) {
+  const summaryText =
+    pickedIps.size === 0
+      ? "Restrict to specific candidates"
+      : `Filter to specific candidates (${pickedIps.size} of ${candidates.length} selected)`;
+
   return (
-    <Card className="p-4 flex flex-col gap-3" data-testid="candidate-sub-picker">
-      <h3 className="text-sm font-semibold">Filter candidates (optional)</h3>
-      <div className="flex flex-wrap gap-3">
-        {candidates.map((c) => (
-          <label
-            key={c.destination_ip}
-            className="flex items-center gap-2 cursor-pointer text-sm font-mono"
-          >
-            <input
-              type="checkbox"
-              data-testid={`candidate-sub-picker-${c.destination_ip}`}
-              checked={pickedIps.has(c.destination_ip)}
-              onChange={() => onToggle(c.destination_ip)}
-              className="accent-primary"
-            />
-            <CandidateRef
-              mode="inline"
-              data={{
-                ip: c.destination_ip,
-                display_name: c.display_name,
-                hostname: c.hostname,
-                is_mesh_member: c.is_mesh_member,
-              }}
-            />
-          </label>
-        ))}
-      </div>
-      {pickedIps.size === 0 ? (
-        <p className="text-xs text-muted-foreground">All candidates shown.</p>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          Showing {pickedIps.size} of {candidates.length} candidates.
-        </p>
-      )}
-    </Card>
+    <details data-testid="candidate-sub-picker-details">
+      <summary className="cursor-pointer font-semibold text-sm mb-3 hover:text-foreground transition-colors">
+        {summaryText}
+      </summary>
+      <Card className="p-4 flex flex-col gap-3" data-testid="candidate-sub-picker">
+        <div className="flex flex-wrap gap-3">
+          {candidates.map((c) => (
+            <label
+              key={c.destination_ip}
+              className="flex items-center gap-2 cursor-pointer text-sm font-mono"
+            >
+              <input
+                type="checkbox"
+                data-testid={`candidate-sub-picker-${c.destination_ip}`}
+                checked={pickedIps.has(c.destination_ip)}
+                onChange={() => onToggle(c.destination_ip)}
+                className="accent-primary"
+              />
+              <CandidateRef
+                mode="inline"
+                data={{
+                  ip: c.destination_ip,
+                  display_name: c.display_name,
+                  hostname: c.hostname,
+                  is_mesh_member: c.is_mesh_member,
+                }}
+              />
+            </label>
+          ))}
+        </div>
+        {pickedIps.size === 0 ? (
+          <p className="text-xs text-muted-foreground">All candidates shown.</p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Showing {pickedIps.size} of {candidates.length} candidates.
+          </p>
+        )}
+      </Card>
+    </details>
   );
 }
 
@@ -646,7 +657,16 @@ function CompareCandidateRow({ candidate, index, onClick }: CompareCandidateRowP
         data-testid={`compare-cwp-${candidate.destination_ip}`}
         className="text-sm tabular-nums text-muted-foreground"
       >
-        —
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="cursor-help">—</span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs text-xs">
+              {CWP_TOOLTIP}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </TableCell>
     </TableRow>
   );
