@@ -196,6 +196,25 @@ fn score_candidate(
     let mut pair_rows: Vec<EdgePairRow> = Vec::with_capacity(inputs.agents.len());
     let mut destinations_total: i32 = 0;
 
+    // Defense-in-depth: drop both endpoint forms of X from the intermediary
+    // pool so the per-(X, B) `pool_for_b` filter below never has to bridge
+    // the `Agent` / `CandidateIp` discriminants when X is a mesh agent. The
+    // `Agent` form would otherwise be caught only via Endpoint equality in
+    // `enumerate_routes`' `y == source` skip while the `CandidateIp(x.ip)`
+    // form would slip through and produce a phantom `(Agent("x"), Ip(x.ip))`
+    // leg that is never measured.
+    let (x_agent_id, x_ip_opt) = match x_endpoint {
+        Endpoint::Agent { id } => {
+            let ip = inputs
+                .agents
+                .iter()
+                .find(|a| &a.agent_id == id)
+                .map(|a| a.ip);
+            (Some(id.as_str()), ip)
+        }
+        Endpoint::CandidateIp { ip } => (None, Some(*ip)),
+    };
+
     for b in &inputs.agents {
         // X == B self-pair excluded (spec §5.5 edge case). Compare on
         // the canonical identity (agent id when X is mesh, IP
@@ -219,19 +238,21 @@ fn score_candidate(
         // the comparison never has to bridge variants.
         let b_endpoint = Endpoint::CandidateIp { ip: b.ip };
 
-        // Exclude B from the intermediary pool. The pool carries both
-        // `Agent(b.agent_id)` and `CandidateIp(b.ip)` for every agent
-        // (see the pool-construction comment above). Both forms must be
-        // removed: `enumerate_routes`' built-in `y == destination` skip
-        // compares endpoint variants, but B is passed as `CandidateIp(b.ip)`
-        // while the `Agent` form has a different discriminant — the
-        // built-in skip would miss it. Pre-filtering here keeps the
-        // route enumerator's contract simple and removes both forms.
+        // Exclude both X and B from the intermediary pool. The pool
+        // carries both `Agent(agent_id)` and `CandidateIp(ip)` for every
+        // mesh agent (see the pool-construction comment above). All four
+        // forms must be removed: `enumerate_routes`' built-in
+        // `y == source` / `y == destination` skip compares endpoint
+        // variants, but B is passed as `CandidateIp(b.ip)` and X as
+        // `Agent(x.id)` (when X is a mesh member) — each variant's twin
+        // has a different discriminant and would slip through. Pre-
+        // filtering here keeps the route enumerator's contract simple
+        // and removes every form of X and B.
         let pool_for_b: Vec<Endpoint> = intermediaries
             .iter()
             .filter(|e| match e {
-                Endpoint::Agent { id } => id != &b.agent_id,
-                Endpoint::CandidateIp { ip } => ip != &b.ip,
+                Endpoint::Agent { id } => id != &b.agent_id && Some(id.as_str()) != x_agent_id,
+                Endpoint::CandidateIp { ip } => ip != &b.ip && Some(*ip) != x_ip_opt,
             })
             .cloned()
             .collect();

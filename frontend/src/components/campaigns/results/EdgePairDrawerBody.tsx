@@ -12,11 +12,13 @@
  */
 
 import { useMemo } from "react";
+import type { AgentSummary } from "@/api/hooks/agents";
+import { useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import type { EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 import { useEdgePairDetails } from "@/api/hooks/evaluation";
 import type { components } from "@/api/schema.gen";
-import { CandidateRef } from "@/components/campaigns/CandidateRef";
+import { IpHostname } from "@/components/ip-hostname/IpHostname";
 import { RouteLegRow } from "@/components/campaigns/results/RouteLegRow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -85,11 +87,20 @@ export function EdgePairDrawerBody({
   const hook = useEdgePairDetails(campaign.id, {
     candidate_ip: candidateIp,
   });
+  const agentsQuery = useAgents();
 
   const rows = useMemo<EvaluationEdgePairDetailDto[]>(
     () => hook.data?.pages.flatMap((p) => p.entries) ?? [],
     [hook.data],
   );
+
+  const agentsById = useMemo<Map<string, AgentSummary>>(() => {
+    const map = new Map<string, AgentSummary>();
+    for (const agent of agentsQuery.data ?? []) {
+      map.set(agent.id, agent);
+    }
+    return map;
+  }, [agentsQuery.data]);
 
   // Self-pair exclusion check (spec §5.5 G-5):
   // The note shows when candidate is a mesh member AND its agent_id matches
@@ -160,6 +171,7 @@ export function EdgePairDrawerBody({
               row={row}
               index={idx}
               lossThresholdRatio={campaign.loss_threshold_ratio}
+              agentsById={agentsById}
             />
           ))}
         </div>
@@ -191,15 +203,19 @@ interface EdgePairRowProps {
   row: EvaluationEdgePairDetailDto;
   index: number;
   lossThresholdRatio: number;
+  agentsById: Map<string, AgentSummary>;
 }
 
-function EdgePairRow({ row, index, lossThresholdRatio }: EdgePairRowProps) {
-  const candidateRefData = {
-    ip: row.candidate_ip,
-    display_name: null,
-    is_mesh_member: false,
-    hostname: row.destination_hostname,
-  };
+function EdgePairRow({ row, index, lossThresholdRatio, agentsById }: EdgePairRowProps) {
+  // The B endpoint is a destination agent, not a catalogue candidate. Render
+  // its hostname / display_name (falling back to agent_id) as the primary
+  // label and the agent's IP — resolved via the agents map — as a smaller
+  // secondary line so the cell points at the destination agent rather than
+  // the X candidate.
+  const destAgent = agentsById.get(row.destination_agent_id);
+  const destLabel =
+    row.destination_hostname ?? destAgent?.display_name ?? row.destination_agent_id;
+  const destIp = destAgent?.ip;
 
   return (
     <div
@@ -213,8 +229,14 @@ function EdgePairRow({ row, index, lossThresholdRatio }: EdgePairRowProps) {
       >
         {/* B name */}
         <div role="cell" className="px-2">
-          <CandidateRef mode="inline" data={candidateRefData} />
-          <div className="font-mono text-xs text-muted-foreground">{row.destination_agent_id}</div>
+          <div className="flex flex-col">
+            <span className="truncate font-medium" title={destLabel}>
+              {destLabel}
+            </span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {destIp ? <IpHostname ip={destIp} /> : row.destination_agent_id}
+            </span>
+          </div>
         </div>
 
         {/* Best RTT — `best_route_ms` is `null` for unreachable rows. */}

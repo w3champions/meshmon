@@ -27,6 +27,11 @@ vi.mock("@/api/hooks/evaluation", async () => {
   return { ...actual, useEdgePairDetails: vi.fn() };
 });
 
+// Stub useAgents so the destination-agent IP lookup map is empty in tests.
+vi.mock("@/api/hooks/agents", () => ({
+  useAgents: () => ({ data: undefined, isLoading: false, isError: false }),
+}));
+
 // Stub CatalogueDrawerOverlay/useCatalogueDrawer so CandidateRef inline doesn't throw
 vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
   useCatalogueDrawer: () => ({ open: vi.fn() }),
@@ -212,12 +217,12 @@ describe("EdgePairDrawerBody — row rendering", () => {
     expect(screen.getByTestId("edge-pair-row-1")).toBeInTheDocument();
   });
 
-  test("renders CandidateRef inline button for the B endpoint", () => {
+  test("renders the destination agent label and id for the B endpoint", () => {
     renderBody([makeEdgePairRow(1)]);
-    // CandidateRef inline renders a button with the label (IP fallback when no display_name)
     expect(screen.getByTestId("edge-pair-row-0")).toBeInTheDocument();
-    // Destination agent id is rendered in the row
-    expect(screen.getByText("dest-agent-1")).toBeInTheDocument();
+    // Destination agent id is rendered in the row (label + secondary line
+    // both fall back to agent_id when no hostname / agentsById entry).
+    expect(screen.getAllByText("dest-agent-1").length).toBeGreaterThanOrEqual(1);
   });
 
   test("renders RouteLegRow for each leg in the best route", () => {
