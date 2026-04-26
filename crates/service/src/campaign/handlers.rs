@@ -348,6 +348,7 @@ async fn source_agent_ids_for_campaign(pool: &sqlx::PgPool, id: Uuid) -> Vec<Str
         "SELECT DISTINCT source_agent_id \
            FROM campaign_pairs \
           WHERE campaign_id = $1 \
+            AND kind = 'campaign' \
           ORDER BY source_agent_id",
     )
     .bind(id)

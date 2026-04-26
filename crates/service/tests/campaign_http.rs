@@ -192,6 +192,12 @@ async fn get_one_pair_counts_excludes_detail_rows() {
 /// DISTINCT set of source agents from `campaign_pairs`, ascending. The
 /// SPA's CompareTab picker reads this field directly; without it the
 /// picker rendered the empty-state card for every real campaign.
+///
+/// Detail rows (`kind` in `detail_ping` / `detail_mtr`) are operator-
+/// supplied per-pair drilldown entries and may carry source IDs that
+/// are not part of the campaign's baseline source set. Those IDs must
+/// not surface in the picker — they have no edge_pair_details rows and
+/// would render an empty CompareTab.
 #[tokio::test]
 async fn get_one_returns_source_agent_ids() {
     let h = common::HttpHarness::start().await;
@@ -209,6 +215,22 @@ async fn get_one_returns_source_agent_ids() {
         .await;
     let id = created["id"].as_str().expect("id is string");
 
+    // Seed a detail_mtr row with a source_agent_id that is NOT in the
+    // baseline campaign source set. The picker query must filter it
+    // out so operators only see real baseline sources.
+    let uuid_id: uuid::Uuid = id.parse().expect("id is uuid");
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, kind) \
+         VALUES ($1::uuid, 'agent-sa-detail-only', '198.51.100.251'::inet, \
+                 'pending', 'detail_mtr')",
+    )
+    .bind(uuid_id)
+    .execute(&h.state.pool)
+    .await
+    .expect("seed detail_mtr row");
+
     let got: serde_json::Value = h.get_json(&format!("/api/campaigns/{id}")).await;
     let agents: Vec<String> = got["source_agent_ids"]
         .as_array()
@@ -216,7 +238,8 @@ async fn get_one_returns_source_agent_ids() {
         .iter()
         .map(|v| v.as_str().expect("agent id is string").to_string())
         .collect();
-    // DISTINCT-ordered ascending; each source surfaces exactly once.
+    // DISTINCT-ordered ascending; each baseline source surfaces exactly
+    // once. The detail-only source must NOT be returned.
     assert_eq!(
         agents,
         vec![
@@ -224,7 +247,11 @@ async fn get_one_returns_source_agent_ids() {
             "agent-sa-b".to_string(),
             "agent-sa-c".to_string(),
         ],
-        "source_agent_ids must be DISTINCT and sorted; got {agents:?}"
+        "source_agent_ids must include only baseline sources; got {agents:?}"
+    );
+    assert!(
+        !agents.iter().any(|a| a == "agent-sa-detail-only"),
+        "detail-only source must not surface in picker; got {agents:?}"
     );
 }
 
