@@ -16,7 +16,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Campaign, CampaignState } from "@/api/hooks/campaigns";
@@ -391,12 +391,13 @@ beforeEach(() => {
   editStub.mutate.mockReset();
   patchStub.mutate.mockReset();
   evaluateStub.mutate.mockReset();
+  forcePairStub.mutate.mockReset();
+  triggerDetailStub.mutate.mockReset();
   useComposerSeedStore.setState({ seed: null });
   setupHookMocks();
 });
 
 afterEach(() => {
-  cleanup();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
   localStorage.clear();

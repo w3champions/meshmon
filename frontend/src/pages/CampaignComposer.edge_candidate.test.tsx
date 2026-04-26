@@ -338,7 +338,6 @@ async function switchToEdgeCandidate(user: ReturnType<typeof userEvent.setup>) {
 
 describe("CampaignComposer edge_candidate — mode switch reveals knobs", () => {
   test("switching to edge_candidate mode reveals useful_latency_ms and vm_lookback_minutes inputs", async () => {
-    setupHooks();
     const user = userEvent.setup();
     renderComposer();
 
@@ -354,7 +353,6 @@ describe("CampaignComposer edge_candidate — mode switch reveals knobs", () => 
   });
 
   test("Direct only (0) segment appears for edge_candidate max_hops", async () => {
-    setupHooks();
     const user = userEvent.setup();
     renderComposer();
 
@@ -368,7 +366,6 @@ describe("CampaignComposer edge_candidate — mode switch reveals knobs", () => 
   });
 
   test("max_hops caption disappears in edge_candidate mode", async () => {
-    setupHooks();
     const user = userEvent.setup();
     renderComposer();
 
