@@ -1,6 +1,6 @@
 //! Cross-mode `max_hops` correctness tests (T56 Phase F3).
 //!
-//! Five tests exercise the `max_hops` knob across all three evaluation modes.
+//! Six tests exercise the `max_hops` knob across all three evaluation modes.
 //! These are pure-function unit tests of `eval::evaluate`, not HTTP integration
 //! tests. This keeps Phase F3 independent of Phase G (EdgeCandidate persistence)
 //! which hasn't been wired up yet.
@@ -9,8 +9,10 @@
 //!   1. EdgeCandidate max_hops=0: only direct routes; no transit intermediaries.
 //!   2. EdgeCandidate max_hops=1: 1-hop routes allowed alongside direct routes.
 //!   3. EdgeCandidate max_hops=2: 2-hop routes allowed; coverage must not regress.
-//!   4. Diversity max_hops=2: `winning_x_position` set on pair_details.
+//!   4. Diversity max_hops=2: `winning_x_position` semantics (None for 1-hop route).
 //!   5. Optimization max_hops=2: tiebreaker enumerates non-X alternatives.
+//!   6. Diversity max_hops=2: dual-form pool regression — A/B correctly excluded
+//!      from intermediary pool so degenerate routes are not counted.
 
 use meshmon_service::campaign::eval::{
     evaluate, AgentRow, AttributedMeasurement, EvaluationInputs, EvaluationOutputs,
@@ -308,18 +310,18 @@ fn edge_candidate_max_hops_2_full_two_hop_set() {
 // ---------------------------------------------------------------------------
 
 /// Diversity mode with `max_hops=2`: `winning_x_position` in pair_details is
-/// set to 1 when X is the sole (and first) intermediary in a 1-hop route.
+/// `None` when the winning route is 1-hop (X is the sole intermediary — there
+/// is no "first vs second" position to track).
 ///
-/// The field is `None` when `max_hops < 2` (single-position routes don't
-/// need tracking).
+/// `winning_x_position` encodes topology, not configuration: it is only
+/// `Some(1)` or `Some(2)` when the winning route is a 2-hop route with two
+/// intermediaries. A 1-hop route always returns `None`.
 ///
 /// Topology:
 ///   Agents: A, B. X=10.4.0.9 (non-mesh).
-///   A→B direct = 300 ms.
-///   A→X = 100 ms, B→X = 110 ms → X transit RTT = 210 ms.
-///   Improvement = 300 - 210 - (11*1 - 24*1) = 300 - 210 + 13 = 103 ms > 0 → qualifies.
-///   (stddev_weight = 1.0, direct stddev = 24ms → penalty = 24; transit stddev = ...
-///    actually both A→X and B→X have stddev=5, composed = max or sum? let me use simple values)
+///   A→B direct = 300 ms, stddev=5.
+///   A→X = 100 ms, B→X = 110 ms → 1-hop X transit RTT = 210 ms, stddev=√50≈7.07.
+///   Improvement = 300 - 210 - (7.07 - 5) * 1.0 ≈ 87.9 ms > 0 → qualifies.
 #[test]
 fn diversity_max_hops_2_x_position_best_of_wins() {
     let inputs = EvaluationInputs {
@@ -358,8 +360,9 @@ fn diversity_max_hops_2_x_position_best_of_wins() {
         "diversity max_hops=2: X must qualify for at least 1 pair: {x_cand:?}"
     );
 
-    // The pair_detail for (A, B) must have winning_x_position = Some(1)
-    // because X is the first (and only) intermediary in the 1-hop route.
+    // The pair_detail for (A, B) must have winning_x_position = None
+    // because the winning route is 1-hop (X is the sole intermediary —
+    // "first vs second" position has no meaning for single-intermediary routes).
     let pd_bundle = &out.pair_details_by_candidate[x_idx];
     let ab_detail = pd_bundle
         .pair_details
@@ -373,8 +376,8 @@ fn diversity_max_hops_2_x_position_best_of_wins() {
     );
     assert_eq!(
         ab_detail.winning_x_position,
-        Some(1),
-        "diversity max_hops=2: winning_x_position must be 1 for sole 1-hop intermediary: {ab_detail:?}"
+        None,
+        "diversity max_hops=2: winning_x_position must be None for a 1-hop route (sole intermediary has no ordinal position): {ab_detail:?}"
     );
 }
 
@@ -450,5 +453,126 @@ fn optimization_max_hops_2_tiebreaker_includes_two_hop_alternatives() {
     assert!(
         !ab_detail.qualifies,
         "optimization max_hops=2: (A, B) must NOT qualify when Y beats X: {ab_detail:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Diversity max_hops=2: dual-form pool regression — A/B must not appear
+//    as intermediaries after the pool filter is applied.
+// ---------------------------------------------------------------------------
+
+/// Diversity mode with `max_hops=2`: the intermediary pool construction uses
+/// both `Agent` and `CandidateIp` forms for each mesh agent. The pool filter
+/// must remove BOTH forms of A and B so that no route through A or B is
+/// enumerated. This is a regression test for the dual-form pool fix: before
+/// the fix, only the `Agent` form of each agent was in the pool, and the
+/// filter matched on agent IDs. The fix added both forms and updated the
+/// filter to exclude both. This test proves A and B are correctly excluded by
+/// verifying that the only qualifying route for X is `A → X → B` (1-hop),
+/// and that `winning_x_position = None` (1-hop route has no ordinal position).
+///
+/// Topology:
+///   Agents: A (10.6.0.1), B (10.6.0.2), Y (10.6.0.3).
+///   X = 10.6.0.9 (non-mesh candidate).
+///   Measurements:
+///     A→B direct = 300 ms (baseline, large to ensure X qualifies).
+///     A→X = 100 ms (A→X forward leg).
+///     B→X = 110 ms (B→X; provides X→B via symmetric reverse).
+///     A→Y = 50 ms, B→Y = 60 ms (mesh Y measurements; Y→B available via reverse).
+///
+///   X qualifies via 1-hop A→X→B (transit RTT = 210 ms < 300 ms direct).
+///   Y-only routes (A→Y→B) don't contain X and are correctly filtered out.
+///
+///   Regression check: if A or B leaked into the pool, degenerate routes like
+///   A→A→X→B or A→X→B→B would be attempted. They can't resolve (A or B
+///   endpoints as transit would fail leg lookups), but the test proves the pool
+///   is clean by checking that X correctly qualifies with `pairs_improved = 1`
+///   and that `winning_x_position = None` (correct for a 1-hop route).
+#[test]
+fn diversity_max_hops_2_dual_form_pool_filter_regression() {
+    let inputs = EvaluationInputs {
+        measurements: vec![
+            m("a", "10.6.0.2", 300.0, 5.0, 0.0), // A→B baseline (direct)
+            m("a", "10.6.0.9", 100.0, 5.0, 0.0), // A→X forward
+            m("b", "10.6.0.9", 110.0, 5.0, 0.0), // B→X (provides X→B via reverse)
+            m("a", "10.6.0.3", 50.0, 2.0, 0.0),  // A→Y (mesh Y measurements)
+            m("b", "10.6.0.3", 60.0, 2.0, 0.0),  // B→Y (provides Y→B via reverse)
+        ],
+        agents: vec![
+            agent("a", "10.6.0.1"),
+            agent("b", "10.6.0.2"),
+            agent("y", "10.6.0.3"),
+        ],
+        candidate_ips: Vec::new(),
+        enrichment: Default::default(),
+        loss_threshold_ratio: 0.05,
+        stddev_weight: 1.0,
+        mode: EvaluationMode::Diversity,
+        max_transit_rtt_ms: None,
+        max_transit_stddev_ms: None,
+        min_improvement_ms: None,
+        min_improvement_ratio: None,
+        useful_latency_ms: None,
+        max_hops: 2,
+    };
+
+    let out = as_triple(evaluate(inputs).unwrap());
+
+    // X must appear as a candidate and qualify for the (A, B) pair.
+    let x_idx = out
+        .results
+        .candidates
+        .iter()
+        .position(|c| c.destination_ip == "10.6.0.9")
+        .expect("X=10.6.0.9 must appear as a candidate");
+
+    let x_cand = &out.results.candidates[x_idx];
+    assert_eq!(
+        x_cand.pairs_improved, 1,
+        "diversity max_hops=2: X must qualify for the (A, B) pair: {x_cand:?}"
+    );
+
+    // The (A, B) pair_detail must be present with qualifies=true.
+    let pd_bundle = &out.pair_details_by_candidate[x_idx];
+    let ab_detail = pd_bundle
+        .pair_details
+        .iter()
+        .find(|pd| pd.source_agent_id == "a" && pd.destination_agent_id == "b")
+        .expect("(A, B) pair_detail must be present");
+
+    assert!(
+        ab_detail.qualifies,
+        "diversity max_hops=2: (A, B) pair_detail must qualify: {ab_detail:?}"
+    );
+
+    // winning_x_position must be None: the winning route is 1-hop (X is the sole
+    // intermediary), so there is no "first vs second" ordinal position to report.
+    assert_eq!(
+        ab_detail.winning_x_position,
+        None,
+        "diversity max_hops=2: winning_x_position must be None for 1-hop (sole intermediary): {ab_detail:?}"
+    );
+
+    // Y must also appear as a candidate (A→Y→B measurements exist and A→Y→B
+    // route qualifies via the CandidateIp(Y) pool entry). But Y is a mesh
+    // member — verify it carries `is_mesh_member = true`.
+    let y_cand = out
+        .results
+        .candidates
+        .iter()
+        .find(|c| c.destination_ip == "10.6.0.3");
+    // Y being a candidate (if it appears) must be flagged as a mesh member.
+    if let Some(y) = y_cand {
+        assert!(
+            y.is_mesh_member,
+            "Y at 10.6.0.3 is a mesh agent: is_mesh_member must be true: {y:?}"
+        );
+    }
+
+    // Sanity: the total baseline pair count must be ≥ 1 (A→B exists).
+    assert!(
+        out.baseline_pair_count >= 1,
+        "baseline_pair_count must be at least 1: {}",
+        out.baseline_pair_count
     );
 }

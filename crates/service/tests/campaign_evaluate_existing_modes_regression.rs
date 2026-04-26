@@ -48,8 +48,8 @@ async fn diversity_at_max_hops_1_matches_pre_change() {
                 "loss_threshold_ratio": 0.02,
                 "stddev_weight": 1.0,
                 "evaluation_mode": "diversity",
-                // max_hops defaults to 1 when not supplied; the F2 refactor
-                // must preserve this behaviour.
+                // max_hops defaults to 2 when not supplied; this test pins
+                // behaviour for max_hops=1 (the pre-T56 hardcoded value).
             }),
         )
         .await;

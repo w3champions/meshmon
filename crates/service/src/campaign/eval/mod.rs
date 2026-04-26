@@ -380,9 +380,10 @@ fn build_candidate_row(
         network_operator: enr.network_operator,
         is_mesh_member: agent_by_ip.contains_key(&x_ip),
         pairs_improved,
-        // Counters reflect the post-eligibility set (after L1+L2+L3
-        // and the in-loop cap-check) but include rows the storage
-        // filter dropped — see architecture #2 (eligibility vs storage).
+        // Counters reflect the post-eligibility set (after the
+        // route-enumeration cap check (max_transit_rtt_ms /
+        // max_transit_stddev_ms)) but include rows the storage filter
+        // dropped — see architecture #2 (eligibility vs storage).
         pairs_total_considered,
         avg_improvement_ms,
         avg_loss_ratio,
@@ -431,9 +432,12 @@ fn candidate_order(a: &EvaluationCandidateDto, b: &EvaluationCandidateDto) -> st
 /// Returns `(ax_was_substituted, xb_was_substituted, mtr_id_ax, mtr_id_xb)`.
 ///
 /// For a 1-hop route `A→X→B`: leg[0] is the AX leg, leg[1] is the XB leg.
-/// For a 2-hop route `A→X→Y→B`: leg[0] = AX, and there is no single XB leg
-///   — use the first leg touching X for AX meta and the last leg for XB meta.
-/// For a 2-hop route `A→Y→X→B`: leg[2] = XB; first leg is AX meta.
+/// For a 2-hop route `A→X→Y→B`: leg[0] = AX (A→X), leg[1] = X→Y, leg[2] = Y→B
+///   — use leg[0] as the AX proxy and leg[2] as the XB proxy (best boundary legs).
+/// For a 2-hop route `A→Y→X→B`: leg[0] = A→Y, leg[1] = Y→X, leg[2] = X→B
+///   — use leg[1] (Y→X) as the AX proxy. Rationale: leg[1] is the closest
+///   measured leg to X on the A side; using leg[0] (A→Y) would describe the
+///   A→Y path which is unrelated to X's reachability characteristics.
 ///
 /// Falls back to `(false, false, None, None)` when intermediary ordering
 /// can't be determined (defensive: shouldn't happen on valid routes).
@@ -622,10 +626,39 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
     // Build the full pool of mesh-agent endpoints (used to compose multi-hop
     // routes). Each baseline pair's inner loop subtracts A and B before passing
     // the pool to `enumerate_routes`.
+    //
+    // Each mesh agent contributes BOTH its `Agent { id }` form and its
+    // `CandidateIp { ip }` form to the pool. Both forms are needed because
+    // `LegLookup` indexes measurements as `(Agent(src_id), Ip(dst_ip))`, and
+    // different leg positions require different endpoint variants:
+    //
+    // * `CandidateIp { ip }` — required for legs where the intermediary is the
+    //   destination of a stored measurement. For example, the A→Y first leg
+    //   resolves via forward key `(Agent("a"), Ip(Y.ip))`. For the terminal
+    //   Y→B leg (where B is `Agent("b")`), using `CandidateIp(Y.ip)` allows the
+    //   reverse key `(Agent("b"), Ip(Y.ip))` to hit the map. Using `Agent("y")`
+    //   instead would yield `(Agent("y"), Agent("b"))` which never exists.
+    //
+    // * `Agent { id }` — required for the middle leg of a 2-hop route where
+    //   the agent is the SOURCE of a stored measurement. For example, in
+    //   `A → CandidateIp(Y) → Agent("y") → B`, the middle leg resolves via
+    //   reverse `(Agent("y"), Ip(Y.ip))` — the agent-ID form is the key.
+    //
+    // Including both forms doubles the pool size but has no correctness cost:
+    // `enumerate_routes` discards routes whose any leg can't resolve, so
+    // non-matching endpoint forms simply produce no route and are filtered out.
+    // `qualifies_under_optimization_v2` uses `CandidateIp`-only for its non-X
+    // pool (a simpler 1-hop-only case); this pool is the richer dual-form version
+    // needed to compose both X-first and X-second 2-hop routes correctly.
     let agent_endpoints: Vec<Endpoint> = inputs
         .agents
         .iter()
-        .map(|a| Endpoint::Agent { id: a.agent_id.clone() })
+        .flat_map(|a| {
+            [
+                Endpoint::CandidateIp { ip: a.ip },
+                Endpoint::Agent { id: a.agent_id.clone() },
+            ]
+        })
         .collect();
 
     let total_baseline = baselines.len() as i32;
@@ -693,11 +726,18 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
             // measurements correctly.
             let a_endpoint = Endpoint::Agent { id: a_id.clone() };
             let b_endpoint = Endpoint::Agent { id: b_id.clone() };
+            // `agent_endpoints` contains both `CandidateIp` and `Agent` forms of
+            // each mesh agent (see construction comment above). Both forms of A
+            // and B must be removed from the pool so that `enumerate_routes`
+            // doesn't route through A or B as a transit intermediary.
             let pool: Vec<Endpoint> = agent_endpoints
                 .iter()
-                .filter(|e| {
-                    // Exclude A (source) and B (destination).
-                    !matches!(e, Endpoint::Agent { id } if id == a_id || id == b_id)
+                .filter(|e| match e {
+                    Endpoint::Agent { id } => id != a_id && id != b_id,
+                    Endpoint::CandidateIp { ip } => {
+                        Some(*ip) != agent_by_id.get(a_id.as_str()).copied()
+                            && *ip != *b_ip
+                    }
                 })
                 .cloned()
                 .chain(std::iter::once(x_endpoint.clone()))
@@ -742,17 +782,19 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
 
             // Determine where X sits in the winning route intermediary order.
-            // Position 1 = X is first intermediary (A→X→…→B);
+            // Position 1 = X is first intermediary (A→X→Y→B);
             // Position 2 = X is second intermediary (A→Y→X→B).
-            // None when max_hops ≤ 1 (only one possible position).
-            let winning_x_position: Option<u8> = if max_hops < 2 {
-                None
-            } else {
+            // None for direct (0 intermediaries) and 1-hop (1 intermediary —
+            // X is the sole transit stop so "first vs second" has no meaning).
+            // This is a function of route topology, not of `max_hops` config.
+            let winning_x_position: Option<u8> = if best_x_route.intermediaries.len() == 2 {
                 best_x_route
                     .intermediaries
                     .iter()
-                    .position(|e| e == &x_endpoint)
+                    .position(|e| matches!(e, Endpoint::CandidateIp { ip } if *ip == *x_ip))
                     .map(|pos| (pos + 1) as u8)
+            } else {
+                None // direct (0 intermediaries) or 1-hop (1 intermediary)
             };
 
             // Extract AX and XB leg metadata from the winning route.
