@@ -79,7 +79,7 @@ fn repo_error(context: &'static str, err: RepoError) -> Response {
     }
 }
 
-/// Validate the knobs that are new in T56: `useful_latency_ms`,
+/// Validate the edge-candidate-mode knobs: `useful_latency_ms`,
 /// `max_hops`, and `vm_lookback_minutes`.
 ///
 /// Rules:
@@ -198,7 +198,7 @@ pub async fn create(
     };
 
     // Resolve the effective mode (default: Optimization) and validate the
-    // T56 knobs before touching the database.
+    // edge-candidate knobs before touching the database.
     let mode = body
         .evaluation_mode
         .unwrap_or(super::model::EvaluationMode::Optimization);
@@ -1046,8 +1046,8 @@ pub async fn evaluate(
         }
     }
 
-    // T54-03 / T56: layer VM continuous-mesh baselines on top of the
-    // active-probe rows for agent→agent pairs the campaign did not cover.
+    // Layer VM continuous-mesh baselines on top of the active-probe rows
+    // for agent→agent pairs the campaign did not cover.
     // `fetch_and_synthesize_vm_baselines` returns rows to prepend so
     // active-probe data wins on `build_pair_lookup`'s last-write-wins
     // (see `eval::evaluate`'s `by_pair` loop). The campaign's
@@ -1558,9 +1558,9 @@ const PAIR_DETAILS_MAX_LIMIT: u32 = 500;
 /// (`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,
 /// `max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset
 /// cursor for forward pagination. The cursor's tiebreak rides on the
-/// post-T54 composite primary key
-/// `(source_agent_id, destination_agent_id)`, which is unique within a
-/// single `(evaluation_id, candidate_destination_ip)` tuple.
+/// composite primary key `(source_agent_id, destination_agent_id)`,
+/// which is unique within a single
+/// `(evaluation_id, candidate_destination_ip)` tuple.
 ///
 /// Error vocabulary:
 /// - `not_found` (404): the campaign id does not exist.

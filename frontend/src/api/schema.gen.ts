@@ -387,9 +387,9 @@ export interface paths {
          *     (`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,
          *     `max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset
          *     cursor for forward pagination. The cursor's tiebreak rides on the
-         *     post-T54 composite primary key
-         *     `(source_agent_id, destination_agent_id)`, which is unique within a
-         *     single `(evaluation_id, candidate_destination_ip)` tuple.
+         *     composite primary key `(source_agent_id, destination_agent_id)`,
+         *     which is unique within a single
+         *     `(evaluation_id, candidate_destination_ip)` tuple.
          *
          *     Error vocabulary:
          *     - `not_found` (404): the campaign id does not exist.
@@ -1983,9 +1983,8 @@ export interface components {
          *     `campaign_evaluation_pair_details`,
          *     `campaign_evaluation_unqualified_reasons`) by
          *     [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
-         *     The read-path joins in Rust so the wire DTO stays unchanged
-         *     compared to the pre-T54-02 JSONB layout, modulo the new
-         *     `direct_source` field on every `pair_detail`.
+         *     The read-path joins in Rust to assemble the wire DTO, which carries
+         *     a `direct_source` field on every `pair_detail`.
          */
         EvaluationDto: {
             /**
@@ -2031,7 +2030,7 @@ export interface components {
             loss_threshold_ratio: number;
             /**
              * Format: int32
-             * @description Snapshot of [`CampaignDto::max_hops`]. `None` on pre-T56 rows.
+             * @description Snapshot of [`CampaignDto::max_hops`]. `None` on legacy rows.
              */
             max_hops?: number | null;
             /**
@@ -2068,12 +2067,12 @@ export interface components {
             /**
              * Format: float
              * @description Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.
-             *     `None` on pre-T56 evaluation rows or when the knob was unset.
+             *     `None` on legacy evaluation rows or when the knob was unset.
              */
             useful_latency_ms?: number | null;
             /**
              * Format: int32
-             * @description Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on pre-T56 rows.
+             * @description Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on legacy rows.
              */
             vm_lookback_minutes?: number | null;
         };
@@ -2638,7 +2637,7 @@ export interface components {
         };
         /**
          * @description Kind of measurement row stored in `measurements`. `campaign` is the
-         *     default; T44 never writes anything else (T45/T48 do).
+         *     default written by the scheduler.
          * @enum {string}
          */
         MeasurementKind: "campaign" | "detail_ping" | "detail_mtr";

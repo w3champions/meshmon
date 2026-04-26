@@ -234,8 +234,7 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         // segment runs after `get_evaluation` for readability — `matchit`
         // resolves the longer static prefix regardless of registration
         // order. This handler is the only wire surface for pair-detail
-        // rows since T55 dropped the inline array from the candidate
-        // DTO; the rows themselves still live in
+        // rows; the rows themselves live in
         // `campaign_evaluation_pair_details`.
         .routes(utoipa_axum::routes!(
             crate::campaign::handlers::get_candidate_pair_details

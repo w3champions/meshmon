@@ -431,9 +431,8 @@ where
 /// `campaign_evaluation_pair_details`,
 /// `campaign_evaluation_unqualified_reasons`) by
 /// [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
-/// The read-path joins in Rust so the wire DTO stays unchanged
-/// compared to the pre-T54-02 JSONB layout, modulo the new
-/// `direct_source` field on every `pair_detail`.
+/// The read-path joins in Rust to assemble the wire DTO, which carries
+/// a `direct_source` field on every `pair_detail`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationDto {
     /// Owning campaign.
@@ -463,13 +462,13 @@ pub struct EvaluationDto {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub min_improvement_ratio: Option<f64>,
     /// Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.
-    /// `None` on pre-T56 evaluation rows or when the knob was unset.
+    /// `None` on legacy evaluation rows or when the knob was unset.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub useful_latency_ms: Option<f32>,
-    /// Snapshot of [`CampaignDto::max_hops`]. `None` on pre-T56 rows.
+    /// Snapshot of [`CampaignDto::max_hops`]. `None` on legacy rows.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_hops: Option<i16>,
-    /// Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on pre-T56 rows.
+    /// Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on legacy rows.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub vm_lookback_minutes: Option<i32>,
     /// Number of `(source, destination)` baseline pairs considered.

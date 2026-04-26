@@ -330,11 +330,11 @@ describe("CandidatesTab — overflow menu state gating", () => {
   });
 });
 
-// T55: per-row force-pair / dispatch-pair actions moved into the
-// drilldown dialog. The tab itself no longer renders a per-row action
-// menu — the action requires a `(source_agent_id, destination_ip)`
-// tuple that is reachable only via the paginated pair-details endpoint
-// the dialog already fetches.
+// Per-row force-pair / dispatch-pair actions live inside the drilldown
+// dialog. The tab itself does not render a per-row action menu — the
+// action requires a `(source_agent_id, destination_ip)` tuple that is
+// reachable only via the paginated pair-details endpoint the dialog
+// already fetches.
 
 describe("CandidatesTab — edge_candidate mode", () => {
   function makeEdgeEvaluation(): Evaluation {

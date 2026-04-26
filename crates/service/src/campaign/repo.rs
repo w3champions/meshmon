@@ -1557,8 +1557,9 @@ pub async fn measurements_for_campaign(
             mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
             // Every row here joins through `campaign_pairs.measurement_id`
             // into the `measurements` table — by construction an active-
-            // probe settlement. The T54-03 handler layers VM-continuous
-            // rows on top in-memory; those never reach this loader.
+            // probe settlement. The `/evaluate` handler layers
+            // VM-continuous rows on top in-memory; those never reach
+            // this loader.
             direct_source: DirectSource::ActiveProbe,
         })
         .collect();
@@ -1583,9 +1584,9 @@ pub async fn measurements_for_campaign(
             agent_id: r.agent_id,
             ip: r.ip.ip(),
             // Hostname stamping happens in the handler via the bulk
-            // hostname-cache lookup (Phase H wires it for
-            // edge_candidate). Diversity / Optimization don't read this
-            // field; the EdgeCandidate arm tolerates `None`.
+            // hostname-cache lookup; the EdgeCandidate arm consumes it,
+            // and Diversity / Optimization don't read this field, so the
+            // arm tolerates `None`.
             hostname: None,
         })
         .collect();
@@ -1619,8 +1620,9 @@ pub async fn measurements_for_campaign(
                     network_operator: r.network_operator,
                     // The diversity / optimization queries don't pull
                     // these fields today; the EdgeCandidate handler
-                    // adds them in Phase H. Defaulting to `None` here
-                    // keeps the loader compatible with both arms.
+                    // populates them at response time. Defaulting to
+                    // `None` here keeps the loader compatible with both
+                    // arms.
                     website: None,
                     notes: None,
                     hostname: None,
@@ -1792,7 +1794,7 @@ pub async fn insert_detail_pairs(
     Ok((inserted, post_state))
 }
 
-// ----- Symmetry-fallback reverse query (T56-C2) -------------------------
+// ----- Symmetry-fallback reverse query ----------------------------------
 
 /// Fetch reverse-direction measurements scoped to a campaign's evaluator
 /// universe.

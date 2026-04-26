@@ -90,9 +90,10 @@ pub async fn insert_evaluation(
 ) -> sqlx::Result<Uuid> {
     // Parent row. `evaluated_at` stamps the write wall-clock so the
     // read-path's `ORDER BY evaluated_at DESC` picks up the freshest
-    // entry. The three T56 snapshot columns are written even for
-    // Diversity / Optimization campaigns so a later mode switch
-    // surfaces the previous knob context.
+    // entry. The three edge-candidate snapshot columns
+    // (`useful_latency_ms`, `max_hops`, `vm_lookback_minutes`) are
+    // written even for Diversity / Optimization campaigns so a later
+    // mode switch surfaces the previous knob context.
     let evaluation_id: Uuid = sqlx::query_scalar!(
         r#"INSERT INTO campaign_evaluations
               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
@@ -220,8 +221,8 @@ pub async fn insert_evaluation(
         // Pair-detail rows FK to the (evaluation_id, destination_ip)
         // tuple on `campaign_evaluation_candidates`, so the insert
         // only succeeds once the candidate is in place.
-        // Substitution flags + winning_x_position are populated from
-        // the evaluator's output (Phase F) and written here (Phase G).
+        // Substitution flags + winning_x_position are populated by the
+        // evaluator and persisted here.
         for pd in &bundle.pair_details {
             sqlx::query!(
                 r#"INSERT INTO campaign_evaluation_pair_details
@@ -1578,7 +1579,7 @@ pub async fn latest_evaluation_edge_pairs(
     };
 
     // Page query. `destination_hostname` is NOT joined here — it is stamped
-    // at response time by the Phase H handler via bulk_hostnames_and_enqueue,
+    // at response time by the HTTP handler via bulk_hostnames_and_enqueue,
     // matching the pattern in get_candidate_pair_details. The
     // agents_with_catalogue view has no hostname column.
     let sql = format!(
@@ -1651,7 +1652,7 @@ pub async fn latest_evaluation_edge_pairs(
         let legs_jsonb: serde_json::Value = row.try_get("best_route_legs")?;
         let qualifies_under_t: bool = row.try_get("qualifies_under_t")?;
         let is_unreachable: bool = row.try_get("is_unreachable")?;
-        // destination_hostname is stamped at response time by the Phase H
+        // destination_hostname is stamped at response time by the HTTP
         // handler via bulk_hostnames_and_enqueue; it is not stored in this table.
         let destination_hostname: Option<String> = None;
 

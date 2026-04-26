@@ -65,9 +65,8 @@ pub struct DispatchOutcome {
     pub skipped_reason: Option<String>,
 }
 
-/// Transport-agnostic dispatcher contract. Production impl is an
-/// RPC-backed dispatcher shipped by T45; T44 uses in-memory stubs for
-/// unit / integration tests.
+/// Transport-agnostic dispatcher contract. Production uses an
+/// RPC-backed dispatcher; tests use in-memory stubs.
 #[async_trait]
 pub trait PairDispatcher: Send + Sync {
     /// Dispatch a batch of pairs belonging to a single agent. Returns

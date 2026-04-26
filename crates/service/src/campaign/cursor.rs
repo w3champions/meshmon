@@ -4,7 +4,7 @@
 //! Each cursor captures three things: the sort column the page-1 caller
 //! requested, the value of that column on the last row of the previous
 //! page, and the `(source_agent_id, destination_agent_id)` tiebreak tail
-//! drawn from the post-T54 composite primary key. Encoding is JSON inside
+//! drawn from the composite primary key. Encoding is JSON inside
 //! base64 (URL-safe, no padding) — clients should treat the byte stream
 //! as opaque and never inspect or fabricate it.
 //!

@@ -214,7 +214,7 @@ pub enum EndpointKind {
 }
 
 /// Kind of measurement row stored in `measurements`. `campaign` is the
-/// default; T44 never writes anything else (T45/T48 do).
+/// default written by the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "measurement_kind", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]

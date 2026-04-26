@@ -64,8 +64,8 @@ export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation
     },
   });
   // Seed the shared hostname map from every response. Pair-detail rows
-  // moved off the candidate's wire shape in T55 — they live behind the
-  // paginated `…/candidates/{ip}/pair_details` endpoint, where
+  // are not carried on the candidate's wire shape — they live behind
+  // the paginated `…/candidates/{ip}/pair_details` endpoint, where
   // [`useCandidatePairDetails`] runs its own `useSeedHostnamesOnResponse`
   // pass. Here we only yield the candidate IP + hostname pair. Null
   // (404 / not-yet-evaluated) produces no entries.

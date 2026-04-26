@@ -17,8 +17,9 @@ use crate::campaign::eval::{AgentRow, EvaluationInputs, EvaluationOutputs};
 use crate::campaign::model::{EdgeRouteKind, Endpoint, LegSource};
 
 /// Output bundle of the `evaluate_edge_candidate` arm. Mirrors the
-/// per-candidate / per-pair persistence shape (Phase G writes these into
-/// `campaign_evaluation_candidates` + a new edge-pair-details table).
+/// per-candidate / per-pair persistence shape — the persistence layer
+/// writes these into `campaign_evaluation_candidates` plus the
+/// edge-pair-details table.
 #[derive(Debug, Clone)]
 pub struct EdgeCandidateOutputs {
     /// One row per candidate IP, sorted by `coverage_weighted_ping_ms`
@@ -78,8 +79,7 @@ pub struct EdgeCandidateRow {
     /// any winning route used real (non-substituted) VM-continuous data.
     pub has_real_x_source_data: bool,
     /// Per-(X, B) pair scoring rows. Persisted into the edge-pair detail
-    /// table by [`crate::campaign::evaluation_repo::insert_evaluation`]
-    /// (Phase G).
+    /// table by [`crate::campaign::evaluation_repo::insert_evaluation`].
     pub pair_details: Vec<EdgePairRow>,
 }
 
@@ -432,8 +432,8 @@ fn aggregate_pair_rows(rows: &[EdgePairRow], destinations_total: i32) -> Candida
 /// `has_real_x_source_data`: true iff X is a mesh agent AND at least one
 /// leg of any winning route, where the leg has X as an endpoint, has
 /// `source = LegSource::VmContinuous` AND was NOT substituted from the
-/// reverse direction (per Phase C, substitution is signalled via
-/// `was_substituted: bool`, not `LegSource::SymmetricReuse`).
+/// reverse direction. Substitution is signalled via `was_substituted: bool`,
+/// not `LegSource::SymmetricReuse`.
 fn compute_has_real_x_source_data(x_endpoint: &Endpoint, pair_rows: &[EdgePairRow]) -> bool {
     let x_agent_id: &str = match x_endpoint {
         Endpoint::Agent { id } => id.as_str(),

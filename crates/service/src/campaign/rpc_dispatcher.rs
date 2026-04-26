@@ -58,7 +58,7 @@ use tracing::{debug, warn};
 
 /// Per-destination leaky bucket used by the process-wide rate limiter.
 ///
-/// Same shape as the T44 `scheduler::Bucket`; kept module-private so
+/// Same shape as the scheduler's `Bucket`; kept module-private so
 /// the dispatcher owns an independent cache without a cross-module
 /// dependency.
 #[derive(Debug)]

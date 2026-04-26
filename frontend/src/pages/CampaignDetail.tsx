@@ -341,8 +341,8 @@ export default function CampaignDetail() {
         // friendly so a tweak-and-rerun doesn't silently re-measure
         // every pair. Operator opts in via the knob panel.
         force_measurement: false,
-        // Carry T56 knobs forward. `?? default` collapses `undefined` on
-        // older campaign rows to sensible defaults.
+        // Carry the edge-candidate knobs forward. `?? default` collapses
+        // `undefined` on older campaign rows to sensible defaults.
         useful_latency_ms: cloneCampaign.useful_latency_ms ?? null,
         max_hops: cloneCampaign.max_hops ?? 2,
         vm_lookback_minutes: cloneCampaign.vm_lookback_minutes ?? 15,

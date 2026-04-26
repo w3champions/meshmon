@@ -6,7 +6,7 @@ use crate::campaign::model::Endpoint;
 /// A fully-composed route from `source` to `destination`, with aggregated
 /// RTT, stddev (orthogonal sum), loss (compound), and the full leg list.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by Phase E (EdgeCandidate evaluator arm)
+#[allow(dead_code)] // consumed by the EdgeCandidate evaluator arm
 pub(crate) struct ComposedRoute {
     pub legs: Vec<LegMeasurement>,
     pub rtt_ms: f32,
@@ -19,7 +19,7 @@ pub(crate) struct ComposedRoute {
 
 /// The number of transit hops in a composed route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by Phase E (EdgeCandidate evaluator arm)
+#[allow(dead_code)] // consumed by the EdgeCandidate evaluator arm
 pub(crate) enum RouteKind {
     Direct,
     OneHop,
@@ -40,7 +40,7 @@ pub(crate) enum RouteKind {
 ///
 /// Loss is composed as the complement of the product of survivals:
 ///   `1 - ∏(1 - l_i)`
-#[allow(dead_code)] // consumed by Phase E (EdgeCandidate evaluator arm)
+#[allow(dead_code)] // consumed by the EdgeCandidate evaluator arm
 #[allow(clippy::too_many_arguments)] // 8 args are load-bearing; a params struct would add ceremony
 pub(crate) fn enumerate_routes(
     lookup: &LegLookup<'_>,

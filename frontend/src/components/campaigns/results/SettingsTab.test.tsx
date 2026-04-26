@@ -920,7 +920,7 @@ describe("SettingsTab — R2: legacy badge", () => {
         candidates_total: 2,
         candidates_good: 1,
         avg_improvement_ms: 12,
-        // max_hops intentionally absent (undefined) — pre-T56 evaluations
+        // max_hops intentionally absent (undefined) — legacy evaluations
         vm_lookback_minutes: null,
         results: { candidates: [], unqualified_reasons: {} },
       } as any,

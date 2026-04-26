@@ -60,7 +60,7 @@ function makeEvaluation(candidates: Evaluation["results"]["candidates"]): Evalua
     evaluation_mode: "optimization",
     baseline_pair_count: 6,
     candidates_total: candidates.length,
-    // T55: pair-detail rows live behind the paginated endpoint, so
+    // Pair-detail rows live behind the paginated endpoint, so
     // candidates_good is approximated from `pairs_improved >= 1`.
     candidates_good: candidates.filter((c) => c.pairs_improved >= 1).length,
     avg_improvement_ms: 0,
@@ -146,11 +146,11 @@ describe("computeCostEstimate", () => {
   });
 
   test("scope=good_candidates returns the upper-bound 4 × Σ pairs_improved", () => {
-    // T55 dropped pair-detail rows from the candidate's wire shape, so
-    // the preview no longer mirrors the backend's exact
-    // `(agent, transit_ip)` dedup — that requires fetching every page
-    // of every candidate's pair-details, which is too expensive for a
-    // preview render. The estimator returns
+    // The candidate wire shape does not carry pair-detail rows, so the
+    // preview cannot mirror the backend's exact `(agent, transit_ip)`
+    // dedup — that requires fetching every page of every candidate's
+    // pair-details, which is too expensive for a preview render. The
+    // estimator returns
     // `4 × Σ candidate.pairs_improved` as an upper bound: each
     // qualifying triple contributes one source-side and one
     // destination-side `(agent, transit)` entry pre-dedup, each

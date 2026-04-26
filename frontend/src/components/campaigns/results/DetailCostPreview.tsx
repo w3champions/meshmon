@@ -95,12 +95,11 @@ function countSettledPairs(campaign: Campaign): number {
 /**
  * Upper-bound enqueue count for `scope=good_candidates`.
  *
- * Pre-T55 the candidate DTO carried every pair_detail row, so the
- * preview could mirror the backend's exact `(agent, transit_ip)` dedup
- * locally. Since T55 the wire DTO no longer nests pair_details — they
- * live behind the paginated endpoint — and reproducing the exact dedup
- * would require fetching every page of every qualifying candidate's
- * pair-detail set just to render a preview number.
+ * The candidate DTO does not carry pair_detail rows on the wire — they
+ * live behind the paginated endpoint — so reproducing the backend's
+ * exact `(agent, transit_ip)` dedup would require fetching every page
+ * of every qualifying candidate's pair-detail set just to render a
+ * preview number.
  *
  * The estimate is therefore an upper bound: each qualifying triple
  * contributes one source-side and one destination-side

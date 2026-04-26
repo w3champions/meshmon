@@ -279,10 +279,10 @@ pub enum EvalError {
 /// lookup the rest of the evaluator keys into.
 ///
 /// Last-write-wins on the pair key: callers place higher-priority
-/// sources LATER in `measurements`. The T54-03 `/evaluate` handler
-/// relies on this — it prepends VM-synthesized rows and appends active-
-/// probe rows so an active-probe measurement always overwrites a VM
-/// baseline for the same `(source_agent_id, destination_ip)` tuple. See
+/// sources LATER in `measurements`. The `/evaluate` handler relies on
+/// this — it prepends VM-synthesized rows and appends active-probe rows
+/// so an active-probe measurement always overwrites a VM baseline for
+/// the same `(source_agent_id, destination_ip)` tuple. See
 /// `campaign::handlers::fetch_and_synthesize_vm_baselines` for the
 /// caller-side contract; any refactor here (pre-sort, dedupe, filter)
 /// must preserve this ordering invariant or move the tie-break logic to
@@ -352,7 +352,7 @@ fn collect_baselines(
 /// Implements the OR semantics of architecture #3 across the
 /// `min_improvement_ms` and `min_improvement_ratio` knobs:
 ///
-/// * Both `None` ⇒ store (gate is open; pre-T55 behaviour).
+/// * Both `None` ⇒ store (gate is open).
 /// * At least one set ⇒ row is stored when at least one *set* knob's
 ///   predicate passes; an unset knob auto-fails so the OR collapses to
 ///   "either set knob passes". Negative thresholds round-trip
@@ -594,7 +594,7 @@ fn qualifies_under_optimization_v2(
 /// Derive the headline `avg_improvement_ms` from per-candidate
 /// aggregates rather than re-iterating `pair_details`.
 ///
-/// With T55 storage filters in play, `pair_details` is a *subset* of
+/// With storage filters in play, `pair_details` is a *subset* of
 /// the qualifying triples (a row can pass eligibility + qualify but be
 /// dropped by the storage gate); re-iterating it would silently exclude
 /// those triples from the headline. The candidate-level
@@ -712,7 +712,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
     let mut pair_details_per_candidate: Vec<PairDetailsForCandidate> = Vec::new();
     let mut unqualified_reasons: BTreeMap<String, String> = BTreeMap::new();
 
-    // T55 eligibility / storage knobs. All four are [`Option<f64>`] — `None`
+    // Eligibility / storage knobs. All four are [`Option<f64>`] — `None`
     // means "knob unset; gate is open".
     let max_rtt_cap = inputs.max_transit_rtt_ms;
     let max_sd_cap = inputs.max_transit_stddev_ms;
@@ -927,8 +927,8 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 direct_loss_ratio,
                 // Provenance of the direct A→B baseline row. The transit
                 // legs (A→X, X→B) are always active-probe measurements;
-                // only this A→B row can be VM-sourced, per the T54-03
-                // handler that synthesizes a [`DirectSource::VmContinuous`]
+                // only this A→B row can be VM-sourced. The `/evaluate`
+                // handler synthesizes a [`DirectSource::VmContinuous`]
                 // `AttributedMeasurement` for agent→agent pairs missing
                 // from the active-probe join.
                 direct_source: direct.direct_source,
@@ -950,7 +950,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         // Skip candidates that scored zero eligible triples — matches
         // the L2 early-termination decision (a candidate whose composed
         // RTT/stddev never satisfies the cap should not appear in the
-        // results). With T55 storage filters the distinction between
+        // results). With storage filters the distinction between
         // `pair_details` and counters matters: a candidate may have
         // `pairs_total_considered > 0` while every detail row was
         // dropped by the storage gate — that candidate's headline

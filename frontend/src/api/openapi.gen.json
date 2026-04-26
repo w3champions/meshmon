@@ -926,7 +926,7 @@
           "campaigns"
         ],
         "summary": "`GET /api/campaigns/{id}/evaluation/candidates/{destination_ip}/pair_details`\n— paginated detail breakdown of a single transit candidate's\nper-baseline-pair scoring rows.",
-        "description": "Replaces the unbounded `EvaluationCandidateDto.pair_details` array\nthe wire used to ship inline. The endpoint applies server-side sort\n(10-column whitelist), four optional runtime filters\n(`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,\n`max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset\ncursor for forward pagination. The cursor's tiebreak rides on the\npost-T54 composite primary key\n`(source_agent_id, destination_agent_id)`, which is unique within a\nsingle `(evaluation_id, candidate_destination_ip)` tuple.\n\nError vocabulary:\n- `not_found` (404): the campaign id does not exist.\n- `no_evaluation` (404): the campaign has never been evaluated.\n- `not_a_candidate` (404): the latest evaluation does not include\n  `destination_ip` as a candidate.\n- `invalid_filter` (400): `limit > 500`, or any filter value is\n  non-finite (`NaN` / `Infinity`).\n- `invalid_cursor` (400): cursor undecodable, or its sort column\n  does not match the request's `sort` parameter.\n- `invalid_sort` (400): `sort` is not one of the whitelisted columns\n  (handled by serde at deserialization time).",
+        "description": "Replaces the unbounded `EvaluationCandidateDto.pair_details` array\nthe wire used to ship inline. The endpoint applies server-side sort\n(10-column whitelist), four optional runtime filters\n(`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,\n`max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset\ncursor for forward pagination. The cursor's tiebreak rides on the\ncomposite primary key `(source_agent_id, destination_agent_id)`,\nwhich is unique within a single\n`(evaluation_id, candidate_destination_ip)` tuple.\n\nError vocabulary:\n- `not_found` (404): the campaign id does not exist.\n- `no_evaluation` (404): the campaign has never been evaluated.\n- `not_a_candidate` (404): the latest evaluation does not include\n  `destination_ip` as a candidate.\n- `invalid_filter` (400): `limit > 500`, or any filter value is\n  non-finite (`NaN` / `Infinity`).\n- `invalid_cursor` (400): cursor undecodable, or its sort column\n  does not match the request's `sort` parameter.\n- `invalid_sort` (400): `sort` is not one of the whitelisted columns\n  (handled by serde at deserialization time).",
         "operationId": "get_candidate_pair_details",
         "parameters": [
           {
@@ -4678,7 +4678,7 @@
       },
       "EvaluationDto": {
         "type": "object",
-        "description": "Wire shape for `GET /api/campaigns/{id}/evaluation`.\n\nAssembled from the relational `campaign_evaluations` parent row\nplus its child tables (`campaign_evaluation_candidates`,\n`campaign_evaluation_pair_details`,\n`campaign_evaluation_unqualified_reasons`) by\n[`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].\nThe read-path joins in Rust so the wire DTO stays unchanged\ncompared to the pre-T54-02 JSONB layout, modulo the new\n`direct_source` field on every `pair_detail`.",
+        "description": "Wire shape for `GET /api/campaigns/{id}/evaluation`.\n\nAssembled from the relational `campaign_evaluations` parent row\nplus its child tables (`campaign_evaluation_candidates`,\n`campaign_evaluation_pair_details`,\n`campaign_evaluation_unqualified_reasons`) by\n[`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].\nThe read-path joins in Rust to assemble the wire DTO, which carries\na `direct_source` field on every `pair_detail`.",
         "required": [
           "campaign_id",
           "evaluated_at",
@@ -4739,7 +4739,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Snapshot of [`CampaignDto::max_hops`]. `None` on pre-T56 rows."
+            "description": "Snapshot of [`CampaignDto::max_hops`]. `None` on legacy rows."
           },
           "max_transit_rtt_ms": {
             "type": [
@@ -4788,7 +4788,7 @@
               "null"
             ],
             "format": "float",
-            "description": "Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.\n`None` on pre-T56 evaluation rows or when the knob was unset."
+            "description": "Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.\n`None` on legacy evaluation rows or when the knob was unset."
           },
           "vm_lookback_minutes": {
             "type": [
@@ -4796,7 +4796,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on pre-T56 rows."
+            "description": "Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on legacy rows."
           }
         }
       },
@@ -5707,7 +5707,7 @@
       },
       "MeasurementKind": {
         "type": "string",
-        "description": "Kind of measurement row stored in `measurements`. `campaign` is the\ndefault; T44 never writes anything else (T45/T48 do).",
+        "description": "Kind of measurement row stored in `measurements`. `campaign` is the\ndefault written by the scheduler.",
         "enum": [
           "campaign",
           "detail_ping",
