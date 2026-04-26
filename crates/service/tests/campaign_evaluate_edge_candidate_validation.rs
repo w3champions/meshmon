@@ -153,10 +153,11 @@ async fn patch_max_hops_dismisses_evaluation() {
     let h = HttpHarness::start().await;
     let id = common::create_evaluated_campaign(&h, "diversity").await;
 
-    // Change max_hops — evaluation must be dismissed and the PATCH
-    // response body must reflect the post-dismiss campaign state. The
-    // handler used to return the pre-dismiss UPDATE row, leaving the SPA
-    // cache stuck on `state=evaluated` with a populated `evaluated_at`.
+    // Change max_hops — the campaign must transition out of `evaluated`
+    // and the PATCH response body must reflect the post-dismiss state.
+    // `campaign_evaluations` is append-only history, so the prior
+    // evaluation row stays queryable; the frontend gates on
+    // `state === 'evaluated'` to know the result is current.
     let patch_response: serde_json::Value = h
         .patch_json(&format!("/api/campaigns/{id}"), &json!({"max_hops": 1}))
         .await;
@@ -169,19 +170,20 @@ async fn patch_max_hops_dismisses_evaluation() {
         "PATCH response must clear evaluated_at after dismissal; body = {patch_response}"
     );
 
-    let eval = h
-        .get_expect_status(&format!("/api/campaigns/{id}/evaluation"), 404)
+    // Historical evaluation row remains queryable — `dismiss_evaluation`
+    // no longer DELETEs `campaign_evaluations`. The state transition is
+    // the source of truth; the frontend treats `state === 'completed'`
+    // as "evaluation is stale".
+    let _: serde_json::Value = h
+        .get_expect_status(&format!("/api/campaigns/{id}/evaluation"), 200)
         .await;
-    assert_eq!(
-        eval["error"], "not_evaluated",
-        "evaluation should be dismissed after max_hops change; body = {eval}"
-    );
 }
 
 /// Switching `evaluation_mode` reshapes the entire evaluation row
 /// (Triple → EdgeCandidate sidecars are incompatible). The PATCH
-/// dismissal check must include `evaluation_mode` so a stale row from
-/// the prior mode never lingers under the new mode.
+/// dismissal check must include `evaluation_mode` so the campaign
+/// transitions out of `evaluated` and the SPA forces a re-run before
+/// it can interact with mode-specific surfaces.
 #[tokio::test]
 async fn patch_evaluation_mode_dismisses_evaluation() {
     let h = HttpHarness::start().await;
@@ -190,20 +192,70 @@ async fn patch_evaluation_mode_dismisses_evaluation() {
     // Switch the evaluation mode to edge_candidate. useful_latency_ms
     // must accompany the change since the validator now sees the
     // post-PATCH state and edge_candidate requires it.
-    let _: serde_json::Value = h
+    let patch_response: serde_json::Value = h
         .patch_json(
             &format!("/api/campaigns/{id}"),
             &json!({"evaluation_mode": "edge_candidate", "useful_latency_ms": 80.0}),
         )
         .await;
-
-    let eval = h
-        .get_expect_status(&format!("/api/campaigns/{id}/evaluation"), 404)
-        .await;
     assert_eq!(
-        eval["error"], "not_evaluated",
-        "evaluation should be dismissed after evaluation_mode change; body = {eval}"
+        patch_response["state"], "completed",
+        "PATCH response must reflect post-dismiss state; body = {patch_response}"
     );
+    assert!(
+        patch_response["evaluated_at"].is_null(),
+        "PATCH response must clear evaluated_at after dismissal; body = {patch_response}"
+    );
+}
+
+/// Dismissing an evaluation must NOT delete the historical
+/// `campaign_evaluations` row or its child sidecar tables. Each
+/// evaluation snapshots the knobs it was run under and stays valid
+/// for that snapshot — knob changes only invalidate the campaign's
+/// *current* `evaluated` state, not the historical record.
+#[tokio::test]
+async fn dismiss_preserves_historical_evaluation_rows() {
+    let h = HttpHarness::start().await;
+    let pool = &h.state.pool;
+    let id = common::create_evaluated_campaign(&h, "diversity").await;
+    let campaign_uuid: uuid::Uuid = id.parse().expect("campaign id parses as uuid");
+
+    // Confirm the post-evaluate row was written.
+    let pre_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1::uuid",
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("count evaluations pre-patch");
+    assert!(
+        pre_count >= 1,
+        "fixture must produce at least one evaluation row, got {pre_count}"
+    );
+
+    // PATCH a knob to trigger dismissal.
+    let _: serde_json::Value = h
+        .patch_json(&format!("/api/campaigns/{id}"), &json!({"max_hops": 1}))
+        .await;
+
+    // Historical evaluation rows persist — dismissal only flips the
+    // campaign state.
+    let post_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM campaign_evaluations WHERE campaign_id = $1::uuid",
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("count evaluations post-patch");
+    assert_eq!(
+        post_count, pre_count,
+        "dismiss must NOT delete historical evaluation rows: pre={pre_count} post={post_count}"
+    );
+
+    // Campaign row is back in `completed` with `evaluated_at` cleared.
+    let camp: serde_json::Value = h.get_json(&format!("/api/campaigns/{id}")).await;
+    assert_eq!(camp["state"], "completed", "campaign state = {camp}");
+    assert!(camp["evaluated_at"].is_null(), "evaluated_at = {camp}");
 }
 
 // ---------------------------------------------------------------------------

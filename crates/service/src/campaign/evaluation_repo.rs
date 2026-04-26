@@ -751,30 +751,28 @@ pub async fn persist_evaluation(
     Ok(evaluation_id)
 }
 
-/// Delete all `campaign_evaluations` rows for `campaign_id` and, if the
-/// campaign is currently in `evaluated` state, flip it back to `completed`.
+/// Mark the latest evaluation as no longer current by flipping the
+/// campaign back to `completed`. **Does not delete** any historical
+/// `campaign_evaluations` rows or their child sidecar tables.
 ///
 /// Called by the `PATCH /api/campaigns/{id}` handler whenever one of the
 /// evaluator knobs (`useful_latency_ms`, `max_hops`, `vm_lookback_minutes`,
-/// `loss_threshold_ratio`, `stddev_weight`) changes value, because the
-/// stored evaluation result would be inconsistent with the new settings.
+/// `loss_threshold_ratio`, `stddev_weight`) changes value. The new
+/// settings would be inconsistent with the *current* evaluation result,
+/// so the campaign transitions out of the `evaluated` state. Older
+/// evaluation rows remain valid for the snapshot of knobs they were
+/// run under and stay queryable as history.
 ///
-/// The operation is a no-op when there are no evaluation rows or the
-/// campaign is not in `evaluated` state (e.g. already `completed`,
-/// `running`, etc.).
+/// The operation is a no-op when the campaign is not in `evaluated`
+/// state (e.g. already `completed`, `running`, etc.).
 pub async fn dismiss_evaluation(pool: &PgPool, campaign_id: Uuid) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    // Dynamic queries (not `sqlx::query!` macros) so no offline-cache
-    // regeneration is required for these two new statements.
-    sqlx::query("DELETE FROM campaign_evaluations WHERE campaign_id = $1")
-        .bind(campaign_id)
-        .execute(&mut *tx)
-        .await?;
-
-    // Flip `evaluated → completed` so the state machine is consistent
-    // after the evaluation row is gone. The WHERE-clause guard means this
-    // is a no-op when the campaign is in any other state.
+    // Flip `evaluated → completed` so the state machine reflects that
+    // the latest evaluation no longer matches the current settings.
+    // `campaign_evaluations` is append-only history — each parent row
+    // snapshots the knobs used for that run, and its child sidecar
+    // tables are FK'd to that specific `evaluation_id`. Older runs
+    // remain valid for THEIR snapshots and are intentionally preserved.
+    // The WHERE-clause guard makes this a no-op for any other state.
     sqlx::query(
         "UPDATE measurement_campaigns \
               SET state        = 'completed', \
@@ -783,10 +781,8 @@ pub async fn dismiss_evaluation(pool: &PgPool, campaign_id: Uuid) -> Result<(), 
               AND state = 'evaluated'",
     )
     .bind(campaign_id)
-    .execute(&mut *tx)
+    .execute(pool)
     .await?;
-
-    tx.commit().await?;
     Ok(())
 }
 
