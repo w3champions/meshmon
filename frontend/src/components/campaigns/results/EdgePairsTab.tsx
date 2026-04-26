@@ -6,11 +6,15 @@
  * sort state (`ep_sort` / `ep_dir` search params).
  *
  * Columns (spec §6.5): X candidate (CandidateRef inline), B destination
- * agent id, best_route_ms, route shape chip, loss, stddev, qualifies.
+ * agent (resolved via `useAgents()` so the catalogue drawer opens on the
+ * agent's IP rather than its agent_id), best_route_ms, route shape chip,
+ * loss, stddev, qualifies.
  */
 
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
+import type { AgentSummary } from "@/api/hooks/agents";
+import { useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import type { EdgePairsSortCol, EdgePairsSortDir } from "@/api/hooks/campaigns";
 import type { EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
@@ -144,11 +148,20 @@ export function EdgePairsTab({ campaign }: EdgePairsTabProps) {
     () => ({ sort: sortCol, dir: sortDir }),
     [sortCol, sortDir],
   ));
+  const agentsQuery = useAgents();
 
   const rows = useMemo<EvaluationEdgePairDetailDto[]>(
     () => query.data?.pages.flatMap((p) => p.entries) ?? [],
     [query.data],
   );
+
+  const agentsById = useMemo<Map<string, AgentSummary>>(() => {
+    const map = new Map<string, AgentSummary>();
+    for (const agent of agentsQuery.data ?? []) {
+      map.set(agent.id, agent);
+    }
+    return map;
+  }, [agentsQuery.data]);
 
   // ------------------------------------------------------------------
   // Loading / error
@@ -258,6 +271,7 @@ export function EdgePairsTab({ campaign }: EdgePairsTabProps) {
                 row={row}
                 index={idx}
                 lossThresholdRatio={campaign.loss_threshold_ratio}
+                agentsById={agentsById}
               />
             ))}
           </TableBody>
@@ -290,9 +304,10 @@ interface EdgePairRowProps {
   row: EvaluationEdgePairDetailDto;
   index: number;
   lossThresholdRatio: number;
+  agentsById: Map<string, AgentSummary>;
 }
 
-function EdgePairRow({ row, index, lossThresholdRatio }: EdgePairRowProps) {
+function EdgePairRow({ row, index, lossThresholdRatio, agentsById }: EdgePairRowProps) {
   const candidateRefData = {
     ip: row.candidate_ip,
     display_name: null,
@@ -300,12 +315,22 @@ function EdgePairRow({ row, index, lossThresholdRatio }: EdgePairRowProps) {
     hostname: undefined,
   };
 
-  const destRefData = {
-    ip: row.destination_agent_id,
-    display_name: null,
-    is_mesh_member: false,
-    hostname: row.destination_hostname,
-  };
+  // The B endpoint is a destination agent, not a catalogue candidate. Resolve
+  // its IP via the agents map so CandidateRef inline opens the catalogue
+  // drawer with the agent's IP, not its agent_id. The display label prefers
+  // the response-provided hostname, falling back to the agent's display name
+  // and finally the agent_id when the agent isn't in the roster.
+  const destAgent = agentsById.get(row.destination_agent_id);
+  const destLabel =
+    row.destination_hostname ?? destAgent?.display_name ?? row.destination_agent_id;
+  const destRefData = destAgent
+    ? {
+        ip: destAgent.ip,
+        display_name: destLabel,
+        is_mesh_member: true,
+        hostname: row.destination_hostname,
+      }
+    : null;
 
   return (
     <>
@@ -316,10 +341,21 @@ function EdgePairRow({ row, index, lossThresholdRatio }: EdgePairRowProps) {
           <div className="font-mono text-xs text-muted-foreground">{row.candidate_ip}</div>
         </TableCell>
 
-        {/* B — destination agent id */}
+        {/* B — destination agent. Render via CandidateRef when the agent is
+            in the roster so clicks open the catalogue drawer with the agent's
+            IP; otherwise fall back to the plain agent_id label. */}
         <TableCell>
-          <CandidateRef mode="inline" data={destRefData} />
-          <div className="font-mono text-xs text-muted-foreground">{row.destination_agent_id}</div>
+          {destRefData ? (
+            <>
+              <CandidateRef mode="inline" data={destRefData} />
+              <div className="font-mono text-xs text-muted-foreground">{destAgent?.ip}</div>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-medium">{destLabel}</span>
+              <div className="font-mono text-xs text-muted-foreground">{row.destination_agent_id}</div>
+            </>
+          )}
         </TableCell>
 
         {/* Best RTT — `best_route_ms` is `null` for unreachable rows. */}
