@@ -4,6 +4,51 @@ use std::process::Command;
 
 use crate::test_db;
 
+/// Strip the per-package `CARGO_*` env vars that the outer `cargo run
+/// -p xtask` leaks into our process. Inheriting them into a freshly
+/// spawned `cargo` causes its build-script fingerprints to diff against
+/// any shell-invoked `cargo` run — every alternation between `cargo
+/// xtask test` and a plain `cargo build` would otherwise rebuild
+/// build-scripts that read `CARGO_MANIFEST_DIR` (ring, rustls,
+/// sqlx-macros-core, …) and cascade through their reverse-deps. See
+/// `cargo::core::compiler::fingerprint` `EnvVarChanged` traces.
+///
+/// Preserves user-facing config (`CARGO_HOME`, `CARGO_TARGET_DIR`,
+/// `CARGO_NET_*`, `CARGO_HTTP_*`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`,
+/// `CARGO_REGISTRIES_*`, `CARGO_TERM_*`) so explicit shell overrides
+/// still flow through to the spawned cargo.
+fn scrub_outer_cargo_env(cmd: &mut Command) {
+    // Exact-match leaks set by cargo per-package while building xtask.
+    const EXACT: &[&str] = &[
+        "CARGO",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_LINKS",
+        "CARGO_MANIFEST_PATH",
+        "CARGO_PRIMARY_PACKAGE",
+        "CARGO_BIN_NAME",
+        "CARGO_CRATE_NAME",
+        "CARGO_RUSTC_CURRENT_DIR",
+        "CARGO_TARGET_TMPDIR",
+    ];
+    for key in EXACT {
+        cmd.env_remove(key);
+    }
+    // Prefix-match leaks: per-package metadata (`CARGO_PKG_*`),
+    // build-script cfg values (`CARGO_CFG_*`), feature flags
+    // (`CARGO_FEATURE_*`), and dependency metadata (`CARGO_DEP_*`).
+    for (key, _) in std::env::vars_os() {
+        let Some(s) = key.to_str() else { continue };
+        if s.starts_with("CARGO_PKG_")
+            || s.starts_with("CARGO_CFG_")
+            || s.starts_with("CARGO_FEATURE_")
+            || s.starts_with("CARGO_DEP_")
+            || s.starts_with("CARGO_BIN_EXE_")
+        {
+            cmd.env_remove(s);
+        }
+    }
+}
+
 pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
     // Spawn a fresh per-invocation container. The guard's Drop runs
     // `docker rm -f` on every exit path; signal::on_signal (registered
@@ -35,23 +80,44 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
     //     (up/down/inspect) directly. Letting them race against an
     //     in-flight `xtask test` invocation muddies the docker-side
     //     state. Run them via `cargo test -p xtask`.
+    //
+    // Target/package narrowing: cargo target-selection flags are unioned,
+    // so `--all-targets` would absorb any user-supplied `--test foo` /
+    // `--lib` / `--bin foo`. Drop `--all-targets` when the user passes
+    // one. Likewise drop `--workspace` (and the workspace-level
+    // `--exclude` flags it pairs with) when `-p`/`--package` narrows the
+    // scope explicitly.
+    let user_picks_targets = extra.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--lib" | "--bins" | "--tests" | "--benches" | "--examples" | "--test" | "--bin"
+        )
+    });
+    let user_picks_package = extra
+        .iter()
+        .any(|a| matches!(a.as_str(), "-p" | "--package"));
+
     let mut cmd = Command::new("cargo");
-    cmd.args([
-        "nextest",
-        "run",
-        "--workspace",
-        "--exclude",
-        "meshmon-e2e",
-        "--exclude",
-        "xtask",
-        "--all-targets",
-    ])
-    .args(&extra)
-    .env("DATABASE_URL", &database_url)
-    // Use the committed .sqlx/ offline cache so sqlx::query! macros do
-    // not try to verify queries against the just-provisioned (un-migrated)
-    // DB during compilation.
-    .env("SQLX_OFFLINE", "true");
+    scrub_outer_cargo_env(&mut cmd);
+    cmd.args(["nextest", "run"]);
+    if !user_picks_package {
+        cmd.args([
+            "--workspace",
+            "--exclude",
+            "meshmon-e2e",
+            "--exclude",
+            "xtask",
+        ]);
+    }
+    if !user_picks_targets {
+        cmd.arg("--all-targets");
+    }
+    cmd.args(&extra)
+        .env("DATABASE_URL", &database_url)
+        // Use the committed .sqlx/ offline cache so sqlx::query! macros do
+        // not try to verify queries against the just-provisioned (un-migrated)
+        // DB during compilation.
+        .env("SQLX_OFFLINE", "true");
     let status = cmd.status()?;
     if !status.success() {
         // `db` drops on the std::process::exit path? No — exit() does
@@ -63,19 +129,28 @@ pub fn test(extra: Vec<String>) -> anyhow::Result<()> {
     // Doctests: nextest doesn't cover them. Run separately if any exist.
     // (A single pass across the workspace; cheap when there are none.)
     // Same exclusions as above for the same reasons.
-    let status = Command::new("cargo")
-        .args([
-            "test",
-            "--doc",
-            "--workspace",
-            "--exclude",
-            "meshmon-e2e",
-            "--exclude",
-            "xtask",
-        ])
-        .env("DATABASE_URL", &database_url)
-        .env("SQLX_OFFLINE", "true")
-        .status()?;
+    // Doctests don't apply when the user narrowed to a specific test
+    // binary (`--test foo`) — skip the pass entirely. Otherwise mirror
+    // the package-scope decision from above.
+    let status = if user_picks_targets {
+        std::process::ExitStatus::default()
+    } else {
+        let mut doc = Command::new("cargo");
+        scrub_outer_cargo_env(&mut doc);
+        doc.args(["test", "--doc"]);
+        if !user_picks_package {
+            doc.args([
+                "--workspace",
+                "--exclude",
+                "meshmon-e2e",
+                "--exclude",
+                "xtask",
+            ]);
+        }
+        doc.env("DATABASE_URL", &database_url)
+            .env("SQLX_OFFLINE", "true")
+            .status()?
+    };
     if !status.success() {
         drop(db);
         std::process::exit(status.code().unwrap_or(1));
@@ -131,7 +206,9 @@ pub fn test_e2e(extra: Vec<String>) -> anyhow::Result<()> {
 
     wait_for_readyz(std::time::Duration::from_secs(30))?;
 
-    let status = Command::new("cargo")
+    let mut e2e = Command::new("cargo");
+    scrub_outer_cargo_env(&mut e2e);
+    let status = e2e
         .current_dir(&root)
         .args(["test", "-p", "meshmon-e2e"])
         .args(&extra)
