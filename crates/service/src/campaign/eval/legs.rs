@@ -159,8 +159,15 @@ impl<'a> LegLookup<'a> {
         for m in measurements {
             let from = EndpointKey::Agent(m.source_agent_id.clone());
             let to = EndpointKey::Ip(m.destination_ip);
-            // active-probe wins over VM-continuous on tie (already enforced
-            // by insertion order from the handler's HashMap composition).
+            // `or_insert` keeps the first insertion. Active-probe and VM
+            // baseline rows for the same `(source, destination)` pair only
+            // coexist when the active-probe row has 100 % loss with no
+            // usable latency — in that narrow case
+            // `fetch_and_synthesize_vm_baselines` adds a VM baseline that
+            // the handler intentionally prepends so VM wins as the
+            // fallback. Otherwise active-probe pairs are exclusive (the
+            // synthesizer skips pairs already covered by a non-broken
+            // active-probe row).
             forward.entry((from, to)).or_insert(m);
         }
         let agent_by_ip = agents.iter().map(|a| (a.ip, a.agent_id.clone())).collect();
