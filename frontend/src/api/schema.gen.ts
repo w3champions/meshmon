@@ -245,12 +245,14 @@ export interface paths {
          *     - `all`: every `kind='campaign'` pair whose baseline resolution
          *       `succeeded` or `reused`. Selects directly from `campaign_pairs`
          *       because an evaluation row is not required for this scope.
-         *     - `good_candidates`: pulls the persisted evaluation row and expands
-         *       each qualifying `(source_agent, destination_agent, transit_ip)`
-         *       triple into a pair of `(source_agent → transit_ip)` +
-         *       `(destination_agent → transit_ip)` detail entries so both legs
-         *       get a higher-resolution measurement. Requires a prior evaluation;
-         *       400 with `no_evaluation` otherwise.
+         *     - `good_candidates`: mode-aware — pulls the persisted evaluation and
+         *       expands "good" candidates into `(source_agent, destination_ip)` pairs:
+         *       - **Triple modes** (Diversity / Optimization): expands each qualifying
+         *         `(source_agent, destination_agent, transit_ip)` triple into a pair of
+         *         `(source_agent → transit_ip)` + `(destination_agent → transit_ip)`.
+         *       - **EdgeCandidate**: selects candidates with `coverage_count ≥ 1` and
+         *         creates `(source_agent, candidate_ip)` pairs for each qualifying
+         *         destination. Requires a prior evaluation; 400 `no_evaluation` otherwise.
          *     - `pair`: a single operator-chosen `(source_agent_id,
          *       destination_ip)` tuple from the request body.
          *
@@ -320,9 +322,20 @@ export interface paths {
          *     isn't configured the handler silently falls back to active-probe
          *     data only.
          *
+         *     For `edge_candidate` campaigns the handler also folds in the reverse-
+         *     direction measurements (B→X and X→A legs) collected by
+         *     [`repo::reverse_direction_measurements_for_campaign`] before VM
+         *     synthesis. The reverse set applies cross-mode — the symmetry-fallback
+         *     path in [`crate::campaign::eval::legs::LegLookup`] uses these rows
+         *     for both EdgeCandidate and Triple modes.
+         *
          *     Returns:
-         *     * 422 (`no_baseline_pairs`) — no agent→agent baseline available,
-         *       even after the VM fallback (or VM wasn't configured).
+         *     * 422 (`no_destinations`) — EdgeCandidate mode with no destination IPs
+         *       configured (the campaign has no `destination_ips`).
+         *     * 422 (`no_candidates_with_data`) — EdgeCandidate mode with no usable
+         *       measurements after VM synthesis.
+         *     * 422 (`no_baseline_pairs`) — Triple mode with no agent→agent baseline
+         *       available, even after the VM fallback (or VM wasn't configured).
          *     * 503 (`vm_upstream`) — VM was configured but the query failed
          *       (unreachable, non-2xx, malformed response).
          */
@@ -391,6 +404,46 @@ export interface paths {
          *       (handled by serde at deserialization time).
          */
         get: operations["get_candidate_pair_details"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{id}/evaluation/edge_pairs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/campaigns/{id}/evaluation/edge_pairs` — paginated list of
+         *     per-(X, B) edge-pair detail rows from the campaign's most recent
+         *     EdgeCandidate evaluation.
+         * @description Supports server-side sort (8 sort columns × 2 directions),
+         *     runtime filters (`candidate_ip`, `qualifies_only`, `reachable_only`),
+         *     and an opaque keyset cursor for forward pagination. Page size is capped
+         *     at 500 rows; the default is 100.
+         *
+         *     Note: the plan's `qualifies_first` compound sort and
+         *     `coverage_weighted_ping_*` sorts are deferred (need a JOIN to the
+         *     candidates table) — record as a future enhancement.
+         *
+         *     Error vocabulary:
+         *     - `not_evaluated` (404): the campaign has never been evaluated.
+         *     - `wrong_mode` (404): the campaign's latest evaluation is not
+         *       `edge_candidate` mode.
+         *     - `invalid_sort` (400): `sort` value is not one of the whitelisted names.
+         *     - `invalid_candidate_ip` (400): `candidate_ip` query param is present
+         *       but can't be parsed as an IP address.
+         *     - `invalid_filter` (400): `limit` exceeds the 500-row cap.
+         *     - `invalid_cursor` (400): cursor is undecodable or its sort column
+         *       doesn't match the request's `sort`.
+         */
+        get: operations["get_edge_pairs"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1224,6 +1277,11 @@ export interface components {
              */
             loss_threshold_ratio: number;
             /**
+             * Format: int32
+             * @description Maximum transit hops for edge_candidate mode. Range [0, 2].
+             */
+            max_hops: number;
+            /**
              * Format: double
              * @description Optional eligibility cap on composed transit RTT (ms). When
              *     set, the evaluator drops `(A, X, B)` triples whose
@@ -1297,6 +1355,18 @@ export interface components {
             timeout_ms: number;
             /** @description Operator-facing title. */
             title: string;
+            /**
+             * Format: float
+             * @description Optional RTT threshold (ms) for edge_candidate useful-route
+             *     qualification. `None` means the filter is disabled.
+             */
+            useful_latency_ms?: number | null;
+            /**
+             * Format: int32
+             * @description VictoriaMetrics look-back window (minutes) for edge_candidate mode.
+             *     Range [1, 1440].
+             */
+            vm_lookback_minutes: number;
         };
         /**
          * @description One row for the Raw tab OR for the DrilldownDialog's MTR resolution.
@@ -1604,6 +1674,13 @@ export interface components {
              */
             loss_threshold_ratio?: number | null;
             /**
+             * Format: int32
+             * @description Maximum number of transit hops for edge_candidate route
+             *     enumeration. Range [0, 2]; default 2 when omitted.
+             * @example 2
+             */
+            max_hops?: number | null;
+            /**
              * Format: double
              * @description Optional eligibility cap on composed transit RTT (ms).
              */
@@ -1656,6 +1733,20 @@ export interface components {
             timeout_ms?: number | null;
             /** @description Operator-facing title. Rejected when blank. */
             title: string;
+            /**
+             * Format: float
+             * @description Optional RTT threshold (ms) below which a route qualifies as
+             *     "useful" in edge_candidate mode.
+             * @example 80
+             */
+            useful_latency_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Look-back window (minutes) for VictoriaMetrics data in
+             *     edge_candidate mode. Range [1, 1440]; default 15 when omitted.
+             * @example 15
+             */
+            vm_lookback_minutes?: number | null;
         };
         /** @description Pair coordinates for [`DetailScope::Pair`] requests. */
         DetailPairIdentifier: {
@@ -1696,6 +1787,23 @@ export interface components {
          * @enum {string}
          */
         DirectSource: "active_probe" | "vm_continuous";
+        /** @description Paginated response for `GET /api/campaigns/:id/evaluation/edge_pairs`. */
+        EdgePairsListResponse: {
+            /** @description Entries for this page. */
+            entries: components["schemas"]["EvaluationEdgePairDetailDto"][];
+            /** @description Opaque cursor for the next page, or `None` at end-of-result. */
+            next_cursor?: string | null;
+            /**
+             * Format: int64
+             * @description Total matching rows across all pages (ignoring the cursor).
+             */
+            total: number;
+        };
+        /**
+         * @description Wire-friendly companion enum used by `EvaluationEdgePairDetailDto.best_route_kind`.
+         * @enum {string}
+         */
+        EdgeRouteKind: "direct" | "one_hop" | "two_hop";
         /** @description Body for `POST /api/campaigns/{id}/edit`. */
         EditCampaignRequest: {
             /** @description Pairs to add (or reset to `pending` if they already exist). */
@@ -1719,6 +1827,31 @@ export interface components {
             source_agent_id: string;
         };
         /**
+         * @description One end of a leg or route. Mixes agent IDs (for mesh agents) with
+         *     arbitrary IPs (for catalogue candidates).
+         *
+         *     `IpAddr` has no built-in `ToSchema` impl under utoipa 5; the field is
+         *     annotated `schema(value_type = String)` so the OpenAPI document renders
+         *     the IP as a plain string. Serde still uses the default `IpAddr` display
+         *     serializer.
+         */
+        Endpoint: {
+            /** @description Agent id (matches `agents.agent_id` in the database). */
+            id: string;
+            /** @enum {string} */
+            kind: "agent";
+        } | {
+            /** @description IP address of the candidate endpoint. */
+            ip: string;
+            /** @enum {string} */
+            kind: "candidate_ip";
+        };
+        /**
+         * @description Discriminator that pairs with `LegDto.from_id` / `to_id`.
+         * @enum {string}
+         */
+        EndpointKind: "agent" | "candidate";
+        /**
          * @description Current status of the enrichment pipeline for a row.
          * @enum {string}
          */
@@ -1730,6 +1863,8 @@ export interface components {
         };
         /** @description Per-candidate transit destination scoring row. */
         EvaluationCandidateDto: {
+            /** @description Mesh agent id when `is_mesh_member = true`; absent otherwise. */
+            agent_id?: string | null;
             /**
              * Format: int64
              * @description Catalogue ASN, when present.
@@ -1755,15 +1890,46 @@ export interface components {
              * Format: float
              * @description Composite score `(pairs_improved / baseline_pair_count) ×
              *     avg_improvement_ms`; higher is better. Candidates are returned
-             *     in descending composite-score order.
+             *     in descending composite-score order. `None` for edge_candidate mode
+             *     (which uses `coverage_count` ordering instead).
              */
-            composite_score: number;
+            composite_score?: number | null;
             /** @description Catalogue ISO country code, when present. */
             country_code?: string | null;
+            /**
+             * Format: int32
+             * @description Edge_candidate: number of destination agents reachable under the
+             *     useful-latency threshold via this candidate. `None` for other modes.
+             */
+            coverage_count?: number | null;
+            /**
+             * Format: float
+             * @description Edge_candidate: coverage-count-weighted mean ping (ms) across
+             *     qualifying routes. `None` when coverage is zero.
+             */
+            coverage_weighted_ping_ms?: number | null;
             /** @description Transit destination IP as a bare host string. */
             destination_ip: string;
+            /**
+             * Format: int32
+             * @description Edge_candidate: total destination agents evaluated for this
+             *     candidate. `None` for other modes.
+             */
+            destinations_total?: number | null;
+            /**
+             * Format: float
+             * @description Edge_candidate: fraction of qualifying routes that are direct
+             *     (zero hops). `None` for other modes.
+             */
+            direct_share?: number | null;
             /** @description Operator-facing label from the catalogue, when present. */
             display_name?: string | null;
+            /**
+             * @description Edge_candidate: `true` when at least one leg in the winning route
+             *     came from live VM or active-probe data (not symmetric-reuse).
+             *     `None` for other modes.
+             */
+            has_real_x_source_data?: boolean | null;
             /**
              * @description Reverse-DNS hostname for the transit destination IP, when cached.
              *     Absent on cold miss and negative-cached IPs (skip-none).
@@ -1774,8 +1940,22 @@ export interface components {
              *     "mesh member — no acquisition needed" badge.
              */
             is_mesh_member: boolean;
+            /**
+             * Format: float
+             * @description Edge_candidate: mean RTT (ms) for routes that are under the
+             *     useful-latency threshold. `None` when no route qualifies.
+             */
+            mean_ms_under_t?: number | null;
             /** @description Catalogue network operator, when present. */
             network_operator?: string | null;
+            /** @description Catalogue notes for the candidate, when present. */
+            notes?: string | null;
+            /**
+             * Format: float
+             * @description Edge_candidate: fraction of qualifying routes that are one-hop.
+             *     `None` for other modes.
+             */
+            onehop_share?: number | null;
             /**
              * Format: int32
              * @description Number of baseline pairs this candidate improved.
@@ -1786,6 +1966,14 @@ export interface components {
              * @description Number of baseline pairs this candidate was scored against.
              */
             pairs_total_considered: number;
+            /**
+             * Format: float
+             * @description Edge_candidate: fraction of qualifying routes that are two-hop.
+             *     `None` for other modes.
+             */
+            twohop_share?: number | null;
+            /** @description Catalogue website URL for the candidate, when present. */
+            website?: string | null;
         };
         /**
          * @description Wire shape for `GET /api/campaigns/{id}/evaluation`.
@@ -1842,6 +2030,11 @@ export interface components {
              */
             loss_threshold_ratio: number;
             /**
+             * Format: int32
+             * @description Snapshot of [`CampaignDto::max_hops`]. `None` on pre-T56 rows.
+             */
+            max_hops?: number | null;
+            /**
              * Format: double
              * @description Snapshot of [`CampaignDto::max_transit_rtt_ms`] at `/evaluate`
              *     time. `None` means the eligibility cap was disabled for this
@@ -1872,15 +2065,74 @@ export interface components {
              * @description Weight applied to RTT stddev during scoring.
              */
             stddev_weight: number;
+            /**
+             * Format: float
+             * @description Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.
+             *     `None` on pre-T56 evaluation rows or when the knob was unset.
+             */
+            useful_latency_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on pre-T56 rows.
+             */
+            vm_lookback_minutes?: number | null;
+        };
+        /**
+         * @description Per-(X, B) result for the edge_candidate mode. Returned by
+         *     `GET /api/campaigns/:id/evaluation/edge_pairs`.
+         */
+        EvaluationEdgePairDetailDto: {
+            /** @description Intermediate hop IPs between candidate and destination (empty for direct). */
+            best_route_intermediaries: string[];
+            /** @description Topology of the best route (direct / one_hop / two_hop). */
+            best_route_kind: components["schemas"]["EdgeRouteKind"];
+            /** @description Ordered per-leg breakdown of the best route. */
+            best_route_legs: components["schemas"]["LegDto"][];
+            /**
+             * Format: float
+             * @description Best-route composed loss fraction (0.0–1.0).
+             */
+            best_route_loss_ratio: number;
+            /**
+             * Format: float
+             * @description Best-route composed RTT (ms).
+             */
+            best_route_ms: number;
+            /**
+             * Format: float
+             * @description Best-route composed RTT stddev (ms).
+             */
+            best_route_stddev_ms: number;
+            /** @description Candidate IP being evaluated as an edge (transit) node. */
+            candidate_ip: string;
+            /** @description Destination agent id (the B endpoint). */
+            destination_agent_id: string;
+            /** @description Reverse-DNS hostname for the destination agent IP, when cached. */
+            destination_hostname?: string | null;
+            /**
+             * @description `true` when every probed path to this destination timed out or
+             *     had 100 % loss.
+             */
+            is_unreachable: boolean;
+            /**
+             * @description `true` when the best-route RTT is below the campaign's
+             *     `useful_latency_ms` threshold.
+             */
+            qualifies_under_t: boolean;
         };
         /**
          * @description Evaluation strategy for the campaign's result-aggregation pass
          *     (spec 04). Storage here; consumed by T48.
          * @enum {string}
          */
-        EvaluationMode: "diversity" | "optimization";
+        EvaluationMode: "diversity" | "optimization" | "edge_candidate";
         /** @description Per-pair scoring row inside an [`EvaluationCandidateDto`]. */
         EvaluationPairDetailDto: {
+            /**
+             * @description `true` when the A→X leg RTT was substituted from the symmetric
+             *     X→A measurement (edge_candidate mode). `None` for other modes.
+             */
+            ax_was_substituted?: boolean | null;
             /** @description Destination agent id of the baseline pair. */
             destination_agent_id: string;
             /**
@@ -1915,6 +2167,11 @@ export interface components {
              * @description Direct A→B RTT stddev (ms).
              */
             direct_stddev_ms: number;
+            /**
+             * @description `true` when the direct A→B baseline was VM-sourced and substituted.
+             *     `None` for other modes.
+             */
+            direct_was_substituted?: boolean | null;
             /**
              * Format: float
              * @description `direct_rtt − transit_rtt − (transit_stddev_penalty −
@@ -1952,6 +2209,18 @@ export interface components {
              * @description Composed A→X→B transit RTT stddev (ms).
              */
             transit_stddev_ms: number;
+            /**
+             * Format: int32
+             * @description Position of the candidate X in the winning route: `1` = X is first
+             *     hop (A→X→B), `2` = X is second hop (A→Y→X→B). `None` for direct
+             *     routes or when not applicable.
+             */
+            winning_x_position?: number | null;
+            /**
+             * @description `true` when the X→B leg RTT was substituted from the symmetric
+             *     B→X measurement (edge_candidate mode). `None` for other modes.
+             */
+            xb_was_substituted?: boolean | null;
         };
         /**
          * @description Wire response body for
@@ -2203,6 +2472,59 @@ export interface components {
             tcp?: null | components["schemas"]["RouteSnapshotDetail"];
             udp?: null | components["schemas"]["RouteSnapshotDetail"];
         };
+        /**
+         * @description Per-leg detail inside an [`EvaluationEdgePairDetailDto`].
+         *
+         *     Mirrors the JSONB shape persisted in
+         *     `campaign_evaluation_edge_pair_details.best_route_legs`.
+         */
+        LegDto: {
+            /** @description ID string for the from-endpoint (agent id or IP string). */
+            from_id: string;
+            /** @description Kind of the from-endpoint (agent or candidate). */
+            from_kind: components["schemas"]["EndpointKind"];
+            /**
+             * Format: float
+             * @description Observed loss fraction for this leg (0.0–1.0).
+             */
+            loss_ratio: number;
+            /**
+             * Format: int64
+             * @description FK to the `measurements` row that produced this leg's data,
+             *     when available.
+             */
+            mtr_measurement_id?: number | null;
+            /**
+             * Format: float
+             * @description Observed RTT for this leg (ms).
+             */
+            rtt_ms: number;
+            /** @description Data source that produced this leg's metrics. */
+            source: components["schemas"]["LegSource"];
+            /**
+             * Format: float
+             * @description Observed RTT stddev for this leg (ms).
+             */
+            stddev_ms: number;
+            /** @description ID string for the to-endpoint (agent id or IP string). */
+            to_id: string;
+            /** @description Kind of the to-endpoint (agent or candidate). */
+            to_kind: components["schemas"]["EndpointKind"];
+            /**
+             * @description `true` when this leg's direction was inferred from the reverse
+             *     measurement (symmetric-reuse substitution).
+             */
+            was_substituted: boolean;
+        };
+        /**
+         * @description Provenance of a leg within a composed evaluator route.
+         *
+         *     Distinct from `DirectSource` (baseline-only) because edge_candidate routes
+         *     can include legs derived from symmetric reuse (using an `agent → candidate`
+         *     probe to model `candidate → agent` direction).
+         * @enum {string}
+         */
+        LegSource: "vm_continuous" | "active_probe" | "symmetric_reuse";
         /** @description Response body for `GET /api/catalogue`. */
         ListResponse: {
             /**
@@ -2546,6 +2868,12 @@ export interface components {
              */
             loss_threshold_ratio?: number | null;
             /**
+             * Format: int32
+             * @description Replacement maximum transit hops for edge_candidate mode. `None`
+             *     leaves the existing value unchanged.
+             */
+            max_hops?: number | null;
+            /**
              * Format: double
              * @description Replacement eligibility cap on composed transit RTT (ms).
              */
@@ -2574,6 +2902,18 @@ export interface components {
             stddev_weight?: number | null;
             /** @description Replacement title (when present). */
             title?: string | null;
+            /**
+             * Format: float
+             * @description Replacement RTT threshold (ms) for edge_candidate useful-route
+             *     qualification. `None` leaves the existing value unchanged.
+             */
+            useful_latency_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Replacement VictoriaMetrics look-back window (minutes). `None`
+             *     leaves the existing value unchanged.
+             */
+            vm_lookback_minutes?: number | null;
         };
         /**
          * @description PATCH payload for `PATCH /api/catalogue/{id}` (declared here for T12
@@ -3546,7 +3886,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description No baseline (agent→agent) pairs */
+            /** @description no_destinations | no_candidates_with_data | no_baseline_pairs */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3696,6 +4036,91 @@ export interface operations {
                 content?: never;
             };
             /** @description Campaign / evaluation / candidate not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_edge_pairs: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Candidate IP filter. When set, restricts results to rows where
+                 *     `candidate_ip` matches this address (exact match).
+                 */
+                candidate_ip?: string;
+                /**
+                 * @description When `Some(true)`, restricts to rows where `qualifies_under_t = true`.
+                 *     `Some(false)` selects non-qualifying rows; `None` (default) is
+                 *     unconstrained.
+                 */
+                qualifies_only?: boolean;
+                /**
+                 * @description When `Some(true)`, restricts to rows where `is_unreachable = false`.
+                 *     Useful for displaying only reachable routes.
+                 */
+                reachable_only?: boolean;
+                /** @description Sort column. Default `best_route_ms`. */
+                sort?: "best_route_ms" | "best_route_loss_ratio" | "best_route_stddev_ms" | "best_route_kind" | "qualifies_under_t" | "is_unreachable" | "candidate_ip" | "destination_agent_id";
+                /** @description Sort direction. Default `asc` (ascending RTT = best routes first). */
+                dir?: "asc" | "desc";
+                /**
+                 * @description Opaque keyset cursor returned by the previous page's `next_cursor`.
+                 *     Absent on the first page.
+                 */
+                cursor?: string;
+                /** @description Page size. Default 100; cap 500. Zero is allowed. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Campaign id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Edge-pair page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EdgePairsListResponse"];
+                };
+            };
+            /** @description invalid_sort | invalid_candidate_ip | invalid_filter | invalid_cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description No active session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description not_evaluated | wrong_mode */
             404: {
                 headers: {
                     [name: string]: unknown;

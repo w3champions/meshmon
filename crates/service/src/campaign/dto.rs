@@ -959,9 +959,11 @@ pub struct EdgePairsQuery {
     pub reachable_only: Option<bool>,
     /// Sort column. Default `best_route_ms`.
     #[serde(default = "default_edge_pair_sort")]
+    #[param(inline)]
     pub sort: EdgePairSortCol,
     /// Sort direction. Default `asc` (ascending RTT = best routes first).
     #[serde(default = "default_edge_pair_dir")]
+    #[param(inline)]
     pub dir: EdgePairSortDir,
     /// Opaque keyset cursor returned by the previous page's `next_cursor`.
     /// Absent on the first page.
