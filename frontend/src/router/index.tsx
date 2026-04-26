@@ -286,6 +286,19 @@ export const campaignDetailSearchSchema = z.object({
     .enum(["asc", "desc"])
     .catch(() => undefined as never)
     .optional(),
+  // Compare tab params. Namespaced to avoid collisions with other tabs.
+  // `picked`: CSV of picked source agent IDs (persisted to localStorage;
+  //   URL wins on first render). Permissive string — validated against
+  //   campaign.source_agent_ids at consume time.
+  // `pick_role`: filter role for diversity/optimization mode only.
+  //   Hidden and ignored for edge_candidate.
+  // `candidates`: CSV of candidate IPs to show (transient, URL-only).
+  picked: z.string().catch(() => undefined as never).optional(),
+  pick_role: z
+    .enum(["both", "source", "destination"])
+    .catch(() => undefined as never)
+    .optional(),
+  candidates: z.string().catch(() => undefined as never).optional(),
 });
 
 /**
@@ -336,6 +349,9 @@ function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
     hm_row_dir: parsed.hm_row_dir,
     hm_col_sort: parsed.hm_col_sort,
     hm_col_dir: parsed.hm_col_dir,
+    picked: parsed.picked,
+    pick_role: parsed.pick_role,
+    candidates: parsed.candidates,
   };
 }
 
