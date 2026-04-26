@@ -791,16 +791,9 @@ describe("CampaignComposer — edge_candidate useful_latency_ms required validat
     const edgeToggle = screen.getByRole("radio", { name: /edge.?candidate/i });
     await user.click(edgeToggle);
 
-    // useful_latency_ms defaults to null — Start must be blocked.
+    // useful_latency_ms defaults to null — Start button must be disabled.
     const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
-    await user.click(startButton);
-
-    expect(pushToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "error",
-        message: expect.stringMatching(/useful latency/i),
-      }),
-    );
+    expect(startButton).toBeDisabled();
     expect(createStub.mutate).not.toHaveBeenCalled();
   });
 });

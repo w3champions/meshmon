@@ -48,7 +48,8 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
     | "probe_count_detail"
     | "timeout_ms"
     | "probe_stagger_ms"
-    | "stddev_weight";
+    | "stddev_weight"
+    | "vm_lookback_minutes";
 
   const handleNumber = (key: NumericKey) => (event: React.ChangeEvent<HTMLInputElement>) => {
     const raw = event.target.value;
@@ -157,7 +158,11 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
           value={value.evaluation_mode}
           onValueChange={(next) => {
             if (!next) return;
-            patch({ evaluation_mode: next as EvaluationMode });
+            const mode = next as EvaluationMode;
+            const hopsFix = mode !== "edge_candidate" && value.max_hops === 0
+              ? { max_hops: 1 }
+              : {};
+            patch({ evaluation_mode: mode, ...hopsFix });
           }}
           variant="outline"
           aria-label="Evaluation mode"
@@ -248,11 +253,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
               min={KNOB_BOUNDS.vm_lookback_minutes.min}
               max={KNOB_BOUNDS.vm_lookback_minutes.max}
               value={value.vm_lookback_minutes}
-              onChange={(e) => {
-                const raw = e.target.value;
-                const parsed = raw === "" ? value.vm_lookback_minutes : Number(raw);
-                patch({ vm_lookback_minutes: clampKnob("vm_lookback_minutes", parsed, value.vm_lookback_minutes) });
-              }}
+              onChange={handleNumber("vm_lookback_minutes")}
               disabled={disabled}
             />
           </div>

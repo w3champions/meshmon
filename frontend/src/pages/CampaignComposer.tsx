@@ -410,7 +410,8 @@ export default function CampaignComposer() {
   // --- Computed UI state --------------------------------------------------
 
   const startDisabled =
-    knobs.protocol === "mtr" || createMutation.isPending || startMutation.isPending;
+    knobs.protocol === "mtr" || createMutation.isPending || startMutation.isPending
+    || (knobs.evaluation_mode === "edge_candidate" && knobs.useful_latency_ms === null);
 
   // Pre-commit view: always mirror the operator's explicit selection. The
   // DestinationPanel footer already advertises the filter's first-page total

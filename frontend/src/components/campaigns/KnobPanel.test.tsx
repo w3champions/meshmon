@@ -305,4 +305,22 @@ describe("KnobPanel", () => {
       screen.queryByText(/2 hops considers an additional mesh agent/i),
     ).not.toBeInTheDocument();
   });
+
+  test("switching from edge_candidate (with max_hops: 0) to diversity clamps max_hops to 1", async () => {
+    const onChange = vi.fn<(next: CampaignKnobs) => void>();
+    const user = userEvent.setup();
+
+    render(
+      <KnobPanel
+        value={baseKnobs({ evaluation_mode: "edge_candidate", max_hops: 0 })}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /diversity/i }));
+
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next?.evaluation_mode).toBe("diversity");
+    expect(next?.max_hops).toBe(1);
+  });
 });
