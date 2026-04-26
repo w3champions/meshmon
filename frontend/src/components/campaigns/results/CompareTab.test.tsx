@@ -197,7 +197,7 @@ function makeQueryClient() {
 
 function renderCompareTab(
   evaluation: Evaluation | null,
-  campaignOverrides: Partial<CampaignWithAgents> = {},
+  campaignOverrides: Partial<Campaign> = {},
   rows: EvaluationEdgePairDetailDto[] = [],
   opts?: { isLoading?: boolean },
 ) {
