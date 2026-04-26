@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO campaign_evaluations\n              (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,\n               useful_latency_ms, max_hops, vm_lookback_minutes,\n               baseline_pair_count, candidates_total, candidates_good,\n               evaluated_at)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, now())\n           RETURNING id",
+  "query": "INSERT INTO campaign_evaluations\n              (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,\n               max_transit_rtt_ms, max_transit_stddev_ms,\n               useful_latency_ms, max_hops, vm_lookback_minutes,\n               baseline_pair_count, candidates_total, candidates_good,\n               evaluated_at)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, now())\n           RETURNING id",
   "describe": {
     "columns": [
       {
@@ -26,6 +26,8 @@
             }
           }
         },
+        "Float8",
+        "Float8",
         "Float4",
         "Int2",
         "Int4",
@@ -37,5 +39,5 @@
       false
     ]
   },
-  "hash": "d459db64e70be4919ceede527ab2cbf0bf224a1014c1aee20d757c09b4b543cc"
+  "hash": "be3b507646b62e39722d362c97b083a3210bad170b0d0e4bfb2c99521ed0c70a"
 }

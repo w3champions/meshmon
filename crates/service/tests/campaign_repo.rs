@@ -2329,3 +2329,57 @@ async fn persist_edge_candidate_evaluation_satisfies_not_null_constraints() {
         "edge_candidate evaluation must persist at least one edge pair detail row; got {edge_pair_count}"
     );
 }
+
+/// `persist_edge_candidate_evaluation` must snapshot the campaign's
+/// `max_transit_rtt_ms` and `max_transit_stddev_ms` onto the parent
+/// `campaign_evaluations` row. The route enumerator already consumes these
+/// caps, so omitting them from the persisted row leaves Settings/audit
+/// views with NULL caps that misrepresent what scoring values produced
+/// the result.
+#[tokio::test]
+async fn persist_edge_candidate_evaluation_snapshots_transit_caps() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign_id_str = common::create_evaluated_campaign(&h, "edge_candidate").await;
+
+    // PATCH the caps onto the campaign — fresh patch dismisses the prior
+    // evaluation, so re-evaluate to write a new parent row that picks
+    // them up.
+    let _: serde_json::Value = h
+        .patch_json(
+            &format!("/api/campaigns/{campaign_id_str}"),
+            &serde_json::json!({
+                "max_transit_rtt_ms": 250.0,
+                "max_transit_stddev_ms": 12.5,
+            }),
+        )
+        .await;
+    let _: serde_json::Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id_str}/evaluate"))
+        .await;
+
+    let campaign_id: uuid::Uuid = campaign_id_str.parse().expect("parse campaign id");
+    let (rtt_cap, stddev_cap): (Option<f64>, Option<f64>) = sqlx::query_as(
+        "SELECT max_transit_rtt_ms, max_transit_stddev_ms \
+           FROM campaign_evaluations \
+          WHERE campaign_id = $1 \
+          ORDER BY evaluated_at DESC \
+          LIMIT 1",
+    )
+    .bind(campaign_id)
+    .fetch_one(pool)
+    .await
+    .expect("query evaluation caps");
+
+    assert_eq!(
+        rtt_cap,
+        Some(250.0),
+        "max_transit_rtt_ms must round-trip onto the edge_candidate evaluation row"
+    );
+    assert_eq!(
+        stddev_cap,
+        Some(12.5),
+        "max_transit_stddev_ms must round-trip onto the edge_candidate evaluation row"
+    );
+}

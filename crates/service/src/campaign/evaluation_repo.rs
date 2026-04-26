@@ -489,6 +489,8 @@ async fn persist_edge_candidate_evaluation(
     loss_threshold_ratio: f32,
     stddev_weight: f32,
     mode: EvaluationMode,
+    max_transit_rtt_ms: Option<f64>,
+    max_transit_stddev_ms: Option<f64>,
     useful_latency_ms: Option<f32>,
     max_hops: i16,
     vm_lookback_minutes: i32,
@@ -501,18 +503,26 @@ async fn persist_edge_candidate_evaluation(
         .filter(|c| c.coverage_count > 0)
         .count() as i32;
 
+    // Persist the same transit-cap snapshot columns as `insert_evaluation`
+    // (Diversity / Optimization). EdgeCandidate's route enumerator
+    // consumes these caps when filtering legs; writing them onto the
+    // parent row keeps `GET /evaluation/{id}` and the Settings audit view
+    // honest about what scoring values produced this row.
     let evaluation_id: Uuid = sqlx::query_scalar!(
         r#"INSERT INTO campaign_evaluations
               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+               max_transit_rtt_ms, max_transit_stddev_ms,
                useful_latency_ms, max_hops, vm_lookback_minutes,
                baseline_pair_count, candidates_total, candidates_good,
                evaluated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, now())
            RETURNING id"#,
         campaign_id,
         loss_threshold_ratio,
         stddev_weight,
         mode as EvaluationMode,
+        max_transit_rtt_ms,
+        max_transit_stddev_ms,
         useful_latency_ms,
         max_hops,
         vm_lookback_minutes,
@@ -693,6 +703,8 @@ pub async fn persist_evaluation(
                 loss_threshold_ratio,
                 stddev_weight,
                 mode,
+                max_transit_rtt_ms,
+                max_transit_stddev_ms,
                 useful_latency_ms,
                 max_hops,
                 vm_lookback_minutes,

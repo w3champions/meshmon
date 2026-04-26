@@ -465,14 +465,24 @@ pub async fn patch(
     // Dismiss the existing evaluation when a knob that affects the scoring
     // outcome has changed. This keeps the persisted evaluation consistent
     // with the current knob values and signals to the operator that a
-    // re-evaluate is needed.
-    if knob_changed {
+    // re-evaluate is needed. After dismissal, re-fetch the row so the
+    // PATCH response body reflects the post-dismiss state (state back to
+    // `completed`, `evaluated_at` cleared) instead of the pre-dismiss
+    // snapshot returned by the UPDATE.
+    let response_row = if knob_changed {
         if let Err(e) = evaluation_repo::dismiss_evaluation(&state.pool, id).await {
             return db_error("campaign::patch::dismiss_evaluation", e);
         }
-    }
+        match repo::get(&state.pool, id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return repo_error("campaign::patch::refetch", RepoError::NotFound(id)),
+            Err(e) => return repo_error("campaign::patch::refetch", e),
+        }
+    } else {
+        updated
+    };
 
-    (StatusCode::OK, Json(CampaignDto::from(updated))).into_response()
+    (StatusCode::OK, Json(CampaignDto::from(response_row))).into_response()
 }
 
 /// `DELETE /api/campaigns/{id}` — idempotent removal.

@@ -152,10 +152,21 @@ async fn patch_max_hops_dismisses_evaluation() {
     let h = HttpHarness::start().await;
     let id = common::create_evaluated_campaign(&h, "diversity").await;
 
-    // Change max_hops — evaluation must be dismissed.
-    let _: serde_json::Value = h
+    // Change max_hops — evaluation must be dismissed and the PATCH
+    // response body must reflect the post-dismiss campaign state. The
+    // handler used to return the pre-dismiss UPDATE row, leaving the SPA
+    // cache stuck on `state=evaluated` with a populated `evaluated_at`.
+    let patch_response: serde_json::Value = h
         .patch_json(&format!("/api/campaigns/{id}"), &json!({"max_hops": 1}))
         .await;
+    assert_eq!(
+        patch_response["state"], "completed",
+        "PATCH response must reflect post-dismiss state; body = {patch_response}"
+    );
+    assert!(
+        patch_response["evaluated_at"].is_null(),
+        "PATCH response must clear evaluated_at after dismissal; body = {patch_response}"
+    );
 
     let eval = h
         .get_expect_status(&format!("/api/campaigns/{id}/evaluation"), 404)
