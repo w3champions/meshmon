@@ -199,9 +199,9 @@ pub struct EvaluationInputs {
 /// `Option`-saturated struct.
 #[derive(Debug, Clone)]
 pub enum EvaluationOutputs {
-    /// Diversity / Optimization output (T44/T48 shape).
+    /// Diversity / Optimization output.
     Triple(TripleEvaluationOutputs),
-    /// EdgeCandidate output (T56). See
+    /// EdgeCandidate output. See
     /// [`crate::campaign::eval::edge_candidate`].
     EdgeCandidate(EdgeCandidateOutputs),
 }

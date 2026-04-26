@@ -407,7 +407,7 @@ Campaign header row. Columns (selected):
 | `min_improvement_ms`, `min_improvement_ratio` | `DOUBLE PRECISION`, nullable | Storage floors for per-pair scoring rows; combine with OR semantics. NULL → off. |
 | `useful_latency_ms` | `REAL`, nullable | EdgeCandidate mode: RTT threshold T (ms) below which a route counts as "useful". Required when `evaluation_mode = edge_candidate`; rejected at API validation when absent. |
 | `max_hops` | `SMALLINT`, not null, default 2 | EdgeCandidate mode: maximum transit hops for route enumeration. Range 0–2; 0 = direct only, 1 = one intermediate hop, 2 = up to two intermediate hops. Diversity and optimization receive the default and ignore it. |
-| `vm_lookback_minutes` | `INTEGER`, not null, default 15 | VictoriaMetrics baseline lookback window in minutes. Applies to all modes; the default (15 min) was previously implicit in the VM query. |
+| `vm_lookback_minutes` | `INTEGER`, not null, default 15 | VictoriaMetrics baseline lookback window in minutes. Applies to all modes. |
 | `created_by`, `created_at` | `TEXT` / `TIMESTAMPTZ` | Audit. |
 | `started_at`, `stopped_at`, `completed_at`, `evaluated_at` | `TIMESTAMPTZ` | Lifecycle timestamps. |
 

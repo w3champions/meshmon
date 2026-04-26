@@ -580,7 +580,7 @@ Tightening a knob between evaluations drops more rows from the new
 pass. Loosening recovers them: the underlying inputs (active probe
 measurements + VM-sourced direct baselines) are durable, so a re-
 evaluate with looser knobs re-computes from the same inputs and
-surfaces the previously-dropped data.
+surfaces data those guardrails excluded.
 
 The drilldown's runtime filters can only tighten beyond the active
 guardrails — they can't recover rows that the guardrails already
