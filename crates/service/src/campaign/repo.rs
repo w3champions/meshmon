@@ -1749,3 +1749,70 @@ pub async fn insert_detail_pairs(
     tx.commit().await?;
     Ok((inserted, post_state))
 }
+
+// ----- Symmetry-fallback reverse query (T56-C2) -------------------------
+
+/// Fetch reverse-direction measurements scoped to a campaign's evaluator
+/// universe.
+///
+/// For each `(source_agent_id, destination_ip)` pair attributed to the
+/// campaign, fetches any matching `(source = destination_ip's agent_id,
+/// destination_ip = source_agent_id's agent ip)` row from `measurements` of
+/// the **same protocol** as the campaign. Used by the symmetry-fallback
+/// substitution (spec §3.1).
+///
+/// Returns the same [`AttributedMeasurement`] shape. Because every row in
+/// `measurements` originates from an active probe, `direct_source` is always
+/// [`DirectSource::ActiveProbe`].
+pub async fn reverse_direction_measurements_for_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Vec<AttributedMeasurement>, RepoError> {
+    let rows = sqlx::query!(
+        r#"
+        WITH camp AS (
+            SELECT id, protocol FROM measurement_campaigns WHERE id = $1
+        ),
+        agent_pairs AS (
+            SELECT DISTINCT cp.source_agent_id AS a_id, ag.ip AS a_ip,
+                            cp.destination_ip AS dst_ip
+            FROM campaign_pairs cp
+            JOIN agents ag ON ag.id = cp.source_agent_id
+            WHERE cp.campaign_id = $1
+              AND cp.kind = 'campaign'
+        )
+        SELECT m.source_agent_id, m.destination_ip,
+               m.latency_avg_ms, m.latency_stddev_ms,
+               m.loss_ratio, m.mtr_id AS mtr_measurement_id,
+               m.id AS measurement_id
+        FROM camp c
+        JOIN agent_pairs ap ON true
+        JOIN agents src ON src.ip = ap.dst_ip
+        JOIN measurements m
+          ON m.source_agent_id = src.id
+         AND m.destination_ip = ap.a_ip
+         AND m.protocol = c.protocol
+         AND m.measured_at > now() - interval '24 hours'
+        "#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| AttributedMeasurement {
+            source_agent_id: r.source_agent_id,
+            destination_ip: r.destination_ip.ip(),
+            latency_avg_ms: r.latency_avg_ms,
+            latency_stddev_ms: r.latency_stddev_ms,
+            loss_ratio: r.loss_ratio,
+            // `mtr_measurement_id` is the DTO FK to `measurements.id` for
+            // the MTR-bearing row; present only when mtr_id is set on the
+            // underlying measurement.
+            mtr_measurement_id: r.mtr_measurement_id.map(|_| r.measurement_id),
+            // All rows in `measurements` originate from active probes.
+            direct_source: DirectSource::ActiveProbe,
+        })
+        .collect())
+}
