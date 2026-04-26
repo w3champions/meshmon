@@ -475,4 +475,35 @@ mod tests {
         let r = routes.iter().find(|r| r.kind == RouteKind::OneHop).expect("one-hop must exist");
         assert!((r.stddev_ms - 5.0).abs() < 1e-4, "got {}", r.stddev_ms);
     }
+
+    #[test]
+    fn max_hops_zero_with_intermediaries_yields_only_direct() {
+        // Fixture: source agent A, destination IP D, candidate intermediary Y.
+        // Both A→D and A→Y are resolvable. With max_hops=0, only the direct
+        // route should be enumerated; the 1-hop A→Y→D route must NOT appear.
+        let ms = vec![
+            meas("a", "10.0.0.1", 20.0, 2.0, 0.0), // A → D direct (the route we want)
+            meas("a", "10.0.0.2", 15.0, 1.0, 0.0), // A → Y direct (would enable 1-hop, but ignored at max_hops=0)
+            meas("y", "10.0.0.1", 18.0, 1.5, 0.0), // Y → D forward (completes 1-hop shape, but suppressed)
+        ];
+        let lk = lookup(&ms);
+
+        let routes = enumerate_routes(
+            &lk,
+            &agent("a"),
+            &candidate("10.0.0.1"),
+            &[agent("y")],
+            0, // max_hops = 0
+            None,
+            None,
+            1.0,
+        );
+
+        assert_eq!(routes.len(), 1, "max_hops=0 must yield exactly one route");
+        assert_eq!(
+            routes[0].kind,
+            RouteKind::Direct,
+            "max_hops=0 must yield only direct route"
+        );
+    }
 }

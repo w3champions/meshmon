@@ -8,7 +8,7 @@
 //! `campaign_evaluation_{candidates, pair_details,
 //! unqualified_reasons}`.
 
-pub mod legs;
+pub(crate) mod legs;
 pub(crate) mod routes;
 
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
