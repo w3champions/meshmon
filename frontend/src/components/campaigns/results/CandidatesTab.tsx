@@ -12,7 +12,11 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";
 import type { Campaign } from "@/api/hooks/campaigns";
 import { useEvaluation } from "@/api/hooks/evaluation";
-import { UnqualifiedReasons } from "@/components/campaigns/results/CandidatesTabParts";
+import {
+  type EdgeCandidateSort,
+  EdgeCandidateTable,
+  UnqualifiedReasons,
+} from "@/components/campaigns/results/CandidatesTabParts";
 import {
   type CandidateSortColumn,
   CandidateTable,
@@ -35,6 +39,8 @@ export interface CandidatesTabProps {
 }
 
 const DEFAULT_SORT: CandidateTableSort = { col: "composite_score", dir: "desc" };
+
+const DEFAULT_EDGE_SORT: EdgeCandidateSort = { col: "coverage_weighted_ping_ms", dir: "asc" };
 
 // ---------------------------------------------------------------------------
 // Component
@@ -74,6 +80,9 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
     },
     [navigate, search],
   );
+
+  // Edge-candidate sort state (local only; edge sort not persisted to URL yet)
+  const [edgeSort, setEdgeSort] = useState<EdgeCandidateSort>(DEFAULT_EDGE_SORT);
 
   const handleSelectCandidate = useCallback((ip: string): void => {
     setSelectedIp(ip);
@@ -162,13 +171,23 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
         <OverflowMenu campaign={campaign} evaluation={evaluation} />
       </div>
 
-      <CandidateTable
-        evaluation={evaluation}
-        selectedIp={selectedIp}
-        onSelectCandidate={handleSelectCandidate}
-        sort={sort}
-        onSortChange={setSort}
-      />
+      {evaluation.evaluation_mode === "edge_candidate" ? (
+        <EdgeCandidateTable
+          evaluation={evaluation}
+          selectedIp={selectedIp}
+          onSelectCandidate={handleSelectCandidate}
+          sort={edgeSort}
+          onSortChange={setEdgeSort}
+        />
+      ) : (
+        <CandidateTable
+          evaluation={evaluation}
+          selectedIp={selectedIp}
+          onSelectCandidate={handleSelectCandidate}
+          sort={sort}
+          onSortChange={setSort}
+        />
+      )}
 
       {Object.keys(evaluation.results.unqualified_reasons ?? {}).length > 0 &&
       selectedIp === null ? (

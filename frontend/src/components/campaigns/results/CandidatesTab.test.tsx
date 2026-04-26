@@ -334,6 +334,74 @@ describe("CandidatesTab — overflow menu state gating", () => {
 // tuple that is reachable only via the paginated pair-details endpoint
 // the dialog already fetches.
 
+describe("CandidatesTab — edge_candidate mode", () => {
+  function makeEdgeEvaluation(): Evaluation {
+    return {
+      campaign_id: CAMPAIGN_ID,
+      evaluated_at: "2026-04-21T10:00:00Z",
+      loss_threshold_ratio: 0.02,
+      stddev_weight: 1,
+      evaluation_mode: "edge_candidate",
+      baseline_pair_count: 0,
+      candidates_total: 2,
+      candidates_good: 2,
+      avg_improvement_ms: null,
+      useful_latency_ms: 80,
+      results: {
+        candidates: [
+          {
+            destination_ip: "10.0.55.1",
+            display_name: "edge-x",
+            city: "Tokyo",
+            country_code: "JP",
+            asn: 7777,
+            network_operator: "EdgeNet",
+            is_mesh_member: false,
+            pairs_improved: 0,
+            pairs_total_considered: 0,
+            coverage_count: 5,
+            coverage_weighted_ping_ms: 45.2,
+            destinations_total: 10,
+            mean_ms_under_t: 40,
+            direct_share: 0.6,
+            onehop_share: 0.4,
+            twohop_share: 0,
+          },
+        ],
+        unqualified_reasons: {},
+      },
+    } as Evaluation;
+  }
+
+  test("renders the EdgeCandidateTable in edge_candidate mode", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+
+    // EdgeCandidateTable uses aria-label "Edge evaluation candidates"
+    expect(screen.getByRole("table", { name: /edge evaluation candidates/i })).toBeInTheDocument();
+  });
+
+  test("renders the edge candidate row in edge_candidate mode", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByTestId("edge-candidate-row-10.0.55.1")).toBeInTheDocument();
+  });
+
+  test("renders EdgeKPIStrip with useful_latency_ms", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByText("Latency threshold (T)")).toBeInTheDocument();
+    expect(screen.getByText("80 ms")).toBeInTheDocument();
+  });
+
+  test("does NOT render the triple CandidateTable (with 'Δ avg' column) in edge_candidate mode", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    // Triple mode has "Δ avg" column; edge mode does not
+    expect(screen.queryByRole("columnheader", { name: /Δ avg/i })).not.toBeInTheDocument();
+  });
+});
+
 describe("CandidatesTab — sort URL state", () => {
   test("sort header click emits navigate with cand_sort + cand_dir", () => {
     setupMocks(makeEvaluation());
