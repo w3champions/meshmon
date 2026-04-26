@@ -1,18 +1,22 @@
 //! Relational persistence for campaign evaluations.
 //!
-//! The evaluator's output fans out across four tables:
+//! The evaluator's output fans out across five tables:
 //!
-//! - `campaign_evaluations` — parent row with summary counters.
-//! - `campaign_evaluation_candidates` — one row per transit destination.
-//! - `campaign_evaluation_pair_details` — per-baseline-pair detail,
-//!   stamped with `direct_source` provenance.
+//! - `campaign_evaluations` — parent row with summary counters and
+//!   evaluation-time knob snapshots.
+//! - `campaign_evaluation_candidates` — one row per transit destination
+//!   (both Triple and EdgeCandidate modes).
+//! - `campaign_evaluation_pair_details` — per-baseline-pair detail for
+//!   Triple modes, stamped with `direct_source` provenance and
+//!   substitution flags.
+//! - `campaign_evaluation_edge_pair_details` — per-(X, B) best-route row
+//!   for EdgeCandidate mode.
 //! - `campaign_evaluation_unqualified_reasons` — reason map for
 //!   destinations that never produced a qualifying pair detail.
 //!
-//! Writes happen inside the caller's transaction so the parent +
-//! children land atomically. Reads are four sequential queries
-//! (parent/candidates/pair_details/unqualified_reasons) that assemble
-//! into the existing [`EvaluationDto`] wire shape.
+//! Writes happen inside a single transaction so the parent + children
+//! land atomically. Reads are sequential queries that assemble into the
+//! existing [`EvaluationDto`] wire shape.
 //!
 //! Every `/evaluate` call appends a fresh evaluation row; the
 //! per-campaign UNIQUE constraint was dropped in the 20260424130000
@@ -25,8 +29,8 @@ use super::dto::{
     EvaluationCandidateDto, EvaluationDto, EvaluationPairDetailDto, EvaluationPairDetailQuery,
     EvaluationResultsDto, PairDetailSortCol, PairDetailSortDir,
 };
-use super::eval::{EvaluationOutputs, TripleEvaluationOutputs};
-use super::model::{CampaignState, DirectSource, EvaluationMode};
+use super::eval::{EdgeCandidateOutputs, EvaluationOutputs, TripleEvaluationOutputs};
+use super::model::{CampaignState, DirectSource, EdgeRouteKind, EvaluationMode};
 use super::repo::RepoError;
 use sqlx::types::ipnetwork::IpNetwork;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -35,9 +39,20 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use uuid::Uuid;
 
-/// Insert the evaluator's output as a new `campaign_evaluations` row
-/// plus fully-normalised child rows, all inside the caller's
-/// transaction. Returns the newly minted evaluation id.
+/// Map an [`EdgeRouteKind`] to the TEXT value stored in the
+/// `best_route_kind` column. Matches the CHECK constraint in the
+/// `20260426000000_campaigns_edge_candidate` migration.
+fn edge_route_kind_to_text(k: EdgeRouteKind) -> &'static str {
+    match k {
+        EdgeRouteKind::Direct => "direct",
+        EdgeRouteKind::OneHop => "1hop",
+        EdgeRouteKind::TwoHop => "2hop",
+    }
+}
+
+/// Persist the Triple-mode evaluator output (Diversity / Optimization)
+/// as a new `campaign_evaluations` parent row and all child rows, inside
+/// the caller's transaction. Returns the newly minted evaluation id.
 ///
 /// The parent row is written first so its `id` is available as the FK
 /// target for every child row. No UPSERT semantics — each call
@@ -65,18 +80,24 @@ pub async fn insert_evaluation(
     max_transit_stddev_ms: Option<f64>,
     min_improvement_ms: Option<f64>,
     min_improvement_ratio: Option<f64>,
+    useful_latency_ms: Option<f32>,
+    max_hops: i16,
+    vm_lookback_minutes: i32,
 ) -> sqlx::Result<Uuid> {
     // Parent row. `evaluated_at` stamps the write wall-clock so the
     // read-path's `ORDER BY evaluated_at DESC` picks up the freshest
-    // entry.
+    // entry. The three T56 snapshot columns are written even for
+    // Diversity / Optimization campaigns so a later mode switch
+    // surfaces the previous knob context.
     let evaluation_id: Uuid = sqlx::query_scalar!(
         r#"INSERT INTO campaign_evaluations
               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                baseline_pair_count, candidates_total, candidates_good,
                avg_improvement_ms, evaluated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
            RETURNING id"#,
         campaign_id,
         loss_threshold_ratio,
@@ -86,6 +107,9 @@ pub async fn insert_evaluation(
         max_transit_stddev_ms,
         min_improvement_ms,
         min_improvement_ratio,
+        useful_latency_ms,
+        max_hops,
+        vm_lookback_minutes,
         outputs.baseline_pair_count,
         outputs.candidates_total,
         outputs.candidates_good,
@@ -192,6 +216,8 @@ pub async fn insert_evaluation(
         // Pair-detail rows FK to the (evaluation_id, destination_ip)
         // tuple on `campaign_evaluation_candidates`, so the insert
         // only succeeds once the candidate is in place.
+        // Substitution flags + winning_x_position are populated from
+        // the evaluator's output (Phase F) and written here (Phase G).
         for pd in &bundle.pair_details {
             sqlx::query!(
                 r#"INSERT INTO campaign_evaluation_pair_details
@@ -201,8 +227,10 @@ pub async fn insert_evaluation(
                        direct_source,
                        transit_rtt_ms, transit_stddev_ms, transit_loss_ratio,
                        improvement_ms, qualifies,
-                       mtr_measurement_id_ax, mtr_measurement_id_xb)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+                       mtr_measurement_id_ax, mtr_measurement_id_xb,
+                       ax_was_substituted, xb_was_substituted,
+                       direct_was_substituted, winning_x_position)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)"#,
                 evaluation_id,
                 destination_ip,
                 pd.source_agent_id,
@@ -218,6 +246,10 @@ pub async fn insert_evaluation(
                 pd.qualifies,
                 pd.mtr_measurement_id_ax,
                 pd.mtr_measurement_id_xb,
+                pd.ax_was_substituted,
+                pd.xb_was_substituted,
+                pd.direct_was_substituted,
+                pd.winning_x_position.map(|v| v as i16),
             )
             .execute(&mut **tx)
             .await?;
@@ -280,6 +312,7 @@ pub async fn latest_evaluation_for_campaign(
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   max_transit_rtt_ms, max_transit_stddev_ms,
                   min_improvement_ms, min_improvement_ratio,
+                  useful_latency_ms, max_hops, vm_lookback_minutes,
                   baseline_pair_count, candidates_total, candidates_good,
                   avg_improvement_ms
              FROM campaign_evaluations
@@ -307,6 +340,12 @@ pub async fn latest_evaluation_for_campaign(
     // evaluator computes it from the pre-storage-filter accumulator
     // so the headline reading is independent of how aggressively
     // `min_improvement_ms` / `min_improvement_ratio` prune detail rows.
+    //
+    // The LEFT JOIN against `agents_with_catalogue` projects `agent_id`
+    // for mesh-member candidates. For EdgeCandidate rows the `agent_id`
+    // column is written directly by the evaluator; for Triple rows the
+    // column is NULL in the candidates table and the JOIN fills it from
+    // the live agent catalogue so downstream callers always have it.
     let candidate_rows = sqlx::query!(
         r#"SELECT c.destination_ip,
                   c.display_name,
@@ -318,8 +357,22 @@ pub async fn latest_evaluation_for_campaign(
                   c.pairs_improved,
                   c.pairs_total_considered,
                   c.avg_improvement_ms,
-                  c.avg_loss_ratio
+                  c.avg_loss_ratio,
+                  c.website,
+                  c.notes,
+                  c.hostname,
+                  COALESCE(c.agent_id, a.agent_id) AS agent_id,
+                  c.coverage_count,
+                  c.destinations_total,
+                  c.mean_ms_under_t,
+                  c.coverage_weighted_ping_ms,
+                  c.direct_share,
+                  c.onehop_share,
+                  c.twohop_share,
+                  c.has_real_x_source_data
              FROM campaign_evaluation_candidates c
+             LEFT JOIN agents_with_catalogue a
+                    ON a.ip = c.destination_ip
             WHERE c.evaluation_id = $1
             ORDER BY c.pairs_improved DESC,
                      COALESCE(c.avg_improvement_ms, 0.0) DESC,
@@ -364,18 +417,18 @@ pub async fn latest_evaluation_for_campaign(
             avg_improvement_ms: c.avg_improvement_ms,
             avg_loss_ratio: c.avg_loss_ratio,
             composite_score: Some(composite_score),
-            hostname: None,
-            website: None,
-            notes: None,
-            agent_id: None,
-            coverage_count: None,
-            destinations_total: None,
-            mean_ms_under_t: None,
-            coverage_weighted_ping_ms: None,
-            direct_share: None,
-            onehop_share: None,
-            twohop_share: None,
-            has_real_x_source_data: None,
+            hostname: c.hostname,
+            website: c.website,
+            notes: c.notes,
+            agent_id: c.agent_id,
+            coverage_count: c.coverage_count,
+            destinations_total: c.destinations_total,
+            mean_ms_under_t: c.mean_ms_under_t,
+            coverage_weighted_ping_ms: c.coverage_weighted_ping_ms,
+            direct_share: c.direct_share,
+            onehop_share: c.onehop_share,
+            twohop_share: c.twohop_share,
+            has_real_x_source_data: c.has_real_x_source_data,
         });
     }
 
@@ -394,9 +447,9 @@ pub async fn latest_evaluation_for_campaign(
         max_transit_stddev_ms: parent.max_transit_stddev_ms,
         min_improvement_ms: parent.min_improvement_ms,
         min_improvement_ratio: parent.min_improvement_ratio,
-        useful_latency_ms: None,
-        max_hops: None,
-        vm_lookback_minutes: None,
+        useful_latency_ms: parent.useful_latency_ms,
+        max_hops: parent.max_hops,
+        vm_lookback_minutes: parent.vm_lookback_minutes,
         baseline_pair_count: parent.baseline_pair_count,
         candidates_total: parent.candidates_total,
         candidates_good: parent.candidates_good,
@@ -408,9 +461,127 @@ pub async fn latest_evaluation_for_campaign(
     }))
 }
 
+/// Persist one EdgeCandidate evaluation: parent `campaign_evaluations`
+/// row + per-candidate `campaign_evaluation_candidates` rows + per-(X, B)
+/// `campaign_evaluation_edge_pair_details` rows, all inside the caller's
+/// transaction.
+#[allow(clippy::too_many_arguments)]
+async fn persist_edge_candidate_evaluation(
+    tx: &mut Transaction<'_, Postgres>,
+    campaign_id: Uuid,
+    outputs: EdgeCandidateOutputs,
+    loss_threshold_ratio: f32,
+    stddev_weight: f32,
+    mode: EvaluationMode,
+    useful_latency_ms: Option<f32>,
+    max_hops: i16,
+    vm_lookback_minutes: i32,
+) -> sqlx::Result<Uuid> {
+    let candidates_total = outputs.candidates.len() as i32;
+    // "Good" candidates: those with at least one qualifying pair.
+    let candidates_good = outputs
+        .candidates
+        .iter()
+        .filter(|c| c.coverage_count > 0)
+        .count() as i32;
+
+    let evaluation_id: Uuid = sqlx::query_scalar!(
+        r#"INSERT INTO campaign_evaluations
+              (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
+               baseline_pair_count, candidates_total, candidates_good,
+               evaluated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, now())
+           RETURNING id"#,
+        campaign_id,
+        loss_threshold_ratio,
+        stddev_weight,
+        mode as EvaluationMode,
+        useful_latency_ms,
+        max_hops,
+        vm_lookback_minutes,
+        candidates_total,
+        candidates_good,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    for c in outputs.candidates {
+        let candidate_ip = IpNetwork::from(c.candidate_ip);
+
+        sqlx::query!(
+            r#"INSERT INTO campaign_evaluation_candidates (
+                   evaluation_id, destination_ip,
+                   display_name, city, country_code, asn, network_operator,
+                   website, notes, hostname,
+                   is_mesh_member, agent_id,
+                   coverage_count, destinations_total, mean_ms_under_t,
+                   coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,
+                   has_real_x_source_data
+               ) VALUES (
+                   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                   $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+               )"#,
+            evaluation_id,
+            candidate_ip,
+            c.display_name,
+            c.city,
+            c.country_code,
+            c.asn,
+            c.network_operator,
+            c.website,
+            c.notes,
+            c.hostname,
+            c.is_mesh_member,
+            c.agent_id,
+            c.coverage_count,
+            c.destinations_total,
+            c.mean_ms_under_t,
+            c.coverage_weighted_ping_ms,
+            c.direct_share,
+            c.onehop_share,
+            c.twohop_share,
+            c.has_real_x_source_data,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        for pair in c.pair_details {
+            let legs_jsonb = serde_json::to_value(&pair.best_route_legs).map_err(|e| {
+                sqlx::Error::Protocol(format!("failed to serialize best_route_legs: {e}"))
+            })?;
+            let kind_text = edge_route_kind_to_text(pair.best_route_kind);
+
+            sqlx::query!(
+                r#"INSERT INTO campaign_evaluation_edge_pair_details (
+                       evaluation_id, candidate_ip, destination_agent_id,
+                       best_route_ms, best_route_loss_ratio, best_route_stddev_ms,
+                       best_route_kind, best_route_intermediaries, best_route_legs,
+                       qualifies_under_t, is_unreachable
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+                evaluation_id,
+                candidate_ip,
+                pair.destination_agent_id,
+                pair.best_route_ms,
+                pair.best_route_loss_ratio,
+                pair.best_route_stddev_ms,
+                kind_text,
+                &pair.best_route_intermediaries[..],
+                legs_jsonb,
+                pair.qualifies_under_t,
+                pair.is_unreachable,
+            )
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    Ok(evaluation_id)
+}
+
 /// Orchestrate a full `/evaluate` persistence pass: lock the parent
-/// campaign row, re-check its state, [`insert_evaluation`], and promote
-/// `completed → evaluated` — all inside a single transaction.
+/// campaign row, re-check its state, persist the evaluator output, and
+/// promote `completed → evaluated` — all inside a single transaction.
 ///
 /// The `SELECT ... FOR UPDATE` guards against a concurrent `/detail`
 /// flipping the campaign to `running` between the handler's advisory
@@ -434,6 +605,9 @@ pub async fn persist_evaluation(
     max_transit_stddev_ms: Option<f64>,
     min_improvement_ms: Option<f64>,
     min_improvement_ratio: Option<f64>,
+    useful_latency_ms: Option<f32>,
+    max_hops: i16,
+    vm_lookback_minutes: i32,
 ) -> Result<Uuid, RepoError> {
     let mut tx = pool.begin().await?;
 
@@ -466,15 +640,7 @@ pub async fn persist_evaluation(
         });
     }
 
-    // Dispatch on the evaluator output variant. Diversity /
-    // Optimization persist through `insert_evaluation`. EdgeCandidate
-    // persistence (per-(X, B) pair detail rows + the new edge-pair
-    // detail table) lands in T56 Phase G; for now this arm is a
-    // no-op write so the response can still re-read the campaign
-    // row, but it does NOT promote the campaign to `evaluated` —
-    // returning early avoids stamping `evaluated_at` against an
-    // empty persistence write. The `/evaluate` handler will fail
-    // gracefully on the read-back miss in Phase E.
+    // Dispatch on the evaluator output variant.
     let evaluation_id = match outputs {
         EvaluationOutputs::Triple(triple) => {
             insert_evaluation(
@@ -488,15 +654,25 @@ pub async fn persist_evaluation(
                 max_transit_stddev_ms,
                 min_improvement_ms,
                 min_improvement_ratio,
+                useful_latency_ms,
+                max_hops,
+                vm_lookback_minutes,
             )
             .await?
         }
-        EvaluationOutputs::EdgeCandidate(_) => {
-            // Phase G persists EdgeCandidate. Roll back the lock without
-            // promoting state so a stuck `completed` campaign isn't
-            // misreported as `evaluated`.
-            tx.rollback().await?;
-            return Err(RepoError::EdgeCandidatePersistenceUnimplemented { campaign_id });
+        EvaluationOutputs::EdgeCandidate(edge) => {
+            persist_edge_candidate_evaluation(
+                &mut tx,
+                campaign_id,
+                edge.clone(),
+                loss_threshold_ratio,
+                stddev_weight,
+                mode,
+                useful_latency_ms,
+                max_hops,
+                vm_lookback_minutes,
+            )
+            .await?
         }
     };
 

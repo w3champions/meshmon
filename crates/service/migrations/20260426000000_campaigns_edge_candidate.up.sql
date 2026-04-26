@@ -57,8 +57,14 @@ CREATE INDEX campaign_eval_edge_pair_eval_idx
 CREATE INDEX campaign_eval_edge_pair_candidate_idx
   ON campaign_evaluation_edge_pair_details (evaluation_id, candidate_ip);
 
--- 6. Edge-mode aggregate columns on existing candidates table.
+-- 6. Edge-mode aggregate + enrichment columns on existing candidates table.
+--    The enrichment columns (website, notes, hostname, agent_id) are written
+--    by the EdgeCandidate evaluator arm; they are NULL for pre-T56 rows.
 ALTER TABLE campaign_evaluation_candidates
+  ADD COLUMN website                   TEXT    NULL,
+  ADD COLUMN notes                     TEXT    NULL,
+  ADD COLUMN hostname                  TEXT    NULL,
+  ADD COLUMN agent_id                  TEXT    NULL,
   ADD COLUMN coverage_count            INTEGER NULL,
   ADD COLUMN destinations_total        INTEGER NULL,
   ADD COLUMN mean_ms_under_t           REAL    NULL,

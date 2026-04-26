@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_evaluation_candidates (\n                   evaluation_id, destination_ip,\n                   display_name, city, country_code, asn, network_operator,\n                   website, notes, hostname,\n                   is_mesh_member, agent_id,\n                   coverage_count, destinations_total, mean_ms_under_t,\n                   coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,\n                   has_real_x_source_data\n               ) VALUES (\n                   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,\n                   $11, $12, $13, $14, $15, $16, $17, $18, $19, $20\n               )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Inet",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Int4",
+        "Int4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7473e34a41746ca2e4741ba52731dcacd81125857c000dce89c83dfbdf2ec616"
+}

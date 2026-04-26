@@ -37,16 +37,6 @@ pub enum RepoError {
     /// No row with the given id exists. Handlers map this to HTTP 404.
     #[error("campaign {0} not found")]
     NotFound(Uuid),
-    /// Persistence for `EvaluationMode::EdgeCandidate` is not yet wired
-    /// up — the writer-side schema + insert path lands in T56 Phase G.
-    /// Handlers map this to HTTP 501 so a `/evaluate` against an
-    /// edge_candidate campaign surfaces the gap loudly instead of
-    /// silently no-oping.
-    #[error("EdgeCandidate persistence not yet implemented for campaign {campaign_id}")]
-    EdgeCandidatePersistenceUnimplemented {
-        /// The campaign that triggered the unimplemented branch.
-        campaign_id: Uuid,
-    },
 }
 
 /// Body for `POST /api/campaigns` (minus `created_by`, injected by the

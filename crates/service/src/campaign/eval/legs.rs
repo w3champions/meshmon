@@ -4,6 +4,7 @@
 
 use crate::campaign::eval::AttributedMeasurement;
 use crate::campaign::model::{Endpoint, LegSource};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -14,8 +15,10 @@ use std::net::IpAddr;
 /// Surfaced through `pub EvaluationOutputs::EdgeCandidate(...)` so the
 /// edge-candidate persistence path (Phase G) can stamp each leg's
 /// substitution / source / MTR-id onto the wire without re-deriving
-/// it.
-#[derive(Debug, Clone)]
+/// it. `Serialize`/`Deserialize` are derived so the leg list can be
+/// round-tripped through the `best_route_legs` JSONB column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct LegMeasurement {
     /// Originating endpoint of the leg.
     pub from: Endpoint,

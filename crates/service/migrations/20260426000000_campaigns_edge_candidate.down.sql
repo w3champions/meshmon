@@ -14,7 +14,11 @@ ALTER TABLE campaign_evaluation_candidates
   DROP COLUMN IF EXISTS coverage_weighted_ping_ms,
   DROP COLUMN IF EXISTS mean_ms_under_t,
   DROP COLUMN IF EXISTS destinations_total,
-  DROP COLUMN IF EXISTS coverage_count;
+  DROP COLUMN IF EXISTS coverage_count,
+  DROP COLUMN IF EXISTS agent_id,
+  DROP COLUMN IF EXISTS hostname,
+  DROP COLUMN IF EXISTS notes,
+  DROP COLUMN IF EXISTS website;
 
 ALTER TABLE campaign_evaluation_pair_details
   DROP COLUMN IF EXISTS winning_x_position,

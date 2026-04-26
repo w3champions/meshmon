@@ -1512,6 +1512,9 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .unwrap();
@@ -1563,6 +1566,9 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .unwrap();
@@ -1661,6 +1667,9 @@ async fn persist_evaluation_rejects_running_campaign() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .expect_err("persist_evaluation must reject running state");
@@ -1793,6 +1802,9 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .expect_err("unparseable candidate destination_ip must abort the tx");
@@ -2196,6 +2208,9 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .unwrap();

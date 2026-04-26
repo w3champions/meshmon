@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_evaluations\n              (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,\n               useful_latency_ms, max_hops, vm_lookback_minutes,\n               baseline_pair_count, candidates_total, candidates_good,\n               evaluated_at)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, now())\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float4",
+        "Float4",
+        {
+          "Custom": {
+            "name": "evaluation_mode",
+            "kind": {
+              "Enum": [
+                "diversity",
+                "optimization",
+                "edge_candidate"
+              ]
+            }
+          }
+        },
+        "Float4",
+        "Int2",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d459db64e70be4919ceede527ab2cbf0bf224a1014c1aee20d757c09b4b543cc"
+}

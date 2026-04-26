@@ -68,8 +68,6 @@ fn db_error(context: &'static str, err: sqlx::Error) -> Response {
 /// Map a domain [`RepoError`] onto the canonical HTTP shape:
 /// - `NotFound` → 404 `{"error":"not_found"}`
 /// - `IllegalTransition` → 409 `{"error":"illegal_state_transition"}`
-/// - `EdgeCandidatePersistenceUnimplemented` → 501
-///   `{"error":"edge_candidate_persistence_unimplemented"}`
 /// - `Sqlx` → 500 (via [`db_error`])
 fn repo_error(context: &'static str, err: RepoError) -> Response {
     match err {
@@ -81,17 +79,6 @@ fn repo_error(context: &'static str, err: RepoError) -> Response {
             Json(json!({ "error": "illegal_state_transition" })),
         )
             .into_response(),
-        RepoError::EdgeCandidatePersistenceUnimplemented { campaign_id } => {
-            tracing::warn!(
-                %campaign_id,
-                "{context}: edge_candidate persistence not yet implemented (T56 Phase G)"
-            );
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({ "error": "edge_candidate_persistence_unimplemented" })),
-            )
-                .into_response()
-        }
         RepoError::Sqlx(e) => db_error(context, e),
     }
 }
@@ -972,7 +959,10 @@ pub async fn evaluate(
     // concurrent `PATCH /campaigns/{id}` that lands between the two reads
     // cannot desync the scored knobs from the persisted evaluation row.
     // `campaign` stays in use only for its `state` gate above; it is no
-    // longer the source of knob values.
+    // longer the source of knob values for the scoring fields.
+    // `vm_lookback_minutes` is read from `campaign` because it is not
+    // carried through `EvaluationInputs` (it controls the VM fetch
+    // window, not the scoring algorithm).
     let loss_threshold_ratio = inputs.loss_threshold_ratio;
     let stddev_weight = inputs.stddev_weight;
     let evaluation_mode = inputs.mode;
@@ -980,6 +970,9 @@ pub async fn evaluate(
     let max_transit_stddev_ms = inputs.max_transit_stddev_ms;
     let min_improvement_ms = inputs.min_improvement_ms;
     let min_improvement_ratio = inputs.min_improvement_ratio;
+    let useful_latency_ms = inputs.useful_latency_ms;
+    let max_hops = inputs.max_hops;
+    let vm_lookback_minutes = campaign.vm_lookback_minutes;
 
     // T54-03: layer VM continuous-mesh baselines on top of the active-
     // probe rows for agent→agent pairs the campaign did not cover.
@@ -1075,6 +1068,9 @@ pub async fn evaluate(
         max_transit_stddev_ms,
         min_improvement_ms,
         min_improvement_ratio,
+        useful_latency_ms,
+        max_hops,
+        vm_lookback_minutes,
     )
     .await
     {
