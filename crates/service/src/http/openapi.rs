@@ -224,6 +224,12 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .routes(utoipa_axum::routes!(
             crate::campaign::handlers::get_evaluation
         ))
+        // EdgeCandidate per-(X, B) pair list; registered before
+        // `get_candidate_pair_details` so `matchit` resolves the longer
+        // `/evaluation/edge_pairs` static prefix first.
+        .routes(utoipa_axum::routes!(
+            crate::campaign::handlers::get_edge_pairs
+        ))
         // Static `/evaluation/candidates/{destination_ip}/pair_details`
         // segment runs after `get_evaluation` for readability — `matchit`
         // resolves the longer static prefix regardless of registration

@@ -1257,9 +1257,72 @@ pub async fn good_candidate_pair_legs(
     ))
 }
 
+/// Expand qualifying EdgeCandidate candidates into `(source_agent_id,
+/// candidate_ip)` pairs for the `POST /detail?scope=good_candidates`
+/// handler in EdgeCandidate mode.
+///
+/// A candidate qualifies when `coverage_count >= 1` (at least one
+/// destination agent B reached the candidate IP X under the latency
+/// threshold T). For each qualifying X the function cross-joins with the
+/// campaign's settled source agents so the caller can enqueue a
+/// `(source_agent, X)` detail pair for each combination.
+///
+/// Returns `Ok(None)` when the campaign has never been evaluated.
+pub async fn good_candidates_for_edge_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> sqlx::Result<Option<Vec<(String, IpAddr)>>> {
+    let evaluation_id: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM campaign_evaluations
+            WHERE campaign_id = $1
+            ORDER BY evaluated_at DESC
+            LIMIT 1"#,
+    )
+    .bind(campaign_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(evaluation_id) = evaluation_id else {
+        return Ok(None);
+    };
+
+    // Qualifying candidate IPs for this evaluation (coverage_count >= 1).
+    let candidate_ips: Vec<IpNetwork> = sqlx::query_scalar(
+        r#"SELECT destination_ip FROM campaign_evaluation_candidates
+            WHERE evaluation_id = $1
+              AND coverage_count >= 1"#,
+    )
+    .bind(evaluation_id)
+    .fetch_all(pool)
+    .await?;
+    if candidate_ips.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    // Source agents: the distinct agents that probed at least one pair
+    // during this campaign (kind='campaign', baseline probes only).
+    let source_agent_ids: Vec<String> = sqlx::query_scalar(
+        r#"SELECT DISTINCT source_agent_id
+             FROM campaign_pairs
+            WHERE campaign_id = $1
+              AND kind = 'campaign'"#,
+    )
+    .bind(campaign_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut pairs: Vec<(String, IpAddr)> = Vec::with_capacity(source_agent_ids.len() * candidate_ips.len());
+    for src in &source_agent_ids {
+        for cand in &candidate_ips {
+            pairs.push((src.clone(), cand.ip()));
+        }
+    }
+
+    Ok(Some(pairs))
+}
+
 /// Outcome of [`latest_evaluation_edge_pairs`], discriminating the
-/// "campaign exists / has been evaluated" path from the two 404 paths
-/// the handler renders distinct error codes for.
+/// "campaign exists / has been evaluated in the right mode" path from the
+/// three 404 paths the handler renders distinct error codes for.
 #[derive(Debug)]
 pub enum EdgePairLookup {
     /// Happy path — the page-and-total result.
@@ -1268,6 +1331,9 @@ pub enum EdgePairLookup {
     CampaignNotFound,
     /// Campaign exists but has never been evaluated.
     NoEvaluation,
+    /// Campaign has been evaluated but the latest evaluation is not in
+    /// `edge_candidate` mode — the endpoint only makes sense for that mode.
+    WrongMode,
 }
 
 /// SQL column name for the requested edge-pair sort column.
@@ -1342,18 +1408,25 @@ pub async fn latest_evaluation_edge_pairs(
         return Ok(EdgePairLookup::CampaignNotFound);
     }
 
-    let evaluation_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"SELECT id FROM campaign_evaluations
+    let evaluation_row = sqlx::query_as::<_, (Uuid, EvaluationMode)>(
+        r#"SELECT id, evaluation_mode
+             FROM campaign_evaluations
             WHERE campaign_id = $1
             ORDER BY evaluated_at DESC
             LIMIT 1"#,
-        campaign_id,
     )
+    .bind(campaign_id)
     .fetch_optional(pool)
     .await?;
-    let Some(evaluation_id) = evaluation_id else {
+    let Some((evaluation_id, evaluation_mode)) = evaluation_row else {
         return Ok(EdgePairLookup::NoEvaluation);
     };
+    // This endpoint surfaces EdgeCandidate-mode data only. A Triple-mode
+    // evaluation has no `campaign_evaluation_edge_pair_details` rows and
+    // the caller should use the `…/candidates/{ip}/pair_details` endpoint.
+    if evaluation_mode != EvaluationMode::EdgeCandidate {
+        return Ok(EdgePairLookup::WrongMode);
+    }
 
     let sort_col = edge_pair_sort_col_sql(query.sort);
     let sort_dir_kw = match query.dir {
