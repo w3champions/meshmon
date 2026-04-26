@@ -42,12 +42,29 @@ vi.mock("@/api/hooks/campaigns", async () => {
 vi.mock("@/api/hooks/evaluation", async () => {
   const actual =
     await vi.importActual<typeof import("@/api/hooks/evaluation")>("@/api/hooks/evaluation");
-  return { ...actual, useTriggerDetail: vi.fn() };
+  return { ...actual, useTriggerDetail: vi.fn(), useEdgePairDetails: vi.fn() };
+});
+
+vi.mock("@tanstack/react-router", async () => {
+  const actual =
+    await vi.importActual<typeof import("@tanstack/react-router")>("@tanstack/react-router");
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+    useSearch: () => ({}),
+  };
+});
+
+vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => {
+  return {
+    CatalogueDrawerOverlay: ({ children }: { children: React.ReactNode }) => children,
+    useCatalogueDrawer: () => ({ open: vi.fn(), close: vi.fn(), isOpen: false, entryId: null }),
+  };
 });
 
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignPairs, useForcePair } from "@/api/hooks/campaigns";
-import { useTriggerDetail } from "@/api/hooks/evaluation";
+import { useEdgePairDetails, useTriggerDetail } from "@/api/hooks/evaluation";
 import { PairsTab } from "@/components/campaigns/results/PairsTab";
 
 // ---------------------------------------------------------------------------
@@ -120,6 +137,32 @@ function makeMutationStub(): MutationStub {
 const forcePairStub = makeMutationStub();
 const triggerDetailStub = makeMutationStub();
 
+function makeEdgePairRow(
+  candidateIp: string,
+  destinationAgentId: string,
+  overrides?: Partial<{
+    best_route_ms: number;
+    best_route_kind: "direct" | "one_hop" | "two_hop";
+    best_route_loss_ratio: number;
+    best_route_stddev_ms: number;
+    qualifies_under_t: boolean;
+    is_unreachable: boolean;
+  }>,
+) {
+  return {
+    candidate_ip: candidateIp,
+    destination_agent_id: destinationAgentId,
+    best_route_ms: overrides?.best_route_ms ?? 25.5,
+    best_route_kind: overrides?.best_route_kind ?? "direct",
+    best_route_legs: [],
+    best_route_intermediaries: [],
+    best_route_loss_ratio: overrides?.best_route_loss_ratio ?? 0,
+    best_route_stddev_ms: overrides?.best_route_stddev_ms ?? 1.2,
+    qualifies_under_t: overrides?.qualifies_under_t ?? true,
+    is_unreachable: overrides?.is_unreachable ?? false,
+  };
+}
+
 function setupMocks(pairs: CampaignPair[], opts?: { isLoading?: boolean; isError?: boolean }) {
   vi.mocked(useCampaignPairs).mockReturnValue({
     data: pairs,
@@ -140,6 +183,17 @@ function setupMocks(pairs: CampaignPair[], opts?: { isLoading?: boolean; isError
   vi.mocked(useTriggerDetail).mockReturnValue(
     triggerDetailStub as unknown as ReturnType<typeof useTriggerDetail>,
   );
+
+  vi.mocked(useEdgePairDetails).mockReturnValue({
+    data: { pages: [], pageParams: [] },
+    isLoading: false,
+    isError: false,
+    error: null,
+    hasNextPage: false,
+    isFetchingNextPage: false,
+    fetchNextPage: vi.fn(),
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useEdgePairDetails>);
 }
 
 function renderTab(campaign: Campaign) {
@@ -356,5 +410,136 @@ describe("PairsTab — row actions", () => {
     await waitFor(() => {
       expect(screen.getByText(/campaign advanced before the request landed/i)).toBeInTheDocument();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// edge_candidate mode
+// ---------------------------------------------------------------------------
+
+describe("PairsTab — edge_candidate mode", () => {
+  test("renders EdgePairsTab (data-testid=edge-pairs-tab) instead of pairs-tab", () => {
+    setupMocks([]);
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByTestId("edge-pairs-tab")).toBeInTheDocument();
+    expect(screen.queryByTestId("pairs-tab")).not.toBeInTheDocument();
+  });
+
+  test("does not call useCampaignPairs in edge_candidate mode", () => {
+    setupMocks([]);
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(useCampaignPairs).not.toHaveBeenCalled();
+  });
+
+  test("calls useEdgePairDetails with campaign id and no candidate_ip filter", () => {
+    setupMocks([]);
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(useEdgePairDetails).toHaveBeenCalledWith(
+      CAMPAIGN_ID,
+      expect.not.objectContaining({ candidate_ip: expect.anything() }),
+    );
+  });
+
+  test("renders empty state when edge pairs list is empty", () => {
+    setupMocks([]);
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByText(/no edge pair data for this campaign yet/i)).toBeInTheDocument();
+  });
+
+  test("renders one row per edge pair with candidate ip and route shape", () => {
+    setupMocks([]);
+    vi.mocked(useEdgePairDetails).mockReturnValue({
+      data: {
+        pages: [
+          {
+            entries: [
+              makeEdgePairRow("10.0.55.1", "agent-b", { best_route_kind: "direct", qualifies_under_t: true }),
+              makeEdgePairRow("10.0.55.2", "agent-c", { best_route_kind: "one_hop", qualifies_under_t: false }),
+            ],
+            next_cursor: null,
+          },
+        ],
+        pageParams: [null],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useEdgePairDetails>);
+
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+
+    expect(screen.getByTestId("edge-pair-row-0")).toBeInTheDocument();
+    expect(screen.getByTestId("edge-pair-row-1")).toBeInTheDocument();
+    // Route kind chips
+    expect(screen.getByText("direct")).toBeInTheDocument();
+    expect(screen.getByText("1 hop")).toBeInTheDocument();
+  });
+
+  test("shows 'qualifies' badge for qualifying rows and 'above T' for non-qualifying", () => {
+    setupMocks([]);
+    vi.mocked(useEdgePairDetails).mockReturnValue({
+      data: {
+        pages: [
+          {
+            entries: [
+              makeEdgePairRow("10.0.55.1", "agent-b", { qualifies_under_t: true }),
+              makeEdgePairRow("10.0.55.2", "agent-c", { qualifies_under_t: false }),
+            ],
+            next_cursor: null,
+          },
+        ],
+        pageParams: [null],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useEdgePairDetails>);
+
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+
+    expect(screen.getByText("qualifies")).toBeInTheDocument();
+    expect(screen.getByText("above T")).toBeInTheDocument();
+  });
+
+  test("renders skeleton while edge pairs are loading", () => {
+    setupMocks([]);
+    vi.mocked(useEdgePairDetails).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+      error: null,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useEdgePairDetails>);
+
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByTestId("edge-pairs-tab")).toHaveAttribute("role", "status");
+  });
+
+  test("renders error card when edge pairs fetch fails", () => {
+    setupMocks([]);
+    vi.mocked(useEdgePairDetails).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new Error("network failure"),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useEdgePairDetails>);
+
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/failed to load edge pairs/i);
   });
 });

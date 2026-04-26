@@ -15,6 +15,7 @@ import { useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import { useCampaignPairs, useForcePair } from "@/api/hooks/campaigns";
 import { useTriggerDetail } from "@/api/hooks/evaluation";
+import { EdgePairsTab } from "@/components/campaigns/results/EdgePairsTab";
 import {
   type PairRowAction,
   PairTable,
@@ -47,6 +48,19 @@ export interface PairsTabProps {
 }
 
 export function PairsTab({ campaign }: PairsTabProps) {
+  // Edge-candidate mode delegates entirely to the flat (X, B) pivot.
+  if (campaign.evaluation_mode === "edge_candidate") {
+    return <EdgePairsTab campaign={campaign} />;
+  }
+  return <TriplePairsTab campaign={campaign} />;
+}
+
+/**
+ * Pairs tab body for non-edge_candidate evaluation modes (optimization / diversity).
+ * Renders the full baseline (A, B) pair table with force-remeasure and detail-dispatch
+ * row actions.
+ */
+function TriplePairsTab({ campaign }: PairsTabProps) {
   const pairsQuery = useCampaignPairs(campaign.id, { limit: PAIRS_TAB_LIMIT });
   const agentsQuery = useAgents();
   const forcePairMutation = useForcePair();

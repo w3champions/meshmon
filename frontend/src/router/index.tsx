@@ -248,6 +248,25 @@ export const campaignDetailSearchSchema = z.object({
     .enum(["asc", "desc"])
     .catch(() => undefined as never)
     .optional(),
+  // Edge-pairs tab sort. Namespaced `ep_` so it doesn't collide with the
+  // candidate-tab `cand_` params. Default (absent): `best_route_ms` / `asc`.
+  ep_sort: z
+    .enum([
+      "best_route_ms",
+      "best_route_loss_ratio",
+      "best_route_stddev_ms",
+      "best_route_kind",
+      "qualifies_under_t",
+      "is_unreachable",
+      "candidate_ip",
+      "destination_agent_id",
+    ])
+    .catch(() => undefined as never)
+    .optional(),
+  ep_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
 });
 
 /**
@@ -292,6 +311,8 @@ function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
     raw_kind: parsed.raw_kind,
     cand_sort: parsed.cand_sort,
     cand_dir: parsed.cand_dir,
+    ep_sort: parsed.ep_sort,
+    ep_dir: parsed.ep_dir,
   };
 }
 
