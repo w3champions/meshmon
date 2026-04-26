@@ -186,19 +186,20 @@ function colCoverage(ip: string, agentIds: string[], cellMap: CellMap): number {
   return count;
 }
 
-/** Coverage-weighted ping for one candidate column. */
-function colWeightedPing(ip: string, agentIds: string[], cellMap: CellMap): number | null {
-  let sum = 0;
-  let count = 0;
-  for (const id of agentIds) {
-    const row = cellMap.get(`${ip}::${id}`);
-    // `best_route_ms` is `null` for unreachable rows.
-    if (row && !row.is_unreachable && row.best_route_ms != null) {
-      sum += row.best_route_ms;
-      count++;
-    }
-  }
-  return count > 0 ? sum / count : null;
+/** Lookup map: `destination_ip` → `coverage_weighted_ping_ms` (backend metric). */
+type WeightedPingMap = Map<string, number | null>;
+
+/**
+ * Coverage-weighted ping for one candidate column, sourced from the
+ * backend-computed `coverage_weighted_ping_ms` so heatmap column order
+ * matches CandidatesTab / CompareTab. Recomputing this in the frontend
+ * would drift from the backend formula:
+ *   - filter to qualifies_under_t rows only
+ *   - mean = sum(best_route_ms) / coverage_count
+ *   - weighted = mean × (destinations_total / coverage_count)
+ */
+function colWeightedPing(ip: string, weightedPingMap: WeightedPingMap): number | null {
+  return weightedPingMap.get(ip) ?? null;
 }
 
 function sortedAgentIds(
@@ -229,6 +230,7 @@ function sortedCandidateIps(
   candidateIps: string[],
   agentIds: string[],
   cellMap: CellMap,
+  weightedPingMap: WeightedPingMap,
   sortKey: ColSortKey,
   dir: SortDir,
 ): string[] {
@@ -242,9 +244,9 @@ function sortedCandidateIps(
       const cb = colCoverage(b, agentIds, cellMap);
       return mult * (ca - cb);
     }
-    // coverage_weighted_ping_ms
-    const pa = colWeightedPing(a, agentIds, cellMap) ?? Infinity;
-    const pb = colWeightedPing(b, agentIds, cellMap) ?? Infinity;
+    // coverage_weighted_ping_ms — backend metric, not a frontend recompute.
+    const pa = colWeightedPing(a, weightedPingMap) ?? Infinity;
+    const pb = colWeightedPing(b, weightedPingMap) ?? Infinity;
     return mult * (pa - pb);
   });
 }
@@ -352,14 +354,33 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
     [allRows],
   );
 
+  // Source the column-sort metric directly from the backend-computed
+  // `coverage_weighted_ping_ms` so heatmap column order matches
+  // CandidatesTab / CompareTab. See `colWeightedPing` for the formula.
+  const weightedPingMap = useMemo<WeightedPingMap>(() => {
+    const map: WeightedPingMap = new Map();
+    for (const c of evaluation.results.candidates) {
+      map.set(c.destination_ip, c.coverage_weighted_ping_ms ?? null);
+    }
+    return map;
+  }, [evaluation.results.candidates]);
+
   const orderedAgentIds = useMemo(
     () => sortedAgentIds(rawAgentIds, rawCandidateIps, cellMap, rowSortKey, rowSortDir),
     [rawAgentIds, rawCandidateIps, cellMap, rowSortKey, rowSortDir],
   );
 
   const orderedCandidateIps = useMemo(
-    () => sortedCandidateIps(rawCandidateIps, rawAgentIds, cellMap, colSortKey, colSortDir),
-    [rawCandidateIps, rawAgentIds, cellMap, colSortKey, colSortDir],
+    () =>
+      sortedCandidateIps(
+        rawCandidateIps,
+        rawAgentIds,
+        cellMap,
+        weightedPingMap,
+        colSortKey,
+        colSortDir,
+      ),
+    [rawCandidateIps, rawAgentIds, cellMap, weightedPingMap, colSortKey, colSortDir],
   );
 
   // Drilldown candidate lookup

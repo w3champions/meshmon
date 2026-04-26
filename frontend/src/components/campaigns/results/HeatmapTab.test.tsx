@@ -380,6 +380,87 @@ describe("O3: Sort + cell click", () => {
     expect(screen.getByRole("button", { name: /coverage/i })).toBeInTheDocument();
   });
 
+  test("coverage_weighted_ping_ms column sort matches backend metric, not raw mean", () => {
+    // Fixture: candidate A has many high-RTT non-qualifying rows so a frontend
+    // mean-of-best_route_ms over reachable rows would rank A worse than B.
+    // The backend metric filters to qualifies_under_t and then applies an
+    // inverse-coverage penalty, which inverts the ranking. The heatmap must
+    // mirror the backend ordering used by CandidatesTab / CompareTab.
+    const rows: EvaluationEdgePairDetailDto[] = [
+      // A: low qualifying RTT, low coverage (1 of 3 destinations qualifies).
+      { ...makeEdgePairRow("10.0.0.1", "agent-a", 20), qualifies_under_t: true },
+      { ...makeEdgePairRow("10.0.0.1", "agent-b", 250), qualifies_under_t: false },
+      { ...makeEdgePairRow("10.0.0.1", "agent-c", 250), qualifies_under_t: false },
+      // B: higher qualifying RTT, full coverage (3 of 3 qualify).
+      { ...makeEdgePairRow("10.0.0.2", "agent-a", 60), qualifies_under_t: true },
+      { ...makeEdgePairRow("10.0.0.2", "agent-b", 60), qualifies_under_t: true },
+      { ...makeEdgePairRow("10.0.0.2", "agent-c", 60), qualifies_under_t: true },
+    ];
+    // Backend formula: mean_qualifying * (destinations_total / coverage_count).
+    // A: 20 * (3/1)  = 60       (only one row qualifies)
+    // B: 60 * (3/3)  = 60       — tie
+    // To break the tie, drop A's qualifying RTT to 10 so the backend ranks A
+    // strictly better than B (10*3 = 30 vs 60).
+    rows[0] = { ...rows[0]!, best_route_ms: 10 };
+
+    renderHeatmap(rows, {
+      results: {
+        candidates: [
+          {
+            destination_ip: "10.0.0.1",
+            display_name: "cand-a",
+            city: null,
+            country_code: null,
+            asn: null,
+            network_operator: null,
+            hostname: null,
+            is_mesh_member: false,
+            pairs_improved: 0,
+            pairs_total_considered: 3,
+            avg_improvement_ms: null,
+            avg_loss_ratio: 0,
+            composite_score: null,
+            // 10 * (3/1) = 30 — backend value; the frontend uses this as-is.
+            coverage_weighted_ping_ms: 30,
+          },
+          {
+            destination_ip: "10.0.0.2",
+            display_name: "cand-b",
+            city: null,
+            country_code: null,
+            asn: null,
+            network_operator: null,
+            hostname: null,
+            is_mesh_member: false,
+            pairs_improved: 0,
+            pairs_total_considered: 3,
+            avg_improvement_ms: null,
+            avg_loss_ratio: 0,
+            composite_score: null,
+            // 60 * (3/3) = 60.
+            coverage_weighted_ping_ms: 60,
+          },
+        ],
+        unqualified_reasons: {},
+      } as Evaluation["results"],
+    });
+
+    // Default column sort key is `coverage_weighted_ping_ms` ASC, so the
+    // candidate with the lower backend metric (10.0.0.1) must come first.
+    const headers = screen
+      .getAllByTestId(/^heatmap-col-header-/)
+      .map((el) => el.getAttribute("data-testid"));
+    const idxA = headers.indexOf("heatmap-col-header-10.0.0.1");
+    const idxB = headers.indexOf("heatmap-col-header-10.0.0.2");
+    expect(idxA).toBeGreaterThanOrEqual(0);
+    expect(idxB).toBeGreaterThanOrEqual(0);
+    expect(idxA).toBeLessThan(idxB);
+
+    // Sanity: the naive frontend mean-over-reachable-rows would have ranked
+    // 10.0.0.2 first (mean = 60) over 10.0.0.1 (mean = (10+250+250)/3 ≈ 170),
+    // i.e. the opposite order. The fix must use the backend value (30 vs 60).
+  });
+
   test("cell click opens drilldown dialog via DrilldownDialog", async () => {
     const rows = [makeEdgePairRow("10.0.0.1", "agent-a", 42)];
     renderHeatmap(rows);
