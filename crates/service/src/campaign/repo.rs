@@ -1564,19 +1564,59 @@ pub async fn measurements_for_campaign(
         })
         .collect();
 
-    let agent_rows = sqlx::query!(
-        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
-             FROM agents_with_catalogue
-            WHERE ip IN (
-                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+    // Roster query — the union of source-agent and destination-IP
+    // matches is correct for Diversity / Optimization, where
+    // `campaign_pairs.destination_ip` is a destination B (often itself a
+    // mesh agent). For EdgeCandidate, `destination_ip` is the candidate
+    // X — a registered mesh agent's IP would otherwise leak into
+    // `inputs.agents` and be double-counted as both X (via candidate_ips)
+    // AND B (via the agents roster the EdgeCandidate evaluator iterates
+    // as the destination set), inflating `destinations_total` and
+    // producing phantom heatmap rows. Restrict the roster to source
+    // agents in EdgeCandidate mode.
+    struct AgentRosterRow {
+        agent_id: String,
+        ip: IpNetwork,
+    }
+    let agent_rows: Vec<AgentRosterRow> =
+        if matches!(campaign.evaluation_mode, EvaluationMode::EdgeCandidate) {
+            sqlx::query!(
+                r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+                     FROM agents_with_catalogue
+                    WHERE agent_id IN (
+                        SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+                    )"#,
+                campaign_id,
             )
-               OR agent_id IN (
-                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
-            )"#,
-        campaign_id,
-    )
-    .fetch_all(pool)
-    .await?;
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|r| AgentRosterRow {
+                agent_id: r.agent_id,
+                ip: r.ip,
+            })
+            .collect()
+        } else {
+            sqlx::query!(
+                r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+                     FROM agents_with_catalogue
+                    WHERE ip IN (
+                        SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+                    )
+                       OR agent_id IN (
+                        SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+                    )"#,
+                campaign_id,
+            )
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|r| AgentRosterRow {
+                agent_id: r.agent_id,
+                ip: r.ip,
+            })
+            .collect()
+        };
 
     let agents: Vec<EvalAgentRow> = agent_rows
         .into_iter()

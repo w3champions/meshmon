@@ -13,6 +13,7 @@
 //! | `patch_max_hops_dismisses_evaluation`                | `t56v-{a,b,c}`  | `198.51.100.{71,.72,.73,.79}` |
 //! | `evaluate_edge_candidate_with_no_destinations_returns_422` | `t56v-nd-a` | `198.51.100.{81}` |
 //! | `evaluate_edge_candidate_with_no_measurements_returns_422` | `t56v-nm-{a,b}` | `198.51.100.{91,92,99}` |
+//! | `evaluate_edge_candidate_excludes_mesh_candidate_from_destinations` | `t56v-c2-{a,b,c}` | `198.51.100.{111,112,119}` |
 
 mod common;
 use common::HttpHarness;
@@ -334,5 +335,96 @@ async fn patch_metadata_only_preserves_useful_latency_for_edge_candidate() {
     assert!(
         (patched["useful_latency_ms"].as_f64().unwrap() - 80.0).abs() < 1e-3,
         "useful_latency_ms must be preserved across metadata-only PATCH: {patched}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C2-3 — EdgeCandidate roster excludes mesh-candidate destinations
+// ---------------------------------------------------------------------------
+
+/// EdgeCandidate destination set B is the source-agent roster, NOT the
+/// candidate-IP set. A registered mesh agent whose IP is selected as a
+/// candidate (but not as a source) must NOT leak into the destination
+/// set — otherwise it gets double-counted as both X (via candidate_ips)
+/// and B (via the agents roster), inflating destinations_total and
+/// producing phantom heatmap rows.
+#[tokio::test]
+async fn evaluate_edge_candidate_excludes_mesh_candidate_from_destinations() {
+    let h = HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // Two source agents and one extra mesh agent C whose IP is also a
+    // candidate. C is intentionally absent from `source_agent_ids`.
+    common::insert_agent_with_ip(pool, "t56v-c2-a", "198.51.100.111".parse().unwrap()).await;
+    common::insert_agent_with_ip(pool, "t56v-c2-b", "198.51.100.112".parse().unwrap()).await;
+    common::insert_agent_with_ip(pool, "t56v-c2-c", "198.51.100.119".parse().unwrap()).await;
+
+    let campaign: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-mesh-candidate-leak-guard",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["t56v-c2-a", "t56v-c2-b"],
+                // C's IP is a candidate; C itself is not a source.
+                "destination_ips": ["198.51.100.119"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+
+    // Baseline a↔b plus transit through X = C's IP.
+    common::seed_measurements(
+        pool,
+        &campaign_id,
+        &[
+            ("t56v-c2-a", "198.51.100.112", 300.0, 5.0, 0.0),
+            ("t56v-c2-b", "198.51.100.111", 300.0, 5.0, 0.0),
+            ("t56v-c2-a", "198.51.100.119", 100.0, 5.0, 0.0),
+            ("t56v-c2-b", "198.51.100.119", 101.0, 5.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(pool, &campaign_id).await;
+    let _: serde_json::Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // Read back the persisted candidate aggregates and edge-pair rows.
+    // Destinations are A and B only. C must not appear as a destination,
+    // and `destinations_total` must equal 2 (A and B), not 3.
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+    let dest_total: i32 = sqlx::query_scalar(
+        "SELECT destinations_total \
+           FROM campaign_evaluation_candidates c \
+           JOIN campaign_evaluations e ON e.id = c.evaluation_id \
+          WHERE e.campaign_id = $1 \
+            AND c.destination_ip = '198.51.100.119'::inet",
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("candidate row exists for X = 198.51.100.119");
+    assert_eq!(
+        dest_total, 2,
+        "destinations_total must count source agents only (A, B); got {dest_total} — \
+         mesh-candidate C leaked into the destination roster"
+    );
+
+    let dest_agent_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT destination_agent_id \
+           FROM campaign_evaluation_edge_pair_details epd \
+           JOIN campaign_evaluations e ON e.id = epd.evaluation_id \
+          WHERE e.campaign_id = $1",
+    )
+    .bind(campaign_uuid)
+    .fetch_all(pool)
+    .await
+    .expect("query edge pair destinations");
+    assert!(
+        !dest_agent_ids.contains(&"t56v-c2-c".to_string()),
+        "destination roster must not contain mesh-candidate C; got {dest_agent_ids:?}"
     );
 }
