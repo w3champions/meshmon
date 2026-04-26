@@ -884,6 +884,138 @@ pub struct LegDto {
     pub mtr_measurement_id: Option<i64>,
 }
 
+/// Sortable columns for the edge-pair paginated endpoint
+/// (`GET /api/campaigns/{id}/evaluation/edge_pairs`).
+///
+/// The set is closed — every variant maps to a hardcoded SQL column name
+/// in [`crate::campaign::evaluation_repo::latest_evaluation_edge_pairs`] so
+/// user input never reaches the SQL string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgePairSortCol {
+    /// `best_route_ms` — default sort.
+    BestRouteMs,
+    /// `best_route_loss_ratio`.
+    BestRouteLossRatio,
+    /// `best_route_stddev_ms`.
+    BestRouteStddevMs,
+    /// `best_route_kind` (text column: direct / 1hop / 2hop).
+    BestRouteKind,
+    /// `qualifies_under_t` — boolean column.
+    QualifiesUnderT,
+    /// `is_unreachable` — boolean column.
+    IsUnreachable,
+    /// `candidate_ip` — inet column; lexicographic text ordering.
+    CandidateIp,
+    /// `destination_agent_id` — text column.
+    DestinationAgentId,
+}
+
+/// Sort direction for [`EdgePairSortCol`].
+///
+/// The composite tiebreak `(candidate_ip, destination_agent_id)` is always
+/// ascending; only the leading column flips direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgePairSortDir {
+    /// Ascending (smallest values first).
+    Asc,
+    /// Descending (largest values first). Default for the endpoint.
+    Desc,
+}
+
+/// Default page size for [`EdgePairsQuery::limit`].
+fn default_edge_pairs_limit() -> u32 {
+    100
+}
+
+fn default_edge_pair_sort() -> EdgePairSortCol {
+    EdgePairSortCol::BestRouteMs
+}
+
+fn default_edge_pair_dir() -> EdgePairSortDir {
+    EdgePairSortDir::Asc
+}
+
+/// Query parameters for `GET /api/campaigns/{id}/evaluation/edge_pairs`.
+///
+/// Defaults: sort = `best_route_ms`, dir = `asc`, limit = 100.
+/// `limit` > 1000 surfaces as `400 invalid_filter`.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct EdgePairsQuery {
+    /// Candidate IP filter. When set, restricts results to rows where
+    /// `candidate_ip` matches this address (exact match).
+    #[serde(default)]
+    pub candidate_ip: Option<String>,
+    /// When `Some(true)`, restricts to rows where `qualifies_under_t = true`.
+    /// `Some(false)` selects non-qualifying rows; `None` (default) is
+    /// unconstrained.
+    #[serde(default)]
+    pub qualifies_only: Option<bool>,
+    /// When `Some(true)`, restricts to rows where `is_unreachable = false`.
+    /// Useful for displaying only reachable routes.
+    #[serde(default)]
+    pub reachable_only: Option<bool>,
+    /// Sort column. Default `best_route_ms`.
+    #[serde(default = "default_edge_pair_sort")]
+    pub sort: EdgePairSortCol,
+    /// Sort direction. Default `asc` (ascending RTT = best routes first).
+    #[serde(default = "default_edge_pair_dir")]
+    pub dir: EdgePairSortDir,
+    /// Opaque keyset cursor returned by the previous page's `next_cursor`.
+    /// Absent on the first page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page size. Default 100; cap 1000. Zero is allowed.
+    #[serde(default = "default_edge_pairs_limit")]
+    pub limit: u32,
+}
+
+/// Opaque keyset-pagination cursor for the edge-pairs endpoint.
+///
+/// Encoding is JSON inside base64 (URL-safe, no padding) — clients must
+/// treat the byte stream as opaque.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EdgePairCursor {
+    /// Sort column the page-1 caller requested.
+    pub sort_col: EdgePairSortCol,
+    /// Value of `sort_col` on the last row of the previous page.
+    pub sort_value: crate::campaign::cursor::SortValue,
+    /// Tiebreak: candidate IP (as text).
+    pub candidate_ip: String,
+    /// Tiebreak: destination agent id.
+    pub destination_agent_id: String,
+}
+
+impl EdgePairCursor {
+    /// Encode to the opaque `cursor` string.
+    pub fn encode(&self) -> String {
+        use base64::Engine as _;
+        let json =
+            serde_json::to_vec(self).expect("EdgePairCursor JSON serialization is total");
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    }
+
+    /// Decode and validate against the expected sort column.
+    pub fn decode(
+        raw: &str,
+        expected: EdgePairSortCol,
+    ) -> Result<Self, crate::campaign::cursor::CursorError> {
+        use base64::Engine as _;
+        use crate::campaign::cursor::CursorError;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw)
+            .map_err(|e| CursorError::Decode(format!("base64: {e}")))?;
+        let cursor: EdgePairCursor = serde_json::from_slice(&bytes)
+            .map_err(|e| CursorError::Decode(format!("json: {e}")))?;
+        if cursor.sort_col != expected {
+            return Err(CursorError::SortMismatch);
+        }
+        Ok(cursor)
+    }
+}
+
 /// Paginated response for `GET /api/campaigns/:id/evaluation/edge_pairs`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EdgePairsListResponse {

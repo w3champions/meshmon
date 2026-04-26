@@ -21,6 +21,7 @@
 //! | `vm_not_configured_still_422_without_active`          | `eval-t10-a`                             | `192.0.2.161`                    |
 //! | `active_probe_wins_over_vm`                           | `eval-t11-a`, `eval-t11-b`              | `192.0.2.171`, `.172`, `.179`    |
 //! | `malformed_vm_response_returns_503`                   | `eval-t12-a`, `eval-t12-b`              | `192.0.2.181`, `.182`, `.189`    |
+//! | `read_legacy_evaluation_with_null_snapshot_columns`   | `eval-t13-a`, `eval-t13-b`              | `192.0.2.191`, `.192`            |
 //!
 //! The campaign scheduler is not spawned in the test harness, so
 //! `AppState.campaign_cancel` is a no-op token; state transitions
@@ -1002,4 +1003,105 @@ async fn malformed_vm_response_returns_503() {
         )
         .await;
     assert_eq!(res["error"], "vm_upstream", "body = {res}");
+}
+
+/// G4: The read path must tolerate pre-T56 `campaign_evaluations` rows that
+/// have NULL in the three new snapshot columns (`useful_latency_ms`,
+/// `max_hops`, `vm_lookback_minutes`). These NULLs arise from rows written
+/// before the 20260426000000 migration added the columns; the migration
+/// intentionally makes all three nullable so pre-existing data remains
+/// valid and the evaluator's read path does not panic on NULL.
+///
+/// Strategy: bypass the normal `/evaluate` handler and INSERT a raw row
+/// with NULL snapshot columns, then assert the GET endpoint returns the
+/// row with those fields absent (skip_serializing_if = None) rather than
+/// erroring.
+#[tokio::test]
+async fn read_legacy_evaluation_with_null_snapshot_columns() {
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: std::net::IpAddr = "192.0.2.191".parse().unwrap();
+    let b_ip: std::net::IpAddr = "192.0.2.192".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t13-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t13-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t13-legacy-null-snapshot",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t13-a", "eval-t13-b"],
+                "destination_ips": ["192.0.2.192", "192.0.2.191"],
+                "loss_threshold_ratio": 0.02,
+                "stddev_weight": 1.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+
+    // Force the campaign to `completed` so the state gate allows an
+    // evaluation row. We bypass `/evaluate` and insert the row directly
+    // with NULL snapshot columns — simulating a pre-T56 evaluation row.
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    // Insert a minimal `campaign_evaluations` row with NULL for all three
+    // T56 snapshot columns. This is exactly the shape of rows that existed
+    // before the 20260426000000_campaigns_edge_candidate migration.
+    sqlx::query(
+        "INSERT INTO campaign_evaluations
+            (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+             baseline_pair_count, candidates_total, candidates_good,
+             useful_latency_ms, max_hops, vm_lookback_minutes,
+             evaluated_at)
+         VALUES
+            ($1::uuid, 0.02, 1.0, 'optimization',
+             2, 0, 0,
+             NULL, NULL, NULL,
+             now())",
+    )
+    .bind(&campaign_id)
+    .execute(&h.state.pool)
+    .await
+    .expect("raw insert of legacy evaluation row");
+
+    // Flip campaign state to `evaluated` so the GET endpoint doesn't
+    // require an additional state check.
+    sqlx::query(
+        "UPDATE measurement_campaigns SET state = 'evaluated', evaluated_at = now() WHERE id = $1::uuid",
+    )
+    .bind(&campaign_id)
+    .execute(&h.state.pool)
+    .await
+    .expect("flip state to evaluated");
+
+    // The read-path must return the row with NULL snapshot columns mapped
+    // to absent JSON keys (skip_serializing_if = None).
+    let got: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+
+    assert_eq!(
+        got["baseline_pair_count"], 2,
+        "baseline_pair_count must be readable: body = {got}"
+    );
+    assert_eq!(
+        got["evaluation_mode"], "optimization",
+        "evaluation_mode must be readable: body = {got}"
+    );
+
+    // The three T56 snapshot columns were NULL in the DB → must be absent
+    // from the JSON (skip_serializing_if = Option::is_none).
+    assert!(
+        got.get("useful_latency_ms").is_none() || got["useful_latency_ms"].is_null(),
+        "useful_latency_ms must be absent or null for legacy row: body = {got}"
+    );
+    assert!(
+        got.get("max_hops").is_none() || got["max_hops"].is_null(),
+        "max_hops must be absent or null for legacy row: body = {got}"
+    );
+    assert!(
+        got.get("vm_lookback_minutes").is_none() || got["vm_lookback_minutes"].is_null(),
+        "vm_lookback_minutes must be absent or null for legacy row: body = {got}"
+    );
 }

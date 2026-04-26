@@ -26,11 +26,13 @@
 
 use super::cursor::{PairDetailCursor, SortValue};
 use super::dto::{
-    EvaluationCandidateDto, EvaluationDto, EvaluationPairDetailDto, EvaluationPairDetailQuery,
-    EvaluationResultsDto, PairDetailSortCol, PairDetailSortDir,
+    EdgePairCursor, EdgePairSortCol, EdgePairSortDir, EdgePairsListResponse, EdgePairsQuery,
+    EvaluationCandidateDto, EvaluationDto, EvaluationEdgePairDetailDto, EvaluationPairDetailDto,
+    EvaluationPairDetailQuery, EvaluationResultsDto, LegDto, PairDetailSortCol, PairDetailSortDir,
 };
 use super::eval::{EdgeCandidateOutputs, EvaluationOutputs, TripleEvaluationOutputs};
-use super::model::{CampaignState, DirectSource, EdgeRouteKind, EvaluationMode};
+use super::eval::legs::LegMeasurement;
+use super::model::{CampaignState, DirectSource, EdgeRouteKind, Endpoint, EndpointKind, EvaluationMode};
 use super::repo::RepoError;
 use sqlx::types::ipnetwork::IpNetwork;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -1232,4 +1234,343 @@ pub async fn good_candidate_pair_legs(
             })
             .collect(),
     ))
+}
+
+/// Outcome of [`latest_evaluation_edge_pairs`], discriminating the
+/// "campaign exists / has been evaluated" path from the two 404 paths
+/// the handler renders distinct error codes for.
+#[derive(Debug)]
+pub enum EdgePairLookup {
+    /// Happy path — the page-and-total result.
+    Found(EdgePairsListResponse),
+    /// `measurement_campaigns.id = $campaign_id` not found.
+    CampaignNotFound,
+    /// Campaign exists but has never been evaluated.
+    NoEvaluation,
+}
+
+/// SQL column name for the requested edge-pair sort column.
+///
+/// Returns a `&'static str` so the dynamic SQL builder never sees user input.
+fn edge_pair_sort_col_sql(c: EdgePairSortCol) -> &'static str {
+    match c {
+        EdgePairSortCol::BestRouteMs => "best_route_ms",
+        EdgePairSortCol::BestRouteLossRatio => "best_route_loss_ratio",
+        EdgePairSortCol::BestRouteStddevMs => "best_route_stddev_ms",
+        EdgePairSortCol::BestRouteKind => "best_route_kind",
+        EdgePairSortCol::QualifiesUnderT => "qualifies_under_t",
+        EdgePairSortCol::IsUnreachable => "is_unreachable",
+        EdgePairSortCol::CandidateIp => "candidate_ip",
+        EdgePairSortCol::DestinationAgentId => "destination_agent_id",
+    }
+}
+
+/// Convert a [`LegMeasurement`] (stored in JSONB) into the wire [`LegDto`].
+fn leg_measurement_to_dto(m: LegMeasurement) -> LegDto {
+    let (from_kind, from_id) = match m.from {
+        Endpoint::Agent { id } => (EndpointKind::Agent, id),
+        Endpoint::CandidateIp { ip } => (EndpointKind::Candidate, ip.to_string()),
+    };
+    let (to_kind, to_id) = match m.to {
+        Endpoint::Agent { id } => (EndpointKind::Agent, id),
+        Endpoint::CandidateIp { ip } => (EndpointKind::Candidate, ip.to_string()),
+    };
+    LegDto {
+        from_kind,
+        from_id,
+        to_kind,
+        to_id,
+        rtt_ms: m.rtt_ms,
+        stddev_ms: m.stddev_ms,
+        loss_ratio: m.loss_ratio,
+        source: m.source,
+        was_substituted: m.was_substituted,
+        mtr_measurement_id: m.mtr_measurement_id,
+    }
+}
+
+/// Page through the most-recent evaluation's
+/// `campaign_evaluation_edge_pair_details` rows, with server-side sort,
+/// runtime filters, and an opaque keyset cursor for pagination.
+///
+/// The cursor tiebreak column is `(candidate_ip, destination_agent_id)` in
+/// both directions (always ascending) so the walk is deterministic within
+/// a single evaluation.
+///
+/// The JSONB `best_route_legs` column is deserialized into
+/// `Vec<LegMeasurement>` and projected to the wire `Vec<LegDto>` shape.
+/// Hostname enrichment for the destination agent is joined from the
+/// `agents_with_catalogue` view.
+///
+/// Returns [`EdgePairLookup::CampaignNotFound`] when the campaign id
+/// doesn't exist, or [`EdgePairLookup::NoEvaluation`] when it has never
+/// been evaluated.
+pub async fn latest_evaluation_edge_pairs(
+    pool: &PgPool,
+    campaign_id: Uuid,
+    query: &EdgePairsQuery,
+) -> sqlx::Result<EdgePairLookup> {
+    // Cheap existence checks so the handler can return distinct 404 codes.
+    let campaign_exists: Option<Uuid> = sqlx::query_scalar!(
+        r#"SELECT id FROM measurement_campaigns WHERE id = $1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if campaign_exists.is_none() {
+        return Ok(EdgePairLookup::CampaignNotFound);
+    }
+
+    let evaluation_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"SELECT id FROM campaign_evaluations
+            WHERE campaign_id = $1
+            ORDER BY evaluated_at DESC
+            LIMIT 1"#,
+        campaign_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(evaluation_id) = evaluation_id else {
+        return Ok(EdgePairLookup::NoEvaluation);
+    };
+
+    let sort_col = edge_pair_sort_col_sql(query.sort);
+    let sort_dir_kw = match query.dir {
+        EdgePairSortDir::Asc => "ASC",
+        EdgePairSortDir::Desc => "DESC",
+    };
+    let leading_cmp = match query.dir {
+        EdgePairSortDir::Asc => ">",
+        EdgePairSortDir::Desc => "<",
+    };
+
+    // Candidate-IP filter: parse the optional IP into an IpNetwork so
+    // Postgres can compare it with the `inet` column. An unparseable
+    // string is treated as "no match" (the result set will be empty)
+    // rather than a 400, because the handler validates the format
+    // beforehand.
+    let candidate_inet: Option<IpNetwork> = query
+        .candidate_ip
+        .as_deref()
+        .and_then(|s| s.parse::<IpAddr>().ok())
+        .map(IpNetwork::from);
+
+    // Static filter fragment (parameters $2–$4).
+    //   $2 candidate_ip  (inet or NULL → skip)
+    //   $3 qualifies_only (bool or NULL → skip)
+    //   $4 reachable_only (bool or NULL → restrict is_unreachable = false)
+    let filter_sql = "\
+        AND ($2::inet IS NULL OR ep.candidate_ip = $2) \
+        AND ($3::bool IS NULL OR ep.qualifies_under_t = $3) \
+        AND ($4::bool IS NULL OR (NOT $4 OR ep.is_unreachable = false))";
+
+    // Cursor predicate uses parameters $5 / $6 / $7.
+    // The tiebreak walks forward through (candidate_ip, destination_agent_id).
+    let cursor_predicate = if query.cursor.is_some() {
+        format!(
+            "AND ( ep.{col} {cmp} $5 \
+                OR (ep.{col} = $5 AND ep.candidate_ip::text > $6) \
+                OR (ep.{col} = $5 AND ep.candidate_ip::text = $6 AND ep.destination_agent_id > $7) )",
+            col = sort_col,
+            cmp = leading_cmp,
+        )
+    } else {
+        // Three placeholder slots so the builder stays constant-arity.
+        "AND ($5::text IS NULL AND $6::text IS NULL AND $7::text IS NULL)".to_string()
+    };
+
+    // Determine SQL type cast for the cursor's sort-column value.
+    let cursor_value_sql_cast = match query.sort {
+        EdgePairSortCol::BestRouteKind
+        | EdgePairSortCol::CandidateIp
+        | EdgePairSortCol::DestinationAgentId => "$5::text",
+        EdgePairSortCol::QualifiesUnderT | EdgePairSortCol::IsUnreachable => "$5::bool",
+        EdgePairSortCol::BestRouteMs
+        | EdgePairSortCol::BestRouteLossRatio
+        | EdgePairSortCol::BestRouteStddevMs => "$5::float8",
+    };
+    let cursor_predicate = cursor_predicate.replace("$5", cursor_value_sql_cast);
+
+    // Decode the cursor into typed parts.
+    let cursor = query.cursor.as_ref().map(|raw| {
+        EdgePairCursor::decode(raw, query.sort)
+            .expect("handler must validate cursor before calling latest_evaluation_edge_pairs")
+    });
+    let (cursor_f64, cursor_text, cursor_bool) = match cursor.as_ref() {
+        Some(c) => match &c.sort_value {
+            SortValue::F64(v) => (Some(*v), None, None),
+            SortValue::String(s) => (None, Some(s.clone()), None),
+            SortValue::Bool(b) => (None, None, Some(*b)),
+        },
+        None => (None, None, None),
+    };
+    let cursor_cand_ip: Option<String> = cursor.as_ref().map(|c| c.candidate_ip.clone());
+    let cursor_dest: Option<String> = cursor.as_ref().map(|c| c.destination_agent_id.clone());
+
+    // Page query. `destination_hostname` is joined from agents_with_catalogue
+    // on the agent_id field (destination_agent_id matches agents.agent_id).
+    let sql = format!(
+        "SELECT ep.candidate_ip, ep.destination_agent_id, \
+                ep.best_route_ms, ep.best_route_loss_ratio, ep.best_route_stddev_ms, \
+                ep.best_route_kind, ep.best_route_intermediaries, ep.best_route_legs, \
+                ep.qualifies_under_t, ep.is_unreachable, \
+                a.hostname AS destination_hostname \
+           FROM campaign_evaluation_edge_pair_details ep \
+           LEFT JOIN agents_with_catalogue a \
+                  ON a.agent_id = ep.destination_agent_id \
+          WHERE ep.evaluation_id = $1 \
+          {filters} {cursor} \
+          ORDER BY ep.{sort_col} {dir}, ep.candidate_ip ASC, ep.destination_agent_id ASC \
+          LIMIT $8",
+        filters = filter_sql,
+        cursor = cursor_predicate,
+        sort_col = sort_col,
+        dir = sort_dir_kw,
+    );
+
+    let bound_limit = query.limit.min(1000) as i64;
+
+    // $1 = evaluation_id
+    // $2 = candidate_inet (filter)
+    // $3 = qualifies_only
+    // $4 = reachable_only
+    // $5 = cursor sort value (typed by sort column)
+    // $6 = cursor candidate_ip tiebreak
+    // $7 = cursor dest_agent_id tiebreak
+    // $8 = LIMIT
+    let mut q = sqlx::query(&sql)
+        .bind(evaluation_id)
+        .bind(candidate_inet)
+        .bind(query.qualifies_only)
+        .bind(query.reachable_only);
+
+    // Bind cursor sort-column value into slot $5, typed by sort column.
+    q = match query.sort {
+        EdgePairSortCol::BestRouteKind
+        | EdgePairSortCol::CandidateIp
+        | EdgePairSortCol::DestinationAgentId => q.bind(cursor_text.clone()),
+        EdgePairSortCol::QualifiesUnderT | EdgePairSortCol::IsUnreachable => {
+            q.bind(cursor_bool)
+        }
+        EdgePairSortCol::BestRouteMs
+        | EdgePairSortCol::BestRouteLossRatio
+        | EdgePairSortCol::BestRouteStddevMs => q.bind(cursor_f64),
+    };
+    let q = q
+        .bind(cursor_cand_ip.clone())
+        .bind(cursor_dest.clone())
+        .bind(bound_limit);
+
+    let rows = q.fetch_all(pool).await?;
+
+    // Assemble wire DTOs. JSONB → Vec<LegDto> via LegMeasurement.
+    let mut entries: Vec<EvaluationEdgePairDetailDto> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let cand_ip: IpNetwork = row.try_get("candidate_ip")?;
+        let destination_agent_id: String = row.try_get("destination_agent_id")?;
+        let best_route_ms: f32 = row.try_get("best_route_ms")?;
+        let best_route_loss_ratio: f32 = row.try_get("best_route_loss_ratio")?;
+        let best_route_stddev_ms: f32 = row.try_get("best_route_stddev_ms")?;
+        let best_route_kind_text: String = row.try_get("best_route_kind")?;
+        let best_route_intermediaries: Vec<String> = row.try_get("best_route_intermediaries")?;
+        let legs_jsonb: serde_json::Value = row.try_get("best_route_legs")?;
+        let qualifies_under_t: bool = row.try_get("qualifies_under_t")?;
+        let is_unreachable: bool = row.try_get("is_unreachable")?;
+        let destination_hostname: Option<String> = row.try_get("destination_hostname")?;
+
+        let best_route_kind = match best_route_kind_text.as_str() {
+            "direct" => EdgeRouteKind::Direct,
+            "1hop" => EdgeRouteKind::OneHop,
+            "2hop" => EdgeRouteKind::TwoHop,
+            other => {
+                tracing::error!(
+                    %campaign_id,
+                    %evaluation_id,
+                    best_route_kind = %other,
+                    "campaign::edge_pairs: unknown best_route_kind text",
+                );
+                return Err(sqlx::Error::Protocol(format!(
+                    "unknown best_route_kind text {other:?}"
+                )));
+            }
+        };
+
+        // Deserialize JSONB legs into LegMeasurement, then project to LegDto.
+        let leg_measurements: Vec<LegMeasurement> =
+            serde_json::from_value(legs_jsonb).map_err(|e| {
+                sqlx::Error::Protocol(format!("failed to deserialize best_route_legs: {e}"))
+            })?;
+        let best_route_legs: Vec<LegDto> =
+            leg_measurements.into_iter().map(leg_measurement_to_dto).collect();
+
+        entries.push(EvaluationEdgePairDetailDto {
+            candidate_ip: cand_ip.ip().to_string(),
+            destination_agent_id,
+            destination_hostname,
+            best_route_ms,
+            best_route_loss_ratio,
+            best_route_stddev_ms,
+            best_route_kind,
+            best_route_intermediaries,
+            best_route_legs,
+            qualifies_under_t,
+            is_unreachable,
+        });
+    }
+
+    // Sibling COUNT(*) — same WHERE as page query, minus cursor.
+    // Parameters: $1 = evaluation_id, $2 = candidate_inet, $3 = qualifies_only, $4 = reachable_only.
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM campaign_evaluation_edge_pair_details ep \
+          WHERE ep.evaluation_id = $1 \
+          {filters}",
+        filters = filter_sql,
+    );
+    let total: i64 = sqlx::query_scalar(&count_sql)
+        .bind(evaluation_id)
+        .bind(candidate_inet)
+        .bind(query.qualifies_only)
+        .bind(query.reachable_only)
+        .fetch_one(pool)
+        .await?;
+
+    // Mint next-page cursor from the last row when we delivered a full page.
+    let next_cursor = if entries.is_empty() || entries.len() < bound_limit as usize {
+        None
+    } else {
+        let last = entries.last().expect("len >= 1");
+        let sort_value = match query.sort {
+            EdgePairSortCol::BestRouteMs => SortValue::F64(last.best_route_ms as f64),
+            EdgePairSortCol::BestRouteLossRatio => {
+                SortValue::F64(last.best_route_loss_ratio as f64)
+            }
+            EdgePairSortCol::BestRouteStddevMs => {
+                SortValue::F64(last.best_route_stddev_ms as f64)
+            }
+            EdgePairSortCol::BestRouteKind => SortValue::String(
+                edge_route_kind_to_text(last.best_route_kind).to_string(),
+            ),
+            EdgePairSortCol::QualifiesUnderT => SortValue::Bool(last.qualifies_under_t),
+            EdgePairSortCol::IsUnreachable => SortValue::Bool(last.is_unreachable),
+            EdgePairSortCol::CandidateIp => SortValue::String(last.candidate_ip.clone()),
+            EdgePairSortCol::DestinationAgentId => {
+                SortValue::String(last.destination_agent_id.clone())
+            }
+        };
+        Some(
+            EdgePairCursor {
+                sort_col: query.sort,
+                sort_value,
+                candidate_ip: last.candidate_ip.clone(),
+                destination_agent_id: last.destination_agent_id.clone(),
+            }
+            .encode(),
+        )
+    };
+
+    Ok(EdgePairLookup::Found(EdgePairsListResponse {
+        entries,
+        total,
+        next_cursor,
+    }))
 }
