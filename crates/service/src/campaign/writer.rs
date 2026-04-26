@@ -39,7 +39,7 @@ use tracing::warn;
 
 /// Per-failure-code tag written to `campaign_pairs.last_error`.
 ///
-/// Must NEVER collide with the T44 scheduler-origin tags
+/// Must NEVER collide with the scheduler-origin tags
 /// (`agent_offline`, `max_attempts_exceeded`, `campaign_stopped`).
 pub fn map_failure_code(code: MeasurementFailureCode) -> &'static str {
     match code {

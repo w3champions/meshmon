@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns SET state = $2, completed_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 max_transit_rtt_ms, max_transit_stddev_ms,\n                 min_improvement_ms, min_improvement_ratio,\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n        UPDATE measurement_campaigns\n           SET title                  = COALESCE($2, title),\n               notes                  = COALESCE($3, notes),\n               loss_threshold_ratio   = COALESCE($4, loss_threshold_ratio),\n               stddev_weight          = COALESCE($5, stddev_weight),\n               evaluation_mode        = COALESCE($6::evaluation_mode, evaluation_mode),\n               max_transit_rtt_ms     = COALESCE($7, max_transit_rtt_ms),\n               max_transit_stddev_ms  = COALESCE($8, max_transit_stddev_ms),\n               min_improvement_ms     = COALESCE($9, min_improvement_ms),\n               min_improvement_ratio  = COALESCE($10, min_improvement_ratio),\n               useful_latency_ms      = COALESCE($11, useful_latency_ms),\n               max_hops               = COALESCE($12, max_hops),\n               vm_lookback_minutes    = COALESCE($13, vm_lookback_minutes)\n         WHERE id = $1\n         RETURNING id, title, notes,\n                   state AS \"state: CampaignState\",\n                   protocol AS \"protocol: ProbeProtocol\",\n                   probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                   force_measurement, loss_threshold_ratio, stddev_weight,\n                   evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                   max_transit_rtt_ms, max_transit_stddev_ms,\n                   min_improvement_ms, min_improvement_ratio,\n                   useful_latency_ms, max_hops, vm_lookback_minutes,\n                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -96,7 +96,8 @@
             "kind": {
               "Enum": [
                 "diversity",
-                "optimization"
+                "optimization",
+                "edge_candidate"
               ]
             }
           }
@@ -124,31 +125,46 @@
       },
       {
         "ordinal": 17,
+        "name": "useful_latency_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 18,
+        "name": "max_hops",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 19,
+        "name": "vm_lookback_minutes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 20,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 18,
+        "ordinal": 21,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 19,
+        "ordinal": 22,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 20,
+        "ordinal": 23,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 21,
+        "ordinal": 24,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 22,
+        "ordinal": 25,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
@@ -156,41 +172,29 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
+        "Float4",
+        "Float4",
         {
           "Custom": {
-            "name": "campaign_state",
+            "name": "evaluation_mode",
             "kind": {
               "Enum": [
-                "draft",
-                "running",
-                "completed",
-                "evaluated",
-                "stopped"
+                "diversity",
+                "optimization",
+                "edge_candidate"
               ]
             }
           }
         },
-        {
-          "Custom": {
-            "name": "campaign_state[]",
-            "kind": {
-              "Array": {
-                "Custom": {
-                  "name": "campaign_state",
-                  "kind": {
-                    "Enum": [
-                      "draft",
-                      "running",
-                      "completed",
-                      "evaluated",
-                      "stopped"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        }
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float4",
+        "Int2",
+        "Int4"
       ]
     },
     "nullable": [
@@ -213,11 +217,14 @@
       true,
       true,
       false,
+      false,
+      true,
+      false,
       true,
       true,
       true,
       true
     ]
   },
-  "hash": "02bccad4d4f5ba0bc30d1f9a695599e693ecf701a8172a908ec95275726db504"
+  "hash": "d23553410227d54a0217928ea000052fd915e4b88ae65213d62d545d8348812f"
 }

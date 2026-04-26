@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn build_baseline_queries_escapes_quotes_in_agent_ids() {
-        // Regression for T54-05: a malicious agent id containing `"`
+        // Regression: a malicious agent id containing `"`
         // must stay inside the label-value string literal. Before the
         // two-stage escape, `x"injection` would close the string early
         // and splice arbitrary PromQL into the selector.

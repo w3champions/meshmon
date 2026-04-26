@@ -52,6 +52,8 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
       ["reused", 5],
       ["pending", 2],
     ],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 
@@ -259,9 +261,9 @@ describe("OverflowMenu — Detail: good candidates dialog", () => {
     await waitFor(() => {
       expect(screen.getByTestId("detail-cost-preview")).toBeInTheDocument();
     });
-    // T55: pair-detail rows live behind the paginated endpoint, so the
-    // preview can no longer mirror the exact `(agent, transit_ip)`
-    // dedup client-side. The estimator returns
+    // Pair-detail rows live behind the paginated endpoint, so the
+    // preview cannot mirror the exact `(agent, transit_ip)` dedup
+    // client-side. The estimator returns
     // `4 × Σ candidate.pairs_improved` as an upper bound: each
     // qualifying triple contributes one source-side and one
     // destination-side `(agent, transit)` entry pre-dedup, each of

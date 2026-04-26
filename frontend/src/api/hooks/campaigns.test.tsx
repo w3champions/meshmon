@@ -40,6 +40,8 @@ const CAMPAIGN: Campaign = {
   probe_stagger_ms: 100,
   timeout_ms: 1_000,
   created_at: "2026-04-16T11:59:00Z",
+  max_hops: 2,
+  vm_lookback_minutes: 15,
 };
 
 function makeQueryClient(): QueryClient {

@@ -41,7 +41,7 @@ vi.mock("@/api/hooks/campaigns", async () => {
 vi.mock("@/api/hooks/evaluation", async () => {
   const actual =
     await vi.importActual<typeof import("@/api/hooks/evaluation")>("@/api/hooks/evaluation");
-  return { ...actual, useEvaluation: vi.fn(), useTriggerDetail: vi.fn() };
+  return { ...actual, useEvaluation: vi.fn(), useTriggerDetail: vi.fn(), useEdgePairDetails: vi.fn() };
 });
 
 vi.mock("@/api/hooks/evaluation-pairs", async () => {
@@ -56,9 +56,16 @@ vi.mock("@/components/RouteTopology", () => ({
   RouteTopology: () => <div data-testid="route-topology" />,
 }));
 
+// CandidateRef (header mode) calls useCatalogueDrawer; stub the provider.
+vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
+  useCatalogueDrawer: () => ({ open: vi.fn() }),
+  CatalogueDrawerOverlay: ({ children }: { children: unknown }) => <>{children}</>,
+}));
+
+
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignMeasurements, useForcePair } from "@/api/hooks/campaigns";
-import { useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
+import { useEdgePairDetails, useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
 import { useCandidatePairDetails } from "@/api/hooks/evaluation-pairs";
 import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
 
@@ -90,6 +97,8 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     completed_at: overrides.completed_at ?? null,
     evaluated_at: overrides.evaluated_at ?? null,
     pair_counts: overrides.pair_counts ?? [],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 
@@ -186,6 +195,17 @@ function setupMocks(evaluation: Evaluation | null, opts?: { isLoading?: boolean 
     fetchNextPage: vi.fn(),
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useCandidatePairDetails>);
+
+  vi.mocked(useEdgePairDetails).mockReturnValue({
+    data: { pages: [{ entries: [], next_cursor: null, total: 0 }], pageParams: [null] },
+    isLoading: false,
+    isError: false,
+    isFetchingNextPage: false,
+    hasNextPage: false,
+    error: null,
+    fetchNextPage: vi.fn(),
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useEdgePairDetails>);
 }
 
 class NoopEventSource {
@@ -310,11 +330,79 @@ describe("CandidatesTab — overflow menu state gating", () => {
   });
 });
 
-// T55: per-row force-pair / dispatch-pair actions moved into the
-// drilldown dialog. The tab itself no longer renders a per-row action
-// menu — the action requires a `(source_agent_id, destination_ip)`
-// tuple that is reachable only via the paginated pair-details endpoint
-// the dialog already fetches.
+// Per-row force-pair / dispatch-pair actions live inside the drilldown
+// dialog. The tab itself does not render a per-row action menu — the
+// action requires a `(source_agent_id, destination_ip)` tuple that is
+// reachable only via the paginated pair-details endpoint the dialog
+// already fetches.
+
+describe("CandidatesTab — edge_candidate mode", () => {
+  function makeEdgeEvaluation(): Evaluation {
+    return {
+      campaign_id: CAMPAIGN_ID,
+      evaluated_at: "2026-04-21T10:00:00Z",
+      loss_threshold_ratio: 0.02,
+      stddev_weight: 1,
+      evaluation_mode: "edge_candidate",
+      baseline_pair_count: 0,
+      candidates_total: 2,
+      candidates_good: 2,
+      avg_improvement_ms: null,
+      useful_latency_ms: 80,
+      results: {
+        candidates: [
+          {
+            destination_ip: "10.0.55.1",
+            display_name: "edge-x",
+            city: "Tokyo",
+            country_code: "JP",
+            asn: 7777,
+            network_operator: "EdgeNet",
+            is_mesh_member: false,
+            pairs_improved: 0,
+            pairs_total_considered: 0,
+            coverage_count: 5,
+            coverage_weighted_ping_ms: 45.2,
+            destinations_total: 10,
+            mean_ms_under_t: 40,
+            direct_share: 0.6,
+            onehop_share: 0.4,
+            twohop_share: 0,
+          },
+        ],
+        unqualified_reasons: {},
+      },
+    } as Evaluation;
+  }
+
+  test("renders the EdgeCandidateTable in edge_candidate mode", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+
+    // EdgeCandidateTable uses aria-label "Edge evaluation candidates"
+    expect(screen.getByRole("table", { name: /edge evaluation candidates/i })).toBeInTheDocument();
+  });
+
+  test("renders the edge candidate row in edge_candidate mode", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByTestId("edge-candidate-row-10.0.55.1")).toBeInTheDocument();
+  });
+
+  test("renders EdgeKPIStrip with useful_latency_ms", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    expect(screen.getByText("Latency threshold (T)")).toBeInTheDocument();
+    expect(screen.getByText("80 ms")).toBeInTheDocument();
+  });
+
+  test("does NOT render the triple CandidateTable (with 'Δ avg' column) in edge_candidate mode", () => {
+    setupMocks(makeEdgeEvaluation());
+    renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
+    // Triple mode has "Δ avg" column; edge mode does not
+    expect(screen.queryByRole("columnheader", { name: /Δ avg/i })).not.toBeInTheDocument();
+  });
+});
 
 describe("CandidatesTab — sort URL state", () => {
   test("sort header click emits navigate with cand_sort + cand_dir", () => {

@@ -75,6 +75,8 @@ function makeCampaign(
     completed_at: overrides.completed_at ?? null,
     evaluated_at: overrides.evaluated_at ?? null,
     pair_counts: overrides.pair_counts ?? [],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 
@@ -389,10 +391,9 @@ describe("Campaigns page — state-gated row actions", () => {
 
 describe("Campaigns page — SSE stream hook", () => {
   test("state_changed invalidates the list key through the stream hook", async () => {
-    // Phase D wires `useCampaignStream` to invalidate CAMPAIGNS_LIST_KEY on
-    // `state_changed`. Here we assert the page mounts the stream exactly once
-    // and that the shared list key constant is stable (the SSE handler targets
-    // it by identity).
+    // `useCampaignStream` invalidates CAMPAIGNS_LIST_KEY on `state_changed`.
+    // Assert the page mounts the stream exactly once and that the shared
+    // list key constant is stable (the SSE handler targets it by identity).
     setupHookMocks({ data: [] });
     renderCampaigns();
 

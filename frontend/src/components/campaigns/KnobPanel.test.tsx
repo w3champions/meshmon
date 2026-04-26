@@ -137,4 +137,190 @@ describe("KnobPanel", () => {
     const neg = onChange.mock.calls.at(-1)?.[0];
     expect(neg?.max_transit_rtt_ms).toBe(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // Q1 — edge_candidate third toggle item
+  // ---------------------------------------------------------------------------
+
+  test("evaluation mode toggle has an edge_candidate option", () => {
+    render(<KnobPanel value={baseKnobs()} onChange={vi.fn()} />);
+    expect(screen.getByRole("radio", { name: /edge.?candidate/i })).toBeInTheDocument();
+  });
+
+  test("selecting edge_candidate emits evaluation_mode: 'edge_candidate'", async () => {
+    const onChange = vi.fn<(next: CampaignKnobs) => void>();
+    const user = userEvent.setup();
+
+    render(<KnobPanel value={baseKnobs()} onChange={onChange} />);
+
+    await user.click(screen.getByRole("radio", { name: /edge.?candidate/i }));
+
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next?.evaluation_mode).toBe("edge_candidate");
+  });
+
+  test("edge_candidate hint text renders when mode is edge_candidate", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={vi.fn()} />,
+    );
+    expect(screen.getByText(/direct \+ transitive/i)).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Q2 — mode-aware sub-panel visibility
+  // ---------------------------------------------------------------------------
+
+  test("useful_latency_ms input is hidden for diversity mode", () => {
+    render(<KnobPanel value={baseKnobs({ evaluation_mode: "diversity" })} onChange={vi.fn()} />);
+    expect(screen.queryByLabelText(/useful latency/i)).not.toBeInTheDocument();
+  });
+
+  test("useful_latency_ms input is hidden for optimization mode", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "optimization" })} onChange={vi.fn()} />,
+    );
+    expect(screen.queryByLabelText(/useful latency/i)).not.toBeInTheDocument();
+  });
+
+  test("useful_latency_ms input is shown for edge_candidate mode", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/useful latency/i)).toBeInTheDocument();
+  });
+
+  test("useful_latency_ms input shows required indicator when value is null in edge_candidate mode", () => {
+    render(
+      <KnobPanel
+        value={baseKnobs({ evaluation_mode: "edge_candidate", useful_latency_ms: null })}
+        onChange={vi.fn()}
+      />,
+    );
+    const input = screen.getByLabelText(/useful latency/i) as HTMLInputElement;
+    expect(input).toHaveAttribute("aria-required", "true");
+    expect(input.value).toBe("");
+  });
+
+  test("typing into useful_latency_ms emits the parsed number", () => {
+    const onChange = vi.fn<(next: CampaignKnobs) => void>();
+    render(
+      <KnobPanel
+        value={baseKnobs({ evaluation_mode: "edge_candidate" })}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/useful latency/i), { target: { value: "80" } });
+
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next?.useful_latency_ms).toBe(80);
+  });
+
+  test("clearing useful_latency_ms emits null", () => {
+    const onChange = vi.fn<(next: CampaignKnobs) => void>();
+    render(
+      <KnobPanel
+        value={baseKnobs({ evaluation_mode: "edge_candidate", useful_latency_ms: 80 })}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/useful latency/i), { target: { value: "" } });
+
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next?.useful_latency_ms).toBeNull();
+  });
+
+  test("vm_lookback_minutes input is hidden for diversity mode", () => {
+    render(<KnobPanel value={baseKnobs({ evaluation_mode: "diversity" })} onChange={vi.fn()} />);
+    expect(screen.queryByLabelText(/lookback/i)).not.toBeInTheDocument();
+  });
+
+  test("vm_lookback_minutes input is shown for edge_candidate mode", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/lookback/i)).toBeInTheDocument();
+  });
+
+  test("min_improvement_ms and min_improvement_ratio are hidden for edge_candidate mode", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={vi.fn()} />,
+    );
+    expect(screen.queryByLabelText(/min improvement \(ms\)/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/min improvement ratio/i)).not.toBeInTheDocument();
+  });
+
+  test("min_improvement_ms and min_improvement_ratio are visible for optimization mode", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "optimization" })} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/min improvement \(ms\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/min improvement ratio/i)).toBeInTheDocument();
+  });
+
+  test("max_hops for diversity mode has no 'Direct only' option", () => {
+    render(<KnobPanel value={baseKnobs({ evaluation_mode: "diversity" })} onChange={vi.fn()} />);
+    expect(screen.queryByRole("radio", { name: /direct only/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /1 hop/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /2 hops/i })).toBeInTheDocument();
+  });
+
+  test("max_hops for edge_candidate mode includes 'Direct only' option", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("radio", { name: /direct only/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /1 hop/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /2 hops/i })).toBeInTheDocument();
+  });
+
+  test("selecting max_hops emits the numeric value", async () => {
+    const onChange = vi.fn<(next: CampaignKnobs) => void>();
+    const user = userEvent.setup();
+
+    render(
+      <KnobPanel
+        value={baseKnobs({ evaluation_mode: "edge_candidate", max_hops: 2 })}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /direct only/i }));
+
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next?.max_hops).toBe(0);
+  });
+
+  test("max_hops diversity caption renders for non-edge_candidate modes", () => {
+    render(<KnobPanel value={baseKnobs({ evaluation_mode: "diversity" })} onChange={vi.fn()} />);
+    expect(screen.getByText(/2 hops considers an additional mesh agent/i)).toBeInTheDocument();
+  });
+
+  test("max_hops diversity caption is absent for edge_candidate mode", () => {
+    render(
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={vi.fn()} />,
+    );
+    expect(
+      screen.queryByText(/2 hops considers an additional mesh agent/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("switching from edge_candidate (with max_hops: 0) to diversity clamps max_hops to 1", async () => {
+    const onChange = vi.fn<(next: CampaignKnobs) => void>();
+    const user = userEvent.setup();
+
+    render(
+      <KnobPanel
+        value={baseKnobs({ evaluation_mode: "edge_candidate", max_hops: 0 })}
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /diversity/i }));
+
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next?.evaluation_mode).toBe("diversity");
+    expect(next?.max_hops).toBe(1);
+  });
 });

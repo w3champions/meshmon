@@ -9,8 +9,8 @@
 //! rendered as a bare IP string).
 
 use super::model::{
-    CampaignRow, CampaignState, DirectSource, EvaluationMode, PairResolutionState, PairRow,
-    ProbeProtocol,
+    CampaignRow, CampaignState, DirectSource, EdgeRouteKind, EndpointKind, EvaluationMode,
+    LegSource, PairResolutionState, PairRow, ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,15 @@ pub struct CampaignDto {
     /// 0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) for edge_candidate useful-route
+    /// qualification. `None` means the filter is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum transit hops for edge_candidate mode. Range [0, 2].
+    pub max_hops: i16,
+    /// VictoriaMetrics look-back window (minutes) for edge_candidate mode.
+    /// Range [1, 1440].
+    pub vm_lookback_minutes: i32,
     /// Session principal that created the row; audit-only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
@@ -95,6 +104,12 @@ pub struct CampaignDto {
     /// Per-state pair counts. Empty on list responses; populated on single-row GET.
     #[serde(default)]
     pub pair_counts: Vec<(PairResolutionState, i64)>,
+    /// DISTINCT source agents from `campaign_pairs`. Empty on list
+    /// responses; populated on single-row GET / PATCH so the SPA can
+    /// render the source-agent picker (CompareTab) without an extra
+    /// round-trip. Order is ascending by `agent_id`.
+    #[serde(default)]
+    pub source_agent_ids: Vec<String>,
 }
 
 impl From<CampaignRow> for CampaignDto {
@@ -117,6 +132,9 @@ impl From<CampaignRow> for CampaignDto {
             max_transit_stddev_ms: r.max_transit_stddev_ms,
             min_improvement_ms: r.min_improvement_ms,
             min_improvement_ratio: r.min_improvement_ratio,
+            useful_latency_ms: r.useful_latency_ms,
+            max_hops: r.max_hops,
+            vm_lookback_minutes: r.vm_lookback_minutes,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,
@@ -124,6 +142,7 @@ impl From<CampaignRow> for CampaignDto {
             completed_at: r.completed_at,
             evaluated_at: r.evaluated_at,
             pair_counts: Vec::new(),
+            source_agent_ids: Vec::new(),
         }
     }
 }
@@ -180,6 +199,21 @@ pub struct CreateCampaignRequest {
     /// Optional storage floor on relative improvement (fraction 0.0–1.0).
     #[serde(default)]
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) below which a route qualifies as
+    /// "useful" in edge_candidate mode.
+    #[serde(default)]
+    #[schema(example = 80.0)]
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum number of transit hops for edge_candidate route
+    /// enumeration. Range [0, 2]; default 2 when omitted.
+    #[serde(default)]
+    #[schema(example = 2)]
+    pub max_hops: Option<i16>,
+    /// Look-back window (minutes) for VictoriaMetrics data in
+    /// edge_candidate mode. Range [1, 1440]; default 15 when omitted.
+    #[serde(default)]
+    #[schema(example = 15)]
+    pub vm_lookback_minutes: Option<i32>,
 }
 
 /// PATCH body for `/api/campaigns/{id}`.
@@ -216,6 +250,18 @@ pub struct PatchCampaignRequest {
     /// Replacement storage floor on relative improvement (fraction 0.0–1.0).
     #[serde(default)]
     pub min_improvement_ratio: Option<f64>,
+    /// Replacement RTT threshold (ms) for edge_candidate useful-route
+    /// qualification. `None` leaves the existing value unchanged.
+    #[serde(default)]
+    pub useful_latency_ms: Option<f32>,
+    /// Replacement maximum transit hops for edge_candidate mode. `None`
+    /// leaves the existing value unchanged.
+    #[serde(default)]
+    pub max_hops: Option<i16>,
+    /// Replacement VictoriaMetrics look-back window (minutes). `None`
+    /// leaves the existing value unchanged.
+    #[serde(default)]
+    pub vm_lookback_minutes: Option<i32>,
 }
 
 /// A single `(source_agent, destination_ip)` pair identifier used by
@@ -392,9 +438,8 @@ where
 /// `campaign_evaluation_pair_details`,
 /// `campaign_evaluation_unqualified_reasons`) by
 /// [`crate::campaign::evaluation_repo::latest_evaluation_for_campaign`].
-/// The read-path joins in Rust so the wire DTO stays unchanged
-/// compared to the pre-T54-02 JSONB layout, modulo the new
-/// `direct_source` field on every `pair_detail`.
+/// The read-path joins in Rust to assemble the wire DTO, which carries
+/// a `direct_source` field on every `pair_detail`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationDto {
     /// Owning campaign.
@@ -423,6 +468,16 @@ pub struct EvaluationDto {
     /// Snapshot of [`CampaignDto::min_improvement_ratio`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub min_improvement_ratio: Option<f64>,
+    /// Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.
+    /// `None` on legacy evaluation rows or when the knob was unset.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub useful_latency_ms: Option<f32>,
+    /// Snapshot of [`CampaignDto::max_hops`]. `None` on legacy rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_hops: Option<i16>,
+    /// Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on legacy rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub vm_lookback_minutes: Option<i32>,
     /// Number of `(source, destination)` baseline pairs considered.
     pub baseline_pair_count: i32,
     /// Total candidate transit destinations scored.
@@ -492,12 +547,56 @@ pub struct EvaluationCandidateDto {
     pub avg_loss_ratio: Option<f32>,
     /// Composite score `(pairs_improved / baseline_pair_count) ×
     /// avg_improvement_ms`; higher is better. Candidates are returned
-    /// in descending composite-score order.
-    pub composite_score: f32,
+    /// in descending composite-score order. `None` for edge_candidate mode
+    /// (which uses `coverage_count` ordering instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composite_score: Option<f32>,
     /// Reverse-DNS hostname for the transit destination IP, when cached.
     /// Absent on cold miss and negative-cached IPs (skip-none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Catalogue website URL for the candidate, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Catalogue notes for the candidate, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Mesh agent id when `is_mesh_member = true`; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Edge_candidate: number of destination agents reachable under the
+    /// useful-latency threshold via this candidate. `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_count: Option<i32>,
+    /// Edge_candidate: total destination agents evaluated for this
+    /// candidate. `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destinations_total: Option<i32>,
+    /// Edge_candidate: mean RTT (ms) for routes that are under the
+    /// useful-latency threshold. `None` when no route qualifies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_ms_under_t: Option<f32>,
+    /// Edge_candidate: coverage-count-weighted mean ping (ms) across
+    /// qualifying routes. `None` when coverage is zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_weighted_ping_ms: Option<f32>,
+    /// Edge_candidate: fraction of qualifying routes that are direct
+    /// (zero hops). `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_share: Option<f32>,
+    /// Edge_candidate: fraction of qualifying routes that are one-hop.
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onehop_share: Option<f32>,
+    /// Edge_candidate: fraction of qualifying routes that are two-hop.
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twohop_share: Option<f32>,
+    /// Edge_candidate: `true` when at least one leg in the winning route
+    /// came from live VM or active-probe data (not symmetric-reuse).
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_real_x_source_data: Option<bool>,
 }
 
 /// Per-pair scoring row inside an [`EvaluationCandidateDto`].
@@ -546,6 +645,23 @@ pub struct EvaluationPairDetailDto {
     /// Absent on cold miss and negative-cached IPs (skip-none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_hostname: Option<String>,
+    /// `true` when the A→X leg RTT was substituted from the symmetric
+    /// X→A measurement (edge_candidate mode). `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ax_was_substituted: Option<bool>,
+    /// `true` when the X→B leg RTT was substituted from the symmetric
+    /// B→X measurement (edge_candidate mode). `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xb_was_substituted: Option<bool>,
+    /// `true` when the direct A→B baseline was VM-sourced and substituted.
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_was_substituted: Option<bool>,
+    /// Position of the candidate X in the winning route: `1` = X is first
+    /// hop (A→X→B), `2` = X is second hop (A→Y→X→B). `None` for direct
+    /// routes or when not applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winning_x_position: Option<u8>,
 }
 
 /// Sortable columns for the paginated pair_details endpoint
@@ -710,6 +826,261 @@ pub struct DetailResponse {
     pub campaign_state: CampaignState,
 }
 
+/// Per-(X, B) result for the edge_candidate mode. Returned by
+/// `GET /api/campaigns/:id/evaluation/edge_pairs`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct EvaluationEdgePairDetailDto {
+    /// Candidate IP being evaluated as an edge (transit) node.
+    pub candidate_ip: String,
+    /// Destination agent id (the B endpoint).
+    pub destination_agent_id: String,
+    /// Reverse-DNS hostname for the destination agent IP, when cached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_hostname: Option<String>,
+    /// Raw RTT of the winning route (ms). The penalty score
+    /// (`rtt + stddev_weight * stddev`) is used internally to pick the
+    /// winner; only the raw RTT is exposed here. `None` when
+    /// `is_unreachable` is `true` — the wire serializes the field as
+    /// JSON `null` rather than an unrepresentable infinity sentinel.
+    pub best_route_ms: Option<f32>,
+    /// Best-route composed loss fraction (0.0–1.0).
+    pub best_route_loss_ratio: f32,
+    /// Best-route composed RTT stddev (ms).
+    pub best_route_stddev_ms: f32,
+    /// Topology of the best route (direct / one_hop / two_hop).
+    pub best_route_kind: EdgeRouteKind,
+    /// Intermediate hop IPs between candidate and destination (empty for direct).
+    pub best_route_intermediaries: Vec<String>,
+    /// Ordered per-leg breakdown of the best route.
+    pub best_route_legs: Vec<LegDto>,
+    /// `true` when the best-route RTT is below the campaign's
+    /// `useful_latency_ms` threshold.
+    pub qualifies_under_t: bool,
+    /// `true` when every probed path to this destination timed out or
+    /// had 100 % loss.
+    pub is_unreachable: bool,
+}
+
+/// Per-leg detail inside an [`EvaluationEdgePairDetailDto`].
+///
+/// Mirrors the JSONB shape persisted in
+/// `campaign_evaluation_edge_pair_details.best_route_legs`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LegDto {
+    /// Kind of the from-endpoint (agent or candidate).
+    pub from_kind: EndpointKind,
+    /// ID string for the from-endpoint (agent id or IP string).
+    pub from_id: String,
+    /// Kind of the to-endpoint (agent or candidate).
+    pub to_kind: EndpointKind,
+    /// ID string for the to-endpoint (agent id or IP string).
+    pub to_id: String,
+    /// Observed RTT for this leg (ms).
+    pub rtt_ms: f32,
+    /// Observed RTT stddev for this leg (ms).
+    pub stddev_ms: f32,
+    /// Observed loss fraction for this leg (0.0–1.0).
+    pub loss_ratio: f32,
+    /// Data source that produced this leg's metrics.
+    pub source: LegSource,
+    /// `true` when this leg's direction was inferred from the reverse
+    /// measurement (symmetric-reuse substitution).
+    pub was_substituted: bool,
+    /// FK to the `measurements` row that produced this leg's data,
+    /// when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtr_measurement_id: Option<i64>,
+}
+
+/// Sortable columns for the edge-pair paginated endpoint
+/// (`GET /api/campaigns/{id}/evaluation/edge_pairs`).
+///
+/// The set is closed — every variant maps to a hardcoded SQL column name
+/// in [`crate::campaign::evaluation_repo::latest_evaluation_edge_pairs`] so
+/// user input never reaches the SQL string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgePairSortCol {
+    /// `best_route_ms` — default sort.
+    BestRouteMs,
+    /// `best_route_loss_ratio`.
+    BestRouteLossRatio,
+    /// `best_route_stddev_ms`.
+    BestRouteStddevMs,
+    /// `best_route_kind` (text column: direct / 1hop / 2hop).
+    BestRouteKind,
+    /// `qualifies_under_t` — boolean column.
+    QualifiesUnderT,
+    /// `is_unreachable` — boolean column.
+    IsUnreachable,
+    /// `candidate_ip` — inet column; lexicographic text ordering.
+    CandidateIp,
+    /// `destination_agent_id` — text column.
+    DestinationAgentId,
+}
+
+/// Sort direction for [`EdgePairSortCol`].
+///
+/// The composite tiebreak `(candidate_ip, destination_agent_id)` is always
+/// ascending; only the leading column flips direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgePairSortDir {
+    /// Ascending (smallest first). Default for the endpoint.
+    Asc,
+    /// Descending (largest values first).
+    Desc,
+}
+
+/// Default page size for [`EdgePairsQuery::limit`].
+fn default_edge_pairs_limit() -> u32 {
+    100
+}
+
+fn default_edge_pair_sort() -> EdgePairSortCol {
+    EdgePairSortCol::BestRouteMs
+}
+
+fn default_edge_pair_dir() -> EdgePairSortDir {
+    EdgePairSortDir::Asc
+}
+
+/// Query parameters for `GET /api/campaigns/{id}/evaluation/edge_pairs`.
+///
+/// Defaults: sort = `best_route_ms`, dir = `asc`, limit = 100.
+/// `limit` > 500 surfaces as `400 invalid_filter`.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct EdgePairsQuery {
+    /// Candidate IP filter. When set, restricts results to rows where
+    /// `candidate_ip` matches this address (exact match).
+    #[serde(default)]
+    pub candidate_ip: Option<String>,
+    /// When `Some(true)`, restricts to rows where `qualifies_under_t = true`.
+    /// `Some(false)` selects non-qualifying rows; `None` (default) is
+    /// unconstrained.
+    #[serde(default)]
+    pub qualifies_only: Option<bool>,
+    /// When `Some(true)`, restricts to rows where `is_unreachable = false`.
+    /// Useful for displaying only reachable routes.
+    #[serde(default)]
+    pub reachable_only: Option<bool>,
+    /// Sort column. Default `best_route_ms`.
+    #[serde(default = "default_edge_pair_sort")]
+    #[param(inline)]
+    pub sort: EdgePairSortCol,
+    /// Sort direction. Default `asc` (ascending RTT = best routes first).
+    #[serde(default = "default_edge_pair_dir")]
+    #[param(inline)]
+    pub dir: EdgePairSortDir,
+    /// Opaque keyset cursor returned by the previous page's `next_cursor`.
+    /// Absent on the first page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page size. Default 100; cap 500. Zero is allowed.
+    #[serde(default = "default_edge_pairs_limit")]
+    pub limit: u32,
+}
+
+/// Opaque keyset-pagination cursor for the edge-pairs endpoint.
+///
+/// Encoding is JSON inside base64 (URL-safe, no padding) — clients must
+/// treat the byte stream as opaque.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EdgePairCursor {
+    /// Sort column the page-1 caller requested.
+    pub sort_col: EdgePairSortCol,
+    /// Value of `sort_col` on the last row of the previous page.
+    pub sort_value: crate::campaign::cursor::SortValue,
+    /// Tiebreak: candidate IP (as text).
+    pub candidate_ip: String,
+    /// Tiebreak: destination agent id.
+    pub destination_agent_id: String,
+}
+
+impl EdgePairCursor {
+    /// Encode to the opaque `cursor` string.
+    pub fn encode(&self) -> String {
+        use base64::Engine as _;
+        let json = serde_json::to_vec(self).expect("EdgePairCursor JSON serialization is total");
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    }
+
+    /// Decode and validate against the expected sort column.
+    ///
+    /// Validation order:
+    /// 1. Base64 + JSON parse succeeds.
+    /// 2. `sort_col` matches `expected`.
+    /// 3. `candidate_ip` parses as an IpAddr (downstream SQL binds
+    ///    it as `$6::inet`).
+    /// 4. When `sort_col == CandidateIp`, `sort_value` is a
+    ///    `SortValue::String` whose contents parse as an IpAddr
+    ///    (downstream SQL binds it as `$5::inet`).
+    ///
+    /// Without (3)/(4) a hand-crafted cursor with a non-IP literal
+    /// would clear `decode` and trip a Postgres cast at query time —
+    /// surfacing as 500 instead of the documented `400 invalid_cursor`.
+    pub fn decode(
+        raw: &str,
+        expected: EdgePairSortCol,
+    ) -> Result<Self, crate::campaign::cursor::CursorError> {
+        use crate::campaign::cursor::{CursorError, SortValue};
+        use base64::Engine as _;
+        use std::net::IpAddr;
+
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw)
+            .map_err(|e| CursorError::Decode(format!("base64: {e}")))?;
+        let cursor: EdgePairCursor = serde_json::from_slice(&bytes)
+            .map_err(|e| CursorError::Decode(format!("json: {e}")))?;
+        if cursor.sort_col != expected {
+            return Err(CursorError::SortMismatch);
+        }
+        // Downstream binds the candidate-IP tiebreak as `$6::inet` for
+        // every sort column. A non-IP literal would survive serde and
+        // fail at query time as a 500.
+        if cursor.candidate_ip.parse::<IpAddr>().is_err() {
+            return Err(CursorError::InvalidIp(format!(
+                "candidate_ip: {:?}",
+                cursor.candidate_ip
+            )));
+        }
+        // When the leading sort column is the candidate IP, the
+        // `sort_value` is also bound to inet (`$5::inet`). The
+        // `SortValue` enum already constrains the JSON shape; here we
+        // additionally require it to be a `String` whose contents parse
+        // as an IpAddr.
+        if matches!(cursor.sort_col, EdgePairSortCol::CandidateIp) {
+            match &cursor.sort_value {
+                SortValue::String(s) if s.parse::<IpAddr>().is_ok() => {}
+                SortValue::String(s) => {
+                    return Err(CursorError::InvalidIp(format!("sort_value: {s:?}")));
+                }
+                other => {
+                    return Err(CursorError::Decode(format!(
+                        "sort_value variant for CandidateIp must be String; got {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(cursor)
+    }
+}
+
+/// Paginated response for `GET /api/campaigns/:id/evaluation/edge_pairs`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EdgePairsListResponse {
+    /// Entries for this page.
+    pub entries: Vec<EvaluationEdgePairDetailDto>,
+    /// Total matching rows across all pages (ignoring the cursor).
+    pub total: i64,
+    /// Opaque cursor for the next page, or `None` at end-of-result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +1097,9 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: Some(5.0),
             min_improvement_ratio: Some(0.1),
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             baseline_pair_count: 24,
             candidates_total: 10,
             candidates_good: 3,
@@ -749,6 +1123,81 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DetailScope::GoodCandidates).unwrap(),
             "\"good_candidates\"",
+        );
+    }
+
+    #[test]
+    fn edge_pair_cursor_rejects_non_ip_candidate_ip() {
+        use crate::campaign::cursor::{CursorError, SortValue};
+
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::BestRouteMs,
+            sort_value: SortValue::F64(1.0),
+            candidate_ip: "not-an-ip".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let err = EdgePairCursor::decode(&raw, EdgePairSortCol::BestRouteMs).unwrap_err();
+        assert!(
+            matches!(err, CursorError::InvalidIp(_)),
+            "non-IP candidate_ip must surface as InvalidIp; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edge_pair_cursor_rejects_non_ip_sort_value_for_candidate_ip_sort() {
+        use crate::campaign::cursor::{CursorError, SortValue};
+
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::CandidateIp,
+            sort_value: SortValue::String("not-an-ip".to_string()),
+            candidate_ip: "10.0.0.1".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let err = EdgePairCursor::decode(&raw, EdgePairSortCol::CandidateIp).unwrap_err();
+        assert!(
+            matches!(err, CursorError::InvalidIp(_)),
+            "non-IP sort_value when sorting by candidate_ip must surface as InvalidIp; \
+             got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edge_pair_cursor_accepts_valid_ip_literals() {
+        use crate::campaign::cursor::SortValue;
+
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::CandidateIp,
+            sort_value: SortValue::String("10.0.0.2".to_string()),
+            candidate_ip: "10.0.0.1".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let back = EdgePairCursor::decode(&raw, EdgePairSortCol::CandidateIp)
+            .expect("valid IP literals must decode cleanly");
+        assert_eq!(back.candidate_ip, "10.0.0.1");
+    }
+
+    #[test]
+    fn edge_pair_cursor_rejects_wrong_sort_value_variant_for_candidate_ip_sort() {
+        use crate::campaign::cursor::{CursorError, SortValue};
+
+        // F64 sort_value paired with CandidateIp sort_col is structurally
+        // ill-formed even before the IP check — validate that this surfaces
+        // as an explicit Decode error rather than escaping to runtime SQL.
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::CandidateIp,
+            sort_value: SortValue::F64(1.0),
+            candidate_ip: "10.0.0.1".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let err = EdgePairCursor::decode(&raw, EdgePairSortCol::CandidateIp).unwrap_err();
+        assert!(
+            matches!(err, CursorError::Decode(_)),
+            "F64 sort_value when sort_col=CandidateIp must surface as Decode; \
+             got {err:?}"
         );
     }
 }

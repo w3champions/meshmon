@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH camp AS (\n            SELECT id, protocol FROM measurement_campaigns WHERE id = $1\n        ),\n        agent_pairs AS (\n            SELECT DISTINCT cp.source_agent_id AS a_id, ag.ip AS a_ip,\n                            cp.destination_ip AS dst_ip\n            FROM campaign_pairs cp\n            JOIN agents ag ON ag.id = cp.source_agent_id\n            WHERE cp.campaign_id = $1\n              AND cp.kind = 'campaign'\n        )\n        SELECT DISTINCT ON (m.source_agent_id, m.destination_ip)\n               m.source_agent_id, m.destination_ip,\n               m.latency_avg_ms, m.latency_stddev_ms,\n               m.loss_ratio, m.mtr_id AS mtr_measurement_id,\n               m.id AS measurement_id\n        FROM camp c\n        JOIN agent_pairs ap ON true\n        JOIN agents src ON src.ip = ap.dst_ip\n        JOIN measurements m\n          ON m.source_agent_id = src.id\n         AND m.destination_ip = ap.a_ip\n         AND m.protocol = c.protocol\n         AND m.measured_at > now() - interval '24 hours'\n         AND m.latency_avg_ms IS NOT NULL\n        ORDER BY m.source_agent_id, m.destination_ip, m.measured_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_agent_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      },
+      {
+        "ordinal": 2,
+        "name": "latency_avg_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 3,
+        "name": "latency_stddev_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 4,
+        "name": "loss_ratio",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 5,
+        "name": "mtr_measurement_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "measurement_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "1087b326689d8f7d208d4091f97f34f761c208a697311402d94482ddb3b58d1b"
+}

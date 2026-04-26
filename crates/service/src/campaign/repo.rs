@@ -77,6 +77,15 @@ pub struct CreateInput {
     pub min_improvement_ms: Option<f64>,
     /// Optional storage floor on relative improvement (fraction 0.0–1.0).
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) for edge_candidate useful-route
+    /// qualification. `None` disables the filter.
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum transit hops for edge_candidate mode. Defaults to 2
+    /// when the request omits the field.
+    pub max_hops: Option<i16>,
+    /// VictoriaMetrics look-back window (minutes) for edge_candidate mode.
+    /// Defaults to 15 when the request omits the field.
+    pub vm_lookback_minutes: Option<i32>,
     /// Session principal that created the row; audit-only.
     pub created_by: Option<String>,
 }
@@ -117,14 +126,17 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
             (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,
              probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,
              evaluation_mode, max_transit_rtt_ms, max_transit_stddev_ms,
-             min_improvement_ms, min_improvement_ratio, created_by)
+             min_improvement_ms, min_improvement_ratio,
+             useful_latency_ms, max_hops, vm_lookback_minutes,
+             created_by)
         VALUES ($1, $2, $3::probe_protocol,
                 COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),
                 COALESCE($6, 2000), COALESCE($7, 100),
                 $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),
                 COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),
                 $12, $13, $14, $15,
-                $16)
+                $16, COALESCE($17, 2::smallint), COALESCE($18, 15),
+                $19)
         RETURNING id, title, notes,
                   state AS "state: CampaignState",
                   protocol AS "protocol: ProbeProtocol",
@@ -133,6 +145,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   max_transit_rtt_ms, max_transit_stddev_ms,
                   min_improvement_ms, min_improvement_ratio,
+                  useful_latency_ms, max_hops, vm_lookback_minutes,
                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         input.title,
@@ -150,6 +163,9 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         input.max_transit_stddev_ms,
         input.min_improvement_ms,
         input.min_improvement_ratio,
+        input.useful_latency_ms,
+        input.max_hops,
+        input.vm_lookback_minutes,
         input.created_by.as_deref(),
     )
     .fetch_one(&mut *tx)
@@ -184,6 +200,7 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoErr
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE id = $1
@@ -220,6 +237,7 @@ pub async fn list(
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)
@@ -254,6 +272,9 @@ pub async fn patch(
     max_transit_stddev_ms: Option<f64>,
     min_improvement_ms: Option<f64>,
     min_improvement_ratio: Option<f64>,
+    useful_latency_ms: Option<f32>,
+    max_hops: Option<i16>,
+    vm_lookback_minutes: Option<i32>,
 ) -> Result<CampaignRow, RepoError> {
     let raw = sqlx::query_as!(
         CampaignRowRaw,
@@ -267,7 +288,10 @@ pub async fn patch(
                max_transit_rtt_ms     = COALESCE($7, max_transit_rtt_ms),
                max_transit_stddev_ms  = COALESCE($8, max_transit_stddev_ms),
                min_improvement_ms     = COALESCE($9, min_improvement_ms),
-               min_improvement_ratio  = COALESCE($10, min_improvement_ratio)
+               min_improvement_ratio  = COALESCE($10, min_improvement_ratio),
+               useful_latency_ms      = COALESCE($11, useful_latency_ms),
+               max_hops               = COALESCE($12, max_hops),
+               vm_lookback_minutes    = COALESCE($13, vm_lookback_minutes)
          WHERE id = $1
          RETURNING id, title, notes,
                    state AS "state: CampaignState",
@@ -277,6 +301,7 @@ pub async fn patch(
                    evaluation_mode AS "evaluation_mode: EvaluationMode",
                    max_transit_rtt_ms, max_transit_stddev_ms,
                    min_improvement_ms, min_improvement_ratio,
+                   useful_latency_ms, max_hops, vm_lookback_minutes,
                    created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         id,
@@ -289,6 +314,9 @@ pub async fn patch(
         max_transit_stddev_ms,
         min_improvement_ms,
         min_improvement_ratio,
+        useful_latency_ms,
+        max_hops,
+        vm_lookback_minutes,
     )
     .fetch_optional(pool)
     .await?;
@@ -794,6 +822,7 @@ pub async fn get_raw_for_scheduler(
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE id = $1
@@ -1158,6 +1187,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1181,6 +1211,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1204,6 +1235,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1227,6 +1259,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1250,6 +1283,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1336,6 +1370,9 @@ struct CampaignRowRaw {
     max_transit_stddev_ms: Option<f64>,
     min_improvement_ms: Option<f64>,
     min_improvement_ratio: Option<f64>,
+    useful_latency_ms: Option<f32>,
+    max_hops: i16,
+    vm_lookback_minutes: i32,
     created_by: Option<String>,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -1364,6 +1401,9 @@ impl From<CampaignRowRaw> for CampaignRow {
             max_transit_stddev_ms: r.max_transit_stddev_ms,
             min_improvement_ms: r.min_improvement_ms,
             min_improvement_ratio: r.min_improvement_ratio,
+            useful_latency_ms: r.useful_latency_ms,
+            max_hops: r.max_hops,
+            vm_lookback_minutes: r.vm_lookback_minutes,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,
@@ -1446,6 +1486,10 @@ pub async fn agents_for_campaign(
         .map(|r| EvalAgentRow {
             agent_id: r.agent_id,
             ip: r.ip.ip(),
+            // Hostname is stamped on the wire DTO post-evaluator via
+            // the bulk hostname-cache pipeline; the agent roster used
+            // by the evaluator itself doesn't surface hostnames.
+            hostname: None,
         })
         .collect())
 }
@@ -1457,15 +1501,24 @@ pub async fn agents_for_campaign(
 /// - Joins `measurements` via `campaign_pairs.measurement_id`.
 /// - Pulls agents + enrichment from `agents_with_catalogue` +
 ///   `ip_catalogue` in one pass so the evaluator stays pure.
+///
+/// Returns `(inputs, vm_lookback_minutes)`. The lookback knob travels
+/// alongside the inputs (rather than on `EvaluationInputs`, where it
+/// would cross-cut every evaluator test fixture) so the `/evaluate`
+/// handler reads it from the same atomic snapshot as the scoring
+/// knobs — a concurrent `PATCH /campaigns/{id}` between the handler's
+/// initial `repo::get` and this call cannot otherwise desync the VM
+/// fetch window from the persisted evaluation row.
 pub async fn measurements_for_campaign(
     pool: &PgPool,
     campaign_id: Uuid,
-) -> Result<EvaluationInputs, RepoError> {
+) -> Result<(EvaluationInputs, i32), RepoError> {
     let campaign = sqlx::query!(
         r#"SELECT loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   max_transit_rtt_ms, max_transit_stddev_ms,
-                  min_improvement_ms, min_improvement_ratio
+                  min_improvement_ms, min_improvement_ratio,
+                  useful_latency_ms, max_hops, vm_lookback_minutes
              FROM measurement_campaigns WHERE id = $1"#,
         campaign_id,
     )
@@ -1512,31 +1565,140 @@ pub async fn measurements_for_campaign(
             mtr_measurement_id: r.mtr_id.map(|_| r.measurement_id),
             // Every row here joins through `campaign_pairs.measurement_id`
             // into the `measurements` table — by construction an active-
-            // probe settlement. The T54-03 handler layers VM-continuous
-            // rows on top in-memory; those never reach this loader.
+            // probe settlement. The `/evaluate` handler layers
+            // VM-continuous rows on top in-memory; those never reach
+            // this loader.
             direct_source: DirectSource::ActiveProbe,
         })
         .collect();
 
-    let agent_rows = sqlx::query!(
-        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
-             FROM agents_with_catalogue
-            WHERE ip IN (
-                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+    // Two roster slices, both pulled from `agents_with_catalogue`:
+    //
+    // * `agents` — destinations the evaluator iterates. EdgeCandidate
+    //   restricts this to campaign-source agents so a registered mesh
+    //   agent that is also a candidate X doesn't get double-counted as
+    //   both X (via `candidate_ips`) and B (via the destination roster),
+    //   inflating `destinations_total` and producing phantom heatmap
+    //   rows. Diversity / Optimization use the union of source-agent
+    //   and destination-IP matches because their baseline pair set
+    //   spans both directions.
+    //
+    // * `roster` — full identity registry covering every agent that
+    //   could appear in any leg position OR as a candidate IP that
+    //   resolves to a mesh agent. Built from the union of (source
+    //   agents) ∪ (agents whose IP appears as a campaign destination).
+    //   For Diversity / Optimization this is identical to `agents`; for
+    //   EdgeCandidate it adds back the agents that were dropped from
+    //   the destination subset so [`legs::LegLookup`]'s
+    //   `agent_by_ip` / `ip_by_agent` maps still know their identity
+    //   when scoring routes through them or detecting `is_mesh_member`
+    //   for a candidate X.
+    struct AgentRosterRow {
+        agent_id: String,
+        ip: IpNetwork,
+    }
+    // `kind = 'campaign'` is load-bearing across every roster / candidate
+    // subquery in this loader. After detail_ping / detail_mtr rows land in
+    // `campaign_pairs` (operator-supplied per-pair drilldown queued
+    // post-evaluation), an unfiltered `WHERE campaign_id = $1` would pull
+    // those source_agent_id / destination_ip values into the next
+    // evaluator input — phantom destinations or candidates that inflate
+    // `destinations_total` and surface heatmap rows / routes outside the
+    // baseline campaign. The picker query (`source_agent_ids_for_campaign`)
+    // had the same bug class; both must filter to baseline rows only.
+    let agent_rows: Vec<AgentRosterRow> =
+        if matches!(campaign.evaluation_mode, EvaluationMode::EdgeCandidate) {
+            sqlx::query!(
+                r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+                     FROM agents_with_catalogue
+                    WHERE agent_id IN (
+                        SELECT source_agent_id FROM campaign_pairs
+                         WHERE campaign_id = $1
+                           AND kind = 'campaign'
+                    )"#,
+                campaign_id,
             )
-               OR agent_id IN (
-                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
-            )"#,
-        campaign_id,
-    )
-    .fetch_all(pool)
-    .await?;
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|r| AgentRosterRow {
+                agent_id: r.agent_id,
+                ip: r.ip,
+            })
+            .collect()
+        } else {
+            sqlx::query!(
+                r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+                     FROM agents_with_catalogue
+                    WHERE ip IN (
+                        SELECT destination_ip FROM campaign_pairs
+                         WHERE campaign_id = $1
+                           AND kind = 'campaign'
+                    )
+                       OR agent_id IN (
+                        SELECT source_agent_id FROM campaign_pairs
+                         WHERE campaign_id = $1
+                           AND kind = 'campaign'
+                    )"#,
+                campaign_id,
+            )
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|r| AgentRosterRow {
+                agent_id: r.agent_id,
+                ip: r.ip,
+            })
+            .collect()
+        };
 
     let agents: Vec<EvalAgentRow> = agent_rows
         .into_iter()
         .map(|r| EvalAgentRow {
             agent_id: r.agent_id,
             ip: r.ip.ip(),
+            // Hostname stamping happens in the handler via the bulk
+            // hostname-cache lookup; the EdgeCandidate arm consumes it,
+            // and Diversity / Optimization don't read this field, so the
+            // arm tolerates `None`.
+            hostname: None,
+        })
+        .collect();
+
+    // The full identity roster. Always pulled regardless of mode so
+    // [`legs::LegLookup`] can resolve a `CandidateIp { ip }` whose IP
+    // belongs to a registered mesh agent — even when that agent is not
+    // a campaign source (and therefore is missing from
+    // `agents` in EdgeCandidate mode).
+    let roster_rows: Vec<AgentRosterRow> = sqlx::query!(
+        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+             FROM agents_with_catalogue
+            WHERE ip IN (
+                SELECT destination_ip FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND kind = 'campaign'
+            )
+               OR agent_id IN (
+                SELECT source_agent_id FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND kind = 'campaign'
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| AgentRosterRow {
+        agent_id: r.agent_id,
+        ip: r.ip,
+    })
+    .collect();
+    let roster: Vec<EvalAgentRow> = roster_rows
+        .into_iter()
+        .map(|r| EvalAgentRow {
+            agent_id: r.agent_id,
+            ip: r.ip.ip(),
+            hostname: None,
         })
         .collect();
 
@@ -1546,10 +1708,14 @@ pub async fn measurements_for_campaign(
                   c.city,
                   c.country_code,
                   c.asn,
-                  c.network_operator
+                  c.network_operator,
+                  c.website,
+                  c.notes
              FROM ip_catalogue c
             WHERE c.ip IN (
-                SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+                SELECT DISTINCT destination_ip FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND kind = 'campaign'
             )"#,
         campaign_id,
     )
@@ -1567,23 +1733,55 @@ pub async fn measurements_for_campaign(
                     country_code: r.country_code,
                     asn: r.asn.map(|v| v as i64),
                     network_operator: r.network_operator,
+                    website: r.website,
+                    notes: r.notes,
+                    hostname: None,
                 },
             )
         })
         .collect();
 
-    Ok(EvaluationInputs {
-        measurements,
-        agents,
-        enrichment,
-        loss_threshold_ratio: campaign.loss_threshold_ratio,
-        stddev_weight: campaign.stddev_weight,
-        mode: campaign.evaluation_mode,
-        max_transit_rtt_ms: campaign.max_transit_rtt_ms,
-        max_transit_stddev_ms: campaign.max_transit_stddev_ms,
-        min_improvement_ms: campaign.min_improvement_ms,
-        min_improvement_ratio: campaign.min_improvement_ratio,
-    })
+    // EdgeCandidate iterates over the campaign's full destination set
+    // (including IPs that have no outgoing measurement — they appear
+    // as unreachable rows). Diversity / Optimization don't read this
+    // field — they enumerate candidates implicitly from the
+    // measurement set — but we populate it consistently for both
+    // modes so a future refactor doesn't surprise either arm.
+    let candidate_rows = sqlx::query!(
+        r#"SELECT DISTINCT destination_ip FROM campaign_pairs
+            WHERE campaign_id = $1
+              AND kind = 'campaign'"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let candidate_ips: Vec<IpAddr> = candidate_rows
+        .into_iter()
+        .map(|r| r.destination_ip.ip())
+        .collect();
+
+    Ok((
+        EvaluationInputs {
+            measurements,
+            agents,
+            roster,
+            candidate_ips,
+            enrichment,
+            loss_threshold_ratio: campaign.loss_threshold_ratio,
+            stddev_weight: campaign.stddev_weight,
+            mode: campaign.evaluation_mode,
+            max_transit_rtt_ms: campaign.max_transit_rtt_ms,
+            max_transit_stddev_ms: campaign.max_transit_stddev_ms,
+            min_improvement_ms: campaign.min_improvement_ms,
+            min_improvement_ratio: campaign.min_improvement_ratio,
+            useful_latency_ms: campaign.useful_latency_ms,
+            // `max_hops` is stored as `SMALLINT NOT NULL` with a 0..=2
+            // schema constraint; surfacing the raw `i16` keeps the type
+            // identical to the validation surface and the wire DTO.
+            max_hops: campaign.max_hops,
+        },
+        campaign.vm_lookback_minutes,
+    ))
 }
 
 /// Returns every (source_agent_id, destination_ip) tuple for baseline
@@ -1708,4 +1906,83 @@ pub async fn insert_detail_pairs(
 
     tx.commit().await?;
     Ok((inserted, post_state))
+}
+
+// ----- Symmetry-fallback reverse query ----------------------------------
+
+/// Fetch reverse-direction measurements scoped to a campaign's evaluator
+/// universe.
+///
+/// For each `(source_agent_id, destination_ip)` pair attributed to the
+/// campaign, fetches any matching `(source = destination_ip's agent_id,
+/// destination_ip = source_agent_id's agent ip)` row from `measurements` of
+/// the **same protocol** as the campaign. Used by the symmetry-fallback
+/// substitution (spec §3.1).
+///
+/// Returns the same [`AttributedMeasurement`] shape. Because every row in
+/// `measurements` originates from an active probe, `direct_source` is always
+/// [`DirectSource::ActiveProbe`].
+///
+/// `DISTINCT ON (source_agent_id, destination_ip)` plus `ORDER BY …,
+/// measured_at DESC` collapses multiple in-window measurements per
+/// reverse-direction pair down to the most recent one. Without the
+/// dedupe, [`crate::campaign::eval::legs::LegLookup::build`]'s
+/// first-write-wins on `forward.entry(...).or_insert(...)` would let
+/// PostgreSQL's implementation-defined row order pick which sample
+/// powers the symmetry fallback — a property the unit-of-evaluator
+/// reproducibility contract relies on.
+pub async fn reverse_direction_measurements_for_campaign(
+    pool: &PgPool,
+    campaign_id: Uuid,
+) -> Result<Vec<AttributedMeasurement>, RepoError> {
+    let rows = sqlx::query!(
+        r#"
+        WITH camp AS (
+            SELECT id, protocol FROM measurement_campaigns WHERE id = $1
+        ),
+        agent_pairs AS (
+            SELECT DISTINCT cp.source_agent_id AS a_id, ag.ip AS a_ip,
+                            cp.destination_ip AS dst_ip
+            FROM campaign_pairs cp
+            JOIN agents ag ON ag.id = cp.source_agent_id
+            WHERE cp.campaign_id = $1
+              AND cp.kind = 'campaign'
+        )
+        SELECT DISTINCT ON (m.source_agent_id, m.destination_ip)
+               m.source_agent_id, m.destination_ip,
+               m.latency_avg_ms, m.latency_stddev_ms,
+               m.loss_ratio, m.mtr_id AS mtr_measurement_id,
+               m.id AS measurement_id
+        FROM camp c
+        JOIN agent_pairs ap ON true
+        JOIN agents src ON src.ip = ap.dst_ip
+        JOIN measurements m
+          ON m.source_agent_id = src.id
+         AND m.destination_ip = ap.a_ip
+         AND m.protocol = c.protocol
+         AND m.measured_at > now() - interval '24 hours'
+         AND m.latency_avg_ms IS NOT NULL
+        ORDER BY m.source_agent_id, m.destination_ip, m.measured_at DESC
+        "#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| AttributedMeasurement {
+            source_agent_id: r.source_agent_id,
+            destination_ip: r.destination_ip.ip(),
+            latency_avg_ms: r.latency_avg_ms,
+            latency_stddev_ms: r.latency_stddev_ms,
+            loss_ratio: r.loss_ratio,
+            // `mtr_measurement_id` is the DTO FK to `measurements.id` for
+            // the MTR-bearing row; present only when mtr_id is set on the
+            // underlying measurement.
+            mtr_measurement_id: r.mtr_measurement_id.map(|_| r.measurement_id),
+            // All rows in `measurements` originate from active probes.
+            direct_source: DirectSource::ActiveProbe,
+        })
+        .collect())
 }

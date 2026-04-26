@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT destination_ip FROM campaign_pairs\n            WHERE campaign_id = $1\n              AND kind = 'campaign'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "destination_ip",
+        "type_info": "Inet"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9ae06d98cdd1efaa1d8ef16e1bfb8165d9c288ab4e4f0b5da8912eedcbd32fd1"
+}

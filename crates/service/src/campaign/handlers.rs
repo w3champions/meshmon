@@ -10,13 +10,15 @@
 use super::cursor::{CursorError, PairDetailCursor};
 use super::dto::{
     CampaignDto, CampaignListQuery, CreateCampaignRequest, DetailRequest, DetailResponse,
-    DetailScope, EditCampaignRequest, EditPairDto, ErrorEnvelope, EvaluationDto,
-    EvaluationPairDetailListResponse, EvaluationPairDetailQuery, ForcePairRequest, PairDto,
-    PairListQuery, PatchCampaignRequest, PreviewDispatchResponse,
+    DetailScope, EdgePairsListResponse, EdgePairsQuery, EditCampaignRequest, EditPairDto,
+    ErrorEnvelope, EvaluationDto, EvaluationPairDetailListResponse, EvaluationPairDetailQuery,
+    ForcePairRequest, PairDto, PairListQuery, PatchCampaignRequest, PreviewDispatchResponse,
 };
 use super::eval::{self, AttributedMeasurement, EvalError};
-use super::evaluation_repo::{self, PairDetailLookup};
-use super::model::{CampaignState, DirectSource, PairResolutionState, ProbeProtocol};
+use super::evaluation_repo::{self, EdgePairLookup, PairDetailLookup};
+use super::model::{
+    CampaignState, DirectSource, EvaluationMode, PairResolutionState, ProbeProtocol,
+};
 use super::repo::{self, CreateInput, EditInput, RepoError};
 use crate::hostname::session_id_from_auth;
 use crate::hostname::stamp::bulk_hostnames_and_enqueue;
@@ -33,12 +35,6 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
-
-/// Lookback window for VM continuous-mesh baselines surfaced into the
-/// evaluator at `/evaluate` time. 15 minutes matches the operator
-/// expectation of a "recent" baseline without inflating the `avg_over_time`
-/// aggregation cost — VM samples tick every ~30 s per pair.
-const VM_BASELINE_LOOKBACK: Duration = Duration::from_secs(15 * 60);
 
 /// Map a [`ProbeProtocol`] to the `protocol=` label value used by the
 /// ingestion pipeline's metrics emitter (see
@@ -81,6 +77,73 @@ fn repo_error(context: &'static str, err: RepoError) -> Response {
             .into_response(),
         RepoError::Sqlx(e) => db_error(context, e),
     }
+}
+
+/// Validate the edge-candidate-mode knobs: `useful_latency_ms`,
+/// `max_hops`, and `vm_lookback_minutes`.
+///
+/// Rules:
+/// - `edge_candidate` mode requires `useful_latency_ms` to be `Some` and
+///   positive. For other modes a supplied value must still be positive.
+/// - `max_hops` must be in `[0, 2]`. A value of `0` is only valid for
+///   `edge_candidate` mode.
+/// - `vm_lookback_minutes` must be in `[1, 1440]`.
+fn validate_create_or_patch_knobs(
+    mode: super::model::EvaluationMode,
+    useful_latency_ms: Option<f32>,
+    max_hops: Option<i16>,
+    vm_lookback_minutes: Option<i32>,
+) -> Result<(), (StatusCode, Json<ErrorEnvelope>)> {
+    use super::model::EvaluationMode;
+
+    // useful_latency_ms: required + positive for edge_candidate; positive
+    // if supplied for any other mode.
+    if mode == EvaluationMode::EdgeCandidate {
+        match useful_latency_ms {
+            None => return Err(error_400("useful_latency_required")),
+            Some(v) if v.is_nan() || v <= 0.0 => return Err(error_400("useful_latency_invalid")),
+            _ => {}
+        }
+    } else if let Some(v) = useful_latency_ms {
+        if v.is_nan() || v <= 0.0 {
+            return Err(error_400("useful_latency_invalid"));
+        }
+    }
+
+    // max_hops: must be in [0, 2]; 0 only allowed for edge_candidate.
+    if let Some(h) = max_hops {
+        if !(0..=2).contains(&h) {
+            return Err(error_400("max_hops_out_of_range"));
+        }
+        if h == 0 && mode != EvaluationMode::EdgeCandidate {
+            return Err(error_400("max_hops_invalid_for_mode"));
+        }
+    }
+
+    // vm_lookback_minutes: must be in [1, 1440].
+    if let Some(m) = vm_lookback_minutes {
+        if !(1..=1440).contains(&m) {
+            return Err(error_400("vm_lookback_out_of_range"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a 400 Bad Request JSON response with a stable `error` code.
+fn error_400(code: &'static str) -> (StatusCode, Json<ErrorEnvelope>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorEnvelope { error: code.into() }),
+    )
+}
+
+/// Build a 422 Unprocessable Entity JSON response with a stable `error` code.
+fn error_422(code: &'static str) -> (StatusCode, Json<ErrorEnvelope>) {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrorEnvelope { error: code.into() }),
+    )
 }
 
 /// `POST /api/campaigns` — create a new campaign in `draft`.
@@ -134,6 +197,20 @@ pub async fn create(
         }
     };
 
+    // Resolve the effective mode (default: Optimization) and validate the
+    // edge-candidate knobs before touching the database.
+    let mode = body
+        .evaluation_mode
+        .unwrap_or(super::model::EvaluationMode::Optimization);
+    if let Err(e) = validate_create_or_patch_knobs(
+        mode,
+        body.useful_latency_ms,
+        body.max_hops,
+        body.vm_lookback_minutes,
+    ) {
+        return e.into_response();
+    }
+
     let input = CreateInput {
         title: body.title,
         notes: body.notes.unwrap_or_default(),
@@ -152,6 +229,9 @@ pub async fn create(
         max_transit_stddev_ms: body.max_transit_stddev_ms,
         min_improvement_ms: body.min_improvement_ms,
         min_improvement_ratio: body.min_improvement_ratio,
+        useful_latency_ms: body.useful_latency_ms,
+        max_hops: body.max_hops,
+        vm_lookback_minutes: body.vm_lookback_minutes,
         created_by: Some(principal.username.clone()),
     };
 
@@ -250,9 +330,41 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         }
     };
 
+    let source_agent_ids = source_agent_ids_for_campaign(&state.pool, id).await;
+
     let mut dto = CampaignDto::from(camp);
     dto.pair_counts = counts;
+    dto.source_agent_ids = source_agent_ids;
     (StatusCode::OK, Json(dto)).into_response()
+}
+
+/// Distinct source-agent ids on a campaign's `campaign_pairs`, ascending.
+/// Used to surface the picker contents on single-row campaign reads
+/// (GET / PATCH) so the SPA can render the source-agent selector without
+/// a second round-trip. A query failure degrades to an empty list — the
+/// campaign shell is still useful and the failure is logged.
+async fn source_agent_ids_for_campaign(pool: &sqlx::PgPool, id: Uuid) -> Vec<String> {
+    match sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT source_agent_id \
+           FROM campaign_pairs \
+          WHERE campaign_id = $1 \
+            AND kind = 'campaign' \
+          ORDER BY source_agent_id",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                campaign_id = %id,
+                "campaign::source_agent_ids_for_campaign query failed",
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// `PATCH /api/campaigns/{id}` — partial update.
@@ -291,7 +403,76 @@ pub async fn patch(
                 .into_response();
         }
     }
-    match repo::patch(
+
+    // Fetch the existing row to resolve the effective mode for PATCH
+    // (since evaluation_mode is optional and defaults to the stored value)
+    // and to compare knob values for the dismissal check below.
+    let existing = match repo::get(&state.pool, id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+        }
+        Err(e) => return repo_error("campaign::patch::prefetch", e),
+    };
+
+    // Resolve the effective row-after-PATCH state. PATCH columns are
+    // applied via `COALESCE($n, col)`, so any field absent from the body
+    // keeps its stored value. Validation runs against the post-PATCH
+    // shape — otherwise a metadata-only PATCH against an
+    // `edge_candidate` row would trip `useful_latency_required` even
+    // though `useful_latency_ms` would be untouched.
+    let mode = body.evaluation_mode.unwrap_or(existing.evaluation_mode);
+    let effective_useful_latency_ms = body.useful_latency_ms.or(existing.useful_latency_ms);
+    let effective_max_hops = body.max_hops.unwrap_or(existing.max_hops);
+    let effective_vm_lookback = body
+        .vm_lookback_minutes
+        .unwrap_or(existing.vm_lookback_minutes);
+
+    if let Err(e) = validate_create_or_patch_knobs(
+        mode,
+        effective_useful_latency_ms,
+        Some(effective_max_hops),
+        Some(effective_vm_lookback),
+    ) {
+        return e.into_response();
+    }
+
+    // Determine whether any evaluator knob has actually changed. When a
+    // knob is absent from the PATCH body, COALESCE leaves it untouched in
+    // the DB — so only supplied values can trigger a dismissal. Each
+    // clause compares the body's optional value against the stored
+    // representation; the `Option<T>`-vs-`T` mismatch in a few fields
+    // is intentional and matches the column nullability.
+    let knob_changed = body
+        .useful_latency_ms
+        .is_some_and(|v| Some(v) != existing.useful_latency_ms)
+        || body.max_hops.is_some_and(|v| v != existing.max_hops)
+        || body
+            .vm_lookback_minutes
+            .is_some_and(|v| v != existing.vm_lookback_minutes)
+        || body
+            .loss_threshold_ratio
+            .is_some_and(|v| v != existing.loss_threshold_ratio)
+        || body
+            .stddev_weight
+            .is_some_and(|v| v != existing.stddev_weight)
+        || body
+            .evaluation_mode
+            .is_some_and(|v| v != existing.evaluation_mode)
+        || body
+            .max_transit_rtt_ms
+            .is_some_and(|v| Some(v) != existing.max_transit_rtt_ms)
+        || body
+            .max_transit_stddev_ms
+            .is_some_and(|v| Some(v) != existing.max_transit_stddev_ms)
+        || body
+            .min_improvement_ms
+            .is_some_and(|v| Some(v) != existing.min_improvement_ms)
+        || body
+            .min_improvement_ratio
+            .is_some_and(|v| Some(v) != existing.min_improvement_ratio);
+
+    let updated = match repo::patch(
         &state.pool,
         id,
         body.title.as_deref(),
@@ -303,12 +484,42 @@ pub async fn patch(
         body.max_transit_stddev_ms,
         body.min_improvement_ms,
         body.min_improvement_ratio,
+        body.useful_latency_ms,
+        body.max_hops,
+        body.vm_lookback_minutes,
     )
     .await
     {
-        Ok(row) => (StatusCode::OK, Json(CampaignDto::from(row))).into_response(),
-        Err(e) => repo_error("campaign::patch", e),
-    }
+        Ok(row) => row,
+        Err(e) => return repo_error("campaign::patch", e),
+    };
+
+    // Dismiss the existing evaluation when a knob that affects the scoring
+    // outcome has changed. This keeps the persisted evaluation consistent
+    // with the current knob values and signals to the operator that a
+    // re-evaluate is needed. After dismissal, re-fetch the row so the
+    // PATCH response body reflects the post-dismiss state (state back to
+    // `completed`, `evaluated_at` cleared) instead of the pre-dismiss
+    // snapshot returned by the UPDATE.
+    let response_row = if knob_changed {
+        if let Err(e) = evaluation_repo::dismiss_evaluation(&state.pool, id).await {
+            return db_error("campaign::patch::dismiss_evaluation", e);
+        }
+        match repo::get(&state.pool, id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return repo_error("campaign::patch::refetch", RepoError::NotFound(id)),
+            Err(e) => return repo_error("campaign::patch::refetch", e),
+        }
+    } else {
+        updated
+    };
+
+    // Surface the source-agent picker contents on PATCH responses for
+    // parity with `get_one`, so SPA cache updates don't drop the field.
+    let source_agent_ids = source_agent_ids_for_campaign(&state.pool, id).await;
+    let mut dto = CampaignDto::from(response_row);
+    dto.source_agent_ids = source_agent_ids;
+    (StatusCode::OK, Json(dto)).into_response()
 }
 
 /// `DELETE /api/campaigns/{id}` — idempotent removal.
@@ -678,6 +889,7 @@ async fn fetch_and_synthesize_vm_baselines(
     protocol: ProbeProtocol,
     active: &[AttributedMeasurement],
     roster: &[eval::AgentRow],
+    vm_lookback_minutes: i32,
 ) -> Result<Vec<AttributedMeasurement>, VmQueryError> {
     let Some(vm_url) = vm_url_opt else {
         return Ok(Vec::new());
@@ -710,13 +922,13 @@ async fn fetch_and_synthesize_vm_baselines(
     }
 
     let roster_ids: Vec<String> = roster.iter().map(|a| a.agent_id.clone()).collect();
-    let samples = vm_query::fetch_agent_baselines(
-        vm_url,
-        &roster_ids,
-        protocol_label(protocol),
-        VM_BASELINE_LOOKBACK,
-    )
-    .await?;
+    // Convert the campaign's `vm_lookback_minutes` knob to a `Duration` for the
+    // PromQL `avg_over_time([Xm])` window. Clamp to 1 minute on the low end
+    // (schema validates [1, 1440] so this is defence-in-depth).
+    let lookback = Duration::from_secs(vm_lookback_minutes.max(1) as u64 * 60);
+    let samples =
+        vm_query::fetch_agent_baselines(vm_url, &roster_ids, protocol_label(protocol), lookback)
+            .await?;
 
     let ip_by_id: HashMap<&str, IpAddr> =
         roster.iter().map(|a| (a.agent_id.as_str(), a.ip)).collect();
@@ -775,9 +987,20 @@ async fn fetch_and_synthesize_vm_baselines(
 /// isn't configured the handler silently falls back to active-probe
 /// data only.
 ///
+/// For `edge_candidate` campaigns the handler also folds in the reverse-
+/// direction measurements (B→X and X→A legs) collected by
+/// [`repo::reverse_direction_measurements_for_campaign`] before VM
+/// synthesis. The reverse set applies cross-mode — the symmetry-fallback
+/// path in [`crate::campaign::eval::legs::LegLookup`] uses these rows
+/// for both EdgeCandidate and Triple modes.
+///
 /// Returns:
-/// * 422 (`no_baseline_pairs`) — no agent→agent baseline available,
-///   even after the VM fallback (or VM wasn't configured).
+/// * 422 (`no_destinations`) — EdgeCandidate mode with no destination IPs
+///   configured (the campaign has no `destination_ips`).
+/// * 422 (`no_candidates_with_data`) — EdgeCandidate mode with no usable
+///   measurements after VM synthesis.
+/// * 422 (`no_baseline_pairs`) — Triple mode with no agent→agent baseline
+///   available, even after the VM fallback (or VM wasn't configured).
 /// * 503 (`vm_upstream`) — VM was configured but the query failed
 ///   (unreachable, non-2xx, malformed response).
 #[utoipa::path(
@@ -790,7 +1013,7 @@ async fn fetch_and_synthesize_vm_baselines(
         (status = 401, description = "No active session"),
         (status = 404, description = "Campaign not found", body = ErrorEnvelope),
         (status = 409, description = "Campaign not in completed/evaluated state", body = ErrorEnvelope),
-        (status = 422, description = "No baseline (agent→agent) pairs", body = ErrorEnvelope),
+        (status = 422, description = "no_destinations | no_candidates_with_data | no_baseline_pairs", body = ErrorEnvelope),
         (status = 503, description = "VictoriaMetrics upstream unreachable", body = ErrorEnvelope),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
     ),
@@ -818,15 +1041,20 @@ pub async fn evaluate(
             .into_response();
     }
 
-    let mut inputs = match repo::measurements_for_campaign(&state.pool, id).await {
-        Ok(i) => i,
-        Err(e) => return repo_error("campaign::evaluate::inputs", e),
-    };
+    let (mut inputs, vm_lookback_minutes) =
+        match repo::measurements_for_campaign(&state.pool, id).await {
+            Ok(pair) => pair,
+            Err(e) => return repo_error("campaign::evaluate::inputs", e),
+        };
     // Snapshot the evaluator knobs from `inputs` (not `campaign`) so a
     // concurrent `PATCH /campaigns/{id}` that lands between the two reads
     // cannot desync the scored knobs from the persisted evaluation row.
     // `campaign` stays in use only for its `state` gate above; it is no
-    // longer the source of knob values.
+    // longer the source of knob values for the scoring fields.
+    // `vm_lookback_minutes` arrives via the same atomic snapshot from
+    // `measurements_for_campaign` (returned alongside `inputs`) so the
+    // VM fetch window is consistent with the scoring knobs even under
+    // a racing PATCH.
     let loss_threshold_ratio = inputs.loss_threshold_ratio;
     let stddev_weight = inputs.stddev_weight;
     let evaluation_mode = inputs.mode;
@@ -834,12 +1062,71 @@ pub async fn evaluate(
     let max_transit_stddev_ms = inputs.max_transit_stddev_ms;
     let min_improvement_ms = inputs.min_improvement_ms;
     let min_improvement_ratio = inputs.min_improvement_ratio;
+    let useful_latency_ms = inputs.useful_latency_ms;
+    let max_hops = inputs.max_hops;
 
-    // T54-03: layer VM continuous-mesh baselines on top of the active-
-    // probe rows for agent→agent pairs the campaign did not cover.
-    // `fetch_and_synthesize_vm_baselines` returns the rows to prepend so
-    // active-probe data wins on `HashMap::insert` (last write wins; see
-    // `eval::evaluate`'s `by_pair` loop).
+    // Hoist reverse-direction measurements above the mode branch.
+    // The symmetry-fallback in `LegLookup` uses these rows for both
+    // Triple and EdgeCandidate modes — collecting them once here keeps
+    // the per-mode branches lean.
+    let reverse_measurements =
+        match repo::reverse_direction_measurements_for_campaign(&state.pool, id).await {
+            Ok(r) => r,
+            Err(e) => return repo_error("campaign::evaluate::reverse", e),
+        };
+    if !reverse_measurements.is_empty() {
+        // Filter reverse rows whose `(source_agent_id, destination_ip)` key is
+        // already present in the campaign-owned active set. The reverse query
+        // pulls from the global `measurements` table over a 24h window — when
+        // the campaign already measured both A→B and B→A, the reverse fetch
+        // can return an unrelated row (a detail-ping, another campaign, or a
+        // newer reuse-bound sample) for the same key. Without this filter
+        // `build_pair_lookup`'s last-write-wins semantics would let that
+        // unrelated row clobber the campaign-owned measurement.
+        //
+        // Reverse rows are still appended AFTER the active-probe set so the
+        // `LegLookup` symmetry path picks them up for legs the campaign
+        // measured in only one direction.
+        let active_keys: HashSet<(String, IpAddr)> = inputs
+            .measurements
+            .iter()
+            .map(|m| (m.source_agent_id.clone(), m.destination_ip))
+            .collect();
+        let filtered_reverse: Vec<AttributedMeasurement> = reverse_measurements
+            .into_iter()
+            .filter(|m| !active_keys.contains(&(m.source_agent_id.clone(), m.destination_ip)))
+            .collect();
+        if !filtered_reverse.is_empty() {
+            inputs.measurements.extend(filtered_reverse);
+        }
+    }
+
+    // Validate EdgeCandidate preconditions before the expensive VM fetch.
+    if evaluation_mode == EvaluationMode::EdgeCandidate {
+        // A campaign with no destination IPs in `campaign_pairs` can't
+        // produce any meaningful edge-pair output. The schema enforces
+        // at least one destination_ip at create time, but an `/edit`
+        // that removes all pairs could leave the campaign in this state.
+        if inputs.candidate_ips.is_empty() {
+            return error_422("no_destinations").into_response();
+        }
+    }
+
+    // Layer VM continuous-mesh baselines on top of the active-probe rows
+    // for agent→agent pairs the campaign did not cover.
+    // `fetch_and_synthesize_vm_baselines` returns rows to prepend so
+    // active-probe data wins on `build_pair_lookup`'s last-write-wins
+    // (see `eval::evaluate`'s `by_pair` loop). The campaign's
+    // `vm_lookback_minutes` knob drives the PromQL `[Xm]` window.
+    //
+    // Pass the FULL identity roster (`inputs.roster`), not the
+    // source-agent subset (`inputs.agents`). For EdgeCandidate the
+    // candidate X may be a mesh agent that is not a campaign source;
+    // its outgoing X→B baseline still has to be fetched from VM so the
+    // evaluator's `LegLookup` can resolve the direct leg without
+    // falling back to a reverse-direction substitution. For Diversity /
+    // Optimization `roster == agents` (the C3-8 invariant), so behavior
+    // for those modes is unchanged.
     let vm_url_opt = state
         .config()
         .upstream
@@ -850,7 +1137,8 @@ pub async fn evaluate(
         vm_url_opt.as_deref(),
         campaign.protocol,
         &inputs.measurements,
-        &inputs.agents,
+        &inputs.roster,
+        vm_lookback_minutes,
     )
     .await
     {
@@ -900,8 +1188,17 @@ pub async fn evaluate(
         }
     }
 
+    // EdgeCandidate: reject when there are no measurements at all after
+    // combining active-probe + reverse + VM rows. Without data the
+    // evaluator would produce zero candidates, which is misleading —
+    // a 422 here prompts the operator to check agent connectivity.
+    if evaluation_mode == EvaluationMode::EdgeCandidate && inputs.measurements.is_empty() {
+        return error_422("no_candidates_with_data").into_response();
+    }
+
     let outputs = match eval::evaluate(inputs) {
         Ok(o) => o,
+        // EdgeCandidate evaluator is infallible; this arm only fires for Triple mode.
         Err(EvalError::NoBaseline) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -929,6 +1226,9 @@ pub async fn evaluate(
         max_transit_stddev_ms,
         min_improvement_ms,
         min_improvement_ratio,
+        useful_latency_ms,
+        max_hops,
+        vm_lookback_minutes,
     )
     .await
     {
@@ -1003,6 +1303,110 @@ pub async fn get_evaluation(
     }
 }
 
+/// `GET /api/campaigns/{id}/evaluation/edge_pairs` — paginated list of
+/// per-(X, B) edge-pair detail rows from the campaign's most recent
+/// EdgeCandidate evaluation.
+///
+/// Supports server-side sort (8 sort columns × 2 directions),
+/// runtime filters (`candidate_ip`, `qualifies_only`, `reachable_only`),
+/// and an opaque keyset cursor for forward pagination. Page size is capped
+/// at 500 rows; the default is 100.
+///
+/// Note: the plan's `qualifies_first` compound sort and
+/// `coverage_weighted_ping_*` sorts are deferred (need a JOIN to the
+/// candidates table) — record as a future enhancement.
+// TODO: add destination_agent_id filter as a follow-up.
+///
+/// Error vocabulary:
+/// - `not_evaluated` (404): the campaign has never been evaluated.
+/// - `wrong_mode` (404): the campaign's latest evaluation is not
+///   `edge_candidate` mode.
+/// - `invalid_sort` (400): `sort` value is not one of the whitelisted names.
+/// - `invalid_candidate_ip` (400): `candidate_ip` query param is present
+///   but can't be parsed as an IP address.
+/// - `invalid_filter` (400): `limit` exceeds the 500-row cap.
+/// - `invalid_cursor` (400): cursor is undecodable or its sort column
+///   doesn't match the request's `sort`.
+#[utoipa::path(
+    get,
+    path = "/api/campaigns/{id}/evaluation/edge_pairs",
+    tag = "campaigns",
+    params(
+        ("id" = Uuid, Path, description = "Campaign id"),
+        EdgePairsQuery,
+    ),
+    responses(
+        (status = 200, description = "Edge-pair page", body = EdgePairsListResponse),
+        (status = 400, description = "invalid_sort | invalid_candidate_ip | invalid_filter | invalid_cursor", body = ErrorEnvelope),
+        (status = 401, description = "No active session"),
+        (status = 404, description = "not_evaluated | wrong_mode", body = ErrorEnvelope),
+        (status = 500, description = "Internal error", body = ErrorEnvelope),
+    ),
+)]
+pub async fn get_edge_pairs(
+    State(state): State<AppState>,
+    _auth: AuthSession,
+    Path(id): Path<Uuid>,
+    Query(query): Query<EdgePairsQuery>,
+) -> Response {
+    // Validate limit cap before any DB round-trip.
+    const EDGE_PAIRS_MAX_LIMIT: u32 = 500;
+    if query.limit > EDGE_PAIRS_MAX_LIMIT {
+        return error_400("invalid_filter").into_response();
+    }
+
+    // Validate candidate_ip filter format up-front.
+    if let Some(ref raw) = query.candidate_ip {
+        if raw.parse::<IpAddr>().is_err() {
+            return error_400("invalid_candidate_ip").into_response();
+        }
+    }
+
+    // Cursor validation runs before the DB round-trip so a stale page-2
+    // cursor surfaces as 400 without consuming a pool connection.
+    if let Some(raw) = &query.cursor {
+        if let Err(err) = super::dto::EdgePairCursor::decode(raw, query.sort) {
+            let error_kind = match err {
+                CursorError::Decode(_) => "decode",
+                CursorError::SortMismatch => "sort_mismatch",
+                CursorError::InvalidEnum => "invalid_enum",
+                CursorError::InvalidIp(_) => "invalid_ip",
+            };
+            tracing::debug!(
+                error_kind = %error_kind,
+                %err,
+                "campaign::edge_pairs: invalid cursor",
+            );
+            return error_400("invalid_cursor").into_response();
+        }
+    }
+
+    match evaluation_repo::latest_evaluation_edge_pairs(&state.pool, id, &query).await {
+        Ok(EdgePairLookup::Found(page)) => {
+            // `destination_hostname` is left as `None` here; the frontend
+            // resolves it via the existing `IpHostname` component using the
+            // `destination_agent_id`. Resolving it server-side requires a
+            // SQL lookup of `agents.ip` by id before hitting the hostname
+            // cache — deferred as a follow-up enhancement.
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Ok(EdgePairLookup::CampaignNotFound) => {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
+        }
+        Ok(EdgePairLookup::NoEvaluation) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "not_evaluated" })),
+        )
+            .into_response(),
+        Ok(EdgePairLookup::WrongMode) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "wrong_mode" })),
+        )
+            .into_response(),
+        Err(e) => db_error("campaign::get_edge_pairs", e),
+    }
+}
+
 /// `POST /api/campaigns/{id}/detail` — enqueue detail-ping + detail-mtr
 /// rows for a slice of `(source_agent, destination_ip)` pairs.
 ///
@@ -1011,12 +1415,14 @@ pub async fn get_evaluation(
 /// - `all`: every `kind='campaign'` pair whose baseline resolution
 ///   `succeeded` or `reused`. Selects directly from `campaign_pairs`
 ///   because an evaluation row is not required for this scope.
-/// - `good_candidates`: pulls the persisted evaluation row and expands
-///   each qualifying `(source_agent, destination_agent, transit_ip)`
-///   triple into a pair of `(source_agent → transit_ip)` +
-///   `(destination_agent → transit_ip)` detail entries so both legs
-///   get a higher-resolution measurement. Requires a prior evaluation;
-///   400 with `no_evaluation` otherwise.
+/// - `good_candidates`: mode-aware — pulls the persisted evaluation and
+///   expands "good" candidates into `(source_agent, destination_ip)` pairs:
+///   - **Triple modes** (Diversity / Optimization): expands each qualifying
+///     `(source_agent, destination_agent, transit_ip)` triple into a pair of
+///     `(source_agent → transit_ip)` + `(destination_agent → transit_ip)`.
+///   - **EdgeCandidate**: selects candidates with `coverage_count ≥ 1` and
+///     creates `(source_agent, candidate_ip)` pairs for each qualifying
+///     destination. Requires a prior evaluation; 400 `no_evaluation` otherwise.
 /// - `pair`: a single operator-chosen `(source_agent_id,
 ///   destination_ip)` tuple from the request body.
 ///
@@ -1103,37 +1509,65 @@ pub async fn detail(
                 )
                     .into_response();
             }
-            // Pair-detail rows live only in `campaign_evaluation_pair_details` —
-            // they are not nested on the wire DTO since T55, so the
-            // expansion reads them directly from the DB instead of
-            // round-tripping through `latest_evaluation_for_campaign`.
-            let legs = match evaluation_repo::good_candidate_pair_legs(&state.pool, id).await {
-                Ok(Some(rows)) => rows,
-                Ok(None) => {
-                    // Defensive: `state=evaluated` implies a row exists
-                    // (persist_evaluation is the only writer that sets
-                    // that state). Reaching this arm would mean a
-                    // concurrent DELETE raced the read; treat as
-                    // missing evaluation.
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": "no_evaluation" })),
-                    )
-                        .into_response();
+
+            if campaign.evaluation_mode == EvaluationMode::EdgeCandidate {
+                // EdgeCandidate mode: "good" candidates are those with
+                // `coverage_count >= 1` (at least one destination agent
+                // B was reachable under the latency threshold T). For
+                // each qualifying candidate X, create
+                // `(source_agent, X)` pairs using the campaign's settled
+                // source agents — the same agents that probed X during
+                // the campaign run.
+                let edge_pairs =
+                    match evaluation_repo::good_candidates_for_edge_campaign(&state.pool, id).await
+                    {
+                        Ok(Some(rows)) => rows,
+                        Ok(None) => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({ "error": "no_evaluation" })),
+                            )
+                                .into_response();
+                        }
+                        Err(e) => return db_error("campaign::detail::edge_eval", e),
+                    };
+                let mut acc = edge_pairs;
+                acc.sort();
+                acc.dedup();
+                acc
+            } else {
+                // Triple modes (Diversity / Optimization): expand each
+                // qualifying `(A, B, X)` triple into `(A, X)` and
+                // `(B, X)` measurement targets so both legs of the
+                // transit route get a higher-resolution probe.
+                let legs = match evaluation_repo::good_candidate_pair_legs(&state.pool, id).await {
+                    Ok(Some(rows)) => rows,
+                    Ok(None) => {
+                        // Defensive: `state=evaluated` implies a row exists
+                        // (persist_evaluation is the only writer that sets
+                        // that state). Reaching this arm would mean a
+                        // concurrent DELETE raced the read; treat as
+                        // missing evaluation.
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": "no_evaluation" })),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => return db_error("campaign::detail::eval", e),
+                };
+                let mut acc: Vec<(String, IpAddr)> = Vec::new();
+                for leg in &legs {
+                    acc.push((leg.source_agent_id.clone(), leg.candidate_destination_ip));
+                    acc.push((
+                        leg.destination_agent_id.clone(),
+                        leg.candidate_destination_ip,
+                    ));
                 }
-                Err(e) => return db_error("campaign::detail::eval", e),
-            };
-            let mut acc: Vec<(String, IpAddr)> = Vec::new();
-            for leg in &legs {
-                acc.push((leg.source_agent_id.clone(), leg.candidate_destination_ip));
-                acc.push((
-                    leg.destination_agent_id.clone(),
-                    leg.candidate_destination_ip,
-                ));
+                acc.sort();
+                acc.dedup();
+                acc
             }
-            acc.sort();
-            acc.dedup();
-            acc
         }
         DetailScope::Pair => {
             let Some(p) = body.pair else {
@@ -1200,9 +1634,9 @@ const PAIR_DETAILS_MAX_LIMIT: u32 = 500;
 /// (`min_improvement_ms`, `min_improvement_ratio`, `max_transit_rtt_ms`,
 /// `max_transit_stddev_ms`) plus `qualifies_only`, and an opaque keyset
 /// cursor for forward pagination. The cursor's tiebreak rides on the
-/// post-T54 composite primary key
-/// `(source_agent_id, destination_agent_id)`, which is unique within a
-/// single `(evaluation_id, candidate_destination_ip)` tuple.
+/// composite primary key `(source_agent_id, destination_agent_id)`,
+/// which is unique within a single
+/// `(evaluation_id, candidate_destination_ip)` tuple.
 ///
 /// Error vocabulary:
 /// - `not_found` (404): the campaign id does not exist.
@@ -1275,6 +1709,7 @@ pub async fn get_candidate_pair_details(
                 CursorError::Decode(_) => "decode",
                 CursorError::SortMismatch => "sort_mismatch",
                 CursorError::InvalidEnum => "invalid_enum",
+                CursorError::InvalidIp(_) => "invalid_ip",
             };
             tracing::debug!(
                 error_kind = %error_kind,
@@ -1358,5 +1793,45 @@ pub async fn get_candidate_pair_details(
         )
             .into_response(),
         Err(e) => db_error("campaign::get_candidate_pair_details", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_edge_candidate_useful_latency_nan_returns_error() {
+        // NaN should be rejected by is_nan() check
+        let result = validate_create_or_patch_knobs(
+            super::super::model::EvaluationMode::EdgeCandidate,
+            Some(f32::NAN),
+            Some(2),
+            Some(15),
+        );
+
+        assert!(result.is_err(), "NaN should be rejected");
+        let (status, body) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = serde_json::to_value(&body.0)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "parse_error".to_string());
+        assert_eq!(error, "useful_latency_invalid");
+    }
+
+    #[test]
+    fn validate_diversity_useful_latency_nan_returns_error() {
+        // NaN should also be rejected in diversity mode
+        let result = validate_create_or_patch_knobs(
+            super::super::model::EvaluationMode::Diversity,
+            Some(f32::NAN),
+            Some(1),
+            Some(15),
+        );
+
+        assert!(result.is_err(), "NaN should be rejected in diversity mode");
+        let (status, _body) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

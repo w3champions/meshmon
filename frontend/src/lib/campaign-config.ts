@@ -71,6 +71,23 @@ export interface CampaignKnobs {
   min_improvement_ratio: number | null;
   /** When true, the scheduler ignores the 24 h reuse cache. */
   force_measurement: boolean;
+  /**
+   * RTT threshold (ms) below which a route qualifies as "useful" in
+   * edge_candidate mode. Required for edge_candidate; ignored otherwise.
+   * `null` means not set (invalid for edge_candidate, omitted on the wire
+   * for diversity/optimization).
+   */
+  useful_latency_ms: number | null;
+  /**
+   * Maximum transit hops for edge_candidate route enumeration.
+   * Range [0, 2]. Default 2.
+   */
+  max_hops: number;
+  /**
+   * Look-back window (minutes) for VictoriaMetrics data in edge_candidate
+   * mode. Range [1, 1440]. Default 15.
+   */
+  vm_lookback_minutes: number;
 }
 
 /**
@@ -99,7 +116,10 @@ export const KNOB_BOUNDS: Record<
   | "max_transit_rtt_ms"
   | "max_transit_stddev_ms"
   | "min_improvement_ms"
-  | "min_improvement_ratio",
+  | "min_improvement_ratio"
+  | "useful_latency_ms"
+  | "max_hops"
+  | "vm_lookback_minutes",
   { min: number; max: number }
 > = {
   probe_count: { min: 1, max: 1000 },
@@ -112,6 +132,9 @@ export const KNOB_BOUNDS: Record<
   max_transit_stddev_ms: { min: 0, max: 5000 },
   min_improvement_ms: { min: -10000, max: 10000 },
   min_improvement_ratio: { min: -1, max: 1 },
+  useful_latency_ms: { min: 1, max: 10000 },
+  max_hops: { min: 0, max: 2 },
+  vm_lookback_minutes: { min: 1, max: 1440 },
 };
 
 /**
@@ -138,6 +161,9 @@ export const DEFAULT_KNOBS: CampaignKnobs = {
   min_improvement_ms: null,
   min_improvement_ratio: null,
   force_measurement: false,
+  useful_latency_ms: null,
+  max_hops: 2,
+  vm_lookback_minutes: 15,
 };
 
 /**

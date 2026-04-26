@@ -104,7 +104,9 @@ export const agentDetailRoute = createRoute({
 
 const pathDetailSearchSchema = z
   .object({
-    range: z.enum(["1h", "6h", "24h", "7d", "30d", "2y", "custom"]).default("24h"),
+    range: z
+      .enum(["1h", "6h", "24h", "7d", "30d", "2y", "custom"])
+      .default("24h"),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
     protocol: z.enum(["icmp", "udp", "tcp"]).optional(),
@@ -172,7 +174,9 @@ export const catalogueRoute = createRoute({
 
 export const campaignsSearchSchema = z.object({
   q: z.string().optional(),
-  state: z.enum(["draft", "running", "completed", "evaluated", "stopped"]).optional(),
+  state: z
+    .enum(["draft", "running", "completed", "evaluated", "stopped"])
+    .optional(),
   created_by: z.string().optional(),
   sort: z.enum(["title", "created_at", "started_at", "state"]).optional(),
   dir: z.enum(["asc", "desc"]).optional(),
@@ -194,11 +198,11 @@ export const campaignNewRoute = createRoute({
   component: CampaignComposer,
 });
 
-// Campaign detail page. The page renders a four-tab shell
-// (Candidates/Pairs/Raw/Settings) below the header card and action bar.
-// `tab` drives the active panel; the Raw-tab filter params live on the same
-// schema so a tab switch preserves them instead of racing with a separate
-// declaration.
+// Campaign detail page. The page renders a six-tab shell
+// (Candidates, Heatmap (edge_candidate-only), Pairs, Compare (terminal states only),
+// Raw, Settings) below the header card and action bar. `tab` drives the active
+// panel; the Raw-tab filter params live on the same schema so a tab switch
+// preserves them instead of racing with a separate declaration.
 //
 // Per-field `.catch` is used on every enum so an invalid value on ONE field
 // falls back to that field's default without dropping sibling fields. A
@@ -210,9 +214,19 @@ export const campaignNewRoute = createRoute({
 // check (TanStack Router gates `search` required/optional on whether the
 // inferred type has any required keys).
 export const campaignDetailSearchSchema = z.object({
-  tab: z.enum(["candidates", "pairs", "raw", "settings"]).catch("candidates").optional(),
+  tab: z
+    .enum(["candidates", "heatmap", "pairs", "compare", "raw", "settings"])
+    .catch("candidates")
+    .optional(),
   raw_state: z
-    .enum(["pending", "dispatched", "reused", "succeeded", "unreachable", "skipped"])
+    .enum([
+      "pending",
+      "dispatched",
+      "reused",
+      "succeeded",
+      "unreachable",
+      "skipped",
+    ])
     .catch(() => undefined as never)
     .optional(),
   raw_protocol: z
@@ -248,6 +262,63 @@ export const campaignDetailSearchSchema = z.object({
     .enum(["asc", "desc"])
     .catch(() => undefined as never)
     .optional(),
+  // Edge-pairs tab sort. Namespaced `ep_` so it doesn't collide with the
+  // candidate-tab `cand_` params. Default (absent): `best_route_ms` / `asc`.
+  ep_sort: z
+    .enum([
+      "best_route_ms",
+      "best_route_loss_ratio",
+      "best_route_stddev_ms",
+      "best_route_kind",
+      "qualifies_under_t",
+      "is_unreachable",
+      "candidate_ip",
+      "destination_agent_id",
+    ])
+    .catch(() => undefined as never)
+    .optional(),
+  ep_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
+  // Heatmap tab sort. Namespaced `hm_` so it doesn't collide with other
+  // tab sort params. Defaults (absent): row → `destination_agent_id` / `asc`,
+  // col → `coverage_weighted_ping_ms` / `asc` (resolved in HeatmapTab).
+  hm_row_sort: z
+    .enum(["destination_agent_id", "mean_ms", "destinations_qualifying"])
+    .catch(() => undefined as never)
+    .optional(),
+  hm_row_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
+  hm_col_sort: z
+    .enum(["candidate_ip", "coverage_weighted_ping_ms", "coverage_count"])
+    .catch(() => undefined as never)
+    .optional(),
+  hm_col_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
+  // Compare tab params. Namespaced to avoid collisions with other tabs.
+  // `picked`: CSV of picked source agent IDs (persisted to localStorage;
+  //   URL wins on first render). Permissive string — validated against
+  //   campaign.source_agent_ids at consume time.
+  // `pick_role`: filter role for diversity/optimization mode only.
+  //   Hidden and ignored for edge_candidate.
+  // `candidates`: CSV of candidate IPs to show (transient, URL-only).
+  picked: z
+    .string()
+    .catch(() => undefined as never)
+    .optional(),
+  pick_role: z
+    .enum(["both", "source", "destination"])
+    .catch(() => undefined as never)
+    .optional(),
+  candidates: z
+    .string()
+    .catch(() => undefined as never)
+    .optional(),
 });
 
 /**
@@ -259,7 +330,13 @@ export const campaignDetailSearchSchema = z.object({
 export type CampaignDetailSearch = z.infer<typeof campaignDetailSearchSchema>;
 
 /** Enumeration of the active tab values; the parser fills `undefined` with `"candidates"`. */
-export type CampaignDetailTab = "candidates" | "pairs" | "raw" | "settings";
+export type CampaignDetailTab =
+  | "candidates"
+  | "heatmap"
+  | "pairs"
+  | "compare"
+  | "raw"
+  | "settings";
 
 /**
  * Safe default when the WHOLE search object is malformed (e.g. the router
@@ -267,7 +344,9 @@ export type CampaignDetailTab = "candidates" | "pairs" | "raw" | "settings";
  * handled inside `campaignDetailSearchSchema` via `.catch(...)` — this
  * fallback only fires when the root-level parse throws.
  */
-const CAMPAIGN_DETAIL_SEARCH_DEFAULT: CampaignDetailSearch = { tab: "candidates" };
+const CAMPAIGN_DETAIL_SEARCH_DEFAULT: CampaignDetailSearch = {
+  tab: "candidates",
+};
 
 /**
  * Parse the raw URL-search bag. Per-field `.catch` inside the schema drops
@@ -292,6 +371,15 @@ function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
     raw_kind: parsed.raw_kind,
     cand_sort: parsed.cand_sort,
     cand_dir: parsed.cand_dir,
+    ep_sort: parsed.ep_sort,
+    ep_dir: parsed.ep_dir,
+    hm_row_sort: parsed.hm_row_sort,
+    hm_row_dir: parsed.hm_row_dir,
+    hm_col_sort: parsed.hm_col_sort,
+    hm_col_dir: parsed.hm_col_dir,
+    picked: parsed.picked,
+    pick_role: parsed.pick_role,
+    candidates: parsed.candidates,
   };
 }
 
@@ -321,7 +409,10 @@ export const historyPairSearchSchema = z
       .array(z.enum(["icmp", "tcp", "udp"]))
       .optional()
       .catch(undefined),
-    range: z.enum(["24h", "7d", "30d", "90d", "custom"]).catch("30d").default("30d"),
+    range: z
+      .enum(["24h", "7d", "30d", "90d", "custom"])
+      .catch("30d")
+      .default("30d"),
     from: z.string().datetime().optional().catch(undefined),
     to: z.string().datetime().optional().catch(undefined),
   })
@@ -345,7 +436,9 @@ export function parseHistoryPairSearch(search: unknown): HistoryPairSearch {
   const result = historyPairSearchSchema.safeParse(search);
   if (result.success) return result.data;
   const raw: Record<string, unknown> =
-    typeof search === "object" && search !== null ? (search as Record<string, unknown>) : {};
+    typeof search === "object" && search !== null
+      ? (search as Record<string, unknown>)
+      : {};
   const retry = historyPairSearchSchema.safeParse({
     ...raw,
     range: undefined,

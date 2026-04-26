@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO campaign_evaluation_edge_pair_details (\n                       evaluation_id, candidate_ip, destination_agent_id,\n                       best_route_ms, best_route_loss_ratio, best_route_stddev_ms,\n                       best_route_kind, best_route_intermediaries, best_route_legs,\n                       qualifies_under_t, is_unreachable\n                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Inet",
+        "Text",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Text",
+        "TextArray",
+        "Jsonb",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fea7bd09ff1dcb15116c19d702407ffacf15efcd5f606e8ebd7348275d2d17f7"
+}

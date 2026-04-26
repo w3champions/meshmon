@@ -50,7 +50,7 @@ pub const TUNNEL_AGENTS: &str = "meshmon_service_tunnel_agents";
 /// Counter: service → agent command RPCs. Labels: `method`, `outcome`.
 pub const COMMAND_RPCS_TOTAL: &str = "meshmon_service_command_rpcs_total";
 
-// --- Campaign scheduler self-metrics (T44-13). -----------------------------
+// --- Campaign scheduler self-metrics. --------------------------------------
 // These carry `meshmon_campaigns_*` / `meshmon_campaign_*` /
 // `meshmon_scheduler_*` prefixes rather than `meshmon_service_*` because they
 // describe campaign-domain state (lifecycle counts, reuse efficacy, tick
@@ -441,7 +441,7 @@ pub fn describe_service_metrics() {
     // `AXUM_HTTP_*` env vars in `.cargo/config.toml`.
 }
 
-/// Describe campaign-scheduler self-metrics (T44-13). Called from
+/// Describe campaign-scheduler self-metrics. Called from
 /// [`describe_service_metrics`]; factored out so the campaign module
 /// owns its HELP/TYPE strings.
 pub fn describe_campaign_metrics() {

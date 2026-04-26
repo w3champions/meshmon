@@ -148,6 +148,8 @@ function makeCampaign(id: string, overrides: Partial<Campaign> = {}): Campaign {
     completed_at: null,
     evaluated_at: null,
     pair_counts: [],
+    max_hops: 2,
+    vm_lookback_minutes: 15,
     ...overrides,
   };
 }
@@ -721,6 +723,119 @@ describe("CampaignComposer — draft lock after create", () => {
     // Title input is disabled — attempting to type must be a no-op.
     const titleInput = screen.getByLabelText(/^title$/i) as HTMLInputElement;
     expect(titleInput).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Q3 — edge_candidate source picker explainer
+// ---------------------------------------------------------------------------
+
+describe("CampaignComposer — edge_candidate source explainer", () => {
+  test("source explainer renders only when evaluation_mode is edge_candidate", async () => {
+    setupHooks();
+    const user = userEvent.setup();
+    renderComposer();
+
+    await screen.findByLabelText(/^title$/i);
+
+    // Default mode is optimization — explainer must not appear.
+    expect(
+      screen.queryByText(/selected source agents probe each candidate/i),
+    ).not.toBeInTheDocument();
+
+    // Switch to edge_candidate via the toggle.
+    const edgeToggle = screen.getByRole("radio", { name: /edge.?candidate/i });
+    await user.click(edgeToggle);
+
+    expect(
+      screen.getByText(/selected source agents probe each candidate/i),
+    ).toBeInTheDocument();
+  });
+
+  test("source explainer disappears when switching away from edge_candidate", async () => {
+    setupHooks();
+    const user = userEvent.setup();
+    renderComposer();
+
+    await screen.findByLabelText(/^title$/i);
+
+    const edgeToggle = screen.getByRole("radio", { name: /edge.?candidate/i });
+    await user.click(edgeToggle);
+    expect(
+      screen.getByText(/selected source agents probe each candidate/i),
+    ).toBeInTheDocument();
+
+    // Switch back to optimization.
+    const optimizationToggle = screen.getByRole("radio", { name: /optimization/i });
+    await user.click(optimizationToggle);
+    expect(
+      screen.queryByText(/selected source agents probe each candidate/i),
+    ).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Q2 — edge_candidate useful_latency_ms validation gate
+// ---------------------------------------------------------------------------
+
+describe("CampaignComposer — edge_candidate useful_latency_ms required validation", () => {
+  test("Start is blocked and shows toast when useful_latency_ms is null in edge_candidate mode", async () => {
+    setupHooks();
+    const user = userEvent.setup();
+    renderComposer();
+
+    await fillTitle(user, "Edge test");
+    await selectAllSources(user);
+    await clickAddAllDestinations(user);
+
+    const edgeToggle = screen.getByRole("radio", { name: /edge.?candidate/i });
+    await user.click(edgeToggle);
+
+    // useful_latency_ms defaults to null — Start button must be disabled.
+    const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
+    expect(startButton).toBeDisabled();
+    expect(createStub.mutate).not.toHaveBeenCalled();
+  });
+});
+
+// Q2 — new fields flow to wire shape
+describe("CampaignComposer — new knobs in create payload", () => {
+  test("max_hops and vm_lookback_minutes are included in the create body", async () => {
+    setupHooks({
+      preview: { fresh: 10, reusable: 0, total: 10 } as PreviewDispatchResponse,
+    });
+    const user = userEvent.setup();
+    renderComposer();
+
+    await fillTitle(user, "New knobs test");
+    await selectAllSources(user);
+    await clickAddAllDestinations(user);
+
+    const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
+    await user.click(startButton);
+
+    await waitFor(() => expect(createStub.mutate).toHaveBeenCalled());
+    const body = createStub.mutate.mock.calls[0]?.[0];
+    expect(body).toMatchObject({ max_hops: 2, vm_lookback_minutes: 15 });
+  });
+
+  test("useful_latency_ms is omitted from payload when null and mode is not edge_candidate", async () => {
+    setupHooks({
+      preview: { fresh: 10, reusable: 0, total: 10 } as PreviewDispatchResponse,
+    });
+    const user = userEvent.setup();
+    renderComposer();
+
+    await fillTitle(user, "No latency knob");
+    await selectAllSources(user);
+    await clickAddAllDestinations(user);
+
+    const startButton = screen.getByRole("button", { name: /^start(ing…)?$/i });
+    await user.click(startButton);
+
+    await waitFor(() => expect(createStub.mutate).toHaveBeenCalled());
+    const body = createStub.mutate.mock.calls[0]?.[0];
+    expect(body.useful_latency_ms).toBeUndefined();
   });
 });
 
