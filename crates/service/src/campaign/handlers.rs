@@ -105,11 +105,11 @@ fn validate_create_or_patch_knobs(
     if mode == EvaluationMode::EdgeCandidate {
         match useful_latency_ms {
             None => return Err(error_400("useful_latency_required")),
-            Some(v) if v <= 0.0 => return Err(error_400("useful_latency_invalid")),
+            Some(v) if v.is_nan() || v <= 0.0 => return Err(error_400("useful_latency_invalid")),
             _ => {}
         }
     } else if let Some(v) = useful_latency_ms {
-        if v <= 0.0 {
+        if v.is_nan() || v <= 0.0 {
             return Err(error_400("useful_latency_invalid"));
         }
     }
@@ -1495,5 +1495,45 @@ pub async fn get_candidate_pair_details(
         )
             .into_response(),
         Err(e) => db_error("campaign::get_candidate_pair_details", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_edge_candidate_useful_latency_nan_returns_error() {
+        // NaN should be rejected by is_nan() check
+        let result = validate_create_or_patch_knobs(
+            super::super::model::EvaluationMode::EdgeCandidate,
+            Some(f32::NAN),
+            Some(2),
+            Some(15),
+        );
+
+        assert!(result.is_err(), "NaN should be rejected");
+        let (status, body) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = serde_json::to_value(&body.0)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "parse_error".to_string());
+        assert_eq!(error, "useful_latency_invalid");
+    }
+
+    #[test]
+    fn validate_diversity_useful_latency_nan_returns_error() {
+        // NaN should also be rejected in diversity mode
+        let result = validate_create_or_patch_knobs(
+            super::super::model::EvaluationMode::Diversity,
+            Some(f32::NAN),
+            Some(1),
+            Some(15),
+        );
+
+        assert!(result.is_err(), "NaN should be rejected in diversity mode");
+        let (status, _body) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
