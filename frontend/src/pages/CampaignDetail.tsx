@@ -439,6 +439,20 @@ export default function CampaignDetail() {
       ? "candidates"
       : tab;
 
+  // A `campaign_evaluations` row survives knob-change dismissal — only the
+  // campaign row's `state` flips back to `completed` and `evaluated_at`
+  // clears. `GET /evaluation` therefore keeps returning the historical
+  // snapshot. Render the evaluation-derived tabs only when the snapshot
+  // is current (state is `evaluated`) AND the snapshot's mode matches the
+  // campaign's current mode (operator may have PATCHed the mode against a
+  // historical row that targeted a different mode). Tabs receive `null`
+  // when the snapshot is stale so their existing null-gate falls through
+  // to the placeholder.
+  const evaluation = evaluationQuery.data ?? null;
+  const hasFreshEvaluation =
+    state === "evaluated" && evaluation?.evaluation_mode === campaign.evaluation_mode;
+  const freshEvaluation = hasFreshEvaluation ? evaluation : null;
+
   return (
     <main className="flex flex-col gap-4 p-6">
       {/* ---------------------------------------------------------------- */}
@@ -655,8 +669,8 @@ export default function CampaignDetail() {
           </TabsContent>
           {isEdgeCandidate ? (
             <TabsContent value="heatmap">
-              {effectiveTab === "heatmap" && evaluationQuery.data ? (
-                <HeatmapTab campaign={campaign} evaluation={evaluationQuery.data} />
+              {effectiveTab === "heatmap" && freshEvaluation ? (
+                <HeatmapTab campaign={campaign} evaluation={freshEvaluation} />
               ) : effectiveTab === "heatmap" ? (
                 <p className="text-sm text-muted-foreground p-4">Evaluate first to view the heatmap.</p>
               ) : null}
@@ -664,13 +678,13 @@ export default function CampaignDetail() {
           ) : null}
           <TabsContent value="pairs">
             {effectiveTab === "pairs" ? (
-              <PairsTab campaign={campaign} evaluation={evaluationQuery.data ?? null} />
+              <PairsTab campaign={campaign} evaluation={freshEvaluation} />
             ) : null}
           </TabsContent>
           {isTerminal ? (
             <TabsContent value="compare">
               {effectiveTab === "compare" ? (
-                <CompareTab campaign={campaign} evaluation={evaluationQuery.data ?? null} />
+                <CompareTab campaign={campaign} evaluation={freshEvaluation} />
               ) : null}
             </TabsContent>
           ) : null}

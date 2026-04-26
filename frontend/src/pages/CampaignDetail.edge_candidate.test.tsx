@@ -698,3 +698,77 @@ describe("CampaignDetail edge_candidate — single-source-agent banner", () => {
     });
   });
 });
+
+describe("CampaignDetail edge_candidate — stale evaluation gating", () => {
+  /**
+   * Regression for the C3-9 dismissal path. After a knob change, the
+   * `campaign_evaluations` row is preserved (state flips to `completed`,
+   * `evaluated_at` clears) and `GET /evaluation` keeps returning the
+   * historical snapshot. Heatmap and Pairs must show their placeholders
+   * until the operator re-runs `/evaluate` and the campaign returns to
+   * `evaluated`.
+   */
+  test("Heatmap shows placeholder when state is completed even if evaluation row exists", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "edge_candidate" }),
+      evaluation: makeEvaluation(),
+    });
+    renderDetail({ search: "?tab=heatmap" });
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByText(/evaluate first/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("heatmap-tab")).not.toBeInTheDocument();
+  });
+
+  test("Pairs shows edge placeholder when state is completed even if evaluation row exists", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "edge_candidate" }),
+      evaluation: makeEvaluation(),
+    });
+    renderDetail({ search: "?tab=pairs" });
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByTestId("edge-pairs-placeholder")).toBeInTheDocument();
+  });
+
+  /**
+   * Mode-mismatch guard. Campaign was previously evaluated in
+   * `optimization` mode then PATCHed to `edge_candidate`; the historical
+   * row still exists but its `evaluation_mode` no longer matches. The
+   * tabs must not render that row as if it described the current mode.
+   */
+  test("Heatmap shows placeholder when evaluation_mode mismatches campaign mode", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      evaluation: makeEvaluation({ evaluation_mode: "optimization" }),
+    });
+    renderDetail({ search: "?tab=heatmap" });
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByText(/evaluate first/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("heatmap-tab")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Sanity counterpart: when state is `evaluated` and the evaluation
+   * snapshot's mode matches the campaign mode, the rich tab bodies render
+   * as before.
+   */
+  test("Heatmap renders normally when state=evaluated and modes match", async () => {
+    const rows = [makeEdgePairRow("10.0.0.1", "agent-a", 42)];
+    setupHookMocks({
+      campaign: makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      evaluation: makeEvaluation(),
+      edgePairRows: rows,
+    });
+    renderDetail({ search: "?tab=heatmap" });
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByTestId("heatmap-tab")).toBeInTheDocument();
+    expect(screen.queryByText(/evaluate first/i)).not.toBeInTheDocument();
+  });
+});
