@@ -368,6 +368,120 @@ async fn detail_rejects_pair_payload_for_non_pair_scope() {
     }
 }
 
+/// T56 H3 — `/detail?scope=good_candidates` for EdgeCandidate campaigns.
+///
+/// Three candidates with `coverage_count` of 5 / 0 / 2 respectively.
+/// Only the two with `coverage_count >= 1` qualify. One source agent
+/// (`det-edge-a`) participated in the campaign.
+///
+/// Expected detail pairs: 2 candidates × 1 source agent = 2 unique
+/// `(source_agent, candidate_ip)` pairs, each expanded into
+/// `detail_ping` + `detail_mtr` = 4 rows total.
+#[tokio::test]
+async fn detail_scope_good_candidates_edge_candidate_uses_coverage_count() {
+    let h = common::HttpHarness::start().await;
+
+    // Agent at a TEST-NET-3 address disjoint from every other detail test.
+    common::insert_agent_with_ip(
+        &h.state.pool,
+        "det-edge-a",
+        "203.0.113.201".parse().unwrap(),
+    )
+    .await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "edge-good-candidates",
+                "protocol": "icmp",
+                "evaluation_mode": "edge_candidate",
+                "useful_latency_ms": 80.0,
+                "source_agent_ids": ["det-edge-a"],
+                "destination_ips": [
+                    "10.65.1.1",  // candidate A — coverage_count 5
+                    "10.65.1.2",  // candidate B — coverage_count 0
+                    "10.65.1.3",  // candidate C — coverage_count 2
+                ],
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string");
+
+    // Seed one settled campaign-kind measurement so `campaign_pairs` has
+    // a row with `source_agent_id='det-edge-a'` and `kind='campaign'`.
+    // `good_candidates_for_edge_campaign` reads DISTINCT source_agent_id
+    // from that table to build the (source, candidate) expansion.
+    common::seed_measurements(
+        &h.state.pool,
+        campaign_id,
+        &[("det-edge-a", "10.65.1.1", 60.0, 2.0, 0.0)],
+    )
+    .await;
+    common::mark_completed(&h.state.pool, campaign_id).await;
+
+    // Insert an EdgeCandidate evaluation row directly (bypassing /evaluate
+    // because the test fixture measurements are intentionally minimal and
+    // the full evaluator path is exercised by other tests).
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().unwrap();
+    let evaluation_id: uuid::Uuid = sqlx::query_scalar(
+        r#"INSERT INTO campaign_evaluations
+               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+                useful_latency_ms, max_hops, vm_lookback_minutes,
+                baseline_pair_count, candidates_total, candidates_good, evaluated_at)
+           VALUES ($1, 0.05, 1.0, 'edge_candidate'::evaluation_mode,
+                   80.0, 1, 30, 1, 3, 2, now())
+           RETURNING id"#,
+    )
+    .bind(campaign_uuid)
+    .fetch_one(&h.state.pool)
+    .await
+    .expect("insert evaluation row");
+
+    // Seed three candidates with distinct coverage_count values.
+    // Only the two with coverage_count >= 1 should be picked by /detail.
+    for (ip, coverage) in [("10.65.1.1", 5_i32), ("10.65.1.2", 0), ("10.65.1.3", 2)] {
+        let ip_net: sqlx::types::ipnetwork::IpNetwork =
+            ip.parse::<std::net::IpAddr>().unwrap().into();
+        sqlx::query(
+            r#"INSERT INTO campaign_evaluation_candidates
+                   (evaluation_id, destination_ip, is_mesh_member,
+                    pairs_improved, pairs_total_considered, coverage_count)
+               VALUES ($1, $2::inet, false, 0, 0, $3)"#,
+        )
+        .bind(evaluation_id)
+        .bind(ip_net)
+        .bind(coverage)
+        .execute(&h.state.pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed candidate {ip}: {e}"));
+    }
+
+    // Promote the campaign state to `evaluated` so /detail's state gate passes.
+    sqlx::query(
+        "UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1",
+    )
+    .bind(campaign_uuid)
+    .execute(&h.state.pool)
+    .await
+    .unwrap();
+
+    let res: Value = h
+        .post_json(
+            &format!("/api/campaigns/{campaign_id}/detail"),
+            &json!({ "scope": "good_candidates" }),
+        )
+        .await;
+
+    // 2 qualifying candidates (coverage_count 5 and 2) × 1 source agent
+    // × 2 detail kinds (detail_ping + detail_mtr) = 4 rows.
+    assert_eq!(
+        res["pairs_enqueued"], 4,
+        "2 candidates × 1 source × 2 kinds = 4; body = {res}"
+    );
+    assert_eq!(res["campaign_state"], "running", "body = {res}");
+}
+
 /// Invariant: `/detail` inserts `detail_ping` + `detail_mtr` rows on the
 /// same `campaign_pairs` table that the evaluator reads. If the
 /// evaluator's WHERE clause isn't kind-gated, a second `/evaluate` call
