@@ -818,8 +818,7 @@ async fn pagination_cursor_round_trip_sort_candidate_ip_inet_ordering() {
 async fn pagination_cursor_round_trip_non_default_sorts_arity() {
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t56ep-12").await;
-    let cid =
-        create_edge_candidate_campaign(&h, "ep-cursor-arity", "t56ep-12", "10.64.12.1").await;
+    let cid = create_edge_candidate_campaign(&h, "ep-cursor-arity", "t56ep-12", "10.64.12.1").await;
     let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
 
     let cand: IpAddr = "10.64.12.1".parse().unwrap();
