@@ -328,9 +328,13 @@ fn collect_baselines(
                     id: a.agent_id.clone(),
                 };
                 let b_endpoint = Endpoint::CandidateIp { ip: b.ip };
-                let direct_was_substituted =
-                    matches!(leg_lookup.lookup(&a_endpoint, &b_endpoint),
-                        LegLookupResult::Found { was_substituted: true, .. });
+                let direct_was_substituted = matches!(
+                    leg_lookup.lookup(&a_endpoint, &b_endpoint),
+                    LegLookupResult::Found {
+                        was_substituted: true,
+                        ..
+                    }
+                );
                 baselines.push((
                     a.agent_id.clone(),
                     b.ip,
@@ -342,7 +346,6 @@ fn collect_baselines(
     }
     baselines
 }
-
 
 /// Decide whether a scored triple's pair-detail row is persisted.
 ///
@@ -379,7 +382,6 @@ fn passes_storage_filter(
         }
     }
 }
-
 
 /// Finalize a candidate's accumulated counters + per-triple lists into
 /// an [`EvaluationCandidateDto`].
@@ -653,7 +655,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         .collect();
 
     let by_pair = build_pair_lookup(&inputs.measurements);
-    let leg_lookup = LegLookup::build(&inputs.measurements);
+    let leg_lookup = LegLookup::build(&inputs.measurements, &inputs.agents);
     let baselines = collect_baselines(&inputs.agents, &by_pair, &leg_lookup);
     if baselines.is_empty() {
         return Err(EvalError::NoBaseline);
@@ -698,7 +700,9 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         .flat_map(|a| {
             [
                 Endpoint::CandidateIp { ip: a.ip },
-                Endpoint::Agent { id: a.agent_id.clone() },
+                Endpoint::Agent {
+                    id: a.agent_id.clone(),
+                },
             ]
         })
         .collect();
@@ -777,8 +781,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 .filter(|e| match e {
                     Endpoint::Agent { id } => id != a_id && id != b_id,
                     Endpoint::CandidateIp { ip } => {
-                        Some(*ip) != agent_by_id.get(a_id.as_str()).copied()
-                            && *ip != *b_ip
+                        Some(*ip) != agent_by_id.get(a_id.as_str()).copied() && *ip != *b_ip
                     }
                 })
                 .cloned()
@@ -820,8 +823,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
             let transit_penalty = inputs.stddev_weight * transit_stddev;
             let compound_loss_ratio = best_x_route.loss_ratio;
             let direct_penalty = inputs.stddev_weight * direct_stddev;
-            let improvement_ms =
-                direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
+            let improvement_ms = direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
 
             // Determine where X sits in the winning route intermediary order.
             // Position 1 = X is first intermediary (A→X→Y→B);

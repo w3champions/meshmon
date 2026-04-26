@@ -129,29 +129,12 @@ pub struct EdgePairRow {
 /// 2. Sort candidates by `coverage_weighted_ping_ms` ASC; tiebreak
 ///    `coverage_count` DESC; tiebreak `mean_ms_under_t` ASC.
 pub fn evaluate(inputs: EvaluationInputs) -> EvaluationOutputs {
-    let lookup = LegLookup::build(&inputs.measurements);
-    // `LegLookup` stores measurements keyed as `(Agent(src_id), Ip(dest_ip))`.
-    // Both endpoint forms are needed for intermediaries:
-    //
-    // * `Agent { id }` — required for arbitrary-X 1-hop routes.
-    //   Leg X→Y resolves via the symmetric reverse of `meas("y", X.ip)`:
-    //   `lookup(CandidateIp(X), Agent("y"))` uses reverse key
-    //   `(Agent("y"), Ip(X))`, which hits the stored entry. Without `Agent`
-    //   in the pool the reverse key becomes `(Ip(Y.ip), Ip(X))` and misses.
-    //
-    // * `CandidateIp { ip }` — required for two cases:
-    //   (a) Mesh-agent-X 1-hop: `lookup(Agent("x"), Agent("y"))` uses forward
-    //       key `(Agent("x"), Agent("y"))` which is never stored (destinations
-    //       are always `Ip`). Switching the pool entry to `CandidateIp(y.ip)`
-    //       gives forward key `(Agent("x"), Ip(y.ip))` → FOUND.
-    //   (b) 2-hop middle leg: `lookup(Agent("y1"), Agent("y2"))` likewise
-    //       misses because no `Agent`-keyed destination exists. The same
-    //       `CandidateIp(y2.ip)` form gives `(Agent("y1"), Ip(y2.ip))` → FOUND.
-    //
-    // Including both forms doubles the pool size but has no correctness cost:
-    // `enumerate_routes` discards routes whose legs can't resolve, so the
-    // form that cannot match a given lookup pattern simply produces no route.
-    // `pick_best_route` then selects from the survivors.
+    let lookup = LegLookup::build(&inputs.measurements, &inputs.agents);
+    // `LegLookup` resolves either endpoint form against the agent
+    // roster, so a single representation per intermediary would suffice.
+    // The pool keeps both `Agent { id }` and `CandidateIp { ip }`
+    // entries as defence-in-depth — duplicates that fail to compose are
+    // silently discarded by `enumerate_routes`.
     let intermediaries: Vec<Endpoint> = inputs
         .agents
         .iter()
@@ -228,15 +211,12 @@ fn score_candidate(
         }
         destinations_total += 1;
 
-        // `LegLookup` keys forward measurements as
-        // `(Agent(src_id), Ip(dest_ip))`. To resolve a leg with
-        // mesh-agent B as the destination, pass B as `CandidateIp(b.ip)`
-        // so the forward hit (Agent(src), Ip(b.ip)) — and the
-        // symmetric-fallback hit (Agent(b), Ip(src)) — are reachable.
-        // Carrying `Endpoint::Agent { id: b.id }` here would always
-        // miss the lookup. The agent identity is preserved separately
-        // via the `b: &AgentRow` borrow used to stamp
-        // `destination_agent_id`.
+        // Either endpoint form would resolve correctly against the
+        // roster-aware [`LegLookup`]; `CandidateIp(b.ip)` is convenient
+        // because `enumerate_routes` compares endpoints by variant when
+        // skipping intermediaries that equal `source` / `destination`,
+        // and the pool below filters both forms of B out explicitly so
+        // the comparison never has to bridge variants.
         let b_endpoint = Endpoint::CandidateIp { ip: b.ip };
 
         // Exclude B from the intermediary pool. The pool carries both
@@ -734,20 +714,18 @@ mod tests {
         // Candidate X = arbitrary IP 203.0.113.99 (not a mesh agent).
         //
         // Seeded measurements:
-        //   meas("a", X.ip, 5ms)   → gives leg X→A via symmetry-sub
+        //   meas("a", X.ip, 5ms)   → gives leg X→A via reverse resolution
         //   meas("a", B.ip, 10ms)  → gives leg A→B forward
         //   meas("a", C.ip, 10ms)  → gives leg A→C forward
         //
         // With max_hops=1 and T=100ms:
-        //   X targeting B: 1-hop X→A→B (5+10=15ms) should be found.
-        //   X targeting C: 1-hop X→A→C (5+10=15ms) should be found.
+        //   X targeting A: direct (reverse-resolved 5ms) qualifies.
+        //   X targeting B: 1-hop X→A→B (5+10=15ms) qualifies.
+        //   X targeting C: 1-hop X→A→C (5+10=15ms) qualifies.
         //
-        // This test guards the intermediary pool model: if intermediaries
-        // were `Agent { id }` instead of `CandidateIp { ip }`, the
-        // lookup for leg X→A (reverse of meas("a", X.ip)) would miss
-        // because `LegLookup` stores `(Agent("a"), Ip(X.ip))` — the
-        // reverse lookup needs to go from `(Ip(X.ip), Ip(A.ip))` form,
-        // which only works when the intermediary Y is `CandidateIp(A.ip)`.
+        // The test guards that B and C still resolve via the 1-hop
+        // intermediary path, and that A surfaces as a direct hit rather
+        // than going via a stale "unreachable" sentinel.
         let agents = vec![
             agent("a", "10.0.0.1"),
             agent("b", "10.0.0.2"),
@@ -755,7 +733,7 @@ mod tests {
         ];
         let x_ip = ip("203.0.113.99");
         let measurements = vec![
-            meas("a", "203.0.113.99", 5.0, 0.0, 0.0), // X→A via symmetry (reverse of this)
+            meas("a", "203.0.113.99", 5.0, 0.0, 0.0), // X→A via reverse resolution
             meas("a", "10.0.0.2", 10.0, 0.0, 0.0),    // A→B forward
             meas("a", "10.0.0.3", 10.0, 0.0, 0.0),    // A→C forward
         ];
@@ -763,11 +741,14 @@ mod tests {
         let out = outputs_edge(evaluate(inputs));
         assert_eq!(out.candidates.len(), 1);
         let row = &out.candidates[0];
-        assert_eq!(row.destinations_total, 3, "3 agents, none excluded (X ≠ any agent)");
-        // Both B and C should be reachable via 1-hop X→A→{B,C}.
         assert_eq!(
-            row.coverage_count, 2,
-            "B and C reachable via 1-hop X→A→B and X→A→C"
+            row.destinations_total, 3,
+            "3 agents, none excluded (X ≠ any agent)"
+        );
+        // A direct + B/C via 1-hop = 3 covered.
+        assert_eq!(
+            row.coverage_count, 3,
+            "A direct + B/C via 1-hop must all qualify"
         );
         for pair in &row.pair_details {
             if pair.destination_agent_id == "b" || pair.destination_agent_id == "c" {
@@ -794,13 +775,13 @@ mod tests {
                     pair.best_route_ms
                 );
             }
-            // Agent A as destination: no measurement for X→A direct, and
-            // the loop X→A→A would be self-loop (skipped). Expect unreachable.
             if pair.destination_agent_id == "a" {
-                assert!(
-                    pair.is_unreachable,
-                    "A should be unreachable (no A-targeting forward measurement from a different agent)"
+                assert_eq!(
+                    pair.best_route_kind,
+                    EdgeRouteKind::Direct,
+                    "A is reachable directly via reverse-resolved leg: {pair:?}"
                 );
+                assert!(!pair.is_unreachable);
             }
         }
     }
@@ -841,8 +822,8 @@ mod tests {
         ];
         let measurements = vec![
             meas("x", "10.0.0.2", 5.0, 0.0, 0.0),  // X→A forward (L1)
-            meas("c", "10.0.0.2", 10.0, 0.0, 0.0),  // A→C via reverse meas (L2)
-            meas("c", "10.0.0.4", 10.0, 0.0, 0.0),  // C→B forward (L3)
+            meas("c", "10.0.0.2", 10.0, 0.0, 0.0), // A→C via reverse meas (L2)
+            meas("c", "10.0.0.4", 10.0, 0.0, 0.0), // C→B forward (L3)
         ];
         // X is the mesh-agent candidate; max_hops=2 to allow 2-hop routes.
         let inputs = build_inputs(

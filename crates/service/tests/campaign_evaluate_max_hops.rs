@@ -149,7 +149,8 @@ fn edge_candidate_max_hops_0_only_direct() {
 // ---------------------------------------------------------------------------
 
 /// With `max_hops=1`, 1-hop transit routes are allowed. An arbitrary (non-mesh)
-/// X can reach mesh agents B and C via 1-hop X→A→B and X→A→C.
+/// X can reach mesh agents B and C via 1-hop X→A→B and X→A→C, and reaches A
+/// directly via the reverse of A's outbound probe to X.
 ///
 /// Topology:
 ///   Agents: A (10.2.0.1), B (10.2.0.2), C (10.2.0.3).
@@ -159,13 +160,12 @@ fn edge_candidate_max_hops_0_only_direct() {
 ///     A→B = 20 ms (forward: (Agent("a"), Ip(B.ip)))
 ///     A→C = 25 ms (forward: (Agent("a"), Ip(C.ip)))
 ///
-///   Under max_hops=0, X has no direct measurements to any agent → all unreachable.
-///   Under max_hops=1, X→A→B (30+20=50 ms) and X→A→C (30+25=55 ms) are found.
-///   B and C are covered via 1-hop; A itself is unreachable (no direct X→A
-///   measurement and no intermediary other than A for A itself).
+///   X→A direct is reverse-resolved (was_substituted = true).
+///   X→B direct is missing; 1-hop X→A→B (30+20=50 ms) is enumerated.
+///   X→C direct is missing; 1-hop X→A→C (30+25=55 ms) is enumerated.
 ///
-/// The test pins that max_hops=1 enables the 1-hop coverage path and produces
-/// `onehop_share > 0`.
+/// All three destinations are covered. Direct-share > 0 (A) and
+/// onehop-share > 0 (B and C).
 #[test]
 fn edge_candidate_max_hops_1_direct_plus_one_hop() {
     let inputs = EvaluationInputs {
@@ -194,19 +194,30 @@ fn edge_candidate_max_hops_1_direct_plus_one_hop() {
         x_row.destinations_total, 3,
         "max_hops=1: 3 destination agents (A, B, C)"
     );
-    // B and C are reachable via 1-hop; A is not reachable (self-loop excluded).
+    // A is reachable directly (reverse-resolved); B and C via 1-hop.
     assert_eq!(
-        x_row.coverage_count, 2,
-        "max_hops=1: B and C covered via 1-hop X→A→B and X→A→C: {x_row:?}"
+        x_row.coverage_count, 3,
+        "max_hops=1: A direct + B/C via 1-hop must all qualify: {x_row:?}"
     );
 
-    // Both covered pairs must be onehop.
     assert!(
         x_row.onehop_share.unwrap_or(0.0) > 0.0,
         "max_hops=1: onehop_share must be positive: {x_row:?}"
     );
 
-    // Verify B and C pair details.
+    // Verify A direct, plus B/C onehop pair details.
+    let a_pair = x_row
+        .pair_details
+        .iter()
+        .find(|p| p.destination_agent_id == "a")
+        .expect("pair for A must exist");
+    assert_eq!(
+        a_pair.best_route_kind,
+        meshmon_service::campaign::model::EdgeRouteKind::Direct,
+        "A must be reached directly via reverse-resolved leg: {a_pair:?}"
+    );
+    assert!(!a_pair.is_unreachable);
+
     for &agent_id in &["b", "c"] {
         let pair = x_row
             .pair_details
@@ -252,8 +263,8 @@ fn edge_candidate_max_hops_2_full_two_hop_set() {
     let inputs = EvaluationInputs {
         measurements: vec![
             m("x", "10.3.0.2", 5.0, 0.0, 0.0),  // X→A direct (L1)
-            m("c", "10.3.0.2", 10.0, 0.0, 0.0),  // reverse: A→C sym (L2)
-            m("c", "10.3.0.4", 10.0, 0.0, 0.0),  // C→B direct (L3)
+            m("c", "10.3.0.2", 10.0, 0.0, 0.0), // reverse: A→C sym (L2)
+            m("c", "10.3.0.4", 10.0, 0.0, 0.0), // C→B direct (L3)
         ],
         agents: vec![
             agent("x", "10.3.0.1"),
@@ -402,11 +413,11 @@ fn diversity_max_hops_2_x_position_best_of_wins() {
 fn optimization_max_hops_2_tiebreaker_includes_two_hop_alternatives() {
     let inputs = EvaluationInputs {
         measurements: vec![
-            m("a", "10.5.0.2", 400.0, 5.0, 0.0),  // A→B baseline
-            m("a", "10.5.0.9", 150.0, 5.0, 0.0),  // A→X
-            m("b", "10.5.0.9", 160.0, 5.0, 0.0),  // B→X → sym X→B
-            m("a", "10.5.0.3", 100.0, 5.0, 0.0),  // A→Y (mesh) → forward lookup works
-            m("b", "10.5.0.3", 90.0, 5.0, 0.0),   // B→Y → Y→B reverse lookup works
+            m("a", "10.5.0.2", 400.0, 5.0, 0.0), // A→B baseline
+            m("a", "10.5.0.9", 150.0, 5.0, 0.0), // A→X
+            m("b", "10.5.0.9", 160.0, 5.0, 0.0), // B→X → sym X→B
+            m("a", "10.5.0.3", 100.0, 5.0, 0.0), // A→Y (mesh) → forward lookup works
+            m("b", "10.5.0.3", 90.0, 5.0, 0.0),  // B→Y → Y→B reverse lookup works
         ],
         agents: vec![
             agent("a", "10.5.0.1"),
@@ -574,5 +585,65 @@ fn diversity_max_hops_2_dual_form_pool_filter_regression() {
         out.baseline_pair_count >= 1,
         "baseline_pair_count must be at least 1: {}",
         out.baseline_pair_count
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. EdgeCandidate non-mesh X with max_hops=0: direct route via reverse
+// ---------------------------------------------------------------------------
+
+/// Non-mesh candidate X reaches mesh agent B via the reverse of B's outbound
+/// probe to X.ip. With `max_hops=0` only direct routes are considered, so the
+/// leg lookup must resolve `X → B` from the stored
+/// `(Agent("b"), Ip(X.ip))` measurement without help from any intermediary.
+///
+/// Topology:
+///   Agents: B (10.7.0.1).
+///   X = 203.0.113.7 (not a mesh agent).
+///   Measurement: B→X = 40 ms (stored as `(Agent("b"), Ip(X.ip))`).
+///
+/// Expectation: `coverage_count == 1` and the pair row carries a real
+/// `best_route_ms` (the reverse-resolved direct leg) rather than a sentinel.
+#[test]
+fn edge_candidate_non_mesh_x_resolves_direct_via_reverse_with_max_hops_zero() {
+    let inputs = EvaluationInputs {
+        measurements: vec![
+            // Only outbound probe is B→X. The X→B leg must be reverse-resolved.
+            m("b", "203.0.113.7", 40.0, 1.0, 0.0),
+        ],
+        agents: vec![agent("b", "10.7.0.1")],
+        candidate_ips: vec![ip("203.0.113.7")],
+        ..base_inputs(EvaluationMode::EdgeCandidate, 0)
+    };
+
+    let out = as_edge(evaluate(inputs).unwrap());
+    let x_row = out
+        .candidates
+        .iter()
+        .find(|r| r.candidate_ip == ip("203.0.113.7"))
+        .expect("non-mesh X must appear as a candidate");
+
+    assert_eq!(x_row.destinations_total, 1, "single mesh destination B");
+    assert_eq!(
+        x_row.coverage_count, 1,
+        "max_hops=0: X→B direct (reverse-resolved) must qualify: {x_row:?}"
+    );
+
+    let b_pair = x_row
+        .pair_details
+        .iter()
+        .find(|p| p.destination_agent_id == "b")
+        .expect("pair for B must exist");
+    assert!(!b_pair.is_unreachable, "X→B must be reachable: {b_pair:?}");
+    // best_route_ms = rtt + stddev_weight * stddev = 40 + 1.0*1.0 = 41
+    assert!(
+        (b_pair.best_route_ms - 41.0).abs() < 1e-3,
+        "best_route_ms must equal the penalised RTT (41ms = 40 rtt + 1*1 stddev), got {}",
+        b_pair.best_route_ms
+    );
+    assert_eq!(
+        b_pair.best_route_kind,
+        meshmon_service::campaign::model::EdgeRouteKind::Direct,
+        "non-mesh X with max_hops=0: route must be Direct (reverse-resolved): {b_pair:?}"
     );
 }

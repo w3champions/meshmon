@@ -281,7 +281,11 @@ mod tests {
     }
 
     fn lookup(measurements: &[AttributedMeasurement]) -> LegLookup<'_> {
-        LegLookup::build(measurements)
+        // Route-enumeration tests intentionally exercise the legacy
+        // `Agent { id }` / `CandidateIp { ip }` matrix — the empty roster
+        // keeps endpoint resolution narrow so the existing fixtures
+        // stay deterministic.
+        LegLookup::build(measurements, &[])
     }
 
     // ── 0-hop (direct) tests ─────────────────────────────────────────────────

@@ -5,10 +5,22 @@
 //! [`LegLookup`] indexes every attributed measurement as a single entry keyed
 //! on `(EndpointKey::Agent(source_agent_id), EndpointKey::Ip(destination_ip))`.
 //! There are no `Agent → Agent` entries; agents always probe IP addresses and
-//! the destination is always an `Ip` key. This has one architectural
-//! consequence: a lookup where both endpoints are `Agent` variants will
-//! always miss (neither the forward nor the reverse key matches any stored
-//! entry).
+//! the destination is always an `Ip` key.
+//!
+//! ## Endpoint resolution
+//!
+//! [`LegLookup::lookup`] resolves either [`Endpoint`] form (`Agent { id }` or
+//! `CandidateIp { ip }`) by consulting two roster maps built at
+//! construction time:
+//!
+//! - `agent_by_ip` — maps a mesh agent's IP back to its agent id.
+//! - `ip_by_agent` — maps an agent id to its IP.
+//!
+//! `Endpoint::Agent { id }` resolves to `(Some(id), agent_ip)`. A
+//! `Endpoint::CandidateIp { ip }` resolves to `(Some(id), ip)` when the IP
+//! belongs to a mesh agent, or `(None, ip)` otherwise. Lookups therefore
+//! treat `Agent("a")` and `CandidateIp(a.ip)` as equivalent for any mesh
+//! agent — callers can pass whichever form is convenient.
 //!
 //! ## Key variants
 //!
@@ -19,38 +31,38 @@
 //!
 //! ## Lookup priority (per [`LegLookup::lookup`])
 //!
-//! Given a requested leg `(from, to)`:
+//! Given a requested leg `(from, to)`, both endpoints are first resolved
+//! to `(agent_id?, ip)` pairs. Then:
 //!
-//! 1. Forward key `(from, to)` present with `loss_ratio < 1.0` → used
-//!    directly; `was_substituted = false`.
-//! 2. Forward key present but `loss_ratio == 1.0`, reverse key
-//!    `(to, from)` present with `loss_ratio < 1.0` → reverse used as
-//!    symmetry substitute; `was_substituted = true`.
-//! 3. No forward key, reverse key present with `loss_ratio < 1.0` →
-//!    same as (2).
-//! 4. Both keys present with `loss_ratio == 1.0` → [`LegLookupResult::Broken`];
+//! 1. **Forward** evidence: `from` (as agent) probed `to.ip`. Requires
+//!    `from` to resolve to a mesh agent. Hits stored key
+//!    `(Agent(from_id), Ip(to.ip))`.
+//! 2. **Reverse** evidence: `to` (as agent) probed `from.ip`. Requires
+//!    `to` to resolve to a mesh agent. Hits stored key
+//!    `(Agent(to_id), Ip(from.ip))`.
+//!
+//! With those two candidates in hand the priority is:
+//!
+//! 1. Forward present with `loss_ratio < 1.0` → used directly;
+//!    `was_substituted = false`.
+//! 2. Forward present but `loss_ratio == 1.0`, reverse present with
+//!    `loss_ratio < 1.0` → reverse used as symmetry substitute;
+//!    `was_substituted = true`.
+//! 3. No forward, reverse present with `loss_ratio < 1.0` → same as (2).
+//! 4. Both present with `loss_ratio == 1.0` → [`LegLookupResult::Broken`];
 //!    any route containing this leg is discarded.
-//! 5. Neither key present → [`LegLookupResult::Missing`]; route discarded.
+//! 5. Neither present → [`LegLookupResult::Missing`]; route discarded.
 //!
 //! ## Dual-form pool
 //!
-//! Diversity and optimization route enumeration builds a pool that includes
-//! both `Agent { id }` and `CandidateIp { ip }` forms for every mesh agent.
-//! Both forms are needed because different leg positions require different
-//! endpoint variants:
-//!
-//! - `CandidateIp { ip }` — used when the agent is the *destination* of a
-//!   stored measurement (e.g. the A→Y first leg resolves via forward key
-//!   `(Agent("a"), Ip(Y.ip))`).
-//! - `Agent { id }` — used when the agent is the *source* of a stored
-//!   measurement in the middle of a 2-hop route (e.g. the Y→B leg resolves
-//!   via reverse key `(Agent("y"), Ip(B.ip))`).
-//!
-//! EdgeCandidate builds the same dual-form pool so both X→M and M→X
-//! (reverse-substituted) legs resolve correctly for candidate IPs that have
-//! no outbound measurement of their own.
+//! Because lookup auto-resolves either form, the per-mode dual-form
+//! intermediary pools (one `Agent { id }` and one `CandidateIp { ip }`
+//! entry per mesh agent) are no longer needed for correctness — they
+//! survive as defence-in-depth. `enumerate_routes` discards routes whose
+//! legs can't resolve, so any duplicate that fails to compose is a
+//! silent no-op.
 
-use crate::campaign::eval::AttributedMeasurement;
+use crate::campaign::eval::{AgentRow, AttributedMeasurement};
 use crate::campaign::model::{Endpoint, LegSource};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -91,13 +103,24 @@ pub struct LegMeasurement {
 
 /// Indexed view of the available measurements for fast leg lookup.
 ///
-/// `forward` is keyed on `(source, dest)` exactly as today's matrix.
-/// The same `forward` map is consulted twice: once with `(from, to)` and once
-/// with `(to, from)` to resolve both directions in O(1) without maintaining a
-/// separate reverse index.
+/// `forward` is keyed on `(source, dest)`: `(EndpointKey::Agent(src_id),
+/// EndpointKey::Ip(dst_ip))`. Two roster maps (`agent_by_ip`,
+/// `ip_by_agent`) let [`LegLookup::lookup`] resolve either endpoint
+/// form (`Agent { id }` or `CandidateIp { ip }`) so callers never need
+/// to coerce a candidate IP back to its mesh-agent identity by hand —
+/// see this module's docs for the full contract.
 #[allow(dead_code)] // consumed by route-composition phases (D–E)
 pub(crate) struct LegLookup<'a> {
     pub(super) forward: HashMap<(EndpointKey, EndpointKey), &'a AttributedMeasurement>,
+    /// Maps a mesh agent's IP to its agent id. Built from the agent
+    /// roster so a `CandidateIp { ip }` referring to a known mesh agent
+    /// resolves to that agent for forward / reverse lookup parity with
+    /// the `Agent { id }` form.
+    agent_by_ip: HashMap<IpAddr, String>,
+    /// Maps an agent id to its IP. Used to resolve `Endpoint::Agent`
+    /// to a concrete IP when the leg's other side carries a stored
+    /// destination IP key.
+    ip_by_agent: HashMap<String, IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,12 +140,21 @@ impl EndpointKey {
     }
 }
 
+/// Endpoint resolved against the agent roster: `agent_id` is `Some` when
+/// the endpoint refers to a mesh agent (either via `Agent { id }` directly
+/// or via `CandidateIp { ip }` where the IP belongs to a known agent).
+struct ResolvedEndpoint {
+    agent_id: Option<String>,
+    ip: IpAddr,
+}
+
 #[allow(dead_code)] // consumed by route-composition phases (D–E)
 impl<'a> LegLookup<'a> {
-    /// Build the lookup from the campaign's attributed measurements.
-    /// Both `agent → ip` (from active probes) and `agent → agent` (from
-    /// VM-archived rows) flow through the same map.
-    pub fn build(measurements: &'a [AttributedMeasurement]) -> Self {
+    /// Build the lookup from the campaign's attributed measurements and
+    /// the agent roster. The roster powers endpoint resolution so a
+    /// `CandidateIp { ip }` that points at a mesh agent's IP behaves
+    /// identically to `Agent { id }` at the lookup boundary.
+    pub fn build(measurements: &'a [AttributedMeasurement], agents: &[AgentRow]) -> Self {
         let mut forward = HashMap::with_capacity(measurements.len());
         for m in measurements {
             let from = EndpointKey::Agent(m.source_agent_id.clone());
@@ -131,27 +163,54 @@ impl<'a> LegLookup<'a> {
             // by insertion order from the handler's HashMap composition).
             forward.entry((from, to)).or_insert(m);
         }
-        Self { forward }
+        let agent_by_ip = agents.iter().map(|a| (a.ip, a.agent_id.clone())).collect();
+        let ip_by_agent = agents.iter().map(|a| (a.agent_id.clone(), a.ip)).collect();
+        Self {
+            forward,
+            agent_by_ip,
+            ip_by_agent,
+        }
     }
 
-    /// Lookup priority per spec §3.1:
-    /// 1. Real M[u→v] with loss < 1.0 → use, was_substituted = false.
-    /// 2. Real M[v→u] with loss < 1.0 → substitute, was_substituted = true.
-    /// 3. Both directions exist with loss == 1.0 → broken, route discarded.
-    /// 4. Otherwise → missing, route discarded.
+    /// Lookup priority:
+    /// 1. Forward (`from` agent probed `to.ip`) with loss < 1.0 → use,
+    ///    `was_substituted = false`.
+    /// 2. Reverse (`to` agent probed `from.ip`) with loss < 1.0 → use,
+    ///    `was_substituted = true`.
+    /// 3. Both endpoints reach a stored row but every candidate has loss
+    ///    == 1.0 → [`LegLookupResult::Broken`]; route discarded.
+    /// 4. Otherwise → [`LegLookupResult::Missing`]; route discarded.
+    ///
+    /// Forward evidence requires `from` to resolve to a mesh agent (so the
+    /// stored `(Agent(src), Ip(dst))` key can be hit). Reverse evidence
+    /// requires `to` to resolve to a mesh agent. A non-mesh `CandidateIp`
+    /// on either side simply skips that direction without erroring.
     ///
     /// `from`/`to` are the endpoints of the leg we want to construct.
-    ///
-    /// When a reverse measurement is used (rule 2), `was_substituted` is set to `true`.
-    /// The `source` field preserves the underlying measurement's `DirectSource` mapping
-    /// (`ActiveProbe` or `VmContinuous`). Consumers should rely on `was_substituted`
-    /// for substitution detection rather than checking the `source` value.
+    /// When the reverse measurement is used, `was_substituted` is set to
+    /// `true`; the `source` field still records the underlying measurement's
+    /// provenance (`ActiveProbe` or `VmContinuous`). Consumers should rely on
+    /// `was_substituted` for substitution detection rather than checking
+    /// the `source` value.
     pub fn lookup(&self, from: &Endpoint, to: &Endpoint) -> LegLookupResult {
-        let from_key = EndpointKey::from_endpoint(from);
-        let to_key = EndpointKey::from_endpoint(to);
+        let from_r = self.resolve(from);
+        let to_r = self.resolve(to);
 
-        let forward = self.forward.get(&(from_key.clone(), to_key.clone()));
-        let reverse = self.forward.get(&(to_key, from_key));
+        // Forward evidence: `from` (as agent) probed `to.ip`. Requires
+        // `from` to resolve to a mesh agent.
+        let forward = from_r.agent_id.as_ref().and_then(|src_id| {
+            self.forward
+                .get(&(EndpointKey::Agent(src_id.clone()), EndpointKey::Ip(to_r.ip)))
+        });
+
+        // Reverse evidence: `to` (as agent) probed `from.ip`. Requires
+        // `to` to resolve to a mesh agent.
+        let reverse = to_r.agent_id.as_ref().and_then(|src_id| {
+            self.forward.get(&(
+                EndpointKey::Agent(src_id.clone()),
+                EndpointKey::Ip(from_r.ip),
+            ))
+        });
 
         match (forward, reverse) {
             (Some(m), _) if m.loss_ratio < 1.0 => LegLookupResult::Found {
@@ -182,6 +241,26 @@ impl<'a> LegLookup<'a> {
             (Some(_), None) => LegLookupResult::Broken, // forward 100%, reverse missing
             (None, None) => LegLookupResult::Missing,
             (None, Some(_)) => LegLookupResult::Broken, // reverse 100% (covered by guard above)
+        }
+    }
+
+    fn resolve(&self, e: &Endpoint) -> ResolvedEndpoint {
+        match e {
+            Endpoint::Agent { id } => ResolvedEndpoint {
+                agent_id: Some(id.clone()),
+                // Fall back to an unspecified address when the agent is
+                // not in the roster. Such a leg cannot match any stored
+                // measurement and lookup naturally returns Missing.
+                ip: self
+                    .ip_by_agent
+                    .get(id)
+                    .copied()
+                    .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            },
+            Endpoint::CandidateIp { ip } => ResolvedEndpoint {
+                agent_id: self.agent_by_ip.get(ip).cloned(),
+                ip: *ip,
+            },
         }
     }
 }
@@ -226,6 +305,14 @@ mod tests {
         }
     }
 
+    fn agent_row(id: &str, addr: &str) -> AgentRow {
+        AgentRow {
+            agent_id: id.into(),
+            ip: addr.parse().unwrap(),
+            hostname: None,
+        }
+    }
+
     fn measurement(src: &str, dst: &str, loss: f32) -> AttributedMeasurement {
         AttributedMeasurement {
             source_agent_id: src.into(),
@@ -241,7 +328,8 @@ mod tests {
     #[test]
     fn forward_low_loss_is_used_directly() {
         let m = vec![measurement("A", "10.0.0.1", 0.0)];
-        let lookup = LegLookup::build(&m);
+        let agents = [agent_row("A", "10.0.0.99")];
+        let lookup = LegLookup::build(&m, &agents);
         let result = lookup.lookup(&agent("A"), &ip("10.0.0.1"));
         match result {
             LegLookupResult::Found {
@@ -252,16 +340,42 @@ mod tests {
     }
 
     #[test]
-    fn forward_100_loss_reverse_low_substitutes() {
-        // forward A→IP at 100%, reverse not directly applicable (X is not an agent
-        // in this synthetic case). To test substitution we use two agents.
-        let _m = [
-            measurement("A", "10.0.0.2", 1.0), // forward broken
-                                               // build a reverse measurement: from="B" agent, to="A.something"?
-                                               // For the symmetric-substitution case we need both endpoints
-                                               // representable as agent IDs. Substitute the "ip" with another agent's IP.
-        ];
-        // ... (full fixture in integration tests; this unit covers the lookup logic).
+    fn candidate_ip_resolves_to_agent_for_forward_lookup() {
+        // Stored measurement is `meas("a", X.ip)`. The leg request is from
+        // a `CandidateIp(a.ip)` (not the `Agent("a")` form) to `X.ip`.
+        // With roster-aware resolution the CandidateIp resolves back to
+        // agent `a`, hits the forward key, and returns Found.
+        let m = vec![measurement("a", "203.0.113.5", 0.0)];
+        let agents = [agent_row("a", "10.0.0.1")];
+        let lookup = LegLookup::build(&m, &agents);
+        let result = lookup.lookup(&ip("10.0.0.1"), &ip("203.0.113.5"));
+        assert!(
+            matches!(
+                result,
+                LegLookupResult::Found {
+                    was_substituted: false,
+                    ..
+                }
+            ),
+            "CandidateIp(a.ip) → CandidateIp(X) must resolve via forward key"
+        );
+    }
+
+    #[test]
+    fn non_mesh_to_mesh_resolves_via_reverse() {
+        // Non-mesh candidate X (203.0.113.99) to mesh agent B (10.0.0.2).
+        // No measurement from X exists, but B probed X — reverse lookup
+        // must succeed and mark the leg substituted.
+        let m = vec![measurement("b", "203.0.113.99", 0.0)];
+        let agents = [agent_row("b", "10.0.0.2")];
+        let lookup = LegLookup::build(&m, &agents);
+        let result = lookup.lookup(&ip("203.0.113.99"), &ip("10.0.0.2"));
+        match result {
+            LegLookupResult::Found {
+                was_substituted, ..
+            } => assert!(was_substituted, "reverse-resolved leg must be substituted"),
+            _ => panic!("expected Found via reverse"),
+        }
     }
 
     #[test]
@@ -272,7 +386,8 @@ mod tests {
             // requires source_agent_id, so reverse is "B → A.something" — but
             // we test this end-to-end in the integration suite.
         ];
-        let lookup = LegLookup::build(&m);
+        let agents = [agent_row("A", "10.0.0.99")];
+        let lookup = LegLookup::build(&m, &agents);
         let result = lookup.lookup(&agent("A"), &ip("10.0.0.3"));
         // forward is 100%, no reverse → Broken (or Missing per the guard).
         assert!(matches!(result, LegLookupResult::Broken));
@@ -280,7 +395,7 @@ mod tests {
 
     #[test]
     fn neither_direction_returns_missing() {
-        let lookup = LegLookup::build(&[]);
+        let lookup = LegLookup::build(&[], &[]);
         let result = lookup.lookup(&agent("A"), &ip("10.0.0.4"));
         assert!(matches!(result, LegLookupResult::Missing));
     }
