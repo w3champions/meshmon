@@ -92,10 +92,7 @@ async fn diversity_at_max_hops_1_matches_pre_change() {
         "diversity mode: X must qualify when transit beats direct: {x_cand}"
     );
     assert!(
-        x_cand["avg_improvement_ms"]
-            .as_f64()
-            .unwrap_or(0.0)
-            > 0.0,
+        x_cand["avg_improvement_ms"].as_f64().unwrap_or(0.0) > 0.0,
         "diversity mode: avg_improvement_ms must be positive: {x_cand}"
     );
 
@@ -115,8 +112,7 @@ async fn diversity_at_max_hops_1_matches_pre_change() {
     let ab_detail = pair_details
         .iter()
         .find(|pd| {
-            pd["source_agent_id"] == "eval-f2r-a"
-                && pd["destination_agent_id"] == "eval-f2r-b"
+            pd["source_agent_id"] == "eval-f2r-a" && pd["destination_agent_id"] == "eval-f2r-b"
         })
         .unwrap_or_else(|| panic!("(A,B) pair_detail missing: {pair_page}"));
     assert!(
@@ -222,8 +218,7 @@ async fn optimization_max_hops_2_rejects_when_pure_mesh_y_beats_x() {
     let ad_detail = pair_details
         .iter()
         .find(|pd| {
-            pd["source_agent_id"] == "eval-f2r-c"
-                && pd["destination_agent_id"] == "eval-f2r-d"
+            pd["source_agent_id"] == "eval-f2r-c" && pd["destination_agent_id"] == "eval-f2r-d"
         })
         .unwrap_or_else(|| panic!("(A,D) pair_detail missing: {pair_page}"));
     assert!(

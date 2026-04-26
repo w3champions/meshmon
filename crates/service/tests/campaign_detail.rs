@@ -458,13 +458,11 @@ async fn detail_scope_good_candidates_edge_candidate_uses_coverage_count() {
     }
 
     // Promote the campaign state to `evaluated` so /detail's state gate passes.
-    sqlx::query(
-        "UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1",
-    )
-    .bind(campaign_uuid)
-    .execute(&h.state.pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(campaign_uuid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
 
     let res: Value = h
         .post_json(

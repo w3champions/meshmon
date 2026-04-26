@@ -143,7 +143,10 @@ fn edge_candidate_with_single_source_evaluates_only_direct_routes() {
         .iter()
         .find(|c| c.candidate_ip == candidate_arb)
         .expect("arbitrary candidate present");
-    assert_eq!(arb_row.destinations_total, 2, "two agents reachable in theory");
+    assert_eq!(
+        arb_row.destinations_total, 2,
+        "two agents reachable in theory"
+    );
     assert!(!arb_row.is_mesh_member);
     for pair in &arb_row.pair_details {
         assert!(

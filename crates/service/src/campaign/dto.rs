@@ -994,8 +994,7 @@ impl EdgePairCursor {
     /// Encode to the opaque `cursor` string.
     pub fn encode(&self) -> String {
         use base64::Engine as _;
-        let json =
-            serde_json::to_vec(self).expect("EdgePairCursor JSON serialization is total");
+        let json = serde_json::to_vec(self).expect("EdgePairCursor JSON serialization is total");
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
     }
 
@@ -1004,8 +1003,8 @@ impl EdgePairCursor {
         raw: &str,
         expected: EdgePairSortCol,
     ) -> Result<Self, crate::campaign::cursor::CursorError> {
-        use base64::Engine as _;
         use crate::campaign::cursor::CursorError;
+        use base64::Engine as _;
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(raw)
             .map_err(|e| CursorError::Decode(format!("base64: {e}")))?;

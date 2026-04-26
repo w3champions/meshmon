@@ -30,9 +30,11 @@ use super::dto::{
     EvaluationCandidateDto, EvaluationDto, EvaluationEdgePairDetailDto, EvaluationPairDetailDto,
     EvaluationPairDetailQuery, EvaluationResultsDto, LegDto, PairDetailSortCol, PairDetailSortDir,
 };
-use super::eval::{EdgeCandidateOutputs, EvaluationOutputs, TripleEvaluationOutputs};
 use super::eval::legs::LegMeasurement;
-use super::model::{CampaignState, DirectSource, EdgeRouteKind, Endpoint, EndpointKind, EvaluationMode};
+use super::eval::{EdgeCandidateOutputs, EvaluationOutputs, TripleEvaluationOutputs};
+use super::model::{
+    CampaignState, DirectSource, EdgeRouteKind, Endpoint, EndpointKind, EvaluationMode,
+};
 use super::repo::RepoError;
 use sqlx::types::ipnetwork::IpNetwork;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -1310,7 +1312,8 @@ pub async fn good_candidates_for_edge_campaign(
     .fetch_all(pool)
     .await?;
 
-    let mut pairs: Vec<(String, IpAddr)> = Vec::with_capacity(source_agent_ids.len() * candidate_ips.len());
+    let mut pairs: Vec<(String, IpAddr)> =
+        Vec::with_capacity(source_agent_ids.len() * candidate_ips.len());
     for src in &source_agent_ids {
         for cand in &candidate_ips {
             pairs.push((src.clone(), cand.ip()));
@@ -1458,14 +1461,30 @@ pub async fn latest_evaluation_edge_pairs(
         AND ($3::bool IS NULL OR ep.qualifies_under_t = $3) \
         AND ($4::bool IS NULL OR (NOT $4 OR ep.is_unreachable = false))";
 
+    // Sort column referenced by the cursor predicate. For `candidate_ip`
+    // (an `inet` column) we use `host(...)` so the comparison against
+    // the cursor's text-encoded value matches what the cursor stores
+    // (the bare `IpAddr.to_string()`, with no `/32` suffix). Postgres
+    // has no native `inet > text` operator, and a naive `inet::text`
+    // cast emits `'10.64.8.1/32'` for an IPv4 host and breaks `>`/`=`
+    // ordering against the cursor's bare-IP form. The ORDER BY can
+    // still use the native inet column directly since inet ordering is
+    // canonical.
+    let cursor_col_expr: String = match query.sort {
+        EdgePairSortCol::CandidateIp => "host(ep.candidate_ip)".to_string(),
+        _ => format!("ep.{sort_col}"),
+    };
+
     // Cursor predicate uses parameters $5 / $6 / $7.
     // The tiebreak walks forward through (candidate_ip, destination_agent_id).
+    // Tiebreak comparisons against `candidate_ip` use `host(...)` for the
+    // same reason as `cursor_col_expr` above.
     let cursor_predicate = if query.cursor.is_some() {
         format!(
-            "AND ( ep.{col} {cmp} $5 \
-                OR (ep.{col} = $5 AND ep.candidate_ip::text > $6) \
-                OR (ep.{col} = $5 AND ep.candidate_ip::text = $6 AND ep.destination_agent_id > $7) )",
-            col = sort_col,
+            "AND ( {col_expr} {cmp} $5 \
+                OR ({col_expr} = $5 AND host(ep.candidate_ip) > $6) \
+                OR ({col_expr} = $5 AND host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) )",
+            col_expr = cursor_col_expr,
             cmp = leading_cmp,
         )
     } else {
@@ -1542,9 +1561,7 @@ pub async fn latest_evaluation_edge_pairs(
         EdgePairSortCol::BestRouteKind
         | EdgePairSortCol::CandidateIp
         | EdgePairSortCol::DestinationAgentId => q.bind(cursor_text.clone()),
-        EdgePairSortCol::QualifiesUnderT | EdgePairSortCol::IsUnreachable => {
-            q.bind(cursor_bool)
-        }
+        EdgePairSortCol::QualifiesUnderT | EdgePairSortCol::IsUnreachable => q.bind(cursor_bool),
         EdgePairSortCol::BestRouteMs
         | EdgePairSortCol::BestRouteLossRatio
         | EdgePairSortCol::BestRouteStddevMs => q.bind(cursor_f64),
@@ -1595,8 +1612,10 @@ pub async fn latest_evaluation_edge_pairs(
             serde_json::from_value(legs_jsonb).map_err(|e| {
                 sqlx::Error::Protocol(format!("failed to deserialize best_route_legs: {e}"))
             })?;
-        let best_route_legs: Vec<LegDto> =
-            leg_measurements.into_iter().map(leg_measurement_to_dto).collect();
+        let best_route_legs: Vec<LegDto> = leg_measurements
+            .into_iter()
+            .map(leg_measurement_to_dto)
+            .collect();
 
         entries.push(EvaluationEdgePairDetailDto {
             candidate_ip: cand_ip.ip().to_string(),
@@ -1639,12 +1658,10 @@ pub async fn latest_evaluation_edge_pairs(
             EdgePairSortCol::BestRouteLossRatio => {
                 SortValue::F64(last.best_route_loss_ratio as f64)
             }
-            EdgePairSortCol::BestRouteStddevMs => {
-                SortValue::F64(last.best_route_stddev_ms as f64)
+            EdgePairSortCol::BestRouteStddevMs => SortValue::F64(last.best_route_stddev_ms as f64),
+            EdgePairSortCol::BestRouteKind => {
+                SortValue::String(edge_route_kind_to_text(last.best_route_kind).to_string())
             }
-            EdgePairSortCol::BestRouteKind => SortValue::String(
-                edge_route_kind_to_text(last.best_route_kind).to_string(),
-            ),
             EdgePairSortCol::QualifiesUnderT => SortValue::Bool(last.qualifies_under_t),
             EdgePairSortCol::IsUnreachable => SortValue::Bool(last.is_unreachable),
             EdgePairSortCol::CandidateIp => SortValue::String(last.candidate_ip.clone()),

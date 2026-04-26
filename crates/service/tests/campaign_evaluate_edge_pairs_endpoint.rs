@@ -113,12 +113,7 @@ struct EdgePairSeed {
 }
 
 impl EdgePairSeed {
-    fn simple(
-        candidate_ip: IpAddr,
-        dest: &str,
-        rtt_ms: f32,
-        qualifies: bool,
-    ) -> Self {
+    fn simple(candidate_ip: IpAddr, dest: &str, rtt_ms: f32, qualifies: bool) -> Self {
         Self {
             candidate_ip,
             destination_agent_id: dest.to_string(),
@@ -134,11 +129,7 @@ impl EdgePairSeed {
 
 /// Seed one `campaign_evaluation_edge_pair_details` row.
 /// The `best_route_legs` JSONB column uses an empty JSON array `[]`.
-async fn seed_edge_pair_row(
-    pool: &sqlx::PgPool,
-    evaluation_id: Uuid,
-    seed: &EdgePairSeed,
-) {
+async fn seed_edge_pair_row(pool: &sqlx::PgPool, evaluation_id: Uuid, seed: &EdgePairSeed) {
     let ip_net = sqlx::types::ipnetwork::IpNetwork::from(seed.candidate_ip);
     sqlx::query(
         r#"INSERT INTO campaign_evaluation_edge_pair_details
@@ -183,8 +174,17 @@ async fn default_sort_returns_asc_best_route_ms() {
     let cand: IpAddr = "10.64.1.1".parse().unwrap();
     seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
 
-    for (dest, rtt) in [("t56ep-dest-a", 50.0_f32), ("t56ep-dest-b", 30.0), ("t56ep-dest-c", 80.0)] {
-        seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand, dest, rtt, true)).await;
+    for (dest, rtt) in [
+        ("t56ep-dest-a", 50.0_f32),
+        ("t56ep-dest-b", 30.0),
+        ("t56ep-dest-c", 80.0),
+    ] {
+        seed_edge_pair_row(
+            &h.state.pool,
+            eval_id,
+            &EdgePairSeed::simple(cand, dest, rtt, true),
+        )
+        .await;
     }
 
     // Mark campaign evaluated so the endpoint sees a valid state.
@@ -195,16 +195,24 @@ async fn default_sort_returns_asc_best_route_ms() {
         .unwrap();
 
     let body: Value = h
-        .get_json(&format!("/api/campaigns/{cid}/evaluation/edge_pairs?limit=10"))
+        .get_json(&format!(
+            "/api/campaigns/{cid}/evaluation/edge_pairs?limit=10"
+        ))
         .await;
     assert_eq!(body["total"], 3, "body = {body}");
     let entries = body["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     // Default direction is asc; RTTs must be non-decreasing.
-    let rtts: Vec<f64> = entries.iter().map(|e| e["best_route_ms"].as_f64().unwrap()).collect();
+    let rtts: Vec<f64> = entries
+        .iter()
+        .map(|e| e["best_route_ms"].as_f64().unwrap())
+        .collect();
     let mut sorted = rtts.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    assert_eq!(rtts, sorted, "entries must be in ascending best_route_ms order");
+    assert_eq!(
+        rtts, sorted,
+        "entries must be in ascending best_route_ms order"
+    );
 }
 
 #[tokio::test]
@@ -221,7 +229,10 @@ async fn sort_by_each_column_returns_200() {
     seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
 
     // Seed a few rows with distinct values for every sort column.
-    for (i, dest) in ["ep2-dest-a", "ep2-dest-b", "ep2-dest-c"].iter().enumerate() {
+    for (i, dest) in ["ep2-dest-a", "ep2-dest-b", "ep2-dest-c"]
+        .iter()
+        .enumerate()
+    {
         let rtt = (i as f32 + 1.0) * 10.0;
         seed_edge_pair_row(
             &h.state.pool,
@@ -232,7 +243,13 @@ async fn sort_by_each_column_returns_200() {
                 best_route_ms: rtt,
                 best_route_loss_ratio: i as f32 * 0.1,
                 best_route_stddev_ms: i as f32 * 2.0,
-                best_route_kind: if i == 0 { "direct" } else if i == 1 { "1hop" } else { "2hop" },
+                best_route_kind: if i == 0 {
+                    "direct"
+                } else if i == 1 {
+                    "1hop"
+                } else {
+                    "2hop"
+                },
                 qualifies_under_t: i % 2 == 0,
                 is_unreachable: false,
             },
@@ -282,9 +299,24 @@ async fn filter_candidate_ip_narrows_results() {
     seed_edge_candidate(&h.state.pool, eval_id, cand1, 1).await;
     seed_edge_candidate(&h.state.pool, eval_id, cand2, 1).await;
 
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand1, "ep3-dest-a", 20.0, true)).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand1, "ep3-dest-b", 25.0, true)).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand2, "ep3-dest-a", 30.0, false)).await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand1, "ep3-dest-a", 20.0, true),
+    )
+    .await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand1, "ep3-dest-b", 25.0, true),
+    )
+    .await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand2, "ep3-dest-a", 30.0, false),
+    )
+    .await;
 
     sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
         .bind(cid)
@@ -293,7 +325,9 @@ async fn filter_candidate_ip_narrows_results() {
         .unwrap();
 
     let unfiltered: Value = h
-        .get_json(&format!("/api/campaigns/{cid}/evaluation/edge_pairs?limit=10"))
+        .get_json(&format!(
+            "/api/campaigns/{cid}/evaluation/edge_pairs?limit=10"
+        ))
         .await;
     assert_eq!(unfiltered["total"], 3);
 
@@ -302,7 +336,10 @@ async fn filter_candidate_ip_narrows_results() {
             "/api/campaigns/{cid}/evaluation/edge_pairs?limit=10&candidate_ip={cand1}"
         ))
         .await;
-    assert_eq!(filtered["total"], 2, "candidate_ip filter; body = {filtered}");
+    assert_eq!(
+        filtered["total"], 2,
+        "candidate_ip filter; body = {filtered}"
+    );
     for e in filtered["entries"].as_array().unwrap() {
         assert_eq!(e["candidate_ip"].as_str().unwrap(), cand1.to_string());
     }
@@ -312,14 +349,30 @@ async fn filter_candidate_ip_narrows_results() {
 async fn filter_qualifies_only_true() {
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t56ep-4").await;
-    let cid = create_edge_candidate_campaign(&h, "ep-qualifies-filter", "t56ep-4", "10.64.4.1").await;
+    let cid =
+        create_edge_candidate_campaign(&h, "ep-qualifies-filter", "t56ep-4", "10.64.4.1").await;
     let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
 
     let cand: IpAddr = "10.64.4.1".parse().unwrap();
     seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand, "ep4-dest-a", 10.0, true)).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand, "ep4-dest-b", 20.0, false)).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand, "ep4-dest-c", 30.0, true)).await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand, "ep4-dest-a", 10.0, true),
+    )
+    .await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand, "ep4-dest-b", 20.0, false),
+    )
+    .await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand, "ep4-dest-c", 30.0, true),
+    )
+    .await;
 
     sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
         .bind(cid)
@@ -332,7 +385,10 @@ async fn filter_qualifies_only_true() {
             "/api/campaigns/{cid}/evaluation/edge_pairs?limit=10&qualifies_only=true"
         ))
         .await;
-    assert_eq!(filtered["total"], 2, "qualifies_only=true narrows; body = {filtered}");
+    assert_eq!(
+        filtered["total"], 2,
+        "qualifies_only=true narrows; body = {filtered}"
+    );
     for e in filtered["entries"].as_array().unwrap() {
         assert_eq!(e["qualifies_under_t"], true);
     }
@@ -342,12 +398,18 @@ async fn filter_qualifies_only_true() {
 async fn filter_reachable_only_true() {
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t56ep-5").await;
-    let cid = create_edge_candidate_campaign(&h, "ep-reachable-filter", "t56ep-5", "10.64.5.1").await;
+    let cid =
+        create_edge_candidate_campaign(&h, "ep-reachable-filter", "t56ep-5", "10.64.5.1").await;
     let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
 
     let cand: IpAddr = "10.64.5.1".parse().unwrap();
     seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand, "ep5-dest-a", 10.0, true)).await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand, "ep5-dest-a", 10.0, true),
+    )
+    .await;
     // Unreachable row.
     seed_edge_pair_row(
         &h.state.pool,
@@ -376,7 +438,10 @@ async fn filter_reachable_only_true() {
             "/api/campaigns/{cid}/evaluation/edge_pairs?limit=10&reachable_only=true"
         ))
         .await;
-    assert_eq!(filtered["total"], 1, "reachable_only=true narrows; body = {filtered}");
+    assert_eq!(
+        filtered["total"], 1,
+        "reachable_only=true narrows; body = {filtered}"
+    );
     assert_eq!(filtered["entries"][0]["is_unreachable"], false);
 }
 
@@ -419,7 +484,10 @@ async fn pagination_cursor_round_trip() {
             }
         };
         let body: Value = h.get_json(&url).await;
-        assert_eq!(body["total"], 10, "total stays 10 across pages; body = {body}");
+        assert_eq!(
+            body["total"], 10,
+            "total stays 10 across pages; body = {body}"
+        );
         let entries = body["entries"].as_array().unwrap();
         for e in entries {
             let rtt = e["best_route_ms"].as_f64().unwrap();
@@ -438,6 +506,68 @@ async fn pagination_cursor_round_trip() {
     seen_dests.sort();
     seen_dests.dedup();
     assert_eq!(seen_dests.len(), 10, "every row visited exactly once");
+}
+
+#[tokio::test]
+async fn pagination_cursor_round_trip_sort_candidate_ip() {
+    // Regression for an `inet`-vs-text mismatch in the cursor predicate.
+    // `candidate_ip` is an `inet` column; the cursor's tiebreak value is a
+    // bare-IP string. The predicate must compare them via `host(...)`
+    // rather than `::text` (which appends `/32` for IPv4 hosts and
+    // breaks `>`/`=` comparisons against the cursor) — and Postgres has
+    // no native `inet > text` operator at all, so paging by
+    // `sort=candidate_ip` would otherwise error at runtime past page 1.
+    let h = common::HttpHarness::start().await;
+    common::insert_agent(&h.state.pool, "t56ep-9").await;
+    let cid = create_edge_candidate_campaign(&h, "ep-cand-ip-sort", "t56ep-9", "10.64.9.10").await;
+    let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
+
+    // Three distinct candidate IPs, each with one row, so paging by
+    // `candidate_ip` must visit each row exactly once.
+    let cands: [IpAddr; 3] = [
+        "10.64.9.10".parse().unwrap(),
+        "10.64.9.20".parse().unwrap(),
+        "10.64.9.30".parse().unwrap(),
+    ];
+    for (i, ip) in cands.iter().enumerate() {
+        seed_edge_candidate(&h.state.pool, eval_id, *ip, (i as i32) + 1).await;
+        seed_edge_pair_row(
+            &h.state.pool,
+            eval_id,
+            &EdgePairSeed::simple(*ip, &format!("ep9-dest-{i}"), 10.0, true),
+        )
+        .await;
+    }
+
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(cid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _page in 0..4 {
+        let url = match &cursor {
+            None => format!("/api/campaigns/{cid}/evaluation/edge_pairs?limit=1&sort=candidate_ip"),
+            Some(c) => format!(
+                "/api/campaigns/{cid}/evaluation/edge_pairs?limit=1&sort=candidate_ip&cursor={c}"
+            ),
+        };
+        let body: Value = h.get_json(&url).await;
+        assert_eq!(body["total"], 3, "total stays 3; body = {body}");
+        for e in body["entries"].as_array().unwrap() {
+            seen.push(e["candidate_ip"].as_str().unwrap().to_string());
+        }
+        cursor = body["next_cursor"].as_str().map(String::from);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 3, "every row visited exactly once: {seen:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -467,7 +597,10 @@ async fn invalid_candidate_ip_returns_400() {
             "/api/campaigns/{unknown_id}/evaluation/edge_pairs?candidate_ip=not-an-ip"
         ))
         .await;
-    assert_eq!(status, 400, "invalid candidate_ip should be 400; body={body}");
+    assert_eq!(
+        status, 400,
+        "invalid candidate_ip should be 400; body={body}"
+    );
     assert!(body.contains("invalid_candidate_ip"), "body={body}");
 }
 
@@ -488,14 +621,10 @@ async fn campaign_not_found_returns_404() {
 async fn campaign_never_evaluated_returns_404() {
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t56ep-9").await;
-    let cid =
-        create_edge_candidate_campaign(&h, "ep-no-eval", "t56ep-9", "10.64.9.1").await;
+    let cid = create_edge_candidate_campaign(&h, "ep-no-eval", "t56ep-9", "10.64.9.1").await;
     // No evaluation row inserted — campaign exists but was never evaluated.
     let body = h
-        .get_expect_status(
-            &format!("/api/campaigns/{cid}/evaluation/edge_pairs"),
-            404,
-        )
+        .get_expect_status(&format!("/api/campaigns/{cid}/evaluation/edge_pairs"), 404)
         .await;
     assert_eq!(body["error"], "not_evaluated", "body = {body}");
 }
@@ -525,10 +654,7 @@ async fn wrong_mode_returns_404() {
     common::seed_evaluation_row(&h.state.pool, cid).await;
 
     let body = h
-        .get_expect_status(
-            &format!("/api/campaigns/{cid}/evaluation/edge_pairs"),
-            404,
-        )
+        .get_expect_status(&format!("/api/campaigns/{cid}/evaluation/edge_pairs"), 404)
         .await;
     assert_eq!(body["error"], "wrong_mode", "body = {body}");
 }
@@ -539,7 +665,8 @@ async fn cursor_mismatch_sort_returns_400() {
     // resend it with a different sort=destination_agent_id → 400 invalid_cursor.
     let h = common::HttpHarness::start().await;
     common::insert_agent(&h.state.pool, "t56ep-7").await;
-    let cid = create_edge_candidate_campaign(&h, "ep-cursor-mismatch", "t56ep-7", "10.64.7.1").await;
+    let cid =
+        create_edge_candidate_campaign(&h, "ep-cursor-mismatch", "t56ep-7", "10.64.7.1").await;
     let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
 
     let cand: IpAddr = "10.64.7.1".parse().unwrap();
@@ -565,7 +692,10 @@ async fn cursor_mismatch_sort_returns_400() {
             "/api/campaigns/{cid}/evaluation/edge_pairs?limit=2"
         ))
         .await;
-    let cursor = body["next_cursor"].as_str().expect("page 1 has cursor").to_string();
+    let cursor = body["next_cursor"]
+        .as_str()
+        .expect("page 1 has cursor")
+        .to_string();
 
     // Resend with mismatched sort.
     let (status, body) = h
@@ -586,7 +716,12 @@ async fn garbage_cursor_returns_400() {
     let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
     let cand: IpAddr = "10.64.8.1".parse().unwrap();
     seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
-    seed_edge_pair_row(&h.state.pool, eval_id, &EdgePairSeed::simple(cand, "ep8-dest-a", 10.0, true)).await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand, "ep8-dest-a", 10.0, true),
+    )
+    .await;
     sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
         .bind(cid)
         .execute(&h.state.pool)
