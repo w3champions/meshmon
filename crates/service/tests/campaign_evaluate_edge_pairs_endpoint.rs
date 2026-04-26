@@ -23,6 +23,7 @@
 //! | `campaign_never_evaluated_returns_404`            | `10.64.9.1`           | not_evaluated                                                 |
 //! | `wrong_mode_returns_404`                          | `10.64.10.1`          | Triple-mode evaluation → wrong_mode                           |
 //! | `pagination_cursor_round_trip_sort_candidate_ip_inet_ordering` | `10.64.11.{2,10,99}` | inet vs lex ordering regression               |
+//! | `pagination_cursor_round_trip_non_default_sorts_arity` | `10.64.12.1`         | $9 cursor-arity regression on non-default sorts                |
 
 mod common;
 
@@ -801,6 +802,87 @@ async fn pagination_cursor_round_trip_sort_candidate_ip_inet_ordering() {
         ],
         "page walk must follow inet ordering, not lexicographic"
     );
+}
+
+/// Regression for an `$9` cursor-arity mismatch. The `best_route_ms`
+/// NULL-aware cursor predicate references `$9::bool` (the cursor's
+/// "previous-tail-was-NULL" flag), and the bind chain unconditionally
+/// binds nine parameters. Every non-`best_route_ms` cursor branch must
+/// also reference `$9` so the predicate's parameter arity stays matched
+/// to the bind set; otherwise PostgreSQL deployments that strictly
+/// enforce bind/parse arity reject the statement on page 2+ for these
+/// sort columns. Walks page 1 → page 2 for each non-default sort to
+/// drive the cursor branch on every cast variant (`$5::text`,
+/// `$5::bool`, `$5::float8`).
+#[tokio::test]
+async fn pagination_cursor_round_trip_non_default_sorts_arity() {
+    let h = common::HttpHarness::start().await;
+    common::insert_agent(&h.state.pool, "t56ep-12").await;
+    let cid =
+        create_edge_candidate_campaign(&h, "ep-cursor-arity", "t56ep-12", "10.64.12.1").await;
+    let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
+
+    let cand: IpAddr = "10.64.12.1".parse().unwrap();
+    seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
+    // Three rows so a `limit=1` walk forces page 2 to engage the
+    // cursor predicate. `EdgePairSeed::simple` always sets
+    // `qualifies_under_t = true`; vary the `best_route_ms` field so
+    // float-cast cursors (`best_route_loss_ratio`,
+    // `best_route_stddev_ms`, `best_route_ms`) traverse distinct values.
+    for i in 0..3 {
+        let dest = format!("ep12-dest-{i:04}");
+        seed_edge_pair_row(
+            &h.state.pool,
+            eval_id,
+            &EdgePairSeed::simple(cand, &dest, (i as f32) * 5.0 + 5.0, true),
+        )
+        .await;
+    }
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(cid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    // Each sort here exercises a distinct `$5` cast type:
+    //   destination_agent_id → text
+    //   best_route_kind      → text
+    //   qualifies_under_t    → bool
+    //   is_unreachable       → bool
+    //   best_route_loss_ratio → float8
+    //   best_route_stddev_ms → float8
+    let sorts = [
+        "destination_agent_id",
+        "best_route_kind",
+        "qualifies_under_t",
+        "is_unreachable",
+        "best_route_loss_ratio",
+        "best_route_stddev_ms",
+    ];
+    for sort in &sorts {
+        let page1: Value = h
+            .get_json(&format!(
+                "/api/campaigns/{cid}/evaluation/edge_pairs?limit=1&sort={sort}"
+            ))
+            .await;
+        assert_eq!(page1["total"], 3, "sort={sort} page 1 total; body={page1}");
+        let cursor = page1["next_cursor"]
+            .as_str()
+            .unwrap_or_else(|| panic!("sort={sort} page 1 must yield cursor: {page1}"))
+            .to_string();
+        // Page 2 must succeed (no 500). The cursor predicate references
+        // `$5..$7` for the leading comparison and `$9` (inert) so the
+        // bind chain's `$9` slot stays matched.
+        let (status, body) = h
+            .get(&format!(
+                "/api/campaigns/{cid}/evaluation/edge_pairs?limit=1&sort={sort}&cursor={cursor}"
+            ))
+            .await;
+        assert_eq!(
+            status, 200,
+            "sort={sort} page 2 must return 200 (cursor arity); body={body}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

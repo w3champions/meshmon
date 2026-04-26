@@ -1579,10 +1579,17 @@ pub async fn latest_evaluation_edge_pairs(
                 ip_tb = cand_ip_tiebreak,
             )
         } else {
+            // The `$9` reference is inert (`$9 IS NOT DISTINCT FROM $9` is
+            // always TRUE) but keeps the predicate's parameter arity
+            // matched to the `$9` bind below, mirroring the no-cursor and
+            // BestRouteMs branches. Without it, PostgreSQL deployments
+            // that strictly enforce bind/parse arity would reject the
+            // statement on page 2+ for these sort columns.
             format!(
                 "AND ( {col_expr} {cmp} $5 \
                     OR ({col_expr} = $5 AND ep.candidate_ip > {ip_tb}) \
-                    OR ({col_expr} = $5 AND ep.candidate_ip = {ip_tb} AND ep.destination_agent_id > $7) )",
+                    OR ({col_expr} = $5 AND ep.candidate_ip = {ip_tb} AND ep.destination_agent_id > $7) ) \
+                  AND $9::bool IS NOT DISTINCT FROM $9::bool",
                 col_expr = cursor_col_expr,
                 cmp = leading_cmp,
                 ip_tb = cand_ip_tiebreak,
