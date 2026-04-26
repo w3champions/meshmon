@@ -1253,9 +1253,8 @@ async fn evaluation_omits_composite_score_for_edge_candidate() {
     .await
     .expect("insert campaign_evaluations row");
 
-    let ip_net = sqlx::types::ipnetwork::IpNetwork::from(
-        "10.98.0.1".parse::<std::net::IpAddr>().unwrap(),
-    );
+    let ip_net =
+        sqlx::types::ipnetwork::IpNetwork::from("10.98.0.1".parse::<std::net::IpAddr>().unwrap());
     sqlx::query(
         r#"INSERT INTO campaign_evaluation_candidates
                (evaluation_id, destination_ip, is_mesh_member,
@@ -1280,7 +1279,11 @@ async fn evaluation_omits_composite_score_for_edge_candidate() {
     let candidates = eval["results"]["candidates"]
         .as_array()
         .unwrap_or_else(|| panic!("candidates missing: {eval}"));
-    assert_eq!(candidates.len(), 1, "expected exactly one candidate: {eval}");
+    assert_eq!(
+        candidates.len(),
+        1,
+        "expected exactly one candidate: {eval}"
+    );
     let cand = &candidates[0];
 
     // The DTO's `serde(skip_serializing_if = "Option::is_none")` drops the
