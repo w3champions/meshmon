@@ -25,12 +25,16 @@ class NoopEventSource {
 // Module mocks
 // ---------------------------------------------------------------------------
 
+// `useSearch` is overridable per-test via `mockSearch` so individual
+// cases can drive the sort state without going through the real router.
+let mockSearch: Record<string, unknown> = {};
+
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...actual,
     useNavigate: () => vi.fn(),
-    useSearch: () => ({}),
+    useSearch: () => mockSearch,
   };
 });
 
@@ -203,6 +207,7 @@ function renderHeatmap(
 beforeEach(() => {
   vi.stubGlobal("EventSource", NoopEventSource);
   localStorage.clear();
+  mockSearch = {};
 });
 
 afterEach(() => {
@@ -210,6 +215,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   localStorage.clear();
+  mockSearch = {};
 });
 
 // ---------------------------------------------------------------------------
@@ -459,6 +465,88 @@ describe("O3: Sort + cell click", () => {
     // Sanity: the naive frontend mean-over-reachable-rows would have ranked
     // 10.0.0.2 first (mean = 60) over 10.0.0.1 (mean = (10+250+250)/3 ≈ 170),
     // i.e. the opposite order. The fix must use the backend value (30 vs 60).
+  });
+
+  test("coverage_count column sort matches backend metric, not naive reachability", async () => {
+    // Fixture: candidate A is reachable from BOTH agents (so a naive
+    // "non-unreachable" frontend recompute would put coverage=2), but
+    // only ONE row qualifies under T (so the backend's coverage_count
+    // is 1). Candidate B has the inverse shape — only one reachable
+    // row but the backend persists `coverage_count=2` in the candidate
+    // aggregate. The backend's `coverage_count` (qualifies_under_t==true)
+    // therefore ranks B above A; a naive reachable-row recompute would
+    // invert that ranking. The heatmap column order must mirror the
+    // backend metric so it agrees with CandidatesTab and CompareTab.
+    const rows: EvaluationEdgePairDetailDto[] = [
+      // A: 2 reachable, 1 qualifying.
+      { ...makeEdgePairRow("10.0.0.1", "agent-a", 30, false), qualifies_under_t: true },
+      { ...makeEdgePairRow("10.0.0.1", "agent-b", 250, false), qualifies_under_t: false },
+      // B: 1 reachable cell, but the backend aggregate carries
+      // `coverage_count=2` (the second cell is unreachable in this
+      // fixture only to keep the naive recompute small).
+      { ...makeEdgePairRow("10.0.0.2", "agent-a", 60, false), qualifies_under_t: true },
+      { ...makeEdgePairRow("10.0.0.2", "agent-b", 0, true), qualifies_under_t: false },
+    ];
+    // Drive the sort directly via the search-param mock — the
+    // navigate path is mocked to a no-op so a click handler can't
+    // change the rendered order.
+    mockSearch = { hm_col_sort: "coverage_count", hm_col_dir: "desc" };
+    renderHeatmap(rows, {
+      results: {
+        candidates: [
+          {
+            destination_ip: "10.0.0.1",
+            display_name: "cand-a",
+            city: null,
+            country_code: null,
+            asn: null,
+            network_operator: null,
+            hostname: null,
+            is_mesh_member: false,
+            pairs_improved: 0,
+            pairs_total_considered: 2,
+            avg_improvement_ms: null,
+            avg_loss_ratio: 0,
+            composite_score: null,
+            // Naive frontend reachable-row count would put A at 2, but
+            // only 1 row qualifies under T — backend coverage_count = 1.
+            coverage_count: 1,
+            coverage_weighted_ping_ms: null,
+          },
+          {
+            destination_ip: "10.0.0.2",
+            display_name: "cand-b",
+            city: null,
+            country_code: null,
+            asn: null,
+            network_operator: null,
+            hostname: null,
+            is_mesh_member: false,
+            pairs_improved: 0,
+            pairs_total_considered: 2,
+            avg_improvement_ms: null,
+            avg_loss_ratio: 0,
+            composite_score: null,
+            // Backend coverage_count = 2; naive reachable count would be 1.
+            coverage_count: 2,
+            coverage_weighted_ping_ms: null,
+          },
+        ],
+        unqualified_reasons: {},
+      } as Evaluation["results"],
+    });
+
+    const headers = screen
+      .getAllByTestId(/^heatmap-col-header-/)
+      .map((el) => el.getAttribute("data-testid"));
+    const idxA = headers.indexOf("heatmap-col-header-10.0.0.1");
+    const idxB = headers.indexOf("heatmap-col-header-10.0.0.2");
+    expect(idxA).toBeGreaterThanOrEqual(0);
+    expect(idxB).toBeGreaterThanOrEqual(0);
+    // Backend coverage_count: B=2 wins over A=1 (DESC). Naive
+    // reachable count would have ranked A=2 over B=1, i.e. opposite
+    // order — that is the regression this test guards.
+    expect(idxB).toBeLessThan(idxA);
   });
 
   test("cell click opens drilldown dialog via DrilldownDialog", async () => {
