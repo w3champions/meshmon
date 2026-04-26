@@ -83,6 +83,67 @@ fn repo_error(context: &'static str, err: RepoError) -> Response {
     }
 }
 
+/// Validate the knobs that are new in T56: `useful_latency_ms`,
+/// `max_hops`, and `vm_lookback_minutes`.
+///
+/// Rules:
+/// - `edge_candidate` mode requires `useful_latency_ms` to be `Some` and
+///   positive. For other modes a supplied value must still be positive.
+/// - `max_hops` must be in `[0, 2]`. A value of `0` is only valid for
+///   `edge_candidate` mode.
+/// - `vm_lookback_minutes` must be in `[1, 1440]`.
+fn validate_create_or_patch_knobs(
+    mode: super::model::EvaluationMode,
+    useful_latency_ms: Option<f32>,
+    max_hops: Option<i16>,
+    vm_lookback_minutes: Option<i32>,
+) -> Result<(), (StatusCode, Json<ErrorEnvelope>)> {
+    use super::model::EvaluationMode;
+
+    // useful_latency_ms: required + positive for edge_candidate; positive
+    // if supplied for any other mode.
+    if mode == EvaluationMode::EdgeCandidate {
+        match useful_latency_ms {
+            None => return Err(error_400("useful_latency_required")),
+            Some(v) if v <= 0.0 => return Err(error_400("useful_latency_invalid")),
+            _ => {}
+        }
+    } else if let Some(v) = useful_latency_ms {
+        if v <= 0.0 {
+            return Err(error_400("useful_latency_invalid"));
+        }
+    }
+
+    // max_hops: must be in [0, 2]; 0 only allowed for edge_candidate.
+    if let Some(h) = max_hops {
+        if !(0..=2).contains(&h) {
+            return Err(error_400("max_hops_out_of_range"));
+        }
+        if h == 0 && mode != EvaluationMode::EdgeCandidate {
+            return Err(error_400("max_hops_invalid_for_mode"));
+        }
+    }
+
+    // vm_lookback_minutes: must be in [1, 1440].
+    if let Some(m) = vm_lookback_minutes {
+        if !(1..=1440).contains(&m) {
+            return Err(error_400("vm_lookback_out_of_range"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a 400 Bad Request JSON response with a stable `error` code.
+fn error_400(code: &'static str) -> (StatusCode, Json<ErrorEnvelope>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorEnvelope {
+            error: code.into(),
+        }),
+    )
+}
+
 /// `POST /api/campaigns` — create a new campaign in `draft`.
 ///
 /// Rejects blank titles and malformed destination IP strings up front
@@ -133,6 +194,20 @@ pub async fn create(
                 .into_response();
         }
     };
+
+    // Resolve the effective mode (default: Optimization) and validate the
+    // T56 knobs before touching the database.
+    let mode = body
+        .evaluation_mode
+        .unwrap_or(super::model::EvaluationMode::Optimization);
+    if let Err(e) = validate_create_or_patch_knobs(
+        mode,
+        body.useful_latency_ms,
+        body.max_hops,
+        body.vm_lookback_minutes,
+    ) {
+        return e.into_response();
+    }
 
     let input = CreateInput {
         title: body.title,
@@ -294,7 +369,51 @@ pub async fn patch(
                 .into_response();
         }
     }
-    match repo::patch(
+
+    // Fetch the existing row to resolve the effective mode for PATCH
+    // (since evaluation_mode is optional and defaults to the stored value)
+    // and to compare knob values for the dismissal check below.
+    let existing = match repo::get(&state.pool, id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+        }
+        Err(e) => return repo_error("campaign::patch::prefetch", e),
+    };
+
+    // Resolve effective mode: the incoming body's mode if set, else the stored one.
+    let mode = body.evaluation_mode.unwrap_or(existing.evaluation_mode);
+
+    // Validate T56 knobs against the resolved effective mode.
+    if let Err(e) = validate_create_or_patch_knobs(
+        mode,
+        body.useful_latency_ms,
+        body.max_hops,
+        body.vm_lookback_minutes,
+    ) {
+        return e.into_response();
+    }
+
+    // Determine whether any evaluator knob has actually changed. When a
+    // knob is absent from the PATCH body, COALESCE leaves it untouched in
+    // the DB — so only supplied values can trigger a dismissal.
+    let knob_changed = body
+        .useful_latency_ms
+        .is_some_and(|v| Some(v) != existing.useful_latency_ms)
+        || body
+            .max_hops
+            .is_some_and(|v| v != existing.max_hops)
+        || body
+            .vm_lookback_minutes
+            .is_some_and(|v| v != existing.vm_lookback_minutes)
+        || body
+            .loss_threshold_ratio
+            .is_some_and(|v| v != existing.loss_threshold_ratio)
+        || body
+            .stddev_weight
+            .is_some_and(|v| v != existing.stddev_weight);
+
+    let updated = match repo::patch(
         &state.pool,
         id,
         body.title.as_deref(),
@@ -312,9 +431,21 @@ pub async fn patch(
     )
     .await
     {
-        Ok(row) => (StatusCode::OK, Json(CampaignDto::from(row))).into_response(),
-        Err(e) => repo_error("campaign::patch", e),
+        Ok(row) => row,
+        Err(e) => return repo_error("campaign::patch", e),
+    };
+
+    // Dismiss the existing evaluation when a knob that affects the scoring
+    // outcome has changed. This keeps the persisted evaluation consistent
+    // with the current knob values and signals to the operator that a
+    // re-evaluate is needed.
+    if knob_changed {
+        if let Err(e) = evaluation_repo::dismiss_evaluation(&state.pool, id).await {
+            return db_error("campaign::patch::dismiss_evaluation", e);
+        }
     }
+
+    (StatusCode::OK, Json(CampaignDto::from(updated))).into_response()
 }
 
 /// `DELETE /api/campaigns/{id}` — idempotent removal.
