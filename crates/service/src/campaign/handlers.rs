@@ -1075,12 +1075,30 @@ pub async fn evaluate(
             Err(e) => return repo_error("campaign::evaluate::reverse", e),
         };
     if !reverse_measurements.is_empty() {
-        // Reverse rows are appended AFTER the active-probe set so that
-        // `build_pair_lookup`'s last-write-wins semantics preserve the
-        // forward direction whenever both directions are present. The
-        // `LegLookup` symmetry path picks up these rows for the legs
-        // where only the reverse direction was measured.
-        inputs.measurements.extend(reverse_measurements);
+        // Filter reverse rows whose `(source_agent_id, destination_ip)` key is
+        // already present in the campaign-owned active set. The reverse query
+        // pulls from the global `measurements` table over a 24h window — when
+        // the campaign already measured both A→B and B→A, the reverse fetch
+        // can return an unrelated row (a detail-ping, another campaign, or a
+        // newer reuse-bound sample) for the same key. Without this filter
+        // `build_pair_lookup`'s last-write-wins semantics would let that
+        // unrelated row clobber the campaign-owned measurement.
+        //
+        // Reverse rows are still appended AFTER the active-probe set so the
+        // `LegLookup` symmetry path picks them up for legs the campaign
+        // measured in only one direction.
+        let active_keys: HashSet<(String, IpAddr)> = inputs
+            .measurements
+            .iter()
+            .map(|m| (m.source_agent_id.clone(), m.destination_ip))
+            .collect();
+        let filtered_reverse: Vec<AttributedMeasurement> = reverse_measurements
+            .into_iter()
+            .filter(|m| !active_keys.contains(&(m.source_agent_id.clone(), m.destination_ip)))
+            .collect();
+        if !filtered_reverse.is_empty() {
+            inputs.measurements.extend(filtered_reverse);
+        }
     }
 
     // Validate EdgeCandidate preconditions before the expensive VM fetch.

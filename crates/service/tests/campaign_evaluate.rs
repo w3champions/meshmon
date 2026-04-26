@@ -1297,3 +1297,123 @@ async fn evaluation_omits_composite_score_for_edge_candidate() {
         "composite_score must be absent or null for edge_candidate (got {score:?}): {cand}"
     );
 }
+
+/// C12-1 regression: when a campaign settles BOTH directions of a pair
+/// (A→B and B→A), the reverse-direction fetch must not be allowed to
+/// clobber the campaign-owned B→A row in `inputs.measurements`.
+///
+/// The reverse query (`reverse_direction_measurements_for_campaign`)
+/// scans the global `measurements` table over a 24h window — it can
+/// legitimately surface unrelated rows (detail-ping kind, another
+/// campaign, a fresher reuse-bound sample) for the same
+/// `(source_agent_id, destination_ip)` key the campaign already owns.
+/// Pre-fix, those reverse rows were appended unconditionally and
+/// `build_pair_lookup`'s last-write-wins replaced the campaign-owned
+/// B→A baseline with whatever the global table held last. That broke
+/// the per-pair direct RTT used by the evaluator's scoring. The fix
+/// filters reverse rows whose `(source, destination_ip)` is already in
+/// the campaign's active set; reverse rows still flow through for
+/// pairs the campaign measured in only one direction, preserving the
+/// `LegLookup` symmetry-fallback behavior.
+#[tokio::test]
+async fn reverse_does_not_clobber_campaign_owned_active_pair() {
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "192.0.2.211".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.212".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t14-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t14-b", b_ip).await;
+
+    // Both A and B are sources; both .211 and .212 appear as
+    // destinations so the campaign-owned set covers BOTH directions
+    // (A→B and B→A) plus a transit candidate at .219.
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t14-reverse-no-clobber",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t14-a", "eval-t14-b"],
+                "destination_ips": ["192.0.2.212", "192.0.2.211", "192.0.2.219"],
+                "loss_threshold_ratio": 0.05,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "optimization",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+
+    // Campaign-owned baselines: A→B at 300 ms, B→A at 350 ms — both
+    // distinct from the polluting value seeded below. The transit legs
+    // go through .219 so a candidate row exists in the evaluation.
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("eval-t14-a", "192.0.2.212", 300.0, 20.0, 0.0),
+            ("eval-t14-b", "192.0.2.211", 350.0, 22.0, 0.0),
+            ("eval-t14-a", "192.0.2.219", 120.0, 8.0, 0.0),
+            ("eval-t14-b", "192.0.2.219", 121.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+
+    // Polluting B→A row from outside the campaign (a `detail_ping` in
+    // the same 24h window, written AFTER the campaign rows so its
+    // `measured_at` is strictly newer). Without the C12-1 filter,
+    // `reverse_direction_measurements_for_campaign` returns this row
+    // (DISTINCT ON + ORDER BY measured_at DESC picks the newest), the
+    // handler appends it to `inputs.measurements`, and
+    // `build_pair_lookup`'s last-write-wins replaces the campaign-owned
+    // 350.0 ms B→A baseline with this 999.0 ms pollutant.
+    let dst_a = sqlx::types::ipnetwork::IpNetwork::from(a_ip);
+    sqlx::query(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, latency_stddev_ms, loss_ratio, kind, measured_at) \
+         VALUES ($1, $2, 'icmp', 10, 999.0, 50.0, 0.0, 'detail_ping', \
+                 now() + interval '1 second')",
+    )
+    .bind("eval-t14-b")
+    .bind(dst_a)
+    .execute(&h.state.pool)
+    .await
+    .expect("insert polluting B→A detail_ping measurement");
+
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let _eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // Read the .219 candidate's pair_details and locate the (B→A) row.
+    // The DTO's `direct_rtt_ms` for `(source=eval-t14-b,
+    // destination=eval-t14-a)` is the B→A baseline RTT — must be the
+    // campaign-owned 350.0, not the 999.0 pollutant.
+    let pair_page: Value = h
+        .get_expect_status(
+            &format!(
+                "/api/campaigns/{campaign_id}/evaluation/candidates/192.0.2.219/pair_details?limit=500"
+            ),
+            200,
+        )
+        .await;
+    let entries = pair_page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pair_details endpoint missing entries: {pair_page}"));
+    let ba_leg = entries
+        .iter()
+        .find(|pd| {
+            pd["source_agent_id"] == "eval-t14-b" && pd["destination_agent_id"] == "eval-t14-a"
+        })
+        .unwrap_or_else(|| panic!("B→A pair_detail missing: {pair_page}"));
+    let rtt = ba_leg["direct_rtt_ms"]
+        .as_f64()
+        .expect("direct_rtt_ms on B→A leg");
+    assert!(
+        (rtt - 350.0).abs() < 1e-3,
+        "C12-1: campaign-owned B→A baseline (350.0) must win over the \
+         unrelated reverse-fetched row (999.0); got direct_rtt_ms = {rtt}: \
+         {ba_leg}"
+    );
+}
