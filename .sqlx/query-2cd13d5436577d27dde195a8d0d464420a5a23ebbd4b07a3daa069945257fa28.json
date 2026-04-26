@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT agent_id AS \"agent_id!\", ip AS \"ip!\"\n                     FROM agents_with_catalogue\n                    WHERE agent_id IN (\n                        SELECT source_agent_id FROM campaign_pairs\n                         WHERE campaign_id = $1\n                           AND kind = 'campaign'\n                    )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "agent_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "ip!",
+        "type_info": "Inet"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "2cd13d5436577d27dde195a8d0d464420a5a23ebbd4b07a3daa069945257fa28"
+}

@@ -14,6 +14,7 @@
 //! | `evaluate_edge_candidate_with_no_destinations_returns_422` | `t56v-nd-a` | `198.51.100.{81}` |
 //! | `evaluate_edge_candidate_with_no_measurements_returns_422` | `t56v-nm-{a,b}` | `198.51.100.{91,92,99}` |
 //! | `evaluate_edge_candidate_excludes_mesh_candidate_from_destinations` | `t56v-c2-{a,b,c}` | `198.51.100.{111,112,119}` |
+//! | `evaluate_edge_candidate_ignores_detail_pairs_in_roster_subqueries` | `t56v-dr-{a,b,leak}` | `198.51.100.{151,152,159,160}` |
 
 mod common;
 use common::HttpHarness;
@@ -580,5 +581,173 @@ async fn evaluate_edge_candidate_persists_catalogue_website_and_notes() {
     assert_eq!(
         cand["notes"], "operator-seeded for evaluator regression",
         "/evaluation response must surface notes: {cand}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C11-1 — Eval-input roster subqueries must filter by `kind = 'campaign'`
+// ---------------------------------------------------------------------------
+
+/// Detail rows (`kind` ∈ {`detail_ping`, `detail_mtr`}) in `campaign_pairs`
+/// are operator-supplied per-pair drilldown entries that may carry
+/// `source_agent_id` / `destination_ip` values outside the baseline
+/// roster. The eval-input loader's roster / candidate / enrichment
+/// subqueries must filter to `kind = 'campaign'` so a queued detail row
+/// inserted between evaluations cannot leak into the next evaluator
+/// input — phantom destinations that inflate `destinations_total` and
+/// produce edge-pair / heatmap rows for IPs the operator never selected.
+///
+/// This is the same bug class C3-2 fixed in
+/// `source_agent_ids_for_campaign`; the repo's eval-input loader had it
+/// in three sibling subqueries (agent_rows EdgeCandidate / agent_rows
+/// other / roster_rows) plus the catalogue enrichment subquery.
+#[tokio::test]
+async fn evaluate_edge_candidate_ignores_detail_pairs_in_roster_subqueries() {
+    let h = HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // Two baseline source agents A, B reaching the candidate IP X. A
+    // separate "leak" agent + a non-baseline destination IP exist only
+    // as detail rows — the loader must not pull either into the
+    // evaluator input.
+    let a_ip: std::net::IpAddr = "198.51.100.151".parse().unwrap();
+    let b_ip: std::net::IpAddr = "198.51.100.152".parse().unwrap();
+    let cand_x: std::net::IpAddr = "198.51.100.159".parse().unwrap();
+    let leak_dest: std::net::IpAddr = "198.51.100.160".parse().unwrap();
+    common::insert_agent_with_ip(pool, "t56v-dr-a", a_ip).await;
+    common::insert_agent_with_ip(pool, "t56v-dr-b", b_ip).await;
+    common::insert_agent_with_ip(pool, "t56v-dr-leak", leak_dest).await;
+
+    let campaign: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-detail-row-roster-leak-guard",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["t56v-dr-a", "t56v-dr-b"],
+                "destination_ips": ["198.51.100.159"],
+                "useful_latency_ms": 200.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+
+    // Baseline measurements: both sources to the single candidate X.
+    // The campaign's `destination_ips=[X]` pre-creates pending pairs at
+    // create-time; `seed_measurements` upserts those to `succeeded`.
+    // We deliberately do NOT seed reverse A↔B measurements here so the
+    // baseline `campaign_pairs.destination_ip` set contains only X —
+    // any extra IP showing up downstream is unambiguously a detail-row
+    // leak, not noise from the seed helper.
+    common::seed_measurements(
+        pool,
+        &campaign_id,
+        &[
+            ("t56v-dr-a", "198.51.100.159", 100.0, 5.0, 0.0),
+            ("t56v-dr-b", "198.51.100.159", 101.0, 5.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(pool, &campaign_id).await;
+
+    // Inject two operator-supplied detail rows post-baseline:
+    //   * a `detail_mtr` whose source is a non-baseline agent and whose
+    //     destination is a non-baseline IP (`leak_dest`)
+    //   * a `detail_ping` whose destination is `leak_dest` from a baseline
+    //     source so the destination subquery alone could pull it in
+    //
+    // Pre-fix, both rows would surface in the roster / candidate /
+    // enrichment subqueries, inflating destinations and adding phantom
+    // edge-pair rows for `leak_dest`.
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, kind) \
+         VALUES ($1, 't56v-dr-leak', $2::inet, 'pending', 'detail_mtr')",
+    )
+    .bind(campaign_uuid)
+    .bind(leak_dest)
+    .execute(pool)
+    .await
+    .expect("seed detail_mtr leak row");
+    sqlx::query(
+        "INSERT INTO campaign_pairs \
+             (campaign_id, source_agent_id, destination_ip, \
+              resolution_state, kind) \
+         VALUES ($1, 't56v-dr-a', $2::inet, 'pending', 'detail_ping')",
+    )
+    .bind(campaign_uuid)
+    .bind(leak_dest)
+    .execute(pool)
+    .await
+    .expect("seed detail_ping leak row");
+
+    // Run the evaluator post-detail-row-injection.
+    let _: serde_json::Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // The evaluator must produce exactly one candidate row (X) — the
+    // detail rows must not have introduced `leak_dest` as a candidate.
+    let candidate_ips: Vec<sqlx::types::ipnetwork::IpNetwork> = sqlx::query_scalar(
+        "SELECT destination_ip \
+           FROM campaign_evaluation_candidates c \
+           JOIN campaign_evaluations e ON e.id = c.evaluation_id \
+          WHERE e.campaign_id = $1 \
+          ORDER BY destination_ip",
+    )
+    .bind(campaign_uuid)
+    .fetch_all(pool)
+    .await
+    .expect("query persisted candidates");
+    let cand_ips_plain: Vec<std::net::IpAddr> = candidate_ips.iter().map(|n| n.ip()).collect();
+    assert_eq!(
+        cand_ips_plain,
+        vec![cand_x],
+        "evaluator must surface only the baseline candidate IP X; \
+         detail rows leaked into candidate_ips: {cand_ips_plain:?}"
+    );
+
+    // `destinations_total` for X must count only baseline source agents
+    // (A, B), not include the detail-only "leak" agent.
+    let dest_total: i32 = sqlx::query_scalar(
+        "SELECT destinations_total \
+           FROM campaign_evaluation_candidates c \
+           JOIN campaign_evaluations e ON e.id = c.evaluation_id \
+          WHERE e.campaign_id = $1 \
+            AND c.destination_ip = $2::inet",
+    )
+    .bind(campaign_uuid)
+    .bind(cand_x)
+    .fetch_one(pool)
+    .await
+    .expect("candidate row exists for X");
+    assert_eq!(
+        dest_total, 2,
+        "destinations_total must count baseline sources only (A, B); \
+         got {dest_total} — detail-row source 't56v-dr-leak' leaked \
+         through the roster subquery"
+    );
+
+    // Edge-pair rows must reference only baseline destination agents
+    // (A, B) — never the detail-only leak agent.
+    let dest_agent_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT destination_agent_id \
+           FROM campaign_evaluation_edge_pair_details epd \
+           JOIN campaign_evaluations e ON e.id = epd.evaluation_id \
+          WHERE e.campaign_id = $1 \
+          ORDER BY destination_agent_id",
+    )
+    .bind(campaign_uuid)
+    .fetch_all(pool)
+    .await
+    .expect("query edge pair destinations");
+    assert_eq!(
+        dest_agent_ids,
+        vec!["t56v-dr-a".to_string(), "t56v-dr-b".to_string()],
+        "edge-pair destinations must include only baseline source agents; \
+         detail-row source leaked: {dest_agent_ids:?}"
     );
 }

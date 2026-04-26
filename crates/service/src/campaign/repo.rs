@@ -1597,13 +1597,24 @@ pub async fn measurements_for_campaign(
         agent_id: String,
         ip: IpNetwork,
     }
+    // `kind = 'campaign'` is load-bearing across every roster / candidate
+    // subquery in this loader. After detail_ping / detail_mtr rows land in
+    // `campaign_pairs` (operator-supplied per-pair drilldown queued
+    // post-evaluation), an unfiltered `WHERE campaign_id = $1` would pull
+    // those source_agent_id / destination_ip values into the next
+    // evaluator input — phantom destinations or candidates that inflate
+    // `destinations_total` and surface heatmap rows / routes outside the
+    // baseline campaign. The picker query (`source_agent_ids_for_campaign`)
+    // had the same bug class; both must filter to baseline rows only.
     let agent_rows: Vec<AgentRosterRow> =
         if matches!(campaign.evaluation_mode, EvaluationMode::EdgeCandidate) {
             sqlx::query!(
                 r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
                      FROM agents_with_catalogue
                     WHERE agent_id IN (
-                        SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+                        SELECT source_agent_id FROM campaign_pairs
+                         WHERE campaign_id = $1
+                           AND kind = 'campaign'
                     )"#,
                 campaign_id,
             )
@@ -1620,10 +1631,14 @@ pub async fn measurements_for_campaign(
                 r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
                      FROM agents_with_catalogue
                     WHERE ip IN (
-                        SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+                        SELECT destination_ip FROM campaign_pairs
+                         WHERE campaign_id = $1
+                           AND kind = 'campaign'
                     )
                        OR agent_id IN (
-                        SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+                        SELECT source_agent_id FROM campaign_pairs
+                         WHERE campaign_id = $1
+                           AND kind = 'campaign'
                     )"#,
                 campaign_id,
             )
@@ -1659,10 +1674,14 @@ pub async fn measurements_for_campaign(
         r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
              FROM agents_with_catalogue
             WHERE ip IN (
-                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+                SELECT destination_ip FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND kind = 'campaign'
             )
                OR agent_id IN (
-                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+                SELECT source_agent_id FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND kind = 'campaign'
             )"#,
         campaign_id,
     )
@@ -1694,7 +1713,9 @@ pub async fn measurements_for_campaign(
                   c.notes
              FROM ip_catalogue c
             WHERE c.ip IN (
-                SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+                SELECT DISTINCT destination_ip FROM campaign_pairs
+                 WHERE campaign_id = $1
+                   AND kind = 'campaign'
             )"#,
         campaign_id,
     )
