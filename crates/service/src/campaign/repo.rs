@@ -1501,16 +1501,24 @@ pub async fn agents_for_campaign(
 /// - Joins `measurements` via `campaign_pairs.measurement_id`.
 /// - Pulls agents + enrichment from `agents_with_catalogue` +
 ///   `ip_catalogue` in one pass so the evaluator stays pure.
+///
+/// Returns `(inputs, vm_lookback_minutes)`. The lookback knob travels
+/// alongside the inputs (rather than on `EvaluationInputs`, where it
+/// would cross-cut every evaluator test fixture) so the `/evaluate`
+/// handler reads it from the same atomic snapshot as the scoring
+/// knobs — a concurrent `PATCH /campaigns/{id}` between the handler's
+/// initial `repo::get` and this call cannot otherwise desync the VM
+/// fetch window from the persisted evaluation row.
 pub async fn measurements_for_campaign(
     pool: &PgPool,
     campaign_id: Uuid,
-) -> Result<EvaluationInputs, RepoError> {
+) -> Result<(EvaluationInputs, i32), RepoError> {
     let campaign = sqlx::query!(
         r#"SELECT loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   max_transit_rtt_ms, max_transit_stddev_ms,
                   min_improvement_ms, min_improvement_ratio,
-                  useful_latency_ms, max_hops
+                  useful_latency_ms, max_hops, vm_lookback_minutes
              FROM measurement_campaigns WHERE id = $1"#,
         campaign_id,
     )
@@ -1731,25 +1739,28 @@ pub async fn measurements_for_campaign(
         .map(|r| r.destination_ip.ip())
         .collect();
 
-    Ok(EvaluationInputs {
-        measurements,
-        agents,
-        roster,
-        candidate_ips,
-        enrichment,
-        loss_threshold_ratio: campaign.loss_threshold_ratio,
-        stddev_weight: campaign.stddev_weight,
-        mode: campaign.evaluation_mode,
-        max_transit_rtt_ms: campaign.max_transit_rtt_ms,
-        max_transit_stddev_ms: campaign.max_transit_stddev_ms,
-        min_improvement_ms: campaign.min_improvement_ms,
-        min_improvement_ratio: campaign.min_improvement_ratio,
-        useful_latency_ms: campaign.useful_latency_ms,
-        // `max_hops` is stored as `SMALLINT NOT NULL` with a 0..=2
-        // schema constraint; surfacing the raw `i16` keeps the type
-        // identical to the validation surface and the wire DTO.
-        max_hops: campaign.max_hops,
-    })
+    Ok((
+        EvaluationInputs {
+            measurements,
+            agents,
+            roster,
+            candidate_ips,
+            enrichment,
+            loss_threshold_ratio: campaign.loss_threshold_ratio,
+            stddev_weight: campaign.stddev_weight,
+            mode: campaign.evaluation_mode,
+            max_transit_rtt_ms: campaign.max_transit_rtt_ms,
+            max_transit_stddev_ms: campaign.max_transit_stddev_ms,
+            min_improvement_ms: campaign.min_improvement_ms,
+            min_improvement_ratio: campaign.min_improvement_ratio,
+            useful_latency_ms: campaign.useful_latency_ms,
+            // `max_hops` is stored as `SMALLINT NOT NULL` with a 0..=2
+            // schema constraint; surfacing the raw `i16` keeps the type
+            // identical to the validation surface and the wire DTO.
+            max_hops: campaign.max_hops,
+        },
+        campaign.vm_lookback_minutes,
+    ))
 }
 
 /// Returns every (source_agent_id, destination_ip) tuple for baseline

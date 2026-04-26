@@ -1436,7 +1436,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
     .await
     .unwrap();
 
-    let inputs = repo::measurements_for_campaign(&pool, row.id)
+    let (inputs, vm_lookback_minutes) = repo::measurements_for_campaign(&pool, row.id)
         .await
         .unwrap();
 
@@ -1464,6 +1464,10 @@ async fn measurements_for_campaign_filters_detail_kind() {
     );
     assert_eq!(inputs.stddev_weight, row.stddev_weight);
     assert_eq!(inputs.mode, row.evaluation_mode);
+    // `vm_lookback_minutes` rides alongside `inputs` from the same atomic
+    // SELECT, so the `/evaluate` handler reads the same snapshot value
+    // as the scoring knobs (TOCTOU regression for a racing PATCH).
+    assert_eq!(vm_lookback_minutes, row.vm_lookback_minutes);
 
     repo::delete(&pool, row.id).await.unwrap();
     sqlx::query("DELETE FROM measurements WHERE id = ANY($1)")

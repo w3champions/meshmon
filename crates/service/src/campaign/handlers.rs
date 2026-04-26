@@ -1041,18 +1041,20 @@ pub async fn evaluate(
             .into_response();
     }
 
-    let mut inputs = match repo::measurements_for_campaign(&state.pool, id).await {
-        Ok(i) => i,
-        Err(e) => return repo_error("campaign::evaluate::inputs", e),
-    };
+    let (mut inputs, vm_lookback_minutes) =
+        match repo::measurements_for_campaign(&state.pool, id).await {
+            Ok(pair) => pair,
+            Err(e) => return repo_error("campaign::evaluate::inputs", e),
+        };
     // Snapshot the evaluator knobs from `inputs` (not `campaign`) so a
     // concurrent `PATCH /campaigns/{id}` that lands between the two reads
     // cannot desync the scored knobs from the persisted evaluation row.
     // `campaign` stays in use only for its `state` gate above; it is no
     // longer the source of knob values for the scoring fields.
-    // `vm_lookback_minutes` is read from `campaign` because it is not
-    // carried through `EvaluationInputs` (it controls the VM fetch
-    // window, not the scoring algorithm).
+    // `vm_lookback_minutes` arrives via the same atomic snapshot from
+    // `measurements_for_campaign` (returned alongside `inputs`) so the
+    // VM fetch window is consistent with the scoring knobs even under
+    // a racing PATCH.
     let loss_threshold_ratio = inputs.loss_threshold_ratio;
     let stddev_weight = inputs.stddev_weight;
     let evaluation_mode = inputs.mode;
@@ -1062,7 +1064,6 @@ pub async fn evaluate(
     let min_improvement_ratio = inputs.min_improvement_ratio;
     let useful_latency_ms = inputs.useful_latency_ms;
     let max_hops = inputs.max_hops;
-    let vm_lookback_minutes = campaign.vm_lookback_minutes;
 
     // Hoist reverse-direction measurements above the mode branch.
     // The symmetry-fallback in `LegLookup` uses these rows for both
