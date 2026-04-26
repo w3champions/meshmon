@@ -430,10 +430,13 @@ fn aggregate_pair_rows(rows: &[EdgePairRow], destinations_total: i32) -> Candida
 }
 
 /// `has_real_x_source_data`: true iff X is a mesh agent AND at least one
-/// leg of any winning route, where the leg has X as an endpoint, has
-/// `source = LegSource::VmContinuous` AND was NOT substituted from the
-/// reverse direction. Substitution is signalled via `was_substituted: bool`,
-/// not `LegSource::SymmetricReuse`.
+/// leg of any winning route — where the leg has X as an endpoint — was
+/// NOT substituted from the reverse direction. Substitution is the only
+/// "synthetic" provenance in this code; both `VmContinuous` and
+/// `ActiveProbe` are real X-source signals once `was_substituted=false`,
+/// so excluding `ActiveProbe` here would falsely flip the symmetric-reuse
+/// warning on for routes that legitimately measured the X→peer leg
+/// through the campaign's active prober.
 fn compute_has_real_x_source_data(x_endpoint: &Endpoint, pair_rows: &[EdgePairRow]) -> bool {
     let x_agent_id: &str = match x_endpoint {
         Endpoint::Agent { id } => id.as_str(),
@@ -443,7 +446,9 @@ fn compute_has_real_x_source_data(x_endpoint: &Endpoint, pair_rows: &[EdgePairRo
         p.best_route_legs.iter().any(|l| {
             let touches_x = matches!(&l.from, Endpoint::Agent { id } if id == x_agent_id)
                 || matches!(&l.to, Endpoint::Agent { id } if id == x_agent_id);
-            touches_x && l.source == LegSource::VmContinuous && !l.was_substituted
+            touches_x
+                && !l.was_substituted
+                && matches!(l.source, LegSource::VmContinuous | LegSource::ActiveProbe)
         })
     })
 }
@@ -725,6 +730,35 @@ mod tests {
         assert!(!row.is_mesh_member);
         assert!(row.agent_id.is_none());
         assert!(!row.has_real_x_source_data);
+    }
+
+    /// `has_real_x_source_data` must accept any non-substituted leg whose
+    /// provenance is real measurement data — `ActiveProbe` no less than
+    /// `VmContinuous`. The default `meas()` helper stamps
+    /// `DirectSource::ActiveProbe`, so a mesh-candidate X whose winning
+    /// route is built from those measurements is the natural fixture for
+    /// the positive case. Excluding `ActiveProbe` (the prior shape of
+    /// the predicate) flipped the symmetric-reuse warning on for every
+    /// route built from the campaign's own active probes.
+    #[test]
+    fn has_real_x_source_data_accepts_active_probe_legs() {
+        let agents = vec![
+            agent("x", "10.0.0.1"),
+            agent("b1", "10.0.0.2"),
+            agent("b2", "10.0.0.3"),
+        ];
+        // Forward x→b1 / x→b2 active-probe legs (default helper source).
+        let measurements = vec![
+            meas("x", "10.0.0.2", 10.0, 0.0, 0.0),
+            meas("x", "10.0.0.3", 20.0, 0.0, 0.0),
+        ];
+        let inputs = build_inputs(agents, vec![ip("10.0.0.1")], measurements, Some(100.0), 2);
+        let out = outputs_edge(evaluate(inputs));
+        let row = &out.candidates[0];
+        assert!(
+            row.has_real_x_source_data,
+            "active-probe legs from a mesh candidate X must count as real X-source data"
+        );
     }
 
     // ── Multi-hop route tests (regression guard for the intermediary pool model) ──
