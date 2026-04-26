@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  c.avg_loss_ratio,\n                  c.website,\n                  c.notes,\n                  COALESCE(c.agent_id,\n                      (SELECT a.agent_id\n                         FROM agents_with_catalogue a\n                        WHERE a.ip = c.destination_ip\n                        LIMIT 1)\n                  ) AS agent_id,\n                  c.coverage_count,\n                  c.destinations_total,\n                  c.mean_ms_under_t,\n                  c.coverage_weighted_ping_ms,\n                  c.direct_share,\n                  c.onehop_share,\n                  c.twohop_share,\n                  c.has_real_x_source_data\n             FROM campaign_evaluation_candidates c\n            WHERE c.evaluation_id = $1\n            ORDER BY c.pairs_improved DESC,\n                     COALESCE(c.avg_improvement_ms, 0.0) DESC,\n                     c.destination_ip ASC",
+  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  c.avg_loss_ratio,\n                  c.website,\n                  c.notes,\n                  COALESCE(c.agent_id,\n                      (SELECT a.agent_id\n                         FROM agents_with_catalogue a\n                        WHERE a.ip = c.destination_ip\n                        LIMIT 1)\n                  ) AS agent_id,\n                  c.coverage_count,\n                  c.destinations_total,\n                  c.mean_ms_under_t,\n                  c.coverage_weighted_ping_ms,\n                  c.direct_share,\n                  c.onehop_share,\n                  c.twohop_share,\n                  c.has_real_x_source_data\n             FROM campaign_evaluation_candidates c\n            WHERE c.evaluation_id = $1\n            ORDER BY\n                CASE WHEN $2 THEN c.coverage_weighted_ping_ms END ASC NULLS LAST,\n                CASE WHEN $2 THEN -c.coverage_count END ASC,\n                CASE WHEN $2 THEN c.mean_ms_under_t END ASC NULLS LAST,\n                CASE WHEN NOT $2 THEN -c.pairs_improved END ASC,\n                CASE WHEN NOT $2 THEN -COALESCE(c.avg_improvement_ms, 0.0) END ASC,\n                c.destination_ip ASC",
   "describe": {
     "columns": [
       {
@@ -116,7 +116,8 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Bool"
       ]
     },
     "nullable": [
@@ -144,5 +145,5 @@
       true
     ]
   },
-  "hash": "f467e84b9a61ff624bc02b5ee10ec2a69cdcf12c4c5fcfaa1ae7eb7714fa40ea"
+  "hash": "90e6771f2fac2a4c61cdf547e200d1362587f1ed210f71fabd78ec44fd93fe4a"
 }

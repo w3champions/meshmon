@@ -334,12 +334,22 @@ pub async fn latest_evaluation_for_campaign(
     };
 
     // Candidates in composite-score order. The evaluator persists them
-    // without a sort key of their own, so the read-path re-sorts by
-    // `(pairs_improved/pairs_total_considered * avg_improvement_ms)`
-    // implied by `avg_improvement_ms DESC` + `pairs_improved DESC` as
-    // a stable approximation. The frontend doesn't rely on an exact
-    // sort beyond "good candidates first"; the tiebreaker falls back
-    // to `destination_ip` so the order is deterministic across reads.
+    // without a sort key of their own, so the read-path re-sorts.
+    //
+    // The tie-break suffix `c.destination_ip ASC` keeps the order
+    // deterministic across reads regardless of mode; the leading keys
+    // change per mode:
+    //
+    // * Triple modes (diversity / optimization) — `pairs_improved DESC,
+    //   COALESCE(avg_improvement_ms, 0.0) DESC` approximates
+    //   `(pairs_improved/pairs_total_considered * avg_improvement_ms)`
+    //   so good candidates surface first.
+    // * EdgeCandidate — every row has `pairs_improved=0` and
+    //   `avg_improvement_ms=NULL`, so the triple ordering would collapse
+    //   to destination-IP order and bury the actual ranking signal. The
+    //   spec ranks by `coverage_weighted_ping_ms ASC` (lower is better)
+    //   with tie-break by `coverage_count DESC` then
+    //   `mean_ms_under_t ASC`, matching the evaluator's emit order.
     //
     // `avg_loss_ratio` is sourced from the persisted column — the
     // evaluator computes it from the pre-storage-filter accumulator
@@ -355,6 +365,13 @@ pub async fn latest_evaluation_for_campaign(
     // hostname is NOT selected here — it is stamped at response time by the
     // handler via bulk_hostnames_and_enqueue, so the relational table must
     // not carry it (asserted by get_evaluation_stamps_candidate_and_pair_detail_hostnames).
+    // Single SELECT with mode-aware ORDER BY: a `$2` boolean toggles
+    // between the EdgeCandidate ranking
+    // (`coverage_weighted_ping_ms ASC, coverage_count DESC,
+    //   mean_ms_under_t ASC`) and the Triple ranking
+    // (`pairs_improved DESC, avg_improvement_ms DESC`). One query macro
+    // means one cached prepared statement and one anonymous Record type.
+    let is_edge_candidate = parent.evaluation_mode == EvaluationMode::EdgeCandidate;
     let candidate_rows = sqlx::query!(
         r#"SELECT c.destination_ip,
                   c.display_name,
@@ -385,10 +402,15 @@ pub async fn latest_evaluation_for_campaign(
                   c.has_real_x_source_data
              FROM campaign_evaluation_candidates c
             WHERE c.evaluation_id = $1
-            ORDER BY c.pairs_improved DESC,
-                     COALESCE(c.avg_improvement_ms, 0.0) DESC,
-                     c.destination_ip ASC"#,
+            ORDER BY
+                CASE WHEN $2 THEN c.coverage_weighted_ping_ms END ASC NULLS LAST,
+                CASE WHEN $2 THEN -c.coverage_count END ASC,
+                CASE WHEN $2 THEN c.mean_ms_under_t END ASC NULLS LAST,
+                CASE WHEN NOT $2 THEN -c.pairs_improved END ASC,
+                CASE WHEN NOT $2 THEN -COALESCE(c.avg_improvement_ms, 0.0) END ASC,
+                c.destination_ip ASC"#,
         parent.id,
+        is_edge_candidate,
     )
     .fetch_all(pool)
     .await?;

@@ -1103,3 +1103,102 @@ async fn read_legacy_evaluation_with_null_snapshot_columns() {
         "vm_lookback_minutes must be absent or null for legacy row: body = {got}"
     );
 }
+
+/// `latest_evaluation_for_campaign` must order edge_candidate candidates
+/// by `coverage_weighted_ping_ms ASC` (lower is better) with tie-break
+/// by `coverage_count DESC`. The shared SELECT previously ordered by
+/// triple-mode `pairs_improved DESC, avg_improvement_ms DESC`, which
+/// collapses to destination-IP order for edge_candidate (every row has
+/// `pairs_improved=0` and `avg_improvement_ms=NULL`) and buries the
+/// real ranking signal.
+#[tokio::test]
+async fn evaluation_orders_edge_candidates_by_coverage_weighted_ping_ms() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-rank-by-coverage-weighted",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-rank-a"],
+                "destination_ips": ["10.99.0.1"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+
+    common::insert_agent_with_ip(pool, "eval-rank-a", "10.99.0.10".parse().unwrap()).await;
+
+    // Seed an evaluation parent and three candidates with deliberately
+    // permuted `coverage_weighted_ping_ms` values such that
+    // destination-IP order disagrees with the spec ranking. After the
+    // fix, the read should order by `coverage_weighted_ping_ms ASC`,
+    // not by IP.
+    let evaluation_id: uuid::Uuid = sqlx::query_scalar(
+        r#"INSERT INTO campaign_evaluations
+               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+                useful_latency_ms, max_hops, vm_lookback_minutes,
+                baseline_pair_count, candidates_total, candidates_good, evaluated_at)
+           VALUES ($1, 0.05, 1.0, 'edge_candidate'::evaluation_mode,
+                   80.0, 1, 30, 0, 3, 3, now())
+           RETURNING id"#,
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("insert campaign_evaluations row");
+
+    // Three rows: ascending IP, but the desired rank order is mid → low → high IP.
+    // best:    coverage_weighted_ping_ms = 12.0  (IP 10.99.0.21)
+    // middle:  coverage_weighted_ping_ms = 25.0  (IP 10.99.0.20)
+    // worst:   coverage_weighted_ping_ms = 75.0  (IP 10.99.0.22)
+    for (ip, cwp_ms, coverage) in &[
+        ("10.99.0.20", 25.0_f32, 1_i32),
+        ("10.99.0.21", 12.0_f32, 2_i32),
+        ("10.99.0.22", 75.0_f32, 1_i32),
+    ] {
+        let ip_net =
+            sqlx::types::ipnetwork::IpNetwork::from(ip.parse::<std::net::IpAddr>().unwrap());
+        sqlx::query(
+            r#"INSERT INTO campaign_evaluation_candidates
+                   (evaluation_id, destination_ip, is_mesh_member,
+                    pairs_improved, pairs_total_considered,
+                    coverage_count, destinations_total, mean_ms_under_t,
+                    coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,
+                    has_real_x_source_data)
+               VALUES ($1, $2::inet, false, 0, 0,
+                       $3, 1, $4,
+                       $4, 1.0, 0.0, 0.0,
+                       true)"#,
+        )
+        .bind(evaluation_id)
+        .bind(ip_net)
+        .bind(coverage)
+        .bind(cwp_ms)
+        .execute(pool)
+        .await
+        .expect("insert candidate row");
+    }
+
+    let eval: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+    let candidates = eval["results"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates missing: {eval}"));
+
+    let order: Vec<&str> = candidates
+        .iter()
+        .map(|c| c["destination_ip"].as_str().expect("destination_ip"))
+        .collect();
+    assert_eq!(
+        order,
+        vec!["10.99.0.21", "10.99.0.20", "10.99.0.22"],
+        "edge_candidate read must rank by coverage_weighted_ping_ms ASC, not by destination_ip: {eval}"
+    );
+}
