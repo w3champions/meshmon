@@ -115,11 +115,16 @@ function HeaderRef({ data }: { data: CandidateRefData }) {
           </div>
         </div>
 
-        {/* Action buttons */}
+        {/* Action buttons. `stopPropagation` keeps clicks from bubbling to a
+            parent row that owns its own click handler (e.g.
+            EdgeCandidateTable, CompareCandidateRow). */}
         <div className="flex gap-1 shrink-0">
           <button
             type="button"
-            onClick={() => open(data.ip)}
+            onClick={(e) => {
+              e.stopPropagation();
+              open(data.ip);
+            }}
             className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-secondary hover:bg-secondary/80 transition-colors"
             aria-label="Open in catalogue"
           >
@@ -129,7 +134,10 @@ function HeaderRef({ data }: { data: CandidateRefData }) {
           {data.is_mesh_member && data.agent_id && (
             <button
               type="button"
-              onClick={handleOpenAgent}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleOpenAgent();
+              }}
               className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-secondary hover:bg-secondary/80 transition-colors"
               aria-label="Open agent detail"
             >
@@ -200,7 +208,10 @@ function InlineRef({ data }: { data: CandidateRefData }) {
   return (
     <button
       type="button"
-      onClick={() => open(data.ip)}
+      onClick={(e) => {
+        e.stopPropagation();
+        open(data.ip);
+      }}
       className="text-primary underline-offset-2 hover:underline text-sm"
     >
       {label}
@@ -222,7 +233,10 @@ function OpenAffordance({ ip, onOpen }: OpenAffordanceProps) {
   return (
     <button
       type="button"
-      onClick={() => onOpen(ip)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(ip);
+      }}
       className="ml-1 inline-flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
       aria-label="Open in catalogue"
     >

@@ -100,4 +100,48 @@ describe("CandidateRef", () => {
     const link = screen.getByRole("button", { name: "OneProvider FRA" });
     expect(link).toBeInTheDocument();
   });
+
+  it("compact-mode catalogue button does not bubble click to a parent row handler", async () => {
+    const parentClick = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <CatalogueDrawerOverlay>
+        {/* Parent uses a div with onClick to mimic the row-level click
+            handler used by EdgeCandidateTable / CompareCandidateRow. */}
+        <div onClick={parentClick} data-testid="parent-row">
+          <CandidateRef mode="compact" data={minimal} />
+        </div>
+      </CatalogueDrawerOverlay>,
+    );
+    await user.click(screen.getByRole("button", { name: /open in catalogue/i }));
+    expect(parentClick).not.toHaveBeenCalled();
+  });
+
+  it("header-mode catalogue button does not bubble click to a parent row handler", async () => {
+    const parentClick = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <CatalogueDrawerOverlay>
+        <div onClick={parentClick} data-testid="parent-row">
+          <CandidateRef mode="header" data={minimal} />
+        </div>
+      </CatalogueDrawerOverlay>,
+    );
+    await user.click(screen.getByRole("button", { name: /open in catalogue/i }));
+    expect(parentClick).not.toHaveBeenCalled();
+  });
+
+  it("inline-mode trigger does not bubble click to a parent row handler", async () => {
+    const parentClick = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <CatalogueDrawerOverlay>
+        <div onClick={parentClick} data-testid="parent-row">
+          <CandidateRef mode="inline" data={minimal} />
+        </div>
+      </CatalogueDrawerOverlay>,
+    );
+    await user.click(screen.getByRole("button", { name: "OneProvider FRA" }));
+    expect(parentClick).not.toHaveBeenCalled();
+  });
 });
