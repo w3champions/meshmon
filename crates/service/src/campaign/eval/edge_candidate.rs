@@ -92,7 +92,10 @@ pub struct EdgePairRow {
     pub destination_agent_id: String,
     /// Destination mesh agent B's reverse-DNS hostname (handler stamps).
     pub destination_hostname: Option<String>,
-    /// Best route's RTT including stddev penalty (ms).
+    /// Raw RTT of the winning route (ms). The penalty score
+    /// (`rtt + stddev_weight * stddev`) is used internally by
+    /// [`pick_best_route`] to choose the winner; only the raw RTT is
+    /// exposed downstream for display, qualification, and aggregation.
     pub best_route_ms: f32,
     /// Best route's compound loss ratio (0.0–1.0).
     pub best_route_loss_ratio: f32,
@@ -268,7 +271,7 @@ fn score_candidate(
             inputs.stddev_weight,
         );
         let best = pick_best_route(routes, inputs.loss_threshold_ratio, inputs.stddev_weight);
-        let row = build_pair_row(b, best, inputs.useful_latency_ms, inputs.stddev_weight);
+        let row = build_pair_row(b, best, inputs.useful_latency_ms);
         pair_rows.push(row);
     }
 
@@ -325,18 +328,24 @@ fn pick_best_route(
 /// Build one [`EdgePairRow`] from a destination B and the optional best
 /// route. When `best` is `None`, emits a sentinel-valued unreachable row
 /// (per spec §4: `best_route_ms = INFINITY`, `loss = 1.0`).
+///
+/// `best_route_ms` is persisted as the raw RTT of the winning route. The
+/// penalty score (`rtt + stddev_weight * stddev`) is only used inside
+/// [`pick_best_route`] to choose the winner; downstream consumers
+/// (heatmap tier coloring, mean / coverage-weighted aggregates, the
+/// `qualifies_under_t` predicate) all reason about raw RTT. The stddev
+/// component remains independently visible via `best_route_stddev_ms`.
 fn build_pair_row(
     b: &AgentRow,
     best: Option<ComposedRoute>,
     useful_latency_ms: Option<f32>,
-    stddev_weight: f32,
 ) -> EdgePairRow {
     match best {
         Some(r) => {
-            // `best_route_ms` is the penalised score the picker
-            // minimised — pre-compute once for both qualification and
-            // persistence.
-            let best_route_ms = r.rtt_ms + stddev_weight * r.stddev_ms;
+            // Persist the raw RTT — see the function-level doc-comment
+            // for why the stddev penalty is intentionally NOT folded in
+            // here even though `pick_best_route` minimised the score.
+            let best_route_ms = r.rtt_ms;
             let qualifies_under_t = useful_latency_ms
                 .map(|t| best_route_ms <= t)
                 .unwrap_or(false);
@@ -732,6 +741,109 @@ mod tests {
         assert!(!row.has_real_x_source_data);
     }
 
+    /// The picker minimises `rtt + stddev_weight * stddev` (penalised
+    /// score) to choose among surviving routes, but the persisted
+    /// `best_route_ms` MUST be the raw RTT of the chosen route — not the
+    /// score. The two diverge whenever `stddev_weight * stddev` is
+    /// non-zero, which is exactly the regression this test guards.
+    ///
+    /// Fixture: candidate X is a mesh agent with a single direct path to
+    /// destination B at RTT 70 ms and stddev 20 ms. Under the default
+    /// `stddev_weight = 1.0`, the penalised score is 90 ms, but
+    /// `best_route_ms` should still surface 70 ms so the heatmap tier
+    /// coloring, mean computations, and `qualifies_under_t` predicate
+    /// agree with the operator's mental model of "raw observed RTT".
+    /// With `T = 80 ms`, the pair must qualify because the raw RTT (70)
+    /// is under T, even though the penalty score (90) is not.
+    #[test]
+    fn best_route_ms_persists_raw_rtt_not_penalised_score() {
+        let agents = vec![agent("x", "10.0.0.1"), agent("b", "10.0.0.2")];
+        // Single direct measurement: 70ms RTT, 20ms stddev.
+        let measurements = vec![meas("x", "10.0.0.2", 70.0, 20.0, 0.0)];
+        let inputs = build_inputs(agents, vec![ip("10.0.0.1")], measurements, Some(80.0), 0);
+        let out = outputs_edge(evaluate(inputs));
+        let row = &out.candidates[0];
+        let pair = row
+            .pair_details
+            .iter()
+            .find(|p| p.destination_agent_id == "b")
+            .expect("pair for B must exist");
+        assert!(
+            (pair.best_route_ms - 70.0).abs() < 1e-3,
+            "persisted best_route_ms must be raw RTT (70ms), got {}",
+            pair.best_route_ms
+        );
+        assert!(
+            (pair.best_route_stddev_ms - 20.0).abs() < 1e-3,
+            "stddev surfaces independently via best_route_stddev_ms"
+        );
+        assert!(
+            pair.qualifies_under_t,
+            "70ms raw RTT must qualify under T=80ms even though the \
+             penalty score (rtt + stddev_weight*stddev) = 90ms exceeds T"
+        );
+    }
+
+    /// The picker MUST still minimise the penalised score
+    /// (`rtt + stddev_weight * stddev`) when choosing among surviving
+    /// routes — the C3-7 fix only changes what gets persisted, not the
+    /// picker's selection logic. This test guards that a higher-RTT but
+    /// lower-stddev route wins over a lower-RTT but higher-stddev route
+    /// when `stddev_weight` makes the penalty differential decisive.
+    ///
+    /// Fixture: candidate X reaches destination B via two direct
+    /// candidate-IPs C1 and C2:
+    /// - X→C1 50ms / 30ms stddev (direct), score = 50 + 1*30 = 80
+    /// - X→C2 60ms / 5ms stddev (direct), score = 60 + 1*5  = 65 ✓ wins
+    ///
+    /// Persisted `best_route_ms` should be 60ms (raw RTT of the winner).
+    #[test]
+    fn picker_minimises_penalised_score_persists_winner_raw_rtt() {
+        // Two destination candidates B1 and B2, both reachable directly.
+        // To make the picker choose between two routes for the SAME pair,
+        // we need the same B endpoint reached via different routes — which
+        // requires intermediaries. Easier: use two separate B's and assert
+        // the chosen one's raw RTT is what's persisted.
+        //
+        // Single B fixture instead: X→B has two competing direct legs is
+        // not representable (one (src, dst) → one measurement). So the
+        // route-vs-route comparison goes through enumerate_routes which
+        // emits one direct + N indirect candidates. Use a 1-hop fixture:
+        //   X→B direct 50ms / 30ms stddev → score 80
+        //   X→A→B 1-hop with X→A 30ms/2ms + A→B 30ms/2ms
+        //     → composed rtt = 60, composed stddev = sqrt(4+4) ≈ 2.83
+        //     → score = 60 + 1*2.83 ≈ 62.83 ✓ wins
+        // Persisted best_route_ms should be the 1-hop RTT (60ms), not 50ms.
+        let agents = vec![
+            agent("x", "10.0.0.1"),
+            agent("a", "10.0.0.2"),
+            agent("b", "10.0.0.3"),
+        ];
+        let measurements = vec![
+            meas("x", "10.0.0.3", 50.0, 30.0, 0.0), // X→B direct
+            meas("x", "10.0.0.2", 30.0, 2.0, 0.0),  // X→A
+            meas("a", "10.0.0.3", 30.0, 2.0, 0.0),  // A→B
+        ];
+        let inputs = build_inputs(agents, vec![ip("10.0.0.1")], measurements, Some(100.0), 1);
+        let out = outputs_edge(evaluate(inputs));
+        let row = &out.candidates[0];
+        let pair = row
+            .pair_details
+            .iter()
+            .find(|p| p.destination_agent_id == "b")
+            .expect("pair for B must exist");
+        assert_eq!(
+            pair.best_route_kind,
+            EdgeRouteKind::OneHop,
+            "1-hop route (lower penalty score) must win over direct: {pair:?}"
+        );
+        assert!(
+            (pair.best_route_ms - 60.0).abs() < 1e-3,
+            "persisted best_route_ms must be the WINNER's raw RTT (60ms), got {}",
+            pair.best_route_ms
+        );
+    }
+
     /// `has_real_x_source_data` must accept any non-substituted leg whose
     /// provenance is real measurement data — `ActiveProbe` no less than
     /// `VmContinuous`. The default `meas()` helper stamps
@@ -823,7 +935,8 @@ mod tests {
                     pair.best_route_intermediaries[0], "a",
                     "intermediary must be agent a"
                 );
-                // penalised score = rtt + stddev_weight * stddev = 15 + 1.0*0 = 15
+                // raw RTT = 5 + 10 = 15ms (stddev penalty intentionally
+                // not folded into the persisted `best_route_ms`).
                 assert!(
                     (pair.best_route_ms - 15.0).abs() < 1e-3,
                     "1-hop RTT must be 5+10=15ms, got {}",
@@ -918,7 +1031,8 @@ mod tests {
             b_pair.best_route_intermediaries.contains(&"c".to_string()),
             "intermediary agent c must appear in best_route_intermediaries"
         );
-        // penalised score = 5+10+10 + 1.0*sqrt(0+0+0) = 25ms
+        // raw RTT = 5 + 10 + 10 = 25ms (stddev penalty intentionally
+        // not folded into the persisted `best_route_ms`).
         assert!(
             (b_pair.best_route_ms - 25.0).abs() < 1e-3,
             "2-hop RTT must be 5+10+10=25ms, got {}",
