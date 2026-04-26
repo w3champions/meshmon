@@ -56,7 +56,7 @@ pub struct PairDetailCursor {
     pub destination_agent_id: String,
 }
 
-/// Reasons cursor decoding can fail. All three map to the same
+/// Reasons cursor decoding can fail. All variants map to the same
 /// `400 invalid_cursor` response on the wire — splitting them out is for
 /// telemetry / log clarity.
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +74,14 @@ pub enum CursorError {
     /// truncated-discriminant failures separately.
     #[error("cursor sort column discriminant out of range")]
     InvalidEnum,
+    /// A cursor field that downstream SQL casts to `inet` (the
+    /// edge-pair endpoint's `candidate_ip` tiebreak, plus the
+    /// `sort_value` when `sort_col == CandidateIp`) failed `IpAddr`
+    /// parsing. Without this validation a hand-crafted cursor would
+    /// pass `decode` but trip a Postgres cast at query time —
+    /// surfacing as 500 instead of the documented 400.
+    #[error("cursor IP literal failed to parse: {0}")]
+    InvalidIp(String),
 }
 
 impl PairDetailCursor {

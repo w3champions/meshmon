@@ -1009,12 +1009,27 @@ impl EdgePairCursor {
     }
 
     /// Decode and validate against the expected sort column.
+    ///
+    /// Validation order:
+    /// 1. Base64 + JSON parse succeeds.
+    /// 2. `sort_col` matches `expected`.
+    /// 3. `candidate_ip` parses as an IpAddr (downstream SQL binds
+    ///    it as `$6::inet`).
+    /// 4. When `sort_col == CandidateIp`, `sort_value` is a
+    ///    `SortValue::String` whose contents parse as an IpAddr
+    ///    (downstream SQL binds it as `$5::inet`).
+    ///
+    /// Without (3)/(4) a hand-crafted cursor with a non-IP literal
+    /// would clear `decode` and trip a Postgres cast at query time —
+    /// surfacing as 500 instead of the documented `400 invalid_cursor`.
     pub fn decode(
         raw: &str,
         expected: EdgePairSortCol,
     ) -> Result<Self, crate::campaign::cursor::CursorError> {
-        use crate::campaign::cursor::CursorError;
+        use crate::campaign::cursor::{CursorError, SortValue};
         use base64::Engine as _;
+        use std::net::IpAddr;
+
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(raw)
             .map_err(|e| CursorError::Decode(format!("base64: {e}")))?;
@@ -1022,6 +1037,33 @@ impl EdgePairCursor {
             .map_err(|e| CursorError::Decode(format!("json: {e}")))?;
         if cursor.sort_col != expected {
             return Err(CursorError::SortMismatch);
+        }
+        // Downstream binds the candidate-IP tiebreak as `$6::inet` for
+        // every sort column. A non-IP literal would survive serde and
+        // fail at query time as a 500.
+        if cursor.candidate_ip.parse::<IpAddr>().is_err() {
+            return Err(CursorError::InvalidIp(format!(
+                "candidate_ip: {:?}",
+                cursor.candidate_ip
+            )));
+        }
+        // When the leading sort column is the candidate IP, the
+        // `sort_value` is also bound to inet (`$5::inet`). The
+        // `SortValue` enum already constrains the JSON shape; here we
+        // additionally require it to be a `String` whose contents parse
+        // as an IpAddr.
+        if matches!(cursor.sort_col, EdgePairSortCol::CandidateIp) {
+            match &cursor.sort_value {
+                SortValue::String(s) if s.parse::<IpAddr>().is_ok() => {}
+                SortValue::String(s) => {
+                    return Err(CursorError::InvalidIp(format!("sort_value: {s:?}")));
+                }
+                other => {
+                    return Err(CursorError::Decode(format!(
+                        "sort_value variant for CandidateIp must be String; got {other:?}"
+                    )));
+                }
+            }
         }
         Ok(cursor)
     }
@@ -1081,6 +1123,81 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DetailScope::GoodCandidates).unwrap(),
             "\"good_candidates\"",
+        );
+    }
+
+    #[test]
+    fn edge_pair_cursor_rejects_non_ip_candidate_ip() {
+        use crate::campaign::cursor::{CursorError, SortValue};
+
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::BestRouteMs,
+            sort_value: SortValue::F64(1.0),
+            candidate_ip: "not-an-ip".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let err = EdgePairCursor::decode(&raw, EdgePairSortCol::BestRouteMs).unwrap_err();
+        assert!(
+            matches!(err, CursorError::InvalidIp(_)),
+            "non-IP candidate_ip must surface as InvalidIp; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edge_pair_cursor_rejects_non_ip_sort_value_for_candidate_ip_sort() {
+        use crate::campaign::cursor::{CursorError, SortValue};
+
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::CandidateIp,
+            sort_value: SortValue::String("not-an-ip".to_string()),
+            candidate_ip: "10.0.0.1".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let err = EdgePairCursor::decode(&raw, EdgePairSortCol::CandidateIp).unwrap_err();
+        assert!(
+            matches!(err, CursorError::InvalidIp(_)),
+            "non-IP sort_value when sorting by candidate_ip must surface as InvalidIp; \
+             got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edge_pair_cursor_accepts_valid_ip_literals() {
+        use crate::campaign::cursor::SortValue;
+
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::CandidateIp,
+            sort_value: SortValue::String("10.0.0.2".to_string()),
+            candidate_ip: "10.0.0.1".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let back = EdgePairCursor::decode(&raw, EdgePairSortCol::CandidateIp)
+            .expect("valid IP literals must decode cleanly");
+        assert_eq!(back.candidate_ip, "10.0.0.1");
+    }
+
+    #[test]
+    fn edge_pair_cursor_rejects_wrong_sort_value_variant_for_candidate_ip_sort() {
+        use crate::campaign::cursor::{CursorError, SortValue};
+
+        // F64 sort_value paired with CandidateIp sort_col is structurally
+        // ill-formed even before the IP check — validate that this surfaces
+        // as an explicit Decode error rather than escaping to runtime SQL.
+        let cursor = EdgePairCursor {
+            sort_col: EdgePairSortCol::CandidateIp,
+            sort_value: SortValue::F64(1.0),
+            candidate_ip: "10.0.0.1".to_string(),
+            destination_agent_id: "dst".to_string(),
+        };
+        let raw = cursor.encode();
+        let err = EdgePairCursor::decode(&raw, EdgePairSortCol::CandidateIp).unwrap_err();
+        assert!(
+            matches!(err, CursorError::Decode(_)),
+            "F64 sort_value when sort_col=CandidateIp must surface as Decode; \
+             got {err:?}"
         );
     }
 }

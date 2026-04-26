@@ -1352,6 +1352,7 @@ pub async fn get_edge_pairs(
                 CursorError::Decode(_) => "decode",
                 CursorError::SortMismatch => "sort_mismatch",
                 CursorError::InvalidEnum => "invalid_enum",
+                CursorError::InvalidIp(_) => "invalid_ip",
             };
             tracing::debug!(
                 error_kind = %error_kind,
@@ -1690,6 +1691,7 @@ pub async fn get_candidate_pair_details(
                 CursorError::Decode(_) => "decode",
                 CursorError::SortMismatch => "sort_mismatch",
                 CursorError::InvalidEnum => "invalid_enum",
+                CursorError::InvalidIp(_) => "invalid_ip",
             };
             tracing::debug!(
                 error_kind = %error_kind,

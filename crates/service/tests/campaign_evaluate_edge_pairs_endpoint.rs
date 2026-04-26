@@ -24,6 +24,7 @@
 //! | `wrong_mode_returns_404`                          | `10.64.10.1`          | Triple-mode evaluation → wrong_mode                           |
 //! | `pagination_cursor_round_trip_sort_candidate_ip_inet_ordering` | `10.64.11.{2,10,99}` | inet vs lex ordering regression               |
 //! | `pagination_cursor_round_trip_non_default_sorts_arity` | `10.64.12.1`         | $9 cursor-arity regression on non-default sorts                |
+//! | `non_ip_cursor_candidate_ip_returns_400`           | `10.64.13.1`          | hand-crafted cursor with non-IP `candidate_ip` field          |
 
 mod common;
 
@@ -1054,4 +1055,105 @@ async fn garbage_cursor_returns_400() {
             "cursor={cursor:?}; body={body}",
         );
     }
+}
+
+/// A cursor whose `candidate_ip` field decodes successfully (base64
+/// + JSON ok, sort_col matches) but isn't a parseable IP literal must
+/// be rejected at decode time as `400 invalid_cursor`. Pre-fix, the
+/// non-IP value sailed through `decode` and surfaced downstream as a
+/// Postgres `inet` cast failure → 500. Decode-time validation now
+/// matches the documented error vocabulary.
+///
+/// The test also covers the `sort_col == candidate_ip` case where the
+/// cursor's `sort_value` (a `String`) is also bound as `inet` —
+/// downstream `$5::inet` would fail the same way.
+#[tokio::test]
+async fn non_ip_cursor_candidate_ip_returns_400() {
+    use base64::Engine as _;
+
+    let h = common::HttpHarness::start().await;
+    common::insert_agent(&h.state.pool, "t56ep-13").await;
+    let cid =
+        create_edge_candidate_campaign(&h, "ep-non-ip-cursor", "t56ep-13", "10.64.13.1").await;
+    let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
+    let cand: IpAddr = "10.64.13.1".parse().unwrap();
+    seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed::simple(cand, "ep13-dest-a", 10.0, true),
+    )
+    .await;
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(cid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    let encode = |body: &Value| -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(body).unwrap())
+    };
+
+    // (1) Default sort=best_route_ms; cursor's `candidate_ip` field is
+    //     a non-IP literal. Bound downstream as `$6::inet`.
+    let bad_cand_ip_cursor = encode(&json!({
+        "sort_col": "best_route_ms",
+        "sort_value": { "kind": "f64", "value": 10.0 },
+        "candidate_ip": "not-an-ip",
+        "destination_agent_id": "ep13-dest-a",
+    }));
+    let (status, body) = h
+        .get(&format!(
+            "/api/campaigns/{cid}/evaluation/edge_pairs?cursor={bad_cand_ip_cursor}"
+        ))
+        .await;
+    assert_eq!(status, 400, "non-IP candidate_ip → 400; body={body}");
+    assert!(
+        body.contains("invalid_cursor"),
+        "non-IP candidate_ip body must carry invalid_cursor; got {body}"
+    );
+
+    // (2) sort=candidate_ip; cursor's `sort_value` is the leading
+    //     `inet`-bound parameter (`$5::inet`). The `candidate_ip`
+    //     field is a valid IP so any 400 here must come from the
+    //     `sort_value` IP check.
+    let bad_sort_value_cursor = encode(&json!({
+        "sort_col": "candidate_ip",
+        "sort_value": { "kind": "string", "value": "not-an-ip" },
+        "candidate_ip": "10.64.13.1",
+        "destination_agent_id": "ep13-dest-a",
+    }));
+    let (status, body) = h
+        .get(&format!(
+            "/api/campaigns/{cid}/evaluation/edge_pairs\
+             ?sort=candidate_ip&cursor={bad_sort_value_cursor}"
+        ))
+        .await;
+    assert_eq!(
+        status, 400,
+        "non-IP sort_value when sort=candidate_ip → 400; body={body}"
+    );
+    assert!(
+        body.contains("invalid_cursor"),
+        "non-IP sort_value body must carry invalid_cursor; got {body}"
+    );
+
+    // (3) Sanity: a fully-valid hand-crafted cursor with the same shape
+    //     succeeds (200), proving the 400s above are about the IP
+    //     literals, not about the encoding shape.
+    let good_cursor = encode(&json!({
+        "sort_col": "best_route_ms",
+        "sort_value": { "kind": "f64", "value": 10.0 },
+        "candidate_ip": "10.64.13.1",
+        "destination_agent_id": "ep13-dest-a",
+    }));
+    let (status, body) = h
+        .get(&format!(
+            "/api/campaigns/{cid}/evaluation/edge_pairs?cursor={good_cursor}"
+        ))
+        .await;
+    assert_eq!(
+        status, 200,
+        "well-formed cursor with valid IPs → 200; body={body}"
+    );
 }
