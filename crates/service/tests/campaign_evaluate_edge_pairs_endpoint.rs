@@ -22,6 +22,7 @@
 //! | `campaign_not_found_returns_404`                  | —                     | random UUID, never inserted                                   |
 //! | `campaign_never_evaluated_returns_404`            | `10.64.9.1`           | not_evaluated                                                 |
 //! | `wrong_mode_returns_404`                          | `10.64.10.1`          | Triple-mode evaluation → wrong_mode                           |
+//! | `pagination_cursor_round_trip_sort_candidate_ip_inet_ordering` | `10.64.11.{2,10,99}` | inet vs lex ordering regression               |
 
 mod common;
 
@@ -730,6 +731,76 @@ async fn pagination_cursor_round_trip_sort_candidate_ip() {
     seen.sort();
     seen.dedup();
     assert_eq!(seen.len(), 3, "every row visited exactly once: {seen:?}");
+}
+
+/// Extends the candidate-IP cursor walk with IPs that lexicographically
+/// disagree with native `inet` ordering: `10.64.11.2` and `10.64.11.10`
+/// sort `2 < 10` as inet but `"10.64.11.10" < "10.64.11.2"` as text.
+/// Casting the cursor value as text would cause page 2 to skip or repeat
+/// rows; the inet cast keeps the walk monotone.
+#[tokio::test]
+async fn pagination_cursor_round_trip_sort_candidate_ip_inet_ordering() {
+    let h = common::HttpHarness::start().await;
+    common::insert_agent(&h.state.pool, "t56ep-11").await;
+    let cid = create_edge_candidate_campaign(&h, "ep-cand-ip-inet", "t56ep-11", "10.64.11.2").await;
+    let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
+
+    // Pick three IPs whose lex-vs-inet ordering disagrees:
+    //   inet : 10.64.11.2   <  10.64.11.10  <  10.64.11.99
+    //   text : 10.64.11.10  <  10.64.11.2   <  10.64.11.99
+    let cands: [IpAddr; 3] = [
+        "10.64.11.2".parse().unwrap(),
+        "10.64.11.10".parse().unwrap(),
+        "10.64.11.99".parse().unwrap(),
+    ];
+    for (i, ip) in cands.iter().enumerate() {
+        seed_edge_candidate(&h.state.pool, eval_id, *ip, (i as i32) + 1).await;
+        seed_edge_pair_row(
+            &h.state.pool,
+            eval_id,
+            &EdgePairSeed::simple(*ip, &format!("ep11-dest-{i}"), 10.0, true),
+        )
+        .await;
+    }
+
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(cid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    // Walk one row at a time; capture order and uniqueness.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _page in 0..4 {
+        let url = match &cursor {
+            None => format!("/api/campaigns/{cid}/evaluation/edge_pairs?limit=1&sort=candidate_ip"),
+            Some(c) => format!(
+                "/api/campaigns/{cid}/evaluation/edge_pairs?limit=1&sort=candidate_ip&cursor={c}"
+            ),
+        };
+        let body: Value = h.get_json(&url).await;
+        for e in body["entries"].as_array().unwrap() {
+            seen.push(e["candidate_ip"].as_str().unwrap().to_string());
+        }
+        cursor = body["next_cursor"].as_str().map(String::from);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    // Inet-ordered sequence: `10.64.11.2`, `10.64.11.10`, `10.64.11.99`.
+    // A lexicographic cursor would have visited `10.64.11.10` first, then
+    // skipped or repeated `10.64.11.2` on page 2.
+    assert_eq!(
+        seen,
+        vec![
+            "10.64.11.2".to_string(),
+            "10.64.11.10".to_string(),
+            "10.64.11.99".to_string(),
+        ],
+        "page walk must follow inet ordering, not lexicographic"
+    );
 }
 
 // ---------------------------------------------------------------------------

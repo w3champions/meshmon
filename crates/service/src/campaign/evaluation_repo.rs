@@ -1505,16 +1505,27 @@ pub async fn latest_evaluation_edge_pairs(
     let cursor_cand_ip: Option<String> = cursor.as_ref().map(|c| c.candidate_ip.clone());
     let cursor_dest: Option<String> = cursor.as_ref().map(|c| c.destination_agent_id.clone());
 
-    // Sort column referenced by the cursor predicate. For `candidate_ip`
-    // (an `inet` column) we use `host(...)` so the comparison against
-    // the cursor's text-encoded value matches what the cursor stores
-    // (the bare `IpAddr.to_string()`, with no `/32` suffix). The ORDER
-    // BY can still use the native inet column directly since inet
-    // ordering is canonical.
+    // Sort column referenced by the cursor predicate. The ORDER BY uses
+    // native `ep.candidate_ip` (an `inet` column) so the cursor predicate
+    // must do the same — comparing via `host(ep.candidate_ip)` against a
+    // text cursor would order lexicographically and disagree with the
+    // page's inet ordering, causing keyset pagination to skip or repeat
+    // rows that share an IP prefix (e.g. `10.0.0.10` lexicographically
+    // sorts before `10.0.0.2`, but inet sorts the reverse).
+    //
+    // The cursor stores the bare IP literal (e.g. `"10.0.0.2"`); we bind
+    // it as text and cast to `inet` in SQL so PostgreSQL parses it the
+    // same way the page's `ep.candidate_ip` column is stored.
     let cursor_col_expr: String = match query.sort {
-        EdgePairSortCol::CandidateIp => "host(ep.candidate_ip)".to_string(),
+        EdgePairSortCol::CandidateIp => "ep.candidate_ip".to_string(),
         _ => format!("ep.{sort_col}"),
     };
+
+    // Tiebreak slot ($6) carries the cursor's candidate-IP literal. Cast
+    // it to `inet` so the secondary-sort comparison against
+    // `ep.candidate_ip` matches the ORDER BY's inet ordering. (The slot
+    // type still binds as `Option<String>`; the cast is purely SQL-side.)
+    let cand_ip_tiebreak = "$6::inet";
 
     // For `best_route_ms` (the only nullable sort column), the page uses
     // `NULLS LAST` ordering and the cursor encodes either a finite f64
@@ -1525,10 +1536,6 @@ pub async fn latest_evaluation_edge_pairs(
     //     value, plus NULL rows (which sort after everything).
     //   * cursor on a NULL row: next page is the remaining NULL rows
     //     after the (candidate_ip, destination_agent_id) tiebreak.
-    //
-    // Comparisons against `candidate_ip` continue to go through
-    // `host(ep.candidate_ip)` (defined in `cursor_col_expr` above) so
-    // the cursor's bare-IP form matches without the `/32` suffix.
     let cursor_predicate = if query.cursor.is_some() {
         if matches!(query.sort, EdgePairSortCol::BestRouteMs) {
             // NULL-aware predicate. `$5::float8` carries the cursor's
@@ -1540,25 +1547,27 @@ pub async fn latest_evaluation_edge_pairs(
                     ($5::float8 IS NOT NULL AND ( \
                         ep.{col} IS NULL \
                         OR ep.{col} {cmp} $5 \
-                        OR (ep.{col} = $5 AND host(ep.candidate_ip) > $6) \
-                        OR (ep.{col} = $5 AND host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) \
+                        OR (ep.{col} = $5 AND ep.candidate_ip > {ip_tb}) \
+                        OR (ep.{col} = $5 AND ep.candidate_ip = {ip_tb} AND ep.destination_agent_id > $7) \
                     )) \
                     OR \
                     ($9::bool IS TRUE AND ep.{col} IS NULL AND ( \
-                        host(ep.candidate_ip) > $6 \
-                        OR (host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) \
+                        ep.candidate_ip > {ip_tb} \
+                        OR (ep.candidate_ip = {ip_tb} AND ep.destination_agent_id > $7) \
                     )) \
                 )",
                 col = sort_col,
                 cmp = leading_cmp,
+                ip_tb = cand_ip_tiebreak,
             )
         } else {
             format!(
                 "AND ( {col_expr} {cmp} $5 \
-                    OR ({col_expr} = $5 AND host(ep.candidate_ip) > $6) \
-                    OR ({col_expr} = $5 AND host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) )",
+                    OR ({col_expr} = $5 AND ep.candidate_ip > {ip_tb}) \
+                    OR ({col_expr} = $5 AND ep.candidate_ip = {ip_tb} AND ep.destination_agent_id > $7) )",
                 col_expr = cursor_col_expr,
                 cmp = leading_cmp,
+                ip_tb = cand_ip_tiebreak,
             )
         }
     } else {
@@ -1570,10 +1579,12 @@ pub async fn latest_evaluation_edge_pairs(
     };
 
     // Determine SQL type cast for the cursor's sort-column value.
+    // `CandidateIp` casts to `inet` so the leading comparison
+    // (`ep.candidate_ip {cmp} $5::inet`) uses native inet ordering — the
+    // same as the page's `ORDER BY ep.candidate_ip`.
     let cursor_value_sql_cast = match query.sort {
-        EdgePairSortCol::BestRouteKind
-        | EdgePairSortCol::CandidateIp
-        | EdgePairSortCol::DestinationAgentId => "$5::text",
+        EdgePairSortCol::CandidateIp => "$5::inet",
+        EdgePairSortCol::BestRouteKind | EdgePairSortCol::DestinationAgentId => "$5::text",
         EdgePairSortCol::QualifiesUnderT | EdgePairSortCol::IsUnreachable => "$5::bool",
         EdgePairSortCol::BestRouteMs
         | EdgePairSortCol::BestRouteLossRatio
