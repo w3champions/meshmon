@@ -2383,3 +2383,79 @@ async fn persist_edge_candidate_evaluation_snapshots_transit_caps() {
         "max_transit_stddev_ms must round-trip onto the edge_candidate evaluation row"
     );
 }
+
+/// `reverse_direction_measurements_for_campaign` must dedupe to the
+/// most recent in-window measurement per `(source_agent_id,
+/// destination_ip)` pair so the symmetry-fallback substitution is
+/// reproducible. PostgreSQL's row order is implementation-defined
+/// without an explicit ORDER BY; pre-fix, multiple in-window samples
+/// for the same pair let `LegLookup`'s first-write-wins pick a
+/// non-deterministic representative.
+#[tokio::test]
+async fn reverse_direction_measurements_dedup_to_latest_per_pair() {
+    let pool = common::shared_migrated_pool().await;
+
+    // Two agents: A is the campaign source, B is the destination.
+    // Reverse direction is B→A (source=B, destination_ip=A.ip).
+    let a_ip: std::net::IpAddr = "198.51.100.61".parse().unwrap();
+    let b_ip: std::net::IpAddr = "198.51.100.62".parse().unwrap();
+    common::insert_agent_with_ip(&pool, "t56-rev-a", a_ip).await;
+    common::insert_agent_with_ip(&pool, "t56-rev-b", b_ip).await;
+
+    let mut input = make_input("t-reverse-dedup");
+    input.source_agent_ids = vec!["t56-rev-a".into()];
+    input.destination_ips = vec![b_ip];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Two reverse-direction (B → A.ip) measurements within the 24h
+    // window — older one first, newer one second. The query must pick
+    // the newer one (latency_avg_ms = 99.0) regardless of insert
+    // order or PostgreSQL's underlying scan.
+    let dst = sqlx::types::ipnetwork::IpNetwork::from(a_ip);
+    sqlx::query(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_ratio, measured_at) \
+         VALUES ($1, $2, 'icmp', 10, 50.0, 0.0, now() - interval '6 hours')",
+    )
+    .bind("t56-rev-b")
+    .bind(dst)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_ratio, measured_at) \
+         VALUES ($1, $2, 'icmp', 10, 99.0, 0.0, now() - interval '1 minute')",
+    )
+    .bind("t56-rev-b")
+    .bind(dst)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let rev = repo::reverse_direction_measurements_for_campaign(&pool, row.id)
+        .await
+        .expect("reverse-direction fetch");
+    let matching: Vec<_> = rev
+        .iter()
+        .filter(|m| m.source_agent_id == "t56-rev-b" && m.destination_ip == a_ip)
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "DISTINCT ON must collapse multiple in-window samples to one row: got {matching:?}"
+    );
+    assert!(
+        (matching[0].latency_avg_ms.unwrap_or(0.0) - 99.0).abs() < 1e-3,
+        "DISTINCT ON + ORDER BY measured_at DESC must surface the latest sample: got {:?}",
+        matching[0].latency_avg_ms
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE source_agent_id = 't56-rev-b'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}

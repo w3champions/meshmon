@@ -1893,6 +1893,15 @@ pub async fn insert_detail_pairs(
 /// Returns the same [`AttributedMeasurement`] shape. Because every row in
 /// `measurements` originates from an active probe, `direct_source` is always
 /// [`DirectSource::ActiveProbe`].
+///
+/// `DISTINCT ON (source_agent_id, destination_ip)` plus `ORDER BY …,
+/// measured_at DESC` collapses multiple in-window measurements per
+/// reverse-direction pair down to the most recent one. Without the
+/// dedupe, [`crate::campaign::eval::legs::LegLookup::build`]'s
+/// first-write-wins on `forward.entry(...).or_insert(...)` would let
+/// PostgreSQL's implementation-defined row order pick which sample
+/// powers the symmetry fallback — a property the unit-of-evaluator
+/// reproducibility contract relies on.
 pub async fn reverse_direction_measurements_for_campaign(
     pool: &PgPool,
     campaign_id: Uuid,
@@ -1910,7 +1919,8 @@ pub async fn reverse_direction_measurements_for_campaign(
             WHERE cp.campaign_id = $1
               AND cp.kind = 'campaign'
         )
-        SELECT m.source_agent_id, m.destination_ip,
+        SELECT DISTINCT ON (m.source_agent_id, m.destination_ip)
+               m.source_agent_id, m.destination_ip,
                m.latency_avg_ms, m.latency_stddev_ms,
                m.loss_ratio, m.mtr_id AS mtr_measurement_id,
                m.id AS measurement_id
@@ -1923,6 +1933,7 @@ pub async fn reverse_direction_measurements_for_campaign(
          AND m.protocol = c.protocol
          AND m.measured_at > now() - interval '24 hours'
          AND m.latency_avg_ms IS NOT NULL
+        ORDER BY m.source_agent_id, m.destination_ip, m.measured_at DESC
         "#,
         campaign_id,
     )
