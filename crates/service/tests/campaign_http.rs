@@ -188,6 +188,46 @@ async fn get_one_pair_counts_excludes_detail_rows() {
     );
 }
 
+/// `GET /api/campaigns/:id` populates `source_agent_ids` with the
+/// DISTINCT set of source agents from `campaign_pairs`, ascending. The
+/// SPA's CompareTab picker reads this field directly; without it the
+/// picker rendered the empty-state card for every real campaign.
+#[tokio::test]
+async fn get_one_returns_source_agent_ids() {
+    let h = common::HttpHarness::start().await;
+
+    let created: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &serde_json::json!({
+                "title": "http-source-agents",
+                "protocol": "icmp",
+                "source_agent_ids": ["agent-sa-c", "agent-sa-a", "agent-sa-b"],
+                "destination_ips": ["198.51.100.250"],
+            }),
+        )
+        .await;
+    let id = created["id"].as_str().expect("id is string");
+
+    let got: serde_json::Value = h.get_json(&format!("/api/campaigns/{id}")).await;
+    let agents: Vec<String> = got["source_agent_ids"]
+        .as_array()
+        .expect("source_agent_ids array present")
+        .iter()
+        .map(|v| v.as_str().expect("agent id is string").to_string())
+        .collect();
+    // DISTINCT-ordered ascending; each source surfaces exactly once.
+    assert_eq!(
+        agents,
+        vec![
+            "agent-sa-a".to_string(),
+            "agent-sa-b".to_string(),
+            "agent-sa-c".to_string(),
+        ],
+        "source_agent_ids must be DISTINCT and sorted; got {agents:?}"
+    );
+}
+
 #[tokio::test]
 async fn patch_rejects_blank_title() {
     // `create` refuses a blank title (handler check at create-time).

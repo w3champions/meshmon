@@ -1332,6 +1332,13 @@ export interface components {
             /** @description Probe protocol shared by every pair. */
             protocol: components["schemas"]["ProbeProtocol"];
             /**
+             * @description DISTINCT source agents from `campaign_pairs`. Empty on list
+             *     responses; populated on single-row GET / PATCH so the SPA can
+             *     render the source-agent picker (CompareTab) without an extra
+             *     round-trip. Order is ascending by `agent_id`.
+             */
+            source_agent_ids?: string[];
+            /**
              * Format: date-time
              * @description When the campaign most recently transitioned to `running`.
              */

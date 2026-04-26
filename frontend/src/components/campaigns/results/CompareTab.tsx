@@ -137,14 +137,15 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
   // Agent picker state — localStorage + URL ?picked= round-trip
   // ------------------------------------------------------------------
 
-  // `source_agent_ids` is an optional field on the campaign DTO that carries
-  // the ordered list of agent IDs configured as sources for this campaign.
-  // Phase Q (Composer) will ensure it's always populated; until then fall
-  // back to an empty list so the picker renders the empty-state card rather
-  // than crashing.
+  // `source_agent_ids` is the DISTINCT set of source agent ids for this
+  // campaign, sourced from `campaign_pairs` and stamped onto the
+  // single-row campaign DTO by the GET / PATCH handlers. Falling back to
+  // an empty list keeps the picker rendering the empty-state card rather
+  // than crashing when the field is absent (e.g. older list responses
+  // that don't populate it).
   const sourceAgentIds: string[] = useMemo(
-    () => (campaign as Campaign & { source_agent_ids?: string[] }).source_agent_ids ?? [],
-    [campaign],
+    () => campaign.source_agent_ids ?? [],
+    [campaign.source_agent_ids],
   );
 
   const localStorageKey = `meshmon.evaluation.compare.${campaign.id}.agents`;

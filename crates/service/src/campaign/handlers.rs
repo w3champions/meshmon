@@ -330,9 +330,40 @@ pub async fn get_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
         }
     };
 
+    let source_agent_ids = source_agent_ids_for_campaign(&state.pool, id).await;
+
     let mut dto = CampaignDto::from(camp);
     dto.pair_counts = counts;
+    dto.source_agent_ids = source_agent_ids;
     (StatusCode::OK, Json(dto)).into_response()
+}
+
+/// Distinct source-agent ids on a campaign's `campaign_pairs`, ascending.
+/// Used to surface the picker contents on single-row campaign reads
+/// (GET / PATCH) so the SPA can render the source-agent selector without
+/// a second round-trip. A query failure degrades to an empty list — the
+/// campaign shell is still useful and the failure is logged.
+async fn source_agent_ids_for_campaign(pool: &sqlx::PgPool, id: Uuid) -> Vec<String> {
+    match sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT source_agent_id \
+           FROM campaign_pairs \
+          WHERE campaign_id = $1 \
+          ORDER BY source_agent_id",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                campaign_id = %id,
+                "campaign::source_agent_ids_for_campaign query failed",
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// `PATCH /api/campaigns/{id}` — partial update.
@@ -482,7 +513,12 @@ pub async fn patch(
         updated
     };
 
-    (StatusCode::OK, Json(CampaignDto::from(response_row))).into_response()
+    // Surface the source-agent picker contents on PATCH responses for
+    // parity with `get_one`, so SPA cache updates don't drop the field.
+    let source_agent_ids = source_agent_ids_for_campaign(&state.pool, id).await;
+    let mut dto = CampaignDto::from(response_row);
+    dto.source_agent_ids = source_agent_ids;
+    (StatusCode::OK, Json(dto)).into_response()
 }
 
 /// `DELETE /api/campaigns/{id}` — idempotent removal.

@@ -49,7 +49,7 @@ const CAMPAIGN_ID = "44444444-4444-4444-4444-444444444444";
 const CANDIDATE_IP = "10.0.77.1";
 const AGENT_ID = "agent-source-x";
 
-function makeCampaign(overrides: Partial<Campaign & { source_agent_ids?: string[] }> = {}): Campaign & { source_agent_ids?: string[] } {
+function makeCampaign(overrides: Partial<Campaign> = {}): Campaign {
   return {
     id: CAMPAIGN_ID,
     title: "edge campaign",
@@ -72,7 +72,7 @@ function makeCampaign(overrides: Partial<Campaign & { source_agent_ids?: string[
     evaluated_at: null,
     pair_counts: [],
     source_agent_ids: overrides.source_agent_ids ?? [],
-  } as unknown as Campaign & { source_agent_ids?: string[] };
+  } as unknown as Campaign;
 }
 
 function makeEdgePairRow(idx: number, overrides: Partial<EvaluationEdgePairDetailDto> = {}): EvaluationEdgePairDetailDto {

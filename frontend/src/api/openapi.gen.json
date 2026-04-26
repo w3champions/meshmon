@@ -3530,6 +3530,13 @@
             "$ref": "#/components/schemas/ProbeProtocol",
             "description": "Probe protocol shared by every pair."
           },
+          "source_agent_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "DISTINCT source agents from `campaign_pairs`. Empty on list\nresponses; populated on single-row GET / PATCH so the SPA can\nrender the source-agent picker (CompareTab) without an extra\nround-trip. Order is ascending by `agent_id`."
+          },
           "started_at": {
             "type": [
               "string",

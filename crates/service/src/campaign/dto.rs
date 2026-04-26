@@ -104,6 +104,12 @@ pub struct CampaignDto {
     /// Per-state pair counts. Empty on list responses; populated on single-row GET.
     #[serde(default)]
     pub pair_counts: Vec<(PairResolutionState, i64)>,
+    /// DISTINCT source agents from `campaign_pairs`. Empty on list
+    /// responses; populated on single-row GET / PATCH so the SPA can
+    /// render the source-agent picker (CompareTab) without an extra
+    /// round-trip. Order is ascending by `agent_id`.
+    #[serde(default)]
+    pub source_agent_ids: Vec<String>,
 }
 
 impl From<CampaignRow> for CampaignDto {
@@ -136,6 +142,7 @@ impl From<CampaignRow> for CampaignDto {
             completed_at: r.completed_at,
             evaluated_at: r.evaluated_at,
             pair_counts: Vec::new(),
+            source_agent_ids: Vec::new(),
         }
     }
 }

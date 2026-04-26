@@ -104,8 +104,9 @@ export function EdgePairDrawerBody({
 
   // Self-pair exclusion check (spec §5.5 G-5):
   // The note shows when candidate is a mesh member AND its agent_id matches
-  // a campaign source agent. Note: CampaignDto.source_agent_ids is optional.
-  const sourceAgentIds = (campaign as Campaign & { source_agent_ids?: string[] }).source_agent_ids;
+  // a campaign source agent. `source_agent_ids` is optional on the wire
+  // DTO (list responses leave it empty); single-row reads populate it.
+  const sourceAgentIds = campaign.source_agent_ids;
   const isSelfPairExcluded =
     candidate.is_mesh_member &&
     candidate.agent_id != null &&

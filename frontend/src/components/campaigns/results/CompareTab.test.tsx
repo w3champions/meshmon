@@ -55,11 +55,9 @@ import { CompareTab } from "@/components/campaigns/results/CompareTab";
 
 const CAMPAIGN_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
-type CampaignWithAgents = Campaign & { source_agent_ids?: string[] };
-
 function makeCampaign(
-  overrides: Partial<CampaignWithAgents> & { state: CampaignState },
-): CampaignWithAgents {
+  overrides: Partial<Campaign> & { state: CampaignState },
+): Campaign {
   return {
     id: overrides.id ?? CAMPAIGN_ID,
     title: overrides.title ?? "Campaign compare",
@@ -84,7 +82,7 @@ function makeCampaign(
     max_hops: overrides.max_hops ?? 2,
     vm_lookback_minutes: overrides.vm_lookback_minutes ?? 60,
     source_agent_ids: overrides.source_agent_ids ?? ["agent-a", "agent-b", "agent-c"],
-  } as CampaignWithAgents;
+  } as Campaign;
 }
 
 function makeEvaluation(overrides: Partial<Evaluation> = {}): Evaluation {
