@@ -1,8 +1,11 @@
 -- Edge candidate evaluation mode + cross-mode improvements (T56).
 -- Spec: docs/superpowers/specs/2026-04-26-campaigns-edge-candidate-evaluation-mode-design.md
 
--- 1. New enum variant.
-ALTER TYPE evaluation_mode ADD VALUE 'edge_candidate' AFTER 'optimization';
+-- 1. New enum variant. PostgreSQL has no ALTER TYPE ... DROP VALUE, so the
+--    down migration cannot remove this label — `IF NOT EXISTS` keeps the
+--    up migration idempotent across re-runs (down → up cycles, partial-
+--    failure recovery).
+ALTER TYPE evaluation_mode ADD VALUE IF NOT EXISTS 'edge_candidate' AFTER 'optimization';
 
 -- 2. Three new knobs on measurement_campaigns.
 ALTER TABLE measurement_campaigns
