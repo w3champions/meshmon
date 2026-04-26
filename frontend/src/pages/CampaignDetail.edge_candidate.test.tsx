@@ -657,6 +657,29 @@ describe("CampaignDetail edge_candidate — Candidates tab + DrilldownDialog", (
   });
 });
 
+describe("CampaignDetail edge_candidate — Knobs card", () => {
+  test("Knobs card surfaces useful_latency_ms / max_hops / vm_lookback_minutes for edge_candidate", async () => {
+    const evaluation = makeEvaluation();
+    setupHookMocks({
+      campaign: makeCampaign({
+        state: "evaluated",
+        evaluation_mode: "edge_candidate",
+        useful_latency_ms: 80,
+        max_hops: 2,
+        vm_lookback_minutes: 15,
+      }),
+      evaluation,
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByText(/useful latency \(ms\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/max hops/i)).toBeInTheDocument();
+    expect(screen.getByText(/lookback window \(min\)/i)).toBeInTheDocument();
+  });
+});
+
 describe("CampaignDetail edge_candidate — single-source-agent banner", () => {
   test("single source agent banner appears in SettingsTab when only one source agent", async () => {
     const evaluation = makeEvaluation();

@@ -578,6 +578,24 @@ export default function CampaignDetail() {
           <KnobRow label="Evaluation mode" value={campaign.evaluation_mode} />
           <KnobRow label="Force measurement" value={campaign.force_measurement} />
           {/*
+           * Cross-mode knobs that drive the evaluator. `max_hops` and
+           * `vm_lookback_minutes` apply to every mode; `useful_latency_ms`
+           * is only consumed by edge_candidate, so we only surface it
+           * when the campaign opted into that mode. Labels match the
+           * SettingsTab inputs verbatim for at-a-glance parity.
+           */}
+          {isEdgeCandidate ? (
+            <KnobRow
+              label="Useful latency (ms)"
+              value={campaign.useful_latency_ms ?? null}
+            />
+          ) : null}
+          <KnobRow label="Max hops" value={campaign.max_hops ?? null} />
+          <KnobRow
+            label="Lookback window (min)"
+            value={campaign.vm_lookback_minutes ?? null}
+          />
+          {/*
            * Guardrail knobs. Optional on the campaign row — `?? null`
            * collapses `undefined` (legacy campaigns predating the
            * columns) to the em-dash sentinel rendered by `KnobRow`.

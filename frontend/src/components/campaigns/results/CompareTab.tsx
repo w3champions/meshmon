@@ -63,7 +63,7 @@ const STORAGE_FILTER_CAVEAT =
 const EDGE_PAIR_QUERY: EdgePairsQuery = { limit: 500 };
 
 const CWP_TOOLTIP =
-  "Coverage-weighted ping is computed against the full agent set; not recomputed in Compare. Pick fewer agents to reason about CWP separately via the Heatmap tab.";
+  "Coverage-weighted ping is computed against the full agent set; not recomputed in Compare. Open the Candidates tab to inspect per-candidate CWP at full-roster scope.";
 
 // ---------------------------------------------------------------------------
 // Props
