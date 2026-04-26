@@ -32,7 +32,9 @@ ALTER TABLE campaign_evaluation_pair_details
   ADD COLUMN ax_was_substituted     BOOLEAN  NULL,
   ADD COLUMN xb_was_substituted     BOOLEAN  NULL,
   ADD COLUMN direct_was_substituted BOOLEAN  NULL,
-  ADD COLUMN winning_x_position     SMALLINT NULL;
+  ADD COLUMN winning_x_position     SMALLINT NULL,
+  ADD CONSTRAINT campaign_eval_pair_winning_x_position_range
+    CHECK (winning_x_position IS NULL OR winning_x_position IN (1, 2));
 
 -- 5. Per-(X, B) result table for edge_candidate.
 CREATE TABLE campaign_evaluation_edge_pair_details (
