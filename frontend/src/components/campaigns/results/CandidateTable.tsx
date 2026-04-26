@@ -93,7 +93,8 @@ function lossClass(value: number | null | undefined, threshold: number): string 
   return "bg-destructive/15 text-destructive";
 }
 
-function formatScore(value: number): string {
+function formatScore(value: number | null | undefined): string {
+  if (value == null) return "—";
   return value.toFixed(2);
 }
 
@@ -117,7 +118,7 @@ function cityLabel(candidate: Candidate): string {
 function compareByColumn(a: Candidate, b: Candidate, col: CandidateSortColumn): number {
   switch (col) {
     case "composite_score":
-      return a.composite_score - b.composite_score;
+      return (a.composite_score ?? 0) - (b.composite_score ?? 0);
     case "display_name":
       return (a.display_name ?? a.destination_ip).localeCompare(b.display_name ?? b.destination_ip);
     case "destination_ip":

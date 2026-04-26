@@ -75,6 +75,8 @@ function makeCampaign(
     completed_at: overrides.completed_at ?? null,
     evaluated_at: overrides.evaluated_at ?? null,
     pair_counts: overrides.pair_counts ?? [],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 

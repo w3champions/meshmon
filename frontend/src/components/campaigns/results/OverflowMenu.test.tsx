@@ -52,6 +52,8 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
       ["reused", 5],
       ["pending", 2],
     ],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 
