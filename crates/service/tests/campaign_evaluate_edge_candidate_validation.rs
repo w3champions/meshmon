@@ -480,3 +480,105 @@ async fn evaluate_edge_candidate_excludes_mesh_candidate_from_destinations() {
         "destination roster must not contain mesh-candidate C; got {dest_agent_ids:?}"
     );
 }
+
+/// `ip_catalogue.website` and `ip_catalogue.notes` must flow from the
+/// catalogue row through the evaluation-input loader, through the
+/// `EdgeCandidateRow`, and into `campaign_evaluation_candidates` so the
+/// API surface and the persisted detail row both expose them. Regression
+/// for the loader hardcoding `website: None, notes: None` while the
+/// `persist_edge_candidate_evaluation` path read those fields from
+/// enrichment.
+#[tokio::test]
+async fn evaluate_edge_candidate_persists_catalogue_website_and_notes() {
+    let h = HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    common::insert_agent_with_ip(pool, "t56v-wn-a", "198.51.100.131".parse().unwrap()).await;
+    common::insert_agent_with_ip(pool, "t56v-wn-b", "198.51.100.132".parse().unwrap()).await;
+
+    // Seed the candidate IP into ip_catalogue with website + notes BEFORE
+    // creating the campaign so the post-insert enrichment trigger doesn't
+    // overwrite our values.
+    sqlx::query(
+        "INSERT INTO ip_catalogue (ip, source, website, notes) \
+           VALUES ('198.51.100.139'::inet, 'operator', $1, $2) \
+           ON CONFLICT (ip) DO UPDATE \
+              SET website = EXCLUDED.website, notes = EXCLUDED.notes",
+    )
+    .bind("https://example.com/edge-candidate-status")
+    .bind("operator-seeded for evaluator regression")
+    .execute(pool)
+    .await
+    .expect("seed ip_catalogue website + notes");
+
+    let campaign: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-website-notes-flow",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["t56v-wn-a", "t56v-wn-b"],
+                "destination_ips": ["198.51.100.139"],
+                "useful_latency_ms": 200.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+
+    common::seed_measurements(
+        pool,
+        &campaign_id,
+        &[
+            ("t56v-wn-a", "198.51.100.139", 50.0, 5.0, 0.0),
+            ("t56v-wn-b", "198.51.100.139", 60.0, 5.0, 0.0),
+        ],
+    )
+    .await;
+    common::mark_completed(pool, &campaign_id).await;
+    let _: serde_json::Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // Persisted candidate row must carry the catalogue values.
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+    let row: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT website, notes \
+           FROM campaign_evaluation_candidates c \
+           JOIN campaign_evaluations e ON e.id = c.evaluation_id \
+          WHERE e.campaign_id = $1 \
+            AND c.destination_ip = '198.51.100.139'::inet",
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("candidate row exists for X = 198.51.100.139");
+
+    assert_eq!(
+        row.0.as_deref(),
+        Some("https://example.com/edge-candidate-status"),
+        "persisted candidate website must come from ip_catalogue, not None: row = {row:?}"
+    );
+    assert_eq!(
+        row.1.as_deref(),
+        Some("operator-seeded for evaluator regression"),
+        "persisted candidate notes must come from ip_catalogue, not None: row = {row:?}"
+    );
+
+    // The `/evaluation` endpoint must surface the same values.
+    let eval: serde_json::Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+    let cand = eval["results"]["candidates"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|c| c["destination_ip"] == "198.51.100.139"))
+        .unwrap_or_else(|| panic!("candidate missing in /evaluation response: {eval}"));
+    assert_eq!(
+        cand["website"], "https://example.com/edge-candidate-status",
+        "/evaluation response must surface website: {cand}"
+    );
+    assert_eq!(
+        cand["notes"], "operator-seeded for evaluator regression",
+        "/evaluation response must surface notes: {cand}"
+    );
+}

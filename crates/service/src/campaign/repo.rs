@@ -1681,7 +1681,9 @@ pub async fn measurements_for_campaign(
                   c.city,
                   c.country_code,
                   c.asn,
-                  c.network_operator
+                  c.network_operator,
+                  c.website,
+                  c.notes
              FROM ip_catalogue c
             WHERE c.ip IN (
                 SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1
@@ -1702,13 +1704,8 @@ pub async fn measurements_for_campaign(
                     country_code: r.country_code,
                     asn: r.asn.map(|v| v as i64),
                     network_operator: r.network_operator,
-                    // The diversity / optimization queries don't pull
-                    // these fields today; the EdgeCandidate handler
-                    // populates them at response time. Defaulting to
-                    // `None` here keeps the loader compatible with both
-                    // arms.
-                    website: None,
-                    notes: None,
+                    website: r.website,
+                    notes: r.notes,
                     hostname: None,
                 },
             )
