@@ -5,7 +5,7 @@
  * per-candidate metrics over a filtered agent subset.
  *
  * For diversity/optimization: candidate sub-picker + pick_role filtering stubs
- * (full wiring deferred — see Phase P followup comment in CompareTab.tsx).
+ * (full wiring deferred — see followup comment in CompareTab.tsx).
  */
 
 import type { EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";

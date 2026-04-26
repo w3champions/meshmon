@@ -276,9 +276,8 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   const isSubmitDisabled =
     !isEligible || isPending || (isEdgeCandidate && form.useful_latency_ms === null);
 
-  // The CampaignDto doesn't expose source_agent_ids in the TypeScript type
-  // yet (Phase P noted this). Use a widened cast matching the pattern used
-  // in CampaignComposer.tsx.
+  // The CampaignDto doesn't expose source_agent_ids in the TypeScript type;
+  // use a widened cast matching the pattern in CampaignComposer.tsx.
   const sourceAgentIds =
     (campaign as unknown as { source_agent_ids?: string[] }).source_agent_ids ?? [];
 

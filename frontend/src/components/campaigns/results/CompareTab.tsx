@@ -2,16 +2,15 @@
  * CompareTab — client-side re-aggregation of evaluation metrics over a
  * user-picked subset of source/destination agents.
  *
- * Phase P sub-tasks:
- *   P1 — Skeleton + placeholder (evaluation === null).
- *   P2 — Agent picker multi-select, localStorage persistence.
- *   P3 — Pick-role radio (diversity/optimization only; hidden for edge_candidate).
- *   P4 — Candidate sub-picker (transient, URL-encoded).
- *   P5 — Client-side re-aggregation for edge_candidate; triple-mode stub.
+ * Surfaces:
+ *   - Skeleton + placeholder when evaluation is null.
+ *   - Agent picker multi-select with localStorage persistence.
+ *   - Pick-role radio (diversity/optimization only; hidden for edge_candidate).
+ *   - Candidate sub-picker (transient, URL-encoded).
+ *   - Client-side re-aggregation for edge_candidate; triple-mode stub.
  *
- * Note: diversity/optimization aggregation is NOT wired in this phase.
- * A visible stub notice is rendered instead — see Phase P followup comment
- * on `CompareTripleStub`.
+ * Diversity/optimization aggregation is not wired — a visible stub notice
+ * is rendered instead (see `CompareTripleStub`).
  */
 
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -686,10 +685,10 @@ function CompareTripleStub() {
     >
       <h3 className="text-sm font-semibold">Compare for diversity/optimization</h3>
       <p className="text-sm text-muted-foreground">
-        Client-side re-aggregation for diversity and optimization modes is not yet wired
-        in this phase. Per-candidate pair_details live behind a paginated endpoint;
-        fetching them per picked candidate is deferred to a Phase P followup.
-        The agent picker and pick-role filter above will drive the query once wired.
+        Client-side re-aggregation for diversity and optimization modes is not wired.
+        Per-candidate pair_details live behind a paginated endpoint; fetching them
+        per picked candidate is deferred. The agent picker and pick-role filter
+        above will drive the query once wired.
       </p>
     </Card>
   );
