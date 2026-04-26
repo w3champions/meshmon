@@ -11,7 +11,7 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";
 import type { Campaign } from "@/api/hooks/campaigns";
-import { useEvaluation } from "@/api/hooks/evaluation";
+import { type Evaluation, useEvaluation } from "@/api/hooks/evaluation";
 import {
   type EdgeCandidateSort,
   EdgeCandidateTable,
@@ -36,6 +36,19 @@ import type { CampaignDetailSearch } from "@/router/index";
 
 export interface CandidatesTabProps {
   campaign: Campaign;
+  /**
+   * Freshness-gated evaluation snapshot from the page shell. When the
+   * campaign has been re-edited (a knob change flips state back to
+   * `completed` and clears `evaluated_at`) or the snapshot's mode no
+   * longer matches the campaign's mode, the page passes `null` so this
+   * tab renders its evaluate-first placeholder instead of the stale
+   * candidate rows. Mirrors the gate Heatmap / Pairs / Compare apply via
+   * `freshEvaluation` in `CampaignDetail`.
+   *
+   * Optional for backward compatibility with stand-alone test mounts that
+   * rely on the in-component `useEvaluation` query.
+   */
+  freshEvaluation?: Evaluation | null;
 }
 
 const DEFAULT_SORT: CandidateTableSort = { col: "composite_score", dir: "desc" };
@@ -46,7 +59,7 @@ const DEFAULT_EDGE_SORT: EdgeCandidateSort = { col: "coverage_weighted_ping_ms",
 // Component
 // ---------------------------------------------------------------------------
 
-export function CandidatesTab({ campaign }: CandidatesTabProps) {
+export function CandidatesTab({ campaign, freshEvaluation }: CandidatesTabProps) {
   const navigate = useNavigate();
   // `strict: false` keeps the hook usable under test harnesses that mount
   // the tab outside the registered route tree; the router's validator has
@@ -54,6 +67,14 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
   const search = useSearch({ strict: false }) as CampaignDetailSearch;
 
   const evaluationQuery = useEvaluation(campaign.id);
+  // When the page passes an explicit `freshEvaluation` (always, in prod),
+  // honour it as the source of truth for the rendered evaluation — that
+  // prop already encodes the page-level freshness gate (state must be
+  // `evaluated` AND snapshot's `evaluation_mode` must match the
+  // campaign's current mode). Falling back to the query result keeps
+  // stand-alone test mounts working without changes.
+  const usePageEvaluation = freshEvaluation !== undefined;
+  const renderedEvaluation = usePageEvaluation ? freshEvaluation : evaluationQuery.data;
 
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
 
@@ -95,8 +116,14 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
   // -------------------------------------------------------------------------
   // Empty + error branches
   // -------------------------------------------------------------------------
+  //
+  // Loading and error branches are driven by the in-component `useEvaluation`
+  // query because the page-level shell does not surface those states through
+  // `freshEvaluation`. When the page explicitly passes `null` to gate against
+  // a stale or mode-mismatched snapshot, fall straight through to the
+  // evaluate-first placeholder regardless of the query state.
 
-  if (evaluationQuery.isLoading) {
+  if (!usePageEvaluation && evaluationQuery.isLoading) {
     return (
       <section
         data-testid="candidates-tab"
@@ -111,7 +138,7 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
     );
   }
 
-  if (evaluationQuery.isError) {
+  if (!usePageEvaluation && evaluationQuery.isError) {
     return (
       <section data-testid="candidates-tab" className="flex flex-col gap-3">
         <Card className="p-4 text-sm text-destructive" role="alert">
@@ -121,7 +148,7 @@ export function CandidatesTab({ campaign }: CandidatesTabProps) {
     );
   }
 
-  const evaluation = evaluationQuery.data;
+  const evaluation = renderedEvaluation;
   if (!evaluation) {
     return (
       <section data-testid="candidates-tab" className="flex flex-col gap-3">

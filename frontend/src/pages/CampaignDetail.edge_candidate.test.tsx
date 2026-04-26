@@ -734,6 +734,45 @@ describe("CampaignDetail edge_candidate — stale evaluation gating", () => {
   });
 
   /**
+   * Candidates is the default tab and shares the same staleness exposure.
+   * After a knob change the `campaign_evaluations` row is preserved and
+   * `GET /evaluation` keeps returning the historical snapshot — the tab
+   * must render its evaluate-first placeholder, not the stale candidate
+   * rows. Mirrors the Heatmap/Pairs/Compare gate.
+   */
+  test("Candidates shows placeholder when state is completed even if evaluation row exists", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "edge_candidate" }),
+      evaluation: makeEvaluation(),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByText(/no evaluation yet/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("edge-candidate-row-10.0.0.1")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Mode-mismatch path for Candidates: the historical snapshot's mode no
+   * longer matches the campaign's current mode, so the rows describe a
+   * different scoring lens. Render the placeholder even though the
+   * campaign is in `evaluated` state.
+   */
+  test("Candidates shows placeholder when evaluation_mode mismatches campaign mode", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      evaluation: makeEvaluation({ evaluation_mode: "optimization" }),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /edge campaign/i });
+
+    expect(screen.getByText(/no evaluation yet/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("edge-candidate-row-10.0.0.1")).not.toBeInTheDocument();
+  });
+
+  /**
    * Mode-mismatch guard. Campaign was previously evaluated in
    * `optimization` mode then PATCHed to `edge_candidate`; the historical
    * row still exists but its `evaluation_mode` no longer matches. The

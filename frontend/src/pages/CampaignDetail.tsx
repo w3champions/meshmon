@@ -665,7 +665,9 @@ export default function CampaignDetail() {
             <TabsTrigger value="settings">Evaluation settings</TabsTrigger>
           </TabsList>
           <TabsContent value="candidates">
-            {effectiveTab === "candidates" ? <CandidatesTab campaign={campaign} /> : null}
+            {effectiveTab === "candidates" ? (
+              <CandidatesTab campaign={campaign} freshEvaluation={freshEvaluation} />
+            ) : null}
           </TabsContent>
           {isEdgeCandidate ? (
             <TabsContent value="heatmap">
