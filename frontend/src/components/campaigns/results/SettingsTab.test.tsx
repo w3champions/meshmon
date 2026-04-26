@@ -56,6 +56,7 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     max_transit_stddev_ms: overrides.max_transit_stddev_ms ?? null,
     min_improvement_ms: overrides.min_improvement_ms ?? null,
     min_improvement_ratio: overrides.min_improvement_ratio ?? null,
+    useful_latency_ms: overrides.useful_latency_ms ?? null,
     created_at: overrides.created_at ?? "2026-04-01T12:00:00Z",
     created_by: overrides.created_by ?? "alice",
     started_at: overrides.started_at ?? null,
@@ -904,6 +905,32 @@ describe("SettingsTab — R2: legacy badge", () => {
     renderTab(makeCampaign({ state: "completed" }));
 
     expect(screen.queryByText(/legacy/i)).not.toBeInTheDocument();
+  });
+
+  test("renders legacy badge when snapshot.max_hops is undefined", () => {
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-legacy-undef",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-10T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        // max_hops intentionally absent (undefined) — pre-T56 evaluations
+        vm_lookback_minutes: null,
+        results: { candidates: [], unqualified_reasons: {} },
+      } as any,
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.getByText(/legacy/i)).toBeInTheDocument();
   });
 });
 

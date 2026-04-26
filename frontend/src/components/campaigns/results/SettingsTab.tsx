@@ -189,7 +189,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
     if (next !== "diversity" && next !== "optimization" && next !== "edge_candidate") return;
     const mode = next as EvaluationMode;
     // When leaving edge_candidate, clamp max_hops to [1, 2] since 0 is invalid for other modes.
-    const hopsFix = mode !== "edge_candidate" && form.max_hops === 0 ? { max_hops: 1 } : {};
+    const hopsFix: Partial<EvaluationKnobs> = mode !== "edge_candidate" && form.max_hops === 0 ? { max_hops: 1 } : {};
     setForm((prev) => ({ ...prev, evaluation_mode: mode, ...hopsFix }));
   };
 
@@ -283,7 +283,8 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
     (campaign as unknown as { source_agent_ids?: string[] }).source_agent_ids ?? [];
 
   const snapshot = evaluationQuery.data;
-  const isLegacySnapshot = snapshot != null && snapshot.max_hops === null;
+  const isLegacySnapshot = snapshot != null && snapshot.max_hops == null;
+  // Reads the *committed* snapshot mode, not the pending form selection — the banner describes the persisted edge_candidate evaluation, not a pending mode switch.
   const showSingleSourceBanner =
     snapshot != null &&
     snapshot.evaluation_mode === "edge_candidate" &&
