@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  campaignEdgePairsPrefixKey,
   campaignEvaluationKey,
   campaignKey,
   campaignMeasurementsPrefixKey,
@@ -139,6 +140,13 @@ describe("useEvaluateCampaign", () => {
     expect(invalidatedKeys).toContainEqual(campaignPairsKey(CAMPAIGN_ID));
     expect(invalidatedKeys).toContainEqual(campaignPreviewKey(CAMPAIGN_ID));
     expect(invalidatedKeys).toContainEqual(campaignMeasurementsPrefixKey(CAMPAIGN_ID));
+    // Edge-pair pages must invalidate too — Heatmap / Pairs / Compare
+    // each call `useEdgePairDetails` with their own filter shape, and
+    // the prefix key covers every variant. Without this invalidation,
+    // re-evaluating an edge_candidate campaign keeps stale page data
+    // visible whenever the SSE `evaluated` frame is missed (clients
+    // that subscribed after the COMMIT).
+    expect(invalidatedKeys).toContainEqual(campaignEdgePairsPrefixKey(CAMPAIGN_ID));
     expect(invalidatedKeys).not.toContainEqual(campaignEvaluationKey(CAMPAIGN_ID));
   });
 });

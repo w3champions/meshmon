@@ -25,6 +25,7 @@ import {
 import { api } from "@/api/client";
 import {
   campaignEdgePairsKey,
+  campaignEdgePairsPrefixKey,
   campaignEvaluationKey,
   campaignKey,
   campaignMeasurementsPrefixKey,
@@ -84,8 +85,10 @@ export function useEvaluation(id: string | undefined): UseQueryResult<Evaluation
  * `evaluated` frame (which may not arrive if this client subscribed after the
  * COMMIT). Also invalidates the campaign shell key (state + `evaluated_at`),
  * the pairs list and preview (evaluator may have regenerated baseline pairs),
- * and the measurements prefix so the Raw tab refetches — parallel to the
- * invalidation set `useTriggerDetail` applies after detail dispatch.
+ * the measurements prefix so the Raw tab refetches, and the edge-pairs prefix
+ * so every filter variant of the Heatmap / Pairs / Compare tabs refetches —
+ * parallel to the invalidation set `useTriggerDetail` applies after detail
+ * dispatch and the SSE `evaluated` handler in `campaign-stream.ts`.
  */
 export function useEvaluateCampaign(): UseMutationResult<Evaluation, Error, string> {
   const queryClient = useQueryClient();
@@ -107,6 +110,14 @@ export function useEvaluateCampaign(): UseMutationResult<Evaluation, Error, stri
       queryClient.invalidateQueries({ queryKey: campaignPreviewKey(id) });
       // Prefix invalidation so every filter variant of the Raw tab refetches.
       queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
+      // Same prefix-match story for the edge-pair pages — Heatmap /
+      // Pairs / Compare each call `useEdgePairDetails` with their own
+      // query shape, so prefix invalidation covers every variant. The
+      // SSE `evaluated` handler also fires this invalidation, but the
+      // SSE frame can be missed when a client subscribes after the
+      // COMMIT — invalidating from the mutation success path closes
+      // that gap (parallel to seeding `campaignEvaluationKey` above).
+      queryClient.invalidateQueries({ queryKey: campaignEdgePairsPrefixKey(id) });
     },
   });
 }
