@@ -41,8 +41,8 @@ fn meas(src: &str, dst: &str, rtt: f32) -> AttributedMeasurement {
     }
 }
 
-#[tokio::test]
-async fn edge_candidate_x_equals_b_excludes_self_pair() {
+#[test]
+fn edge_candidate_x_equals_b_excludes_self_pair() {
     // 3 mesh agents; candidate IP = agent A's IP. destinations_total
     // for that candidate must be 2 (B and C), not 3 — A cannot route
     // to itself.
