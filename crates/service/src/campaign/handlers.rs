@@ -16,7 +16,9 @@ use super::dto::{
 };
 use super::eval::{self, AttributedMeasurement, EvalError};
 use super::evaluation_repo::{self, EdgePairLookup, PairDetailLookup};
-use super::model::{CampaignState, DirectSource, EvaluationMode, PairResolutionState, ProbeProtocol};
+use super::model::{
+    CampaignState, DirectSource, EvaluationMode, PairResolutionState, ProbeProtocol,
+};
 use super::repo::{self, CreateInput, EditInput, RepoError};
 use crate::hostname::session_id_from_auth;
 use crate::hostname::stamp::bulk_hostnames_and_enqueue;
@@ -33,7 +35,6 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
-
 
 /// Map a [`ProbeProtocol`] to the `protocol=` label value used by the
 /// ingestion pipeline's metrics emitter (see
@@ -382,15 +383,24 @@ pub async fn patch(
         Err(e) => return repo_error("campaign::patch::prefetch", e),
     };
 
-    // Resolve effective mode: the incoming body's mode if set, else the stored one.
+    // Resolve the effective row-after-PATCH state. PATCH columns are
+    // applied via `COALESCE($n, col)`, so any field absent from the body
+    // keeps its stored value. Validation runs against the post-PATCH
+    // shape — otherwise a metadata-only PATCH against an
+    // `edge_candidate` row would trip `useful_latency_required` even
+    // though `useful_latency_ms` would be untouched.
     let mode = body.evaluation_mode.unwrap_or(existing.evaluation_mode);
+    let effective_useful_latency_ms = body.useful_latency_ms.or(existing.useful_latency_ms);
+    let effective_max_hops = body.max_hops.unwrap_or(existing.max_hops);
+    let effective_vm_lookback = body
+        .vm_lookback_minutes
+        .unwrap_or(existing.vm_lookback_minutes);
 
-    // Validate T56 knobs against the resolved effective mode.
     if let Err(e) = validate_create_or_patch_knobs(
         mode,
-        body.useful_latency_ms,
-        body.max_hops,
-        body.vm_lookback_minutes,
+        effective_useful_latency_ms,
+        Some(effective_max_hops),
+        Some(effective_vm_lookback),
     ) {
         return e.into_response();
     }
@@ -851,13 +861,9 @@ async fn fetch_and_synthesize_vm_baselines(
     // PromQL `avg_over_time([Xm])` window. Clamp to 1 minute on the low end
     // (schema validates [1, 1440] so this is defence-in-depth).
     let lookback = Duration::from_secs(vm_lookback_minutes.max(1) as u64 * 60);
-    let samples = vm_query::fetch_agent_baselines(
-        vm_url,
-        &roster_ids,
-        protocol_label(protocol),
-        lookback,
-    )
-    .await?;
+    let samples =
+        vm_query::fetch_agent_baselines(vm_url, &roster_ids, protocol_label(protocol), lookback)
+            .await?;
 
     let ip_by_id: HashMap<&str, IpAddr> =
         roster.iter().map(|a| (a.agent_id.as_str(), a.ip)).collect();
@@ -1093,9 +1099,7 @@ pub async fn evaluate(
     // combining active-probe + reverse + VM rows. Without data the
     // evaluator would produce zero candidates, which is misleading —
     // a 422 here prompts the operator to check agent connectivity.
-    if evaluation_mode == EvaluationMode::EdgeCandidate
-        && inputs.measurements.is_empty()
-    {
+    if evaluation_mode == EvaluationMode::EdgeCandidate && inputs.measurements.is_empty() {
         return error_422("no_candidates_with_data").into_response();
     }
 
@@ -1421,11 +1425,7 @@ pub async fn detail(
                 // source agents — the same agents that probed X during
                 // the campaign run.
                 let edge_pairs =
-                    match evaluation_repo::good_candidates_for_edge_campaign(
-                        &state.pool,
-                        id,
-                    )
-                    .await
+                    match evaluation_repo::good_candidates_for_edge_campaign(&state.pool, id).await
                     {
                         Ok(Some(rows)) => rows,
                         Ok(None) => {
@@ -1446,23 +1446,22 @@ pub async fn detail(
                 // qualifying `(A, B, X)` triple into `(A, X)` and
                 // `(B, X)` measurement targets so both legs of the
                 // transit route get a higher-resolution probe.
-                let legs =
-                    match evaluation_repo::good_candidate_pair_legs(&state.pool, id).await {
-                        Ok(Some(rows)) => rows,
-                        Ok(None) => {
-                            // Defensive: `state=evaluated` implies a row exists
-                            // (persist_evaluation is the only writer that sets
-                            // that state). Reaching this arm would mean a
-                            // concurrent DELETE raced the read; treat as
-                            // missing evaluation.
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({ "error": "no_evaluation" })),
-                            )
-                                .into_response();
-                        }
-                        Err(e) => return db_error("campaign::detail::eval", e),
-                    };
+                let legs = match evaluation_repo::good_candidate_pair_legs(&state.pool, id).await {
+                    Ok(Some(rows)) => rows,
+                    Ok(None) => {
+                        // Defensive: `state=evaluated` implies a row exists
+                        // (persist_evaluation is the only writer that sets
+                        // that state). Reaching this arm would mean a
+                        // concurrent DELETE raced the read; treat as
+                        // missing evaluation.
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": "no_evaluation" })),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => return db_error("campaign::detail::eval", e),
+                };
                 let mut acc: Vec<(String, IpAddr)> = Vec::new();
                 for leg in &legs {
                     acc.push((leg.source_agent_id.clone(), leg.candidate_destination_ip));

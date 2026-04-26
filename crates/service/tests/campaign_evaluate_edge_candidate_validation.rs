@@ -209,7 +209,11 @@ async fn evaluate_edge_candidate_with_no_destinations_returns_422() {
     common::mark_completed(pool, &campaign_id).await;
 
     let body = h
-        .post_expect_status(&format!("/api/campaigns/{campaign_id}/evaluate"), &json!({}), 422)
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluate"),
+            &json!({}),
+            422,
+        )
         .await;
     assert_eq!(body["error"], "no_destinations", "body = {body}");
 }
@@ -243,7 +247,53 @@ async fn evaluate_edge_candidate_with_no_measurements_returns_422() {
     common::mark_completed(pool, &campaign_id).await;
 
     let body = h
-        .post_expect_status(&format!("/api/campaigns/{campaign_id}/evaluate"), &json!({}), 422)
+        .post_expect_status(
+            &format!("/api/campaigns/{campaign_id}/evaluate"),
+            &json!({}),
+            422,
+        )
         .await;
     assert_eq!(body["error"], "no_candidates_with_data", "body = {body}");
+}
+
+// ---------------------------------------------------------------------------
+// B3 — PATCH validates against effective post-PATCH values
+// ---------------------------------------------------------------------------
+
+/// A metadata-only PATCH against an existing edge_candidate campaign
+/// must not trip `useful_latency_required` just because the body omits
+/// `useful_latency_ms`. The validator runs against the row's effective
+/// state after PATCH (`COALESCE(body, stored)`), so an absent field
+/// keeps its stored value.
+#[tokio::test]
+async fn patch_metadata_only_preserves_useful_latency_for_edge_candidate() {
+    let h = HttpHarness::start().await;
+
+    // Create an edge_candidate campaign with useful_latency_ms set.
+    let body = json!({
+        "title": "ec-patch-effective",
+        "evaluation_mode": "edge_candidate",
+        "protocol": "icmp",
+        "source_agent_ids": ["sa1"],
+        "destination_ips": ["198.51.100.1"],
+        "useful_latency_ms": 80.0,
+    });
+    let created: serde_json::Value = h.post_json("/api/campaigns", &body).await;
+    let id = created["id"].as_str().expect("id").to_string();
+    assert!(
+        (created["useful_latency_ms"].as_f64().unwrap() - 80.0).abs() < 1e-3,
+        "stored useful_latency_ms must round-trip on create: {created}"
+    );
+
+    // PATCH only the notes — the validator must validate the
+    // post-PATCH state (useful_latency_ms = 80.0) rather than the body
+    // (useful_latency_ms = absent → None).
+    let patched: serde_json::Value = h
+        .patch_json(&format!("/api/campaigns/{id}"), &json!({"notes": "edited"}))
+        .await;
+    assert_eq!(patched["notes"], "edited");
+    assert!(
+        (patched["useful_latency_ms"].as_f64().unwrap() - 80.0).abs() < 1e-3,
+        "useful_latency_ms must be preserved across metadata-only PATCH: {patched}"
+    );
 }
