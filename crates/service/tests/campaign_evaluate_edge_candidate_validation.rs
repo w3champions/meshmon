@@ -11,6 +11,8 @@
 //! | `create_campaign_vm_lookback_zero_returns_400`       | —               | —                |
 //! | `create_campaign_vm_lookback_too_large_returns_400`  | —               | —                |
 //! | `patch_max_hops_dismisses_evaluation`                | `t56v-{a,b,c}`  | `198.51.100.{71,.72,.73,.79}` |
+//! | `evaluate_edge_candidate_with_no_destinations_returns_422` | `t56v-nd-a` | `198.51.100.{81}` |
+//! | `evaluate_edge_candidate_with_no_measurements_returns_422` | `t56v-nm-{a,b}` | `198.51.100.{91,92,99}` |
 
 mod common;
 use common::HttpHarness;
@@ -162,4 +164,86 @@ async fn patch_max_hops_dismisses_evaluation() {
         eval["error"], "not_evaluated",
         "evaluation should be dismissed after max_hops change; body = {eval}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// S3 — HTTP-level 422 for edge_candidate evaluate preconditions
+// ---------------------------------------------------------------------------
+
+/// Create a minimal edge_candidate campaign, delete all its
+/// `campaign_pairs` rows (so `candidate_ips` is empty), then call
+/// `/evaluate`. Expect 422 `no_destinations`.
+///
+/// Campaign creation requires at least one destination_ip so we create
+/// with one destination then DELETE the pair row directly via SQL to
+/// simulate an `/edit` that removed the last destination.
+#[tokio::test]
+async fn evaluate_edge_candidate_with_no_destinations_returns_422() {
+    let h = HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    common::insert_agent_with_ip(pool, "t56v-nd-a", "198.51.100.81".parse().unwrap()).await;
+
+    let campaign: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-no-destinations",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["t56v-nd-a"],
+                "destination_ips": ["198.51.100.81"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+
+    // Remove all campaign_pairs so candidate_ips resolves to empty.
+    sqlx::query("DELETE FROM campaign_pairs WHERE campaign_id = $1::uuid")
+        .bind(&campaign_id)
+        .execute(pool)
+        .await
+        .expect("delete campaign_pairs");
+
+    common::mark_completed(pool, &campaign_id).await;
+
+    let body = h
+        .post_expect_status(&format!("/api/campaigns/{campaign_id}/evaluate"), &json!({}), 422)
+        .await;
+    assert_eq!(body["error"], "no_destinations", "body = {body}");
+}
+
+/// Create an edge_candidate campaign with destinations but no probe
+/// measurements, then call `/evaluate`. Expect 422 `no_candidates_with_data`.
+#[tokio::test]
+async fn evaluate_edge_candidate_with_no_measurements_returns_422() {
+    let h = HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    common::insert_agent_with_ip(pool, "t56v-nm-a", "198.51.100.91".parse().unwrap()).await;
+    common::insert_agent_with_ip(pool, "t56v-nm-b", "198.51.100.92".parse().unwrap()).await;
+
+    let campaign: serde_json::Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-no-measurements",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["t56v-nm-a", "t56v-nm-b"],
+                "destination_ips": ["198.51.100.99"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+
+    // Intentionally skip seed_measurements — no probe data exists.
+    common::mark_completed(pool, &campaign_id).await;
+
+    let body = h
+        .post_expect_status(&format!("/api/campaigns/{campaign_id}/evaluate"), &json!({}), 422)
+        .await;
+    assert_eq!(body["error"], "no_candidates_with_data", "body = {body}");
 }

@@ -1521,7 +1521,7 @@ pub async fn latest_evaluation_edge_pairs(
         dir = sort_dir_kw,
     );
 
-    let bound_limit = query.limit.min(1000) as i64;
+    let bound_limit = query.limit.min(500) as i64;
 
     // $1 = evaluation_id
     // $2 = candidate_inet (filter)

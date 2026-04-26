@@ -1012,7 +1012,7 @@ pub async fn evaluate(
     }
 
     // Validate EdgeCandidate preconditions before the expensive VM fetch.
-    if evaluation_mode == super::model::EvaluationMode::EdgeCandidate {
+    if evaluation_mode == EvaluationMode::EdgeCandidate {
         // A campaign with no destination IPs in `campaign_pairs` can't
         // produce any meaningful edge-pair output. The schema enforces
         // at least one destination_ip at create time, but an `/edit`
@@ -1093,7 +1093,7 @@ pub async fn evaluate(
     // combining active-probe + reverse + VM rows. Without data the
     // evaluator would produce zero candidates, which is misleading —
     // a 422 here prompts the operator to check agent connectivity.
-    if evaluation_mode == super::model::EvaluationMode::EdgeCandidate
+    if evaluation_mode == EvaluationMode::EdgeCandidate
         && inputs.measurements.is_empty()
     {
         return error_422("no_candidates_with_data").into_response();
@@ -1101,6 +1101,7 @@ pub async fn evaluate(
 
     let outputs = match eval::evaluate(inputs) {
         Ok(o) => o,
+        // EdgeCandidate evaluator is infallible; this arm only fires for Triple mode.
         Err(EvalError::NoBaseline) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1209,10 +1210,15 @@ pub async fn get_evaluation(
 /// per-(X, B) edge-pair detail rows from the campaign's most recent
 /// EdgeCandidate evaluation.
 ///
-/// Supports server-side sort (8 columns + `qualifies_first` compound sort),
+/// Supports server-side sort (8 sort columns × 2 directions),
 /// runtime filters (`candidate_ip`, `qualifies_only`, `reachable_only`),
 /// and an opaque keyset cursor for forward pagination. Page size is capped
 /// at 500 rows; the default is 100.
+///
+/// Note: the plan's `qualifies_first` compound sort and
+/// `coverage_weighted_ping_*` sorts are deferred (need a JOIN to the
+/// candidates table) — record as a future enhancement.
+// TODO: add destination_agent_id filter as a follow-up.
 ///
 /// Error vocabulary:
 /// - `not_evaluated` (404): the campaign has never been evaluated.
@@ -1221,8 +1227,6 @@ pub async fn get_evaluation(
 /// - `invalid_sort` (400): `sort` value is not one of the whitelisted names.
 /// - `invalid_candidate_ip` (400): `candidate_ip` query param is present
 ///   but can't be parsed as an IP address.
-/// - `invalid_destination_agent_id` (400): `destination_agent_id` query
-///   param is present but has an invalid format (empty).
 /// - `invalid_filter` (400): `limit` exceeds the 500-row cap.
 /// - `invalid_cursor` (400): cursor is undecodable or its sort column
 ///   doesn't match the request's `sort`.
@@ -1236,7 +1240,7 @@ pub async fn get_evaluation(
     ),
     responses(
         (status = 200, description = "Edge-pair page", body = EdgePairsListResponse),
-        (status = 400, description = "invalid_sort | invalid_candidate_ip | invalid_destination_agent_id | invalid_filter | invalid_cursor", body = ErrorEnvelope),
+        (status = 400, description = "invalid_sort | invalid_candidate_ip | invalid_filter | invalid_cursor", body = ErrorEnvelope),
         (status = 401, description = "No active session"),
         (status = 404, description = "not_evaluated | wrong_mode", body = ErrorEnvelope),
         (status = 500, description = "Internal error", body = ErrorEnvelope),
@@ -1244,7 +1248,7 @@ pub async fn get_evaluation(
 )]
 pub async fn get_edge_pairs(
     State(state): State<AppState>,
-    auth: AuthSession,
+    _auth: AuthSession,
     Path(id): Path<Uuid>,
     Query(query): Query<EdgePairsQuery>,
 ) -> Response {
@@ -1280,40 +1284,12 @@ pub async fn get_edge_pairs(
     }
 
     match evaluation_repo::latest_evaluation_edge_pairs(&state.pool, id, &query).await {
-        Ok(EdgePairLookup::Found(mut page)) => {
-            // Stamp destination hostnames on the returned entries. Each
-            // entry's `destination_agent_id` maps to an agent whose IP
-            // is available via the hostname cache. Non-fatal: on error,
-            // log a warning and return the page without hostnames.
-            if !page.entries.is_empty() {
-                let session = session_id_from_auth(&auth);
-                let ips: Vec<IpAddr> = page
-                    .entries
-                    .iter()
-                    .filter_map(|e| e.destination_hostname.as_ref().and(None).or_else(|| {
-                        // Destination hostname is already set by the
-                        // repo join; only stamp if missing.
-                        if e.destination_hostname.is_none() {
-                            e.candidate_ip.parse::<IpAddr>().ok()
-                        } else {
-                            None
-                        }
-                    }))
-                    .collect();
-                if !ips.is_empty() {
-                    if let Ok(map) = bulk_hostnames_and_enqueue(&state, &session, &ips).await {
-                        for entry in page.entries.iter_mut() {
-                            if entry.destination_hostname.is_none() {
-                                if let Ok(ip) = entry.candidate_ip.parse::<IpAddr>() {
-                                    if let Some(Some(h)) = map.get(&ip) {
-                                        entry.destination_hostname = Some(h.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        Ok(EdgePairLookup::Found(page)) => {
+            // `destination_hostname` is left as `None` here; the frontend
+            // resolves it via the existing `IpHostname` component using the
+            // `destination_agent_id`. Resolving it server-side requires a
+            // SQL lookup of `agents.ip` by id before hitting the hostname
+            // cache — deferred as a follow-up enhancement.
             (StatusCode::OK, Json(page)).into_response()
         }
         Ok(EdgePairLookup::CampaignNotFound) => {
@@ -1461,10 +1437,7 @@ pub async fn detail(
                         }
                         Err(e) => return db_error("campaign::detail::edge_eval", e),
                     };
-                let mut acc: Vec<(String, IpAddr)> = Vec::new();
-                for (source_agent_id, candidate_ip) in edge_pairs {
-                    acc.push((source_agent_id, candidate_ip));
-                }
+                let mut acc = edge_pairs;
                 acc.sort();
                 acc.dedup();
                 acc

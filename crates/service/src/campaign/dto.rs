@@ -918,9 +918,9 @@ pub enum EdgePairSortCol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgePairSortDir {
-    /// Ascending (smallest values first).
+    /// Ascending (smallest first). Default for the endpoint.
     Asc,
-    /// Descending (largest values first). Default for the endpoint.
+    /// Descending (largest values first).
     Desc,
 }
 
@@ -940,7 +940,7 @@ fn default_edge_pair_dir() -> EdgePairSortDir {
 /// Query parameters for `GET /api/campaigns/{id}/evaluation/edge_pairs`.
 ///
 /// Defaults: sort = `best_route_ms`, dir = `asc`, limit = 100.
-/// `limit` > 1000 surfaces as `400 invalid_filter`.
+/// `limit` > 500 surfaces as `400 invalid_filter`.
 #[derive(Debug, Clone, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct EdgePairsQuery {
@@ -967,7 +967,7 @@ pub struct EdgePairsQuery {
     /// Absent on the first page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Page size. Default 100; cap 1000. Zero is allowed.
+    /// Page size. Default 100; cap 500. Zero is allowed.
     #[serde(default = "default_edge_pairs_limit")]
     pub limit: u32,
 }
