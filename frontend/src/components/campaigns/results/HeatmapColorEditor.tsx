@@ -92,6 +92,15 @@ const TIER_COLORS = [
   "var(--hm-tier-5)", // > b[3]
 ];
 
+/** Text colours matched to each tier background for WCAG contrast. */
+const TIER_TEXT_COLORS = [
+  "#fff",
+  "#fff",
+  "var(--hm-tier-3-text)", // yellow — needs dark text
+  "var(--hm-tier-4-text)", // orange — needs dark text
+  "#fff",
+];
+
 // ---------------------------------------------------------------------------
 // Draggable handle
 // ---------------------------------------------------------------------------
@@ -99,12 +108,11 @@ const TIER_COLORS = [
 interface HandleProps {
   index: number;
   value: number;
-  boundaries: [number, number, number, number];
   maxValue: number;
   onChange: (index: number, value: number) => void;
 }
 
-function Handle({ index, value, boundaries, maxValue, onChange }: HandleProps) {
+function Handle({ index, value, maxValue, onChange }: HandleProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
@@ -133,8 +141,6 @@ function Handle({ index, value, boundaries, maxValue, onChange }: HandleProps) {
   const handlePointerUp = () => {
     dragging.current = false;
   };
-
-  void boundaries; // used by parent to compute positions
 
   return (
     <div
@@ -207,7 +213,11 @@ export function HeatmapColorEditor({
   };
 
   const handleSave = () => {
-    localStorage.setItem(storageKey(mode), JSON.stringify(boundaries));
+    try {
+      localStorage.setItem(storageKey(mode), JSON.stringify(boundaries));
+    } catch {
+      // Storage unavailable — boundaries still apply in-session via state.
+    }
     onSaved();
     onOpenChange(false);
   };
@@ -262,7 +272,6 @@ export function HeatmapColorEditor({
                 key={i}
                 index={i}
                 value={val}
-                boundaries={boundaries}
                 maxValue={maxValue}
                 onChange={handleChange}
               />
@@ -274,8 +283,8 @@ export function HeatmapColorEditor({
             {["Excellent", "Good", "Warning", "Slow", "Bad"].map((label, i) => (
               <div
                 key={i}
-                className="flex-1 text-center py-0.5 rounded text-white font-medium truncate"
-                style={{ background: TIER_COLORS[i] }}
+                className="flex-1 text-center py-0.5 rounded font-medium truncate"
+                style={{ background: TIER_COLORS[i], color: TIER_TEXT_COLORS[i] }}
               >
                 {label}
               </div>

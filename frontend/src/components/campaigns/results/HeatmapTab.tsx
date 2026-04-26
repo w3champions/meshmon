@@ -20,7 +20,7 @@
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Campaign } from "@/api/hooks/campaigns";
 import type { Evaluation, EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 import { useEdgePairDetails } from "@/api/hooks/evaluation";
@@ -258,15 +258,11 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as CampaignDetailSearch;
 
-  // Sort state from URL params (with defaults). CampaignDetailSearch doesn't
-  // include heatmap-specific params yet (Phase S adds the tab shell), so we
-  // access them via a cast through unknown.
-  const rawSearch = search as Record<string, unknown>;
-  const rowSortKey = (rawSearch.hm_row_sort as RowSortKey | undefined) ?? "destination_agent_id";
-  const rowSortDir = (rawSearch.hm_row_dir as SortDir | undefined) ?? "asc";
-  const colSortKey =
-    (rawSearch.hm_col_sort as ColSortKey | undefined) ?? "coverage_weighted_ping_ms";
-  const colSortDir = (rawSearch.hm_col_dir as SortDir | undefined) ?? "asc";
+  // Sort state from URL params (with defaults).
+  const rowSortKey = search.hm_row_sort ?? "destination_agent_id";
+  const rowSortDir = search.hm_row_dir ?? "asc";
+  const colSortKey = search.hm_col_sort ?? "coverage_weighted_ping_ms";
+  const colSortDir = search.hm_col_dir ?? "asc";
 
   const [colorEditorOpen, setColorEditorOpen] = useState(false);
   // Revision counter incremented when the editor saves so the heatmap re-reads boundaries.
@@ -285,21 +281,23 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
       hm_col_sort: ColSortKey;
       hm_col_dir: SortDir;
     }>): void => {
-      const navigateSearch = navigate as unknown as (opts: {
-        search: Record<string, unknown>;
+      // useNavigate() is untyped in non-strict mode; cast through unknown so
+      // TypeScript doesn't try to match the global router union.
+      const nav = navigate as unknown as (opts: {
+        search: (prev: Record<string, unknown>) => Record<string, unknown>;
         replace: boolean;
       }) => void;
-      navigateSearch({
-        search: { ...rawSearch, ...updates },
+      nav({
+        search: (prev) => ({ ...prev, ...updates }),
         replace: true,
       });
     },
-    [navigate, rawSearch],
+    [navigate],
   );
 
   // Fetch ALL edge pair rows (no filter). The heatmap needs the full matrix.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const emptyQuery = useMemo(() => ({}), []);
+  const emptyQuery = useMemo(() => ({ limit: 500 }), []);
   const query = useEdgePairDetails(campaign.id, emptyQuery);
 
   const allRows = useMemo<EvaluationEdgePairDetailDto[]>(
@@ -308,12 +306,11 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
   );
 
   // Auto-fetch remaining pages so the heatmap always shows the full matrix.
-  useMemo(() => {
+  useEffect(() => {
     if (query.hasNextPage && !query.isFetchingNextPage) {
       void query.fetchNextPage();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query.hasNextPage, query.isFetchingNextPage]);
+  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
 
   const boundaries = useMemo(
     () => readBoundaries(evaluation.evaluation_mode, evaluation.useful_latency_ms),
@@ -480,6 +477,13 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
         </div>
       </div>
 
+      {/* Loading indicator during multi-page fetch */}
+      {query.isFetchingNextPage && (
+        <div className="text-xs text-muted-foreground" role="status">
+          Loading further pages…
+        </div>
+      )}
+
       {/* Heatmap grid */}
       <Card className="overflow-hidden">
         <div
@@ -629,6 +633,15 @@ interface AxisSortButtonProps {
   onSort: (key: string, dir: SortDir) => void;
 }
 
+const SORT_DEFAULT_DIR: Record<string, SortDir> = {
+  mean_ms: "asc",
+  coverage_weighted_ping_ms: "asc",
+  destinations_qualifying: "desc",
+  coverage_count: "desc",
+  destination_agent_id: "asc",
+  candidate_ip: "asc",
+};
+
 function AxisSortButton({
   label,
   options,
@@ -641,7 +654,9 @@ function AxisSortButton({
       <span className="text-xs text-muted-foreground">{label}:</span>
       {options.map(({ key, label: optLabel }) => {
         const isActive = key === activeKey;
-        const nextDir: SortDir = isActive && activeDir === "desc" ? "asc" : "desc";
+        const nextDir: SortDir = isActive
+          ? activeDir === "asc" ? "desc" : "asc"
+          : SORT_DEFAULT_DIR[key] ?? "asc";
         return (
           <Button
             key={key}

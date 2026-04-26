@@ -267,6 +267,25 @@ export const campaignDetailSearchSchema = z.object({
     .enum(["asc", "desc"])
     .catch(() => undefined as never)
     .optional(),
+  // Heatmap tab sort. Namespaced `hm_` so it doesn't collide with other
+  // tab sort params. Defaults (absent): row → `destination_agent_id` / `asc`,
+  // col → `coverage_weighted_ping_ms` / `asc` (resolved in HeatmapTab).
+  hm_row_sort: z
+    .enum(["destination_agent_id", "mean_ms", "destinations_qualifying"])
+    .catch(() => undefined as never)
+    .optional(),
+  hm_row_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
+  hm_col_sort: z
+    .enum(["candidate_ip", "coverage_weighted_ping_ms", "coverage_count"])
+    .catch(() => undefined as never)
+    .optional(),
+  hm_col_dir: z
+    .enum(["asc", "desc"])
+    .catch(() => undefined as never)
+    .optional(),
 });
 
 /**
@@ -313,6 +332,10 @@ function parseCampaignDetailSearch(search: unknown): CampaignDetailSearch {
     cand_dir: parsed.cand_dir,
     ep_sort: parsed.ep_sort,
     ep_dir: parsed.ep_dir,
+    hm_row_sort: parsed.hm_row_sort,
+    hm_row_dir: parsed.hm_row_dir,
+    hm_col_sort: parsed.hm_col_sort,
+    hm_col_dir: parsed.hm_col_dir,
   };
 }
 
