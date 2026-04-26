@@ -9,6 +9,7 @@
 //! unqualified_reasons}`.
 
 pub mod legs;
+pub(crate) mod routes;
 
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
 use crate::campaign::model::{DirectSource, EvaluationMode};
