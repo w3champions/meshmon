@@ -818,6 +818,10 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                     &by_pair,
                     inputs.stddev_weight,
                 ),
+                // EdgeCandidate uses a separate evaluator path (Phase E).
+                // This arm is unreachable in practice — the handler rejects
+                // edge_candidate campaigns before calling `evaluate()`.
+                EvaluationMode::EdgeCandidate => false,
             };
 
             // Counter accumulation runs between the eligibility gate

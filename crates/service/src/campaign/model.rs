@@ -126,6 +126,10 @@ pub enum EvaluationMode {
     Diversity,
     /// Optimize the aggregate result against the loss/stddev target.
     Optimization,
+    /// Rank candidate IPs by their connectivity to the existing mesh
+    /// (directly or transitively). See spec
+    /// `docs/superpowers/specs/2026-04-26-campaigns-edge-candidate-evaluation-mode-design.md`.
+    EdgeCandidate,
 }
 
 /// Where an evaluation pair-detail's "direct A→B" baseline came from.
@@ -146,6 +150,53 @@ pub enum DirectSource {
     /// samples at `/evaluate` time — used when the campaign's own
     /// active-probe data left the agent→agent pair uncovered.
     VmContinuous,
+}
+
+/// Provenance of a leg within a composed evaluator route.
+///
+/// Distinct from `DirectSource` (baseline-only) because edge_candidate routes
+/// can include legs derived from symmetric reuse (using an `agent → candidate`
+/// probe to model `candidate → agent` direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LegSource {
+    VmContinuous,
+    ActiveProbe,
+    SymmetricReuse,
+}
+
+/// One end of a leg or route. Mixes agent IDs (for mesh agents) with
+/// arbitrary IPs (for catalogue candidates).
+///
+/// `IpAddr` has no built-in `ToSchema` impl under utoipa 5; the field is
+/// annotated `schema(value_type = String)` so the OpenAPI document renders
+/// the IP as a plain string. Serde still uses the default `IpAddr` display
+/// serializer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Endpoint {
+    Agent { id: String },
+    CandidateIp {
+        #[schema(value_type = String)]
+        ip: std::net::IpAddr,
+    },
+}
+
+/// Wire-friendly companion enum used by `EvaluationEdgePairDetailDto.best_route_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeRouteKind {
+    Direct,
+    OneHop,
+    TwoHop,
+}
+
+/// Discriminator that pairs with `LegDto.from_id` / `to_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointKind {
+    Agent,
+    Candidate,
 }
 
 /// Kind of measurement row stored in `measurements`. `campaign` is the
