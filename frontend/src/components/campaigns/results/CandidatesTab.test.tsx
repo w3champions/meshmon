@@ -41,7 +41,7 @@ vi.mock("@/api/hooks/campaigns", async () => {
 vi.mock("@/api/hooks/evaluation", async () => {
   const actual =
     await vi.importActual<typeof import("@/api/hooks/evaluation")>("@/api/hooks/evaluation");
-  return { ...actual, useEvaluation: vi.fn(), useTriggerDetail: vi.fn() };
+  return { ...actual, useEvaluation: vi.fn(), useTriggerDetail: vi.fn(), useEdgePairDetails: vi.fn() };
 });
 
 vi.mock("@/api/hooks/evaluation-pairs", async () => {
@@ -56,9 +56,16 @@ vi.mock("@/components/RouteTopology", () => ({
   RouteTopology: () => <div data-testid="route-topology" />,
 }));
 
+// CandidateRef (header mode) calls useCatalogueDrawer; stub the provider.
+vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
+  useCatalogueDrawer: () => ({ open: vi.fn() }),
+  CatalogueDrawerOverlay: ({ children }: { children: unknown }) => <>{children}</>,
+}));
+
+
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignMeasurements, useForcePair } from "@/api/hooks/campaigns";
-import { useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
+import { useEdgePairDetails, useEvaluation, useTriggerDetail } from "@/api/hooks/evaluation";
 import { useCandidatePairDetails } from "@/api/hooks/evaluation-pairs";
 import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
 
@@ -186,6 +193,17 @@ function setupMocks(evaluation: Evaluation | null, opts?: { isLoading?: boolean 
     fetchNextPage: vi.fn(),
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useCandidatePairDetails>);
+
+  vi.mocked(useEdgePairDetails).mockReturnValue({
+    data: { pages: [{ entries: [], next_cursor: null, total: 0 }], pageParams: [null] },
+    isLoading: false,
+    isError: false,
+    isFetchingNextPage: false,
+    hasNextPage: false,
+    error: null,
+    fetchNextPage: vi.fn(),
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useEdgePairDetails>);
 }
 
 class NoopEventSource {

@@ -378,16 +378,37 @@ function PairRow({ row, index, top, height, agentsById, onOpenMtr }: PairRowProp
         {deltaPct}
       </Cell>
       <Cell>
-        {row.qualifies ? (
-          <Badge
-            variant="secondary"
-            className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-          >
-            qualifies
-          </Badge>
-        ) : (
-          <Badge variant="outline">below gate</Badge>
-        )}
+        <div className="flex flex-wrap items-center gap-1">
+          {row.qualifies ? (
+            <Badge
+              variant="secondary"
+              className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+            >
+              qualifies
+            </Badge>
+          ) : (
+            <Badge variant="outline">below gate</Badge>
+          )}
+          {row.winning_x_position === 1 ? (
+            <Badge
+              variant="outline"
+              className="font-mono text-[10px]"
+              data-testid={`winning-x-position-${index}`}
+              aria-label="X is first hop"
+            >
+              X first (A → X → Y → B)
+            </Badge>
+          ) : row.winning_x_position === 2 ? (
+            <Badge
+              variant="outline"
+              className="font-mono text-[10px]"
+              data-testid={`winning-x-position-${index}`}
+              aria-label="X is second hop"
+            >
+              X second (A → Y → X → B)
+            </Badge>
+          ) : null}
+        </div>
       </Cell>
       <Cell>
         <div className="flex items-center gap-1">
