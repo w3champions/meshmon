@@ -459,7 +459,9 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
       size: COL_WIDTH,
     }));
 
-  const innerRowHeight = useRowVirt ? rowVirtualizer.getTotalSize() : undefined;
+  const innerRowHeight = useRowVirt
+    ? rowVirtualizer.getTotalSize()
+    : orderedAgentIds.length * ROW_HEIGHT;
   const innerColWidth = useColVirt ? colVirtualizer.getTotalSize() : undefined;
   const totalWidth = ROW_HEADER_WIDTH + (innerColWidth ?? orderedCandidateIps.length * COL_WIDTH);
 

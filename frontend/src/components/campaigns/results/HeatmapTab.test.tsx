@@ -435,6 +435,22 @@ describe("O4: Virtualization", () => {
     }
   });
 
+  test("rows wrapper has explicit height when virtualization is disabled", () => {
+    // Each absolute-positioned row needs its parent to declare a non-zero
+    // height; otherwise the wrapper collapses and rows clip out of flow.
+    const rows: EvaluationEdgePairDetailDto[] = [];
+    for (let a = 0; a < 3; a++) {
+      rows.push(makeEdgePairRow("10.0.0.1", `agent-${a}`, 30 + a));
+    }
+    renderHeatmap(rows);
+
+    const firstRow = screen.getByTestId("heatmap-row-agent-0");
+    const wrapper = firstRow.parentElement as HTMLElement;
+    expect(wrapper).not.toBeNull();
+    // Three rows × ROW_HEIGHT (40px each) = 120px.
+    expect(wrapper.style.height).toBe("120px");
+  });
+
   test("with 50 candidates renders only a window of col headers (virtualized)", () => {
     const agents = ["agent-a", "agent-b"];
     const candidates = Array.from({ length: 50 }, (_, i) => `10.0.${i}.1`);
