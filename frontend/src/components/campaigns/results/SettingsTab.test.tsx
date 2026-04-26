@@ -147,7 +147,7 @@ describe("SettingsTab — form seeding", () => {
     expect(screen.getByRole("radio", { name: /diversity/i })).toHaveAttribute("data-state", "on");
   });
 
-  test("prefers the evaluation row snapshot when present", async () => {
+  test("prefers the evaluation row snapshot when present and fresh", async () => {
     vi.mocked(useEvaluation).mockReturnValue({
       data: {
         id: "eval-1",
@@ -156,6 +156,8 @@ describe("SettingsTab — form seeding", () => {
         // Wire ratio 0.0325 renders as "3.25" in the percent-facing input.
         loss_threshold_ratio: 0.0325,
         stddev_weight: 0.5,
+        // The snapshot's mode matches the campaign's mode below — i.e.
+        // the snapshot is *fresh* (reflects the current campaign config).
         evaluation_mode: "diversity",
         baseline_pair_count: 4,
         candidates_total: 2,
@@ -174,7 +176,7 @@ describe("SettingsTab — form seeding", () => {
         // but the evaluation-row snapshot takes precedence and shows "3.25".
         loss_threshold_ratio: 0.09,
         stddev_weight: 9,
-        evaluation_mode: "optimization",
+        evaluation_mode: "diversity",
       }),
     );
 
@@ -182,6 +184,95 @@ describe("SettingsTab — form seeding", () => {
     expect(lossInput.value).toBe("3.25");
     // Evaluated footer references the evaluation-row timestamp.
     expect(screen.getByText(/last evaluated/i)).toBeInTheDocument();
+  });
+
+  test("seeds from the campaign row when state=completed even if a stale snapshot exists", () => {
+    // After a knob-change PATCH dismisses the evaluation, `state` flips
+    // back to `completed` while the historical `campaign_evaluations`
+    // row stays around for the read-side history view. The form must
+    // seed from the campaign's *current* knob values (the operator's
+    // most recent PATCH), not from the pre-dismissal evaluation.
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-stale",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-05T12:00:00Z",
+        // Historical (pre-dismissal) values.
+        loss_threshold_ratio: 0.01,
+        stddev_weight: 0.1,
+        evaluation_mode: "diversity",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        useful_latency_ms: 30,
+        max_hops: 1,
+        vm_lookback_minutes: 5,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(
+      makeCampaign({
+        // `completed` => the snapshot is stale; the form must NOT seed from it.
+        state: "completed",
+        // Current campaign values (post-PATCH that dismissed the evaluation).
+        loss_threshold_ratio: 0.075,
+        stddev_weight: 1.75,
+        evaluation_mode: "diversity",
+      }),
+    );
+
+    // Form reflects the campaign row, NOT the historical snapshot.
+    const lossInput = screen.getByLabelText(/loss threshold/i) as HTMLInputElement;
+    const stddevInput = screen.getByLabelText(/stddev weight/i) as HTMLInputElement;
+    expect(lossInput.value).toBe("7.5");
+    expect(stddevInput.value).toBe("1.75");
+    // The historical snapshot is still rendered in the footer though —
+    // the legacy badge / "last evaluated" line track the stored row,
+    // independent of the form-seed freshness gate.
+    expect(screen.getByText(/last evaluated/i)).toBeInTheDocument();
+  });
+
+  test("seeds from the campaign row when snapshot mode != campaign mode", () => {
+    // Operator may have PATCHed `evaluation_mode` against a historical
+    // row that targeted a different mode. The form must seed from the
+    // campaign's current mode + knobs, not from the stale snapshot.
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-mode-mismatch",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-08T12:00:00Z",
+        loss_threshold_ratio: 0.0125,
+        stddev_weight: 0.25,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(
+      makeCampaign({
+        state: "evaluated",
+        // Mode mismatch with the historical snapshot above.
+        loss_threshold_ratio: 0.06,
+        stddev_weight: 2,
+        evaluation_mode: "diversity",
+      }),
+    );
+
+    const lossInput = screen.getByLabelText(/loss threshold/i) as HTMLInputElement;
+    const stddevInput = screen.getByLabelText(/stddev weight/i) as HTMLInputElement;
+    expect(lossInput.value).toBe("6");
+    expect(stddevInput.value).toBe("2");
+    expect(screen.getByRole("radio", { name: /diversity/i })).toHaveAttribute("data-state", "on");
   });
 });
 

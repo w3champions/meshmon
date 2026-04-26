@@ -99,12 +99,28 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
   const patchMutation = usePatchCampaign();
   const evaluateMutation = useEvaluateCampaign();
 
-  // Prefer the evaluation row's snapshot over the campaign row when present:
-  // operators expect re-evaluate to start from "what produced the current
-  // results", not from a subsequent PATCH that never ran. Fall back to the
-  // campaign's own fields (NOT NULL at the DB level) before the first run.
+  // Prefer the evaluation row's snapshot over the campaign row when it is
+  // *fresh* — i.e. the campaign is in `evaluated` state and the snapshot's
+  // mode matches the current campaign mode. A knob-change PATCH dismisses
+  // the evaluation by flipping `state` back to `completed` while the
+  // historical `campaign_evaluations` row stays around for the read-side
+  // history view. Without the freshness gate the form would seed from that
+  // stale row and silently push the previous knob values back over the
+  // operator's PATCH on the next submit.
+  //
+  // This mirrors `hasFreshEvaluation` in `CampaignDetail.tsx` so the
+  // evaluation-derived tabs and the SettingsTab form share one notion
+  // of "current snapshot vs. historical row".
+  const isFreshEvaluation =
+    campaign.state === "evaluated" &&
+    evaluationQuery.data?.evaluation_mode === campaign.evaluation_mode;
+  const snapshotForForm = isFreshEvaluation ? evaluationQuery.data : null;
+
   const initial = useMemo<EvaluationKnobs>(() => {
-    const source = evaluationQuery.data ?? campaign;
+    // Fall back to the campaign row whenever the snapshot is stale (or
+    // absent) so a post-dismissal reopen reflects the operator's most
+    // recent PATCH, not the historical evaluation that triggered it.
+    const source = snapshotForForm ?? campaign;
     return {
       loss_threshold_ratio: source.loss_threshold_ratio,
       stddev_weight: source.stddev_weight,
@@ -121,7 +137,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       max_hops: source.max_hops ?? KNOB_BOUNDS.max_hops.max,
       vm_lookback_minutes: source.vm_lookback_minutes ?? 15,
     };
-  }, [campaign, evaluationQuery.data]);
+  }, [campaign, snapshotForForm]);
 
   // Keep the form locally editable, but rebase on a fresh seed when the
   // upstream changes (evaluation lands in cache, or the user navigates to
