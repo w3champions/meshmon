@@ -293,7 +293,16 @@ mod tests {
     fn zero_hop_direct_returns_one_route_when_leg_exists() {
         let ms = vec![meas("a", "10.0.0.1", 20.0, 2.0, 0.0)];
         let lk = lookup(&ms);
-        let routes = enumerate_routes(&lk, &agent("a"), &candidate("10.0.0.1"), &[], 0, None, None, 1.0);
+        let routes = enumerate_routes(
+            &lk,
+            &agent("a"),
+            &candidate("10.0.0.1"),
+            &[],
+            0,
+            None,
+            None,
+            1.0,
+        );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, RouteKind::Direct);
         assert!((routes[0].rtt_ms - 20.0).abs() < 1e-4);
@@ -330,7 +339,10 @@ mod tests {
         let dst = candidate("10.0.0.99");
         let pool = vec![agent("y1"), agent("y2")];
         let routes = enumerate_routes(&lk, &src, &dst, &pool, 1, None, None, 1.0);
-        let n = routes.iter().filter(|r| r.kind == RouteKind::OneHop).count();
+        let n = routes
+            .iter()
+            .filter(|r| r.kind == RouteKind::OneHop)
+            .count();
         assert_eq!(n, 2, "expected 2 one-hop routes (one per intermediary)");
     }
 
@@ -347,8 +359,15 @@ mod tests {
         // pool includes src and dst as well — they must be skipped
         let pool = vec![src.clone(), dst.clone(), y1.clone()];
         let routes = enumerate_routes(&lk, &src, &dst, &pool, 1, None, None, 1.0);
-        let one_hop: Vec<_> = routes.iter().filter(|r| r.kind == RouteKind::OneHop).collect();
-        assert_eq!(one_hop.len(), 1, "src and dst must be excluded from intermediary pool");
+        let one_hop: Vec<_> = routes
+            .iter()
+            .filter(|r| r.kind == RouteKind::OneHop)
+            .collect();
+        assert_eq!(
+            one_hop.len(),
+            1,
+            "src and dst must be excluded from intermediary pool"
+        );
         assert_eq!(one_hop[0].intermediaries[0], y1);
     }
 
@@ -376,7 +395,10 @@ mod tests {
         // Pool = [c1, y2]; (c1,y2) resolves; (y2,c1) fails because src→y2 is unresolvable
         let pool = vec![c1, y2];
         let routes = enumerate_routes(&lk, &src, &dst, &pool, 2, None, None, 1.0);
-        let two_hop_routes: Vec<_> = routes.iter().filter(|r| r.kind == RouteKind::TwoHop).collect();
+        let two_hop_routes: Vec<_> = routes
+            .iter()
+            .filter(|r| r.kind == RouteKind::TwoHop)
+            .collect();
         assert_eq!(two_hop_routes.len(), 1);
         assert_eq!(two_hop_routes[0].legs.len(), 3);
         assert_eq!(two_hop_routes[0].intermediaries.len(), 2);
@@ -393,9 +415,24 @@ mod tests {
         let lk = lookup(&ms);
         let src = agent("src");
         let pool = vec![candidate("10.0.0.1")];
-        let routes = enumerate_routes(&lk, &src, &candidate("10.0.0.99"), &pool, 2, None, None, 1.0);
-        let n = routes.iter().filter(|r| r.kind == RouteKind::TwoHop).count();
-        assert_eq!(n, 0, "single-intermediary pool must produce 0 two-hop routes");
+        let routes = enumerate_routes(
+            &lk,
+            &src,
+            &candidate("10.0.0.99"),
+            &pool,
+            2,
+            None,
+            None,
+            1.0,
+        );
+        let n = routes
+            .iter()
+            .filter(|r| r.kind == RouteKind::TwoHop)
+            .count();
+        assert_eq!(
+            n, 0,
+            "single-intermediary pool must produce 0 two-hop routes"
+        );
     }
 
     // ── missing/broken leg tests ──────────────────────────────────────────────
@@ -409,7 +446,10 @@ mod tests {
         let dst = candidate("10.0.0.99");
         let pool = vec![candidate("10.0.0.200")]; // no leg from 10.0.0.200 to dst
         let routes = enumerate_routes(&lk, &src, &dst, &pool, 1, None, None, 1.0);
-        assert!(routes.is_empty(), "route with a missing leg must be discarded");
+        assert!(
+            routes.is_empty(),
+            "route with a missing leg must be discarded"
+        );
     }
 
     // ── cap tests ─────────────────────────────────────────────────────────────
@@ -419,8 +459,20 @@ mod tests {
         // rtt=50, stddev=10, weight=1.0 → penalised=60; cap=55 → discard
         let ms = vec![meas("a", "10.0.0.1", 50.0, 10.0, 0.0)];
         let lk = lookup(&ms);
-        let routes = enumerate_routes(&lk, &agent("a"), &candidate("10.0.0.1"), &[], 0, Some(55.0), None, 1.0);
-        assert!(routes.is_empty(), "route exceeding RTT cap must be discarded");
+        let routes = enumerate_routes(
+            &lk,
+            &agent("a"),
+            &candidate("10.0.0.1"),
+            &[],
+            0,
+            Some(55.0),
+            None,
+            1.0,
+        );
+        assert!(
+            routes.is_empty(),
+            "route exceeding RTT cap must be discarded"
+        );
     }
 
     #[test]
@@ -428,7 +480,16 @@ mod tests {
         // rtt=50, stddev=5, weight=1.0 → penalised=55; cap=55 → keep (not strictly greater)
         let ms = vec![meas("a", "10.0.0.1", 50.0, 5.0, 0.0)];
         let lk = lookup(&ms);
-        let routes = enumerate_routes(&lk, &agent("a"), &candidate("10.0.0.1"), &[], 0, Some(55.0), None, 1.0);
+        let routes = enumerate_routes(
+            &lk,
+            &agent("a"),
+            &candidate("10.0.0.1"),
+            &[],
+            0,
+            Some(55.0),
+            None,
+            1.0,
+        );
         assert_eq!(routes.len(), 1, "route at exactly the cap must be kept");
     }
 
@@ -437,8 +498,20 @@ mod tests {
         // stddev=10.0, cap=9.0 → discard
         let ms = vec![meas("a", "10.0.0.1", 20.0, 10.0, 0.0)];
         let lk = lookup(&ms);
-        let routes = enumerate_routes(&lk, &agent("a"), &candidate("10.0.0.1"), &[], 0, None, Some(9.0), 1.0);
-        assert!(routes.is_empty(), "route exceeding stddev cap must be discarded");
+        let routes = enumerate_routes(
+            &lk,
+            &agent("a"),
+            &candidate("10.0.0.1"),
+            &[],
+            0,
+            None,
+            Some(9.0),
+            1.0,
+        );
+        assert!(
+            routes.is_empty(),
+            "route exceeding stddev cap must be discarded"
+        );
     }
 
     // ── composition-correctness tests ─────────────────────────────────────────
@@ -456,10 +529,26 @@ mod tests {
         ];
         let lk = lookup(&ms);
         let pool = vec![agent("y")];
-        let routes = enumerate_routes(&lk, &candidate("10.0.0.200"), &candidate("10.0.0.99"), &pool, 1, None, None, 1.0);
-        let r = routes.iter().find(|r| r.kind == RouteKind::OneHop).expect("one-hop must exist");
+        let routes = enumerate_routes(
+            &lk,
+            &candidate("10.0.0.200"),
+            &candidate("10.0.0.99"),
+            &pool,
+            1,
+            None,
+            None,
+            1.0,
+        );
+        let r = routes
+            .iter()
+            .find(|r| r.kind == RouteKind::OneHop)
+            .expect("one-hop must exist");
         let expected = 1.0 - 0.9_f32 * 0.9_f32;
-        assert!((r.loss_ratio - expected).abs() < 1e-5, "got {}", r.loss_ratio);
+        assert!(
+            (r.loss_ratio - expected).abs() < 1e-5,
+            "got {}",
+            r.loss_ratio
+        );
     }
 
     #[test]
@@ -471,8 +560,20 @@ mod tests {
         ];
         let lk = lookup(&ms);
         let pool = vec![agent("y")];
-        let routes = enumerate_routes(&lk, &candidate("10.0.0.200"), &candidate("10.0.0.99"), &pool, 1, None, None, 1.0);
-        let r = routes.iter().find(|r| r.kind == RouteKind::OneHop).expect("one-hop must exist");
+        let routes = enumerate_routes(
+            &lk,
+            &candidate("10.0.0.200"),
+            &candidate("10.0.0.99"),
+            &pool,
+            1,
+            None,
+            None,
+            1.0,
+        );
+        let r = routes
+            .iter()
+            .find(|r| r.kind == RouteKind::OneHop)
+            .expect("one-hop must exist");
         assert!((r.stddev_ms - 5.0).abs() < 1e-4, "got {}", r.stddev_ms);
     }
 

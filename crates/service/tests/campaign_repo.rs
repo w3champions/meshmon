@@ -1480,7 +1480,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
     // per-campaign UNIQUE constraint, so two rows must coexist and
     // the read-path must surface the freshest.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, TripleEvaluationOutputs};
     use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
@@ -1490,7 +1490,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
     // persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
-    let first = EvaluationOutputs {
+    let first = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 3,
         candidates_total: 2,
         candidates_good: 1,
@@ -1500,7 +1500,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
     let first_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
@@ -1541,7 +1541,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
     // strictly greater regardless of platform timestamp resolution.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-    let second = EvaluationOutputs {
+    let second = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 7,
         candidates_total: 5,
         candidates_good: 4,
@@ -1551,7 +1551,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
     let second_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
@@ -1628,7 +1628,7 @@ async fn persist_evaluation_rejects_running_campaign() {
     // must abort with IllegalTransition rather than silently writing a
     // fresh evaluation against a now-running campaign.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, TripleEvaluationOutputs};
     use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
@@ -1638,7 +1638,7 @@ async fn persist_evaluation_rejects_running_campaign() {
     repo::start(&pool, row.id).await.unwrap();
     // Campaign is now in `running`.
 
-    let outputs = EvaluationOutputs {
+    let outputs = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 0,
         candidates_total: 0,
         candidates_good: 0,
@@ -1648,7 +1648,7 @@ async fn persist_evaluation_rejects_running_campaign() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
 
     let err = evaluation_repo::persist_evaluation(
         &pool,
@@ -1698,7 +1698,9 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
     use meshmon_service::campaign::dto::{
         EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto,
     };
-    use meshmon_service::campaign::eval::{EvaluationOutputs, PairDetailsForCandidate};
+    use meshmon_service::campaign::eval::{
+        EvaluationOutputs, PairDetailsForCandidate, TripleEvaluationOutputs,
+    };
     use meshmon_service::campaign::evaluation_repo;
     use meshmon_service::campaign::model::DirectSource;
     let pool = common::shared_migrated_pool().await;
@@ -1768,7 +1770,7 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         }],
         qualifying_legs: Vec::new(),
     };
-    let outputs = EvaluationOutputs {
+    let outputs = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 1,
         candidates_total: 1,
         candidates_good: 0,
@@ -1778,7 +1780,7 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: vec![bundle],
-    };
+    });
 
     let err = evaluation_repo::persist_evaluation(
         &pool,
@@ -2161,7 +2163,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
     // attempts on a recreated campaign reusing the same UUID (tests
     // and disaster-recovery paths both rely on reusable ids).
     use meshmon_service::campaign::dto::EvaluationResultsDto;
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, TripleEvaluationOutputs};
     use meshmon_service::campaign::evaluation_repo;
 
     let pool = common::shared_migrated_pool().await;
@@ -2172,7 +2174,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
     // completed so the persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
-    let outputs = EvaluationOutputs {
+    let outputs = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 1,
         candidates_total: 0,
         candidates_good: 0,
@@ -2182,7 +2184,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
     evaluation_repo::persist_evaluation(
         &pool,
         row.id,

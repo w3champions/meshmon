@@ -68,6 +68,8 @@ fn db_error(context: &'static str, err: sqlx::Error) -> Response {
 /// Map a domain [`RepoError`] onto the canonical HTTP shape:
 /// - `NotFound` → 404 `{"error":"not_found"}`
 /// - `IllegalTransition` → 409 `{"error":"illegal_state_transition"}`
+/// - `EdgeCandidatePersistenceUnimplemented` → 501
+///   `{"error":"edge_candidate_persistence_unimplemented"}`
 /// - `Sqlx` → 500 (via [`db_error`])
 fn repo_error(context: &'static str, err: RepoError) -> Response {
     match err {
@@ -79,6 +81,17 @@ fn repo_error(context: &'static str, err: RepoError) -> Response {
             Json(json!({ "error": "illegal_state_transition" })),
         )
             .into_response(),
+        RepoError::EdgeCandidatePersistenceUnimplemented { campaign_id } => {
+            tracing::warn!(
+                %campaign_id,
+                "{context}: edge_candidate persistence not yet implemented (T56 Phase G)"
+            );
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({ "error": "edge_candidate_persistence_unimplemented" })),
+            )
+                .into_response()
+        }
         RepoError::Sqlx(e) => db_error(context, e),
     }
 }
@@ -138,9 +151,7 @@ fn validate_create_or_patch_knobs(
 fn error_400(code: &'static str) -> (StatusCode, Json<ErrorEnvelope>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(ErrorEnvelope {
-            error: code.into(),
-        }),
+        Json(ErrorEnvelope { error: code.into() }),
     )
 }
 
@@ -400,9 +411,7 @@ pub async fn patch(
     let knob_changed = body
         .useful_latency_ms
         .is_some_and(|v| Some(v) != existing.useful_latency_ms)
-        || body
-            .max_hops
-            .is_some_and(|v| v != existing.max_hops)
+        || body.max_hops.is_some_and(|v| v != existing.max_hops)
         || body
             .vm_lookback_minutes
             .is_some_and(|v| v != existing.vm_lookback_minutes)

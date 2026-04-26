@@ -152,21 +152,14 @@ async fn patch_max_hops_dismisses_evaluation() {
 
     // Change max_hops — evaluation must be dismissed.
     let _: serde_json::Value = h
-        .patch_json(
-            &format!("/api/campaigns/{id}"),
-            &json!({"max_hops": 1}),
-        )
+        .patch_json(&format!("/api/campaigns/{id}"), &json!({"max_hops": 1}))
         .await;
 
     let eval = h
-        .get_expect_status(
-            &format!("/api/campaigns/{id}/evaluation"),
-            404,
-        )
+        .get_expect_status(&format!("/api/campaigns/{id}/evaluation"), 404)
         .await;
     assert_eq!(
         eval["error"], "not_evaluated",
         "evaluation should be dismissed after max_hops change; body = {eval}"
     );
 }
-

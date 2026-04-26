@@ -8,8 +8,11 @@
 //! `campaign_evaluation_{candidates, pair_details,
 //! unqualified_reasons}`.
 
+pub(crate) mod edge_candidate;
 pub(crate) mod legs;
 pub(crate) mod routes;
+
+pub use edge_candidate::{EdgeCandidateOutputs, EdgeCandidateRow, EdgePairRow};
 
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
 use crate::campaign::model::{DirectSource, EvaluationMode};
@@ -54,6 +57,15 @@ pub struct AgentRow {
     pub agent_id: String,
     /// Agent's canonical IP (`agents.ip`), the key both sides key into.
     pub ip: IpAddr,
+    /// Optional reverse-DNS hostname for the agent. Stamped onto
+    /// `EdgePairRow.destination_hostname` in the EdgeCandidate arm so
+    /// the wire DTO can render a friendly destination label without a
+    /// second round-trip through the hostname cache.
+    ///
+    /// Diversity / Optimization don't read this field today (their
+    /// hostname stamping happens via the post-process
+    /// `bulk_hostnames_and_enqueue` path inside `handlers.rs`).
+    pub hostname: Option<String>,
 }
 
 /// Lookup side-table: IP → catalogue enrichment. Agents contribute
@@ -71,6 +83,17 @@ pub struct CatalogueLookup {
     pub asn: Option<i64>,
     /// Catalogue network operator, when known.
     pub network_operator: Option<String>,
+    /// Catalogue website URL, when known. Populated by the
+    /// EdgeCandidate handler from `ip_catalogue.website`. Diversity /
+    /// Optimization don't surface this field today.
+    pub website: Option<String>,
+    /// Catalogue free-text notes, when present. Same provenance as
+    /// `website`; consumed by the EdgeCandidate arm only.
+    pub notes: Option<String>,
+    /// Reverse-DNS hostname for the IP, when cached. Populated by the
+    /// EdgeCandidate handler so the evaluator can stamp it onto
+    /// non-mesh `EdgeCandidateRow`s without a second round-trip.
+    pub hostname: Option<String>,
 }
 
 /// Full input bundle for one evaluator pass.
@@ -80,13 +103,21 @@ pub struct EvaluationInputs {
     pub measurements: Vec<AttributedMeasurement>,
     /// Agent roster the campaign pulled its sources from.
     pub agents: Vec<AgentRow>,
+    /// Candidate destination IPs (the X set). For Diversity /
+    /// Optimization this is derived from the measurement set; for
+    /// EdgeCandidate it comes straight from
+    /// `measurement_campaigns.destination_ips` so X-IPs without any
+    /// outgoing measurement still appear as a candidate row (with
+    /// unreachable pairs).
+    pub candidate_ips: Vec<IpAddr>,
     /// IP → catalogue enrichment for candidate rendering.
     pub enrichment: HashMap<IpAddr, CatalogueLookup>,
     /// Loss ceiling (fraction); triples exceeding this never qualify.
     pub loss_threshold_ratio: f32,
     /// Weight applied to RTT stddev when computing the improvement score.
     pub stddev_weight: f32,
-    /// Diversity vs. Optimization arbitration (spec §2.4).
+    /// Diversity vs. Optimization vs. EdgeCandidate arbitration (spec
+    /// §2.4 + EdgeCandidate spec §4).
     pub mode: EvaluationMode,
     /// Optional eligibility cap on composed transit RTT (ms). The
     /// evaluator drops `(A, X, B)` triples whose `transit_rtt_ms`
@@ -101,13 +132,42 @@ pub struct EvaluationInputs {
     /// 0.0–1.0). Combined with [`Self::min_improvement_ms`] under OR
     /// semantics.
     pub min_improvement_ratio: Option<f64>,
+    /// Useful-latency threshold T (ms) for EdgeCandidate qualification.
+    /// Required when `mode == EdgeCandidate` (the API validation layer
+    /// rejects requests where it is `None`); ignored by other modes.
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum transit hops for route enumeration in EdgeCandidate
+    /// mode. Diversity / Optimization don't enumerate multi-hop routes
+    /// — they pass the validation default (`1`) but never read this
+    /// field. Validated upstream into `[0, 2]`.
+    pub max_hops: i16,
 }
 
-/// Full evaluator output: summary counters plus the wire-bound DTO and
-/// the per-candidate pair-detail rows persisted into
-/// `campaign_evaluation_pair_details`.
+/// Top-level evaluator output. Tagged on the evaluation mode that
+/// produced it: Diversity / Optimization both lower into the same
+/// triple-scoring shape ([`TripleEvaluationOutputs`]); EdgeCandidate
+/// uses its own per-(X, B) shape ([`EdgeCandidateOutputs`], in
+/// [`crate::campaign::eval::edge_candidate`]).
 ///
-/// `pair_details` is intentionally NOT nested inside
+/// Splitting the wire shape per mode keeps each arm's persistence
+/// path narrow (the EdgeCandidate writer doesn't need
+/// triple-shaped fields, and vice versa) and lets the read-path
+/// dispatch on the variant rather than juggling a giant
+/// `Option`-saturated struct.
+#[derive(Debug, Clone)]
+pub enum EvaluationOutputs {
+    /// Diversity / Optimization output (T44/T48 shape).
+    Triple(TripleEvaluationOutputs),
+    /// EdgeCandidate output (T56). See
+    /// [`crate::campaign::eval::edge_candidate`].
+    EdgeCandidate(EdgeCandidateOutputs),
+}
+
+/// Diversity / Optimization evaluator output: summary counters plus
+/// the wire-bound DTO and the per-candidate pair-detail rows persisted
+/// into `campaign_evaluation_pair_details`.
+///
+/// `pair_details_by_candidate` is intentionally NOT nested inside
 /// [`EvaluationCandidateDto`]: that DTO is the wire shape served by
 /// `GET /api/campaigns/{id}/evaluation`, and pair-detail rows are only
 /// reachable on the wire via the paginated
@@ -116,7 +176,7 @@ pub struct EvaluationInputs {
 /// `insert_evaluation` for persistence without round-tripping them
 /// through the wire DTO.
 #[derive(Debug, Clone)]
-pub struct EvaluationOutputs {
+pub struct TripleEvaluationOutputs {
     /// Total baseline (A, B) agent pairs the evaluator scored against.
     pub baseline_pair_count: i32,
     /// Count of candidate transit destinations considered.
@@ -680,8 +740,26 @@ fn aggregate_headline_avg(candidate_rows: &[EvaluationCandidateDto]) -> Option<f
 ///
 /// Pure function — no DB, no IO. See the crate-level README and
 /// `docs/superpowers/specs/2026-04-19-campaigns-04-evaluation-and-results.md`
-/// §2.4 for the formula.
+/// §2.4 for the Diversity / Optimization formulae;
+/// `docs/superpowers/specs/2026-04-26-campaigns-edge-candidate-evaluation-mode-design.md`
+/// §4 for the EdgeCandidate algorithm.
+///
+/// Dispatch on `mode`: Diversity / Optimization both fall through to
+/// the triple-scoring path that returns
+/// [`EvaluationOutputs::Triple`]; EdgeCandidate hands off to
+/// [`edge_candidate::evaluate`] which returns
+/// [`EvaluationOutputs::EdgeCandidate`].
 pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError> {
+    if inputs.mode == EvaluationMode::EdgeCandidate {
+        return Ok(edge_candidate::evaluate(inputs));
+    }
+    evaluate_triple(inputs).map(EvaluationOutputs::Triple)
+}
+
+/// Triple-scoring evaluator path (Diversity / Optimization). Pure
+/// function; the `evaluate` dispatcher wraps the result in
+/// [`EvaluationOutputs::Triple`].
+fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, EvalError> {
     let agent_by_ip: HashMap<IpAddr, String> = inputs
         .agents
         .iter()
@@ -833,10 +911,12 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                     &by_pair,
                     inputs.stddev_weight,
                 ),
-                // EdgeCandidate uses a separate evaluator path (Phase E).
-                // This arm is unreachable in practice — the handler rejects
-                // edge_candidate campaigns before calling `evaluate()`.
-                EvaluationMode::EdgeCandidate => false,
+                // EdgeCandidate is dispatched at the top of `evaluate`
+                // and never reaches this match — the dispatcher
+                // returns from `edge_candidate::evaluate` first.
+                EvaluationMode::EdgeCandidate => unreachable!(
+                    "EdgeCandidate must be dispatched by `evaluate` before reaching the triple loop"
+                ),
             };
 
             // Counter accumulation runs between the eligibility gate
@@ -957,7 +1037,7 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
     // (architecture #2 / architecture #4).
     let avg_improvement_ms = aggregate_headline_avg(&candidate_rows);
 
-    Ok(EvaluationOutputs {
+    Ok(TripleEvaluationOutputs {
         baseline_pair_count: total_baseline,
         candidates_total,
         candidates_good,
@@ -982,6 +1062,19 @@ mod tests {
         AgentRow {
             agent_id: id.into(),
             ip: ip(addr),
+            hostname: None,
+        }
+    }
+
+    /// Helper: unwrap a `Triple` evaluator output for assertions in the
+    /// diversity / optimization tests. Panics on `EdgeCandidate` so a
+    /// future refactor that mis-dispatches the mode fails loudly.
+    fn triple(out: EvaluationOutputs) -> TripleEvaluationOutputs {
+        match out {
+            EvaluationOutputs::Triple(t) => t,
+            EvaluationOutputs::EdgeCandidate(_) => {
+                panic!("expected Triple variant for diversity / optimization mode")
+            }
         }
     }
 
@@ -1005,6 +1098,7 @@ mod tests {
                 m("b", "203.0.113.7", 121.0, 8.0, 0.0),
             ],
             agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
@@ -1013,6 +1107,8 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
         }
     }
 
@@ -1021,7 +1117,7 @@ mod tests {
         let mut i = inputs_basic(EvaluationMode::Diversity);
         i.measurements.push(m("a", "10.0.0.2", 318.0, 24.0, 0.0));
         i.measurements.push(m("b", "10.0.0.2", 0.0, 0.0, 0.0));
-        let out = evaluate(i).unwrap();
+        let out = triple(evaluate(i).unwrap());
         for cand in &out.results.candidates {
             assert_ne!(cand.destination_ip, "10.0.0.2");
             assert_ne!(cand.destination_ip, "10.0.0.1");
@@ -1033,6 +1129,7 @@ mod tests {
         let i = EvaluationInputs {
             measurements: vec![m("a", "203.0.113.7", 120.0, 8.0, 0.0)],
             agents: vec![agent("a", "10.0.0.1")],
+            candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
@@ -1041,6 +1138,8 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
         };
         let err = evaluate(i).unwrap_err();
         assert!(matches!(err, EvalError::NoBaseline));
@@ -1065,6 +1164,7 @@ mod tests {
                 direct_source: DirectSource::ActiveProbe,
             }],
             agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
@@ -1073,6 +1173,8 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
         };
         let err = evaluate(i).expect_err("RTT-less baseline must not register");
         assert!(matches!(err, EvalError::NoBaseline));
@@ -1080,7 +1182,7 @@ mod tests {
 
     #[test]
     fn diversity_qualifies_transit_that_beats_direct() {
-        let out = evaluate(inputs_basic(EvaluationMode::Diversity)).unwrap();
+        let out = triple(evaluate(inputs_basic(EvaluationMode::Diversity)).unwrap());
         let cand = out
             .results
             .candidates
@@ -1098,7 +1200,7 @@ mod tests {
     fn loss_threshold_filters_unreliable_transit() {
         let mut i = inputs_basic(EvaluationMode::Diversity);
         i.measurements[1].loss_ratio = 0.03;
-        let out = evaluate(i).unwrap();
+        let out = triple(evaluate(i).unwrap());
         let cand = out
             .results
             .candidates
@@ -1112,7 +1214,7 @@ mod tests {
         let mut i = inputs_basic(EvaluationMode::Diversity);
         i.measurements[1].latency_stddev_ms = Some(200.0);
         i.measurements[2].latency_stddev_ms = Some(200.0);
-        let out = evaluate(i).unwrap();
+        let out = triple(evaluate(i).unwrap());
         let cand = out
             .results
             .candidates
@@ -1148,6 +1250,7 @@ mod tests {
                 agent("b", "10.0.0.2"),
                 agent("y", "10.0.0.3"),
             ],
+            candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
@@ -1156,8 +1259,10 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
         };
-        let out = evaluate(inputs).unwrap();
+        let out = triple(evaluate(inputs).unwrap());
         let (x_idx, x_cand) = out
             .results
             .candidates
@@ -1205,6 +1310,7 @@ mod tests {
                 m("b", "203.0.113.7", 121.0, 8.0, 0.0),
             ],
             agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
@@ -1213,8 +1319,10 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
         };
-        let out = evaluate(inputs).unwrap();
+        let out = triple(evaluate(inputs).unwrap());
         let (cand_idx, _cand) = out
             .results
             .candidates
@@ -1242,6 +1350,7 @@ mod tests {
                 agent("b", "10.0.0.2"),
                 agent("c", "10.0.0.3"),
             ],
+            candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
             stddev_weight: 1.0,
@@ -1250,8 +1359,10 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
         };
-        let out = evaluate(inputs).unwrap();
+        let out = triple(evaluate(inputs).unwrap());
         let cand = out
             .results
             .candidates

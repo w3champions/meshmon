@@ -37,6 +37,16 @@ pub enum RepoError {
     /// No row with the given id exists. Handlers map this to HTTP 404.
     #[error("campaign {0} not found")]
     NotFound(Uuid),
+    /// Persistence for `EvaluationMode::EdgeCandidate` is not yet wired
+    /// up — the writer-side schema + insert path lands in T56 Phase G.
+    /// Handlers map this to HTTP 501 so a `/evaluate` against an
+    /// edge_candidate campaign surfaces the gap loudly instead of
+    /// silently no-oping.
+    #[error("EdgeCandidate persistence not yet implemented for campaign {campaign_id}")]
+    EdgeCandidatePersistenceUnimplemented {
+        /// The campaign that triggered the unimplemented branch.
+        campaign_id: Uuid,
+    },
 }
 
 /// Body for `POST /api/campaigns` (minus `created_by`, injected by the
@@ -1486,6 +1496,10 @@ pub async fn agents_for_campaign(
         .map(|r| EvalAgentRow {
             agent_id: r.agent_id,
             ip: r.ip.ip(),
+            // Hostname is stamped on the wire DTO post-evaluator via
+            // the bulk hostname-cache pipeline; the agent roster used
+            // by the evaluator itself doesn't surface hostnames.
+            hostname: None,
         })
         .collect())
 }
@@ -1505,7 +1519,8 @@ pub async fn measurements_for_campaign(
         r#"SELECT loss_threshold_ratio, stddev_weight,
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   max_transit_rtt_ms, max_transit_stddev_ms,
-                  min_improvement_ms, min_improvement_ratio
+                  min_improvement_ms, min_improvement_ratio,
+                  useful_latency_ms, max_hops
              FROM measurement_campaigns WHERE id = $1"#,
         campaign_id,
     )
@@ -1577,6 +1592,11 @@ pub async fn measurements_for_campaign(
         .map(|r| EvalAgentRow {
             agent_id: r.agent_id,
             ip: r.ip.ip(),
+            // Hostname stamping happens in the handler via the bulk
+            // hostname-cache lookup (Phase H wires it for
+            // edge_candidate). Diversity / Optimization don't read this
+            // field; the EdgeCandidate arm tolerates `None`.
+            hostname: None,
         })
         .collect();
 
@@ -1607,14 +1627,41 @@ pub async fn measurements_for_campaign(
                     country_code: r.country_code,
                     asn: r.asn.map(|v| v as i64),
                     network_operator: r.network_operator,
+                    // The diversity / optimization queries don't pull
+                    // these fields today; the EdgeCandidate handler
+                    // adds them in Phase H. Defaulting to `None` here
+                    // keeps the loader compatible with both arms.
+                    website: None,
+                    notes: None,
+                    hostname: None,
                 },
             )
         })
         .collect();
 
+    // EdgeCandidate iterates over the campaign's full destination set
+    // (including IPs that have no outgoing measurement — they appear
+    // as unreachable rows). Diversity / Optimization don't read this
+    // field — they enumerate candidates implicitly from the
+    // measurement set — but we populate it consistently for both
+    // modes so a future refactor doesn't surprise either arm.
+    let candidate_rows = sqlx::query!(
+        r#"SELECT DISTINCT destination_ip FROM campaign_pairs
+            WHERE campaign_id = $1
+              AND kind = 'campaign'"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let candidate_ips: Vec<IpAddr> = candidate_rows
+        .into_iter()
+        .map(|r| r.destination_ip.ip())
+        .collect();
+
     Ok(EvaluationInputs {
         measurements,
         agents,
+        candidate_ips,
         enrichment,
         loss_threshold_ratio: campaign.loss_threshold_ratio,
         stddev_weight: campaign.stddev_weight,
@@ -1623,6 +1670,11 @@ pub async fn measurements_for_campaign(
         max_transit_stddev_ms: campaign.max_transit_stddev_ms,
         min_improvement_ms: campaign.min_improvement_ms,
         min_improvement_ratio: campaign.min_improvement_ratio,
+        useful_latency_ms: campaign.useful_latency_ms,
+        // `max_hops` is stored as `SMALLINT NOT NULL` with a 0..=2
+        // schema constraint; surfacing the raw `i16` keeps the type
+        // identical to the validation surface and the wire DTO.
+        max_hops: campaign.max_hops,
     })
 }
 

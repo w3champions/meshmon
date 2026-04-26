@@ -10,16 +10,32 @@ use std::net::IpAddr;
 /// One directional measurement in a route. Owned struct (not borrowed) so the
 /// per-route composer can hold composed leg sets across multiple route shapes
 /// without lifetime pain.
+///
+/// Surfaced through `pub EvaluationOutputs::EdgeCandidate(...)` so the
+/// edge-candidate persistence path (Phase G) can stamp each leg's
+/// substitution / source / MTR-id onto the wire without re-deriving
+/// it.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by route-composition phases (D–E)
-pub(crate) struct LegMeasurement {
+pub struct LegMeasurement {
+    /// Originating endpoint of the leg.
     pub from: Endpoint,
+    /// Destination endpoint of the leg.
     pub to: Endpoint,
+    /// Mean RTT (ms) for this leg.
     pub rtt_ms: f32,
+    /// RTT stddev (ms) for this leg.
     pub stddev_ms: f32,
+    /// Observed loss fraction (0.0–1.0).
     pub loss_ratio: f32,
+    /// Provenance of the underlying measurement row
+    /// (`ActiveProbe` / `VmContinuous`).
     pub source: LegSource,
+    /// `true` when the leg was resolved from the *reverse* direction
+    /// (symmetry-fallback, spec §3.1) rather than the forward
+    /// measurement.
     pub was_substituted: bool,
+    /// FK to the backing `measurements.id` row when an MTR trace is
+    /// attached; `None` for VM-synthesized rows.
     pub mtr_measurement_id: Option<i64>,
 }
 
@@ -191,9 +207,9 @@ mod tests {
         // in this synthetic case). To test substitution we use two agents.
         let _m = [
             measurement("A", "10.0.0.2", 1.0), // forward broken
-                                                // build a reverse measurement: from="B" agent, to="A.something"?
-                                                // For the symmetric-substitution case we need both endpoints
-                                                // representable as agent IDs. Substitute the "ip" with another agent's IP.
+                                               // build a reverse measurement: from="B" agent, to="A.something"?
+                                               // For the symmetric-substitution case we need both endpoints
+                                               // representable as agent IDs. Substitute the "ip" with another agent's IP.
         ];
         // ... (full fixture in integration tests; this unit covers the lookup logic).
     }

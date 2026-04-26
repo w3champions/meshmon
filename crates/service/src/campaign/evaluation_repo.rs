@@ -25,7 +25,7 @@ use super::dto::{
     EvaluationCandidateDto, EvaluationDto, EvaluationPairDetailDto, EvaluationPairDetailQuery,
     EvaluationResultsDto, PairDetailSortCol, PairDetailSortDir,
 };
-use super::eval::EvaluationOutputs;
+use super::eval::{EvaluationOutputs, TripleEvaluationOutputs};
 use super::model::{CampaignState, DirectSource, EvaluationMode};
 use super::repo::RepoError;
 use sqlx::types::ipnetwork::IpNetwork;
@@ -57,7 +57,7 @@ use uuid::Uuid;
 pub async fn insert_evaluation(
     tx: &mut Transaction<'_, Postgres>,
     campaign_id: Uuid,
-    outputs: &EvaluationOutputs,
+    outputs: &TripleEvaluationOutputs,
     loss_threshold_ratio: f32,
     stddev_weight: f32,
     mode: EvaluationMode,
@@ -466,19 +466,39 @@ pub async fn persist_evaluation(
         });
     }
 
-    let evaluation_id = insert_evaluation(
-        &mut tx,
-        campaign_id,
-        outputs,
-        loss_threshold_ratio,
-        stddev_weight,
-        mode,
-        max_transit_rtt_ms,
-        max_transit_stddev_ms,
-        min_improvement_ms,
-        min_improvement_ratio,
-    )
-    .await?;
+    // Dispatch on the evaluator output variant. Diversity /
+    // Optimization persist through `insert_evaluation`. EdgeCandidate
+    // persistence (per-(X, B) pair detail rows + the new edge-pair
+    // detail table) lands in T56 Phase G; for now this arm is a
+    // no-op write so the response can still re-read the campaign
+    // row, but it does NOT promote the campaign to `evaluated` —
+    // returning early avoids stamping `evaluated_at` against an
+    // empty persistence write. The `/evaluate` handler will fail
+    // gracefully on the read-back miss in Phase E.
+    let evaluation_id = match outputs {
+        EvaluationOutputs::Triple(triple) => {
+            insert_evaluation(
+                &mut tx,
+                campaign_id,
+                triple,
+                loss_threshold_ratio,
+                stddev_weight,
+                mode,
+                max_transit_rtt_ms,
+                max_transit_stddev_ms,
+                min_improvement_ms,
+                min_improvement_ratio,
+            )
+            .await?
+        }
+        EvaluationOutputs::EdgeCandidate(_) => {
+            // Phase G persists EdgeCandidate. Roll back the lock without
+            // promoting state so a stuck `completed` campaign isn't
+            // misreported as `evaluated`.
+            tx.rollback().await?;
+            return Err(RepoError::EdgeCandidatePersistenceUnimplemented { campaign_id });
+        }
+    };
 
     // Promote `completed → evaluated` on first evaluate; otherwise just
     // restamp `measurement_campaigns.evaluated_at` so UI consumers see
