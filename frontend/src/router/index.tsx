@@ -210,7 +210,7 @@ export const campaignNewRoute = createRoute({
 // check (TanStack Router gates `search` required/optional on whether the
 // inferred type has any required keys).
 export const campaignDetailSearchSchema = z.object({
-  tab: z.enum(["candidates", "pairs", "raw", "settings"]).catch("candidates").optional(),
+  tab: z.enum(["candidates", "heatmap", "pairs", "compare", "raw", "settings"]).catch("candidates").optional(),
   raw_state: z
     .enum(["pending", "dispatched", "reused", "succeeded", "unreachable", "skipped"])
     .catch(() => undefined as never)
@@ -310,7 +310,7 @@ export const campaignDetailSearchSchema = z.object({
 export type CampaignDetailSearch = z.infer<typeof campaignDetailSearchSchema>;
 
 /** Enumeration of the active tab values; the parser fills `undefined` with `"candidates"`. */
-export type CampaignDetailTab = "candidates" | "pairs" | "raw" | "settings";
+export type CampaignDetailTab = "candidates" | "heatmap" | "pairs" | "compare" | "raw" | "settings";
 
 /**
  * Safe default when the WHOLE search object is malformed (e.g. the router

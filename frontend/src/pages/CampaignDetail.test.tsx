@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -86,6 +87,24 @@ vi.mock("@/components/campaigns/results/SettingsTab", () => ({
     <div data-testid={`stub-settings-${campaign.id}`} />
   ),
 }));
+vi.mock("@/components/campaigns/results/CompareTab", () => ({
+  CompareTab: ({ campaign }: { campaign: { id: string } }) => (
+    <div data-testid={`stub-compare-${campaign.id}`} />
+  ),
+}));
+vi.mock("@/components/campaigns/results/HeatmapTab", () => ({
+  HeatmapTab: ({ campaign }: { campaign: { id: string } }) => (
+    <div data-testid={`stub-heatmap-${campaign.id}`} />
+  ),
+}));
+vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
+  CatalogueDrawerOverlay: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="catalogue-drawer-overlay">{children}</div>
+  ),
+}));
+vi.mock("@/api/hooks/evaluation", () => ({
+  useEvaluation: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // Imports AFTER mocks so vi.fn() stubs are in place.
@@ -103,6 +122,7 @@ import {
   useStartCampaign,
   useStopCampaign,
 } from "@/api/hooks/campaigns";
+import { type Evaluation, useEvaluation } from "@/api/hooks/evaluation";
 import CampaignDetail from "@/pages/CampaignDetail";
 import { campaignDetailSearchSchema } from "@/router/index";
 import { useComposerSeedStore } from "@/stores/composer-seed";
@@ -161,6 +181,7 @@ interface HookSetupOptions {
   pairsIsLoading?: boolean;
   pairsIsError?: boolean;
   pairsRefetch?: ReturnType<typeof vi.fn>;
+  evaluation?: Evaluation | null;
 }
 
 function setupHookMocks(opts: HookSetupOptions = {}) {
@@ -201,6 +222,12 @@ function setupHookMocks(opts: HookSetupOptions = {}) {
     editMutationStub as unknown as ReturnType<typeof useEditCampaign>,
   );
   vi.mocked(useCampaignStream).mockReturnValue(undefined);
+  vi.mocked(useEvaluation).mockReturnValue({
+    data: opts.evaluation !== undefined ? opts.evaluation : null,
+    isLoading: false,
+    isError: false,
+    error: null,
+  } as unknown as ReturnType<typeof useEvaluation>);
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +773,139 @@ describe("CampaignDetail — tab shell", () => {
     };
     expect(lastCall?.search?.tab).toBe("settings");
     expect(lastCall?.replace).toBe(true);
+  });
+});
+
+describe("CampaignDetail — Heatmap tab visibility", () => {
+  test("Heatmap tab trigger is present for edge_candidate campaigns", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "edge_candidate" }),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.getByRole("tab", { name: /heatmap/i })).toBeInTheDocument();
+  });
+
+  test("Heatmap tab trigger is absent for diversity campaigns", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "diversity" }),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.queryByRole("tab", { name: /heatmap/i })).not.toBeInTheDocument();
+  });
+
+  test("Heatmap tab trigger is absent for optimization campaigns", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "optimization" }),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.queryByRole("tab", { name: /heatmap/i })).not.toBeInTheDocument();
+  });
+
+  test("?tab=heatmap falls back to candidates for non-edge_candidate campaigns", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed", evaluation_mode: "diversity" }),
+    });
+    renderDetail({ search: "?tab=heatmap" });
+
+    expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-heatmap-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+  });
+
+  test("renders HeatmapTab when ?tab=heatmap and evaluation exists", async () => {
+    const evaluation = {
+      id: "eval-1",
+      campaign_id: CAMPAIGN_ID,
+      evaluation_mode: "edge_candidate",
+      useful_latency_ms: 80,
+      results: { candidates: [] },
+    } as unknown as Evaluation;
+    setupHookMocks({
+      campaign: makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      evaluation,
+    });
+    renderDetail({ search: "?tab=heatmap" });
+
+    expect(await screen.findByTestId(`stub-heatmap-${CAMPAIGN_ID}`)).toBeInTheDocument();
+  });
+
+  test("renders placeholder instead of HeatmapTab when evaluation is null", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      evaluation: null,
+    });
+    renderDetail({ search: "?tab=heatmap" });
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.queryByTestId(`stub-heatmap-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+    expect(screen.getByText(/evaluate first/i)).toBeInTheDocument();
+  });
+});
+
+describe("CampaignDetail — Compare tab visibility", () => {
+  test("Compare tab trigger is present when state is completed", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "completed" }) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.getByRole("tab", { name: /^compare$/i })).toBeInTheDocument();
+  });
+
+  test("Compare tab trigger is present when state is stopped", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "stopped" }) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.getByRole("tab", { name: /^compare$/i })).toBeInTheDocument();
+  });
+
+  test("Compare tab trigger is present when state is evaluated", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "evaluated" }) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.getByRole("tab", { name: /^compare$/i })).toBeInTheDocument();
+  });
+
+  test("Compare tab trigger is absent when state is draft", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "draft" }) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.queryByRole("tab", { name: /^compare$/i })).not.toBeInTheDocument();
+  });
+
+  test("Compare tab trigger is absent when state is running", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.queryByRole("tab", { name: /^compare$/i })).not.toBeInTheDocument();
+  });
+
+  test("renders CompareTab when ?tab=compare and state is terminal", async () => {
+    setupHookMocks({
+      campaign: makeCampaign({ state: "completed" }),
+      evaluation: null,
+    });
+    renderDetail({ search: "?tab=compare" });
+
+    expect(await screen.findByTestId(`stub-compare-${CAMPAIGN_ID}`)).toBeInTheDocument();
+  });
+});
+
+describe("CampaignDetail — CatalogueDrawerOverlay mount", () => {
+  test("CatalogueDrawerOverlay wraps the tabs area", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "completed" }) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: /campaign alpha/i });
+    expect(screen.getByTestId("catalogue-drawer-overlay")).toBeInTheDocument();
   });
 });
 

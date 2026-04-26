@@ -14,14 +14,18 @@ import {
 import { DeleteCampaignDialog } from "@/components/campaigns/DeleteCampaignDialog";
 import { EditMetadataSheet } from "@/components/campaigns/EditMetadataSheet";
 import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
+import { CompareTab } from "@/components/campaigns/results/CompareTab";
+import { HeatmapTab } from "@/components/campaigns/results/HeatmapTab";
 import { PairsTab } from "@/components/campaigns/results/PairsTab";
 import { RawTab } from "@/components/campaigns/results/RawTab";
 import { SettingsTab } from "@/components/campaigns/results/SettingsTab";
+import { CatalogueDrawerOverlay } from "@/components/catalogue/CatalogueDrawerOverlay";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useEvaluation } from "@/api/hooks/evaluation";
 import { isIllegalStateTransition, stateBadgeVariant } from "@/lib/campaign";
 import { ratioToPercentInput } from "@/lib/campaign-config";
 import {
@@ -173,6 +177,7 @@ export default function CampaignDetail() {
 
   const campaignQuery = useCampaign(id);
   const previewQuery = usePreviewDispatchCount(id);
+  const evaluationQuery = useEvaluation(id);
 
   // TanStack Query v5 returns a new result object every render, so listing
   // the whole mutation in a `useCallback` dep array defeats memoization.
@@ -426,6 +431,14 @@ export default function CampaignDetail() {
   const { state } = campaign;
   const isTerminal = state === "completed" || state === "stopped" || state === "evaluated";
 
+  // Guard tabs that are conditionally available: fall back to "candidates"
+  // when the URL requests a tab that is hidden for this campaign's mode/state.
+  const isEdgeCandidate = campaign.evaluation_mode === "edge_candidate";
+  const effectiveTab: CampaignDetailTab =
+    (tab === "heatmap" && !isEdgeCandidate) || (tab === "compare" && !isTerminal)
+      ? "candidates"
+      : tab;
+
   return (
     <main className="flex flex-col gap-4 p-6">
       {/* ---------------------------------------------------------------- */}
@@ -585,48 +598,70 @@ export default function CampaignDetail() {
       {/* mounts. That preserves "lazy tabs" (expensive per-tab queries     */}
       {/* only fire once the operator opens the tab).                       */}
       {/* ---------------------------------------------------------------- */}
-      <Tabs
-        value={tab}
-        // Spreading `search` preserves `raw_*` filter params across tab
-        // switches by design — the operator keeps their filter selection
-        // when navigating between Raw and other tabs. If they open Raw,
-        // apply a `raw_state=pending` filter, then visit Settings, the
-        // filter survives the round-trip back.
-        onValueChange={(next) => {
-          // `useNavigate` without a `to` infers the active route's search
-          // shape, but TanStack Router's generic inference here resolves to
-          // `never` under the component-test router harness. Cast to the
-          // narrow search-only shape so prod and the test harness both
-          // type-check. The router's `validateSearch` runs regardless.
-          const navigateSearch = navigate as unknown as (opts: {
-            search: CampaignDetailSearch;
-            replace: boolean;
-          }) => void;
-          navigateSearch({
-            search: { ...search, tab: next as CampaignDetailTab },
-            replace: true,
-          });
-        }}
-      >
-        <TabsList aria-label="Campaign results tabs">
-          <TabsTrigger value="candidates">Candidates</TabsTrigger>
-          <TabsTrigger value="pairs">Pairs</TabsTrigger>
-          <TabsTrigger value="raw">Raw measurements</TabsTrigger>
-          <TabsTrigger value="settings">Evaluation settings</TabsTrigger>
-        </TabsList>
-        <TabsContent value="candidates">
-          {tab === "candidates" ? <CandidatesTab campaign={campaign} /> : null}
-        </TabsContent>
-        <TabsContent value="pairs">
-          {tab === "pairs" ? <PairsTab campaign={campaign} /> : null}
-        </TabsContent>
-        <TabsContent value="raw">
-          {tab === "raw" ? <RawTab campaign={campaign} /> : null}
-        </TabsContent>
-        <TabsContent value="settings">
-          {tab === "settings" ? <SettingsTab campaign={campaign} /> : null}
-        </TabsContent>
-      </Tabs>
+      <CatalogueDrawerOverlay>
+        <Tabs
+          value={effectiveTab}
+          // Spreading `search` preserves `raw_*` filter params across tab
+          // switches by design — the operator keeps their filter selection
+          // when navigating between Raw and other tabs. If they open Raw,
+          // apply a `raw_state=pending` filter, then visit Settings, the
+          // filter survives the round-trip back.
+          onValueChange={(next) => {
+            // `useNavigate` without a `to` infers the active route's search
+            // shape, but TanStack Router's generic inference here resolves to
+            // `never` under the component-test router harness. Cast to the
+            // narrow search-only shape so prod and the test harness both
+            // type-check. The router's `validateSearch` runs regardless.
+            const navigateSearch = navigate as unknown as (opts: {
+              search: CampaignDetailSearch;
+              replace: boolean;
+            }) => void;
+            navigateSearch({
+              search: { ...search, tab: next as CampaignDetailTab },
+              replace: true,
+            });
+          }}
+        >
+          <TabsList aria-label="Campaign results tabs">
+            <TabsTrigger value="candidates">Candidates</TabsTrigger>
+            {isEdgeCandidate ? (
+              <TabsTrigger value="heatmap">Heatmap</TabsTrigger>
+            ) : null}
+            <TabsTrigger value="pairs">Pairs</TabsTrigger>
+            {isTerminal ? <TabsTrigger value="compare">Compare</TabsTrigger> : null}
+            <TabsTrigger value="raw">Raw measurements</TabsTrigger>
+            <TabsTrigger value="settings">Evaluation settings</TabsTrigger>
+          </TabsList>
+          <TabsContent value="candidates">
+            {effectiveTab === "candidates" ? <CandidatesTab campaign={campaign} /> : null}
+          </TabsContent>
+          {isEdgeCandidate ? (
+            <TabsContent value="heatmap">
+              {effectiveTab === "heatmap" && evaluationQuery.data ? (
+                <HeatmapTab campaign={campaign} evaluation={evaluationQuery.data} />
+              ) : effectiveTab === "heatmap" ? (
+                <p className="text-sm text-muted-foreground p-4">Evaluate first to view the heatmap.</p>
+              ) : null}
+            </TabsContent>
+          ) : null}
+          <TabsContent value="pairs">
+            {effectiveTab === "pairs" ? <PairsTab campaign={campaign} /> : null}
+          </TabsContent>
+          {isTerminal ? (
+            <TabsContent value="compare">
+              {effectiveTab === "compare" ? (
+                <CompareTab campaign={campaign} evaluation={evaluationQuery.data ?? null} />
+              ) : null}
+            </TabsContent>
+          ) : null}
+          <TabsContent value="raw">
+            {effectiveTab === "raw" ? <RawTab campaign={campaign} /> : null}
+          </TabsContent>
+          <TabsContent value="settings">
+            {effectiveTab === "settings" ? <SettingsTab campaign={campaign} /> : null}
+          </TabsContent>
+        </Tabs>
+      </CatalogueDrawerOverlay>
 
       {/* ---------------------------------------------------------------- */}
       {/* Sheets + dialogs                                                 */}
