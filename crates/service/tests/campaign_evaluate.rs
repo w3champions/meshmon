@@ -388,8 +388,8 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
     // T54-02 dropped the per-campaign UNIQUE constraint so every
     // `/evaluate` call appends a fresh `campaign_evaluations` row.
     // Guards: two rows exist after two calls, the first row's id +
-    // evaluated_at + evaluation_mode + candidate count are all
-    // untouched, and the read-path surfaces the second (newer) row.
+    // evaluated_at + evaluation_mode are all untouched, and the
+    // read-path surfaces the second (newer) row.
     let h = common::HttpHarness::start().await;
 
     let a_ip: IpAddr = "192.0.2.71".parse().unwrap();
@@ -449,18 +449,14 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
     // Force a measurable clock delta before the second call.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-    // Switch evaluation mode and re-evaluate — a distinct row should
+    // Re-evaluate without changing any knobs — a distinct row should
     // land in `campaign_evaluations` rather than overwriting the first.
-    let _patch: Value = h
-        .patch_json(
-            &format!("/api/campaigns/{campaign_id}"),
-            &json!({ "evaluation_mode": "diversity" }),
-        )
-        .await;
+    // Knob-changing PATCHes (mode, max_hops, useful_latency_ms, etc.)
+    // dismiss the existing row by design so they don't appear here.
     let eval2: Value = h
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
-    assert_eq!(eval2["evaluation_mode"], "diversity", "body = {eval2}");
+    assert_eq!(eval2["evaluation_mode"], "optimization", "body = {eval2}");
 
     // Two rows exist, the first is untouched, the second is newer.
     let row_count: i64 =
@@ -500,7 +496,7 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
     let fetched: Value = h
         .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
         .await;
-    assert_eq!(fetched["evaluation_mode"], "diversity");
+    assert_eq!(fetched["evaluation_mode"], "optimization");
     assert_eq!(
         fetched["evaluated_at"], second_evaluated_at,
         "GET /evaluation must surface the latest row: {fetched}"

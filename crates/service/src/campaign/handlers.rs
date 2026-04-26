@@ -407,7 +407,10 @@ pub async fn patch(
 
     // Determine whether any evaluator knob has actually changed. When a
     // knob is absent from the PATCH body, COALESCE leaves it untouched in
-    // the DB — so only supplied values can trigger a dismissal.
+    // the DB — so only supplied values can trigger a dismissal. Each
+    // clause compares the body's optional value against the stored
+    // representation; the `Option<T>`-vs-`T` mismatch in a few fields
+    // is intentional and matches the column nullability.
     let knob_changed = body
         .useful_latency_ms
         .is_some_and(|v| Some(v) != existing.useful_latency_ms)
@@ -420,7 +423,22 @@ pub async fn patch(
             .is_some_and(|v| v != existing.loss_threshold_ratio)
         || body
             .stddev_weight
-            .is_some_and(|v| v != existing.stddev_weight);
+            .is_some_and(|v| v != existing.stddev_weight)
+        || body
+            .evaluation_mode
+            .is_some_and(|v| v != existing.evaluation_mode)
+        || body
+            .max_transit_rtt_ms
+            .is_some_and(|v| Some(v) != existing.max_transit_rtt_ms)
+        || body
+            .max_transit_stddev_ms
+            .is_some_and(|v| Some(v) != existing.max_transit_stddev_ms)
+        || body
+            .min_improvement_ms
+            .is_some_and(|v| Some(v) != existing.min_improvement_ms)
+        || body
+            .min_improvement_ratio
+            .is_some_and(|v| Some(v) != existing.min_improvement_ratio);
 
     let updated = match repo::patch(
         &state.pool,

@@ -166,6 +166,34 @@ async fn patch_max_hops_dismisses_evaluation() {
     );
 }
 
+/// Switching `evaluation_mode` reshapes the entire evaluation row
+/// (Triple → EdgeCandidate sidecars are incompatible). The PATCH
+/// dismissal check must include `evaluation_mode` so a stale row from
+/// the prior mode never lingers under the new mode.
+#[tokio::test]
+async fn patch_evaluation_mode_dismisses_evaluation() {
+    let h = HttpHarness::start().await;
+    let id = common::create_evaluated_campaign(&h, "diversity").await;
+
+    // Switch the evaluation mode to edge_candidate. useful_latency_ms
+    // must accompany the change since the validator now sees the
+    // post-PATCH state and edge_candidate requires it.
+    let _: serde_json::Value = h
+        .patch_json(
+            &format!("/api/campaigns/{id}"),
+            &json!({"evaluation_mode": "edge_candidate", "useful_latency_ms": 80.0}),
+        )
+        .await;
+
+    let eval = h
+        .get_expect_status(&format!("/api/campaigns/{id}/evaluation"), 404)
+        .await;
+    assert_eq!(
+        eval["error"], "not_evaluated",
+        "evaluation should be dismissed after evaluation_mode change; body = {eval}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // S3 — HTTP-level 422 for edge_candidate evaluate preconditions
 // ---------------------------------------------------------------------------
