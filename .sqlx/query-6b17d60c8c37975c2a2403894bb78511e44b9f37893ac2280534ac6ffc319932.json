@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, max_transit_rtt_ms, max_transit_stddev_ms,\n             min_improvement_ms, min_improvement_ratio, created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12, $13, $14, $15,\n                $16)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  max_transit_rtt_ms, max_transit_stddev_ms,\n                  min_improvement_ms, min_improvement_ratio,\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
+  "query": "\n        INSERT INTO measurement_campaigns\n            (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,\n             probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,\n             evaluation_mode, max_transit_rtt_ms, max_transit_stddev_ms,\n             min_improvement_ms, min_improvement_ratio,\n             useful_latency_ms, max_hops, vm_lookback_minutes,\n             created_by)\n        VALUES ($1, $2, $3::probe_protocol,\n                COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),\n                COALESCE($6, 2000), COALESCE($7, 100),\n                $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),\n                COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),\n                $12, $13, $14, $15,\n                $16, COALESCE($17, 2::smallint), COALESCE($18, 15),\n                $19)\n        RETURNING id, title, notes,\n                  state AS \"state: CampaignState\",\n                  protocol AS \"protocol: ProbeProtocol\",\n                  probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                  force_measurement, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  max_transit_rtt_ms, max_transit_stddev_ms,\n                  min_improvement_ms, min_improvement_ratio,\n                  useful_latency_ms, max_hops, vm_lookback_minutes,\n                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -96,7 +96,8 @@
             "kind": {
               "Enum": [
                 "diversity",
-                "optimization"
+                "optimization",
+                "edge_candidate"
               ]
             }
           }
@@ -124,31 +125,46 @@
       },
       {
         "ordinal": 17,
+        "name": "useful_latency_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 18,
+        "name": "max_hops",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 19,
+        "name": "vm_lookback_minutes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 20,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 18,
+        "ordinal": 21,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 19,
+        "ordinal": 22,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 20,
+        "ordinal": 23,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 21,
+        "ordinal": 24,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 22,
+        "ordinal": 25,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
@@ -182,7 +198,8 @@
             "kind": {
               "Enum": [
                 "diversity",
-                "optimization"
+                "optimization",
+                "edge_candidate"
               ]
             }
           }
@@ -191,6 +208,9 @@
         "Float8",
         "Float8",
         "Float8",
+        "Float4",
+        "Int2",
+        "Int4",
         "Text"
       ]
     },
@@ -214,11 +234,14 @@
       true,
       true,
       false,
+      false,
+      true,
+      false,
       true,
       true,
       true,
       true
     ]
   },
-  "hash": "b1222d0086c1153998c123ec8176acd2f4f0fd2e76de98b09e798205b8e51b13"
+  "hash": "6b17d60c8c37975c2a2403894bb78511e44b9f37893ac2280534ac6ffc319932"
 }

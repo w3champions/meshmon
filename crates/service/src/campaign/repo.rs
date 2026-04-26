@@ -77,6 +77,15 @@ pub struct CreateInput {
     pub min_improvement_ms: Option<f64>,
     /// Optional storage floor on relative improvement (fraction 0.0–1.0).
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) for edge_candidate useful-route
+    /// qualification. `None` disables the filter.
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum transit hops for edge_candidate mode. Defaults to 2
+    /// when the request omits the field.
+    pub max_hops: Option<i16>,
+    /// VictoriaMetrics look-back window (minutes) for edge_candidate mode.
+    /// Defaults to 15 when the request omits the field.
+    pub vm_lookback_minutes: Option<i32>,
     /// Session principal that created the row; audit-only.
     pub created_by: Option<String>,
 }
@@ -117,14 +126,17 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
             (title, notes, protocol, probe_count, probe_count_detail, timeout_ms,
              probe_stagger_ms, force_measurement, loss_threshold_ratio, stddev_weight,
              evaluation_mode, max_transit_rtt_ms, max_transit_stddev_ms,
-             min_improvement_ms, min_improvement_ratio, created_by)
+             min_improvement_ms, min_improvement_ratio,
+             useful_latency_ms, max_hops, vm_lookback_minutes,
+             created_by)
         VALUES ($1, $2, $3::probe_protocol,
                 COALESCE($4, 10::smallint), COALESCE($5, 250::smallint),
                 COALESCE($6, 2000), COALESCE($7, 100),
                 $8, COALESCE($9, 0.02::real), COALESCE($10, 1.0::real),
                 COALESCE($11::evaluation_mode, 'optimization'::evaluation_mode),
                 $12, $13, $14, $15,
-                $16)
+                $16, COALESCE($17, 2::smallint), COALESCE($18, 15),
+                $19)
         RETURNING id, title, notes,
                   state AS "state: CampaignState",
                   protocol AS "protocol: ProbeProtocol",
@@ -133,6 +145,7 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
                   evaluation_mode AS "evaluation_mode: EvaluationMode",
                   max_transit_rtt_ms, max_transit_stddev_ms,
                   min_improvement_ms, min_improvement_ratio,
+                  useful_latency_ms, max_hops, vm_lookback_minutes,
                   created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         input.title,
@@ -150,6 +163,9 @@ pub async fn create(pool: &PgPool, input: CreateInput) -> Result<CampaignRow, Re
         input.max_transit_stddev_ms,
         input.min_improvement_ms,
         input.min_improvement_ratio,
+        input.useful_latency_ms,
+        input.max_hops,
+        input.vm_lookback_minutes,
         input.created_by.as_deref(),
     )
     .fetch_one(&mut *tx)
@@ -184,6 +200,7 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<CampaignRow>, RepoErr
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE id = $1
@@ -220,6 +237,7 @@ pub async fn list(
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE ($1::text IS NULL OR title ILIKE $1 OR notes ILIKE $1)
@@ -254,6 +272,9 @@ pub async fn patch(
     max_transit_stddev_ms: Option<f64>,
     min_improvement_ms: Option<f64>,
     min_improvement_ratio: Option<f64>,
+    useful_latency_ms: Option<f32>,
+    max_hops: Option<i16>,
+    vm_lookback_minutes: Option<i32>,
 ) -> Result<CampaignRow, RepoError> {
     let raw = sqlx::query_as!(
         CampaignRowRaw,
@@ -267,7 +288,10 @@ pub async fn patch(
                max_transit_rtt_ms     = COALESCE($7, max_transit_rtt_ms),
                max_transit_stddev_ms  = COALESCE($8, max_transit_stddev_ms),
                min_improvement_ms     = COALESCE($9, min_improvement_ms),
-               min_improvement_ratio  = COALESCE($10, min_improvement_ratio)
+               min_improvement_ratio  = COALESCE($10, min_improvement_ratio),
+               useful_latency_ms      = COALESCE($11, useful_latency_ms),
+               max_hops               = COALESCE($12, max_hops),
+               vm_lookback_minutes    = COALESCE($13, vm_lookback_minutes)
          WHERE id = $1
          RETURNING id, title, notes,
                    state AS "state: CampaignState",
@@ -277,6 +301,7 @@ pub async fn patch(
                    evaluation_mode AS "evaluation_mode: EvaluationMode",
                    max_transit_rtt_ms, max_transit_stddev_ms,
                    min_improvement_ms, min_improvement_ratio,
+                   useful_latency_ms, max_hops, vm_lookback_minutes,
                    created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
         "#,
         id,
@@ -289,6 +314,9 @@ pub async fn patch(
         max_transit_stddev_ms,
         min_improvement_ms,
         min_improvement_ratio,
+        useful_latency_ms,
+        max_hops,
+        vm_lookback_minutes,
     )
     .fetch_optional(pool)
     .await?;
@@ -794,6 +822,7 @@ pub async fn get_raw_for_scheduler(
                evaluation_mode AS "evaluation_mode: EvaluationMode",
                max_transit_rtt_ms, max_transit_stddev_ms,
                min_improvement_ms, min_improvement_ratio,
+               useful_latency_ms, max_hops, vm_lookback_minutes,
                created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
           FROM measurement_campaigns
          WHERE id = $1
@@ -1158,6 +1187,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1181,6 +1211,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1204,6 +1235,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1227,6 +1259,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1250,6 +1283,7 @@ pub(crate) async fn transition_state_in_tx(
                  evaluation_mode AS "evaluation_mode: EvaluationMode",
                  max_transit_rtt_ms, max_transit_stddev_ms,
                  min_improvement_ms, min_improvement_ratio,
+                 useful_latency_ms, max_hops, vm_lookback_minutes,
                  created_by, created_at, started_at, stopped_at, completed_at, evaluated_at
             "#,
                 id,
@@ -1336,6 +1370,9 @@ struct CampaignRowRaw {
     max_transit_stddev_ms: Option<f64>,
     min_improvement_ms: Option<f64>,
     min_improvement_ratio: Option<f64>,
+    useful_latency_ms: Option<f32>,
+    max_hops: i16,
+    vm_lookback_minutes: i32,
     created_by: Option<String>,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -1364,6 +1401,9 @@ impl From<CampaignRowRaw> for CampaignRow {
             max_transit_stddev_ms: r.max_transit_stddev_ms,
             min_improvement_ms: r.min_improvement_ms,
             min_improvement_ratio: r.min_improvement_ratio,
+            useful_latency_ms: r.useful_latency_ms,
+            max_hops: r.max_hops,
+            vm_lookback_minutes: r.vm_lookback_minutes,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,

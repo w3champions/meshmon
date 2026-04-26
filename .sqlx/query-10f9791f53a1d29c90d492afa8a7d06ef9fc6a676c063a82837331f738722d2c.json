@@ -22,7 +22,8 @@
             "kind": {
               "Enum": [
                 "diversity",
-                "optimization"
+                "optimization",
+                "edge_candidate"
               ]
             }
           }

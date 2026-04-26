@@ -152,6 +152,9 @@ pub async fn create(
         max_transit_stddev_ms: body.max_transit_stddev_ms,
         min_improvement_ms: body.min_improvement_ms,
         min_improvement_ratio: body.min_improvement_ratio,
+        useful_latency_ms: body.useful_latency_ms,
+        max_hops: body.max_hops,
+        vm_lookback_minutes: body.vm_lookback_minutes,
         created_by: Some(principal.username.clone()),
     };
 
@@ -303,6 +306,9 @@ pub async fn patch(
         body.max_transit_stddev_ms,
         body.min_improvement_ms,
         body.min_improvement_ratio,
+        body.useful_latency_ms,
+        body.max_hops,
+        body.vm_lookback_minutes,
     )
     .await
     {

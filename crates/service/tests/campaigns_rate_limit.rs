@@ -116,6 +116,9 @@ async fn per_destination_rps_caps_cross_agent_traffic() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )

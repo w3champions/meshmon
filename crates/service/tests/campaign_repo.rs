@@ -36,6 +36,9 @@ fn make_input(title: &str) -> CreateInput {
         max_transit_stddev_ms: None,
         min_improvement_ms: None,
         min_improvement_ratio: None,
+        useful_latency_ms: None,
+        max_hops: None,
+        vm_lookback_minutes: None,
         created_by: Some("tester".into()),
     }
 }
@@ -194,6 +197,9 @@ async fn patch_updates_provided_fields_only() {
         None,
         Some(7.5_f64),
         None,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -221,6 +227,9 @@ async fn patch_returns_not_found_for_unknown_id() {
         &pool,
         fresh,
         Some("x"),
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -1713,8 +1722,19 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         pairs_total_considered: 1,
         avg_improvement_ms: Some(0.0),
         avg_loss_ratio: Some(0.0),
-        composite_score: 0.0,
+        composite_score: Some(0.0),
         hostname: None,
+        website: None,
+        notes: None,
+        agent_id: None,
+        coverage_count: None,
+        destinations_total: None,
+        mean_ms_under_t: None,
+        coverage_weighted_ping_ms: None,
+        direct_share: None,
+        onehop_share: None,
+        twohop_share: None,
+        has_real_x_source_data: None,
     };
     // Sidecar pair-detail bundle. The bundle's `destination_ip` is
     // intentionally a real IP — the evaluator sets this from the
@@ -1741,6 +1761,10 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             mtr_measurement_id_ax: None,
             mtr_measurement_id_xb: None,
             destination_hostname: None,
+            ax_was_substituted: None,
+            xb_was_substituted: None,
+            direct_was_substituted: None,
+            winning_x_position: None,
         }],
         qualifying_legs: Vec::new(),
     };
@@ -1978,6 +2002,9 @@ async fn apply_edit_preserves_detail_rows() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )
@@ -2063,6 +2090,9 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )
