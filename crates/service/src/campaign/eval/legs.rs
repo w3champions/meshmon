@@ -1,6 +1,54 @@
-//! Leg construction with symmetry-fallback substitution. Spec
-//! `docs/superpowers/specs/2026-04-26-campaigns-edge-candidate-evaluation-mode-design.md`
-//! §3.1.
+//! Leg construction with symmetry-fallback substitution.
+//!
+//! # LegLookup endpoint model
+//!
+//! [`LegLookup`] indexes every attributed measurement as a single entry keyed
+//! on `(EndpointKey::Agent(source_agent_id), EndpointKey::Ip(destination_ip))`.
+//! There are no `Agent → Agent` entries; agents always probe IP addresses and
+//! the destination is always an `Ip` key. This has one architectural
+//! consequence: a lookup where both endpoints are `Agent` variants will
+//! always miss (neither the forward nor the reverse key matches any stored
+//! entry).
+//!
+//! ## Key variants
+//!
+//! - [`EndpointKey::Agent`]`(String)` — a mesh agent identified by its
+//!   string id.
+//! - [`EndpointKey::Ip`]`(IpAddr)` — any IP-addressed endpoint (candidate
+//!   IP or a mesh agent referenced by its IP rather than its id).
+//!
+//! ## Lookup priority (per [`LegLookup::lookup`])
+//!
+//! Given a requested leg `(from, to)`:
+//!
+//! 1. Forward key `(from, to)` present with `loss_ratio < 1.0` → used
+//!    directly; `was_substituted = false`.
+//! 2. Forward key present but `loss_ratio == 1.0`, reverse key
+//!    `(to, from)` present with `loss_ratio < 1.0` → reverse used as
+//!    symmetry substitute; `was_substituted = true`.
+//! 3. No forward key, reverse key present with `loss_ratio < 1.0` →
+//!    same as (2).
+//! 4. Both keys present with `loss_ratio == 1.0` → [`LegLookupResult::Broken`];
+//!    any route containing this leg is discarded.
+//! 5. Neither key present → [`LegLookupResult::Missing`]; route discarded.
+//!
+//! ## Dual-form pool
+//!
+//! Diversity and optimization route enumeration builds a pool that includes
+//! both `Agent { id }` and `CandidateIp { ip }` forms for every mesh agent.
+//! Both forms are needed because different leg positions require different
+//! endpoint variants:
+//!
+//! - `CandidateIp { ip }` — used when the agent is the *destination* of a
+//!   stored measurement (e.g. the A→Y first leg resolves via forward key
+//!   `(Agent("a"), Ip(Y.ip))`).
+//! - `Agent { id }` — used when the agent is the *source* of a stored
+//!   measurement in the middle of a 2-hop route (e.g. the Y→B leg resolves
+//!   via reverse key `(Agent("y"), Ip(B.ip))`).
+//!
+//! EdgeCandidate builds the same dual-form pool so both X→M and M→X
+//! (reverse-substituted) legs resolve correctly for candidate IPs that have
+//! no outbound measurement of their own.
 
 use crate::campaign::eval::AttributedMeasurement;
 use crate::campaign::model::{Endpoint, LegSource};

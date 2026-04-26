@@ -1,12 +1,54 @@
-//! Pure-function core for the campaign evaluator. No DB, no IO.
+//! Pure-function campaign evaluator core. No DB, no IO.
 //!
-//! `evaluate()` is the single entry point. Its caller (repo.rs) builds
-//! `EvaluationInputs` from DB queries and persists the returned
-//! `EvaluationOutputs` through
-//! [`crate::campaign::evaluation_repo::persist_evaluation`], which
-//! fans the structure out across `campaign_evaluations` +
-//! `campaign_evaluation_{candidates, pair_details,
-//! unqualified_reasons}`.
+//! # Entry point
+//!
+//! [`evaluate`] is the single public entry point. Callers build
+//! [`EvaluationInputs`] from DB queries and pass the returned
+//! [`EvaluationOutputs`] to
+//! [`crate::campaign::evaluation_repo::persist_evaluation`], which fans the
+//! structure across the relational child tables.
+//!
+//! # Three-arm dispatch
+//!
+//! [`evaluate`] dispatches on [`crate::campaign::model::EvaluationMode`]:
+//!
+//! - **`diversity`** / **`optimization`** — both enter the triple-scoring
+//!   path (`evaluate_triple`) and return [`EvaluationOutputs::Triple`].
+//!   The evaluator scores every candidate IP (X) as a transit between two
+//!   mesh agents (A→X→B). Diversity qualifies X when it beats the direct
+//!   A→B path; optimization additionally requires X to beat every
+//!   alternative mesh transit.
+//! - **`edge_candidate`** — dispatched to
+//!   [`edge_candidate::evaluate`][crate::campaign::eval::edge_candidate]
+//!   before the triple loop runs. Returns
+//!   [`EvaluationOutputs::EdgeCandidate`]. The evaluator scores each
+//!   candidate IP (X) by its best route to every source mesh agent (A),
+//!   rather than as a transit between two agents.
+//!
+//! # Leg-construction priority order
+//!
+//! The [`legs::LegLookup`] resolver applies the following priority for every
+//! directed leg (from → to):
+//!
+//! 1. **Forward measurement with loss < 1.0** — used directly;
+//!    `was_substituted = false`.
+//! 2. **Reverse measurement (symmetry fallback) with loss < 1.0** — used as
+//!    a substitute; `was_substituted = true`. The `source` field records the
+//!    underlying measurement's provenance (`ActiveProbe` or `VmContinuous`)
+//!    regardless of direction.
+//! 3. **Both directions present with loss == 1.0** — leg is **broken**;
+//!    any route containing this leg is discarded.
+//! 4. **Neither direction has data** — leg is **missing**; route discarded.
+//!
+//! See [`legs::LegLookup::lookup`] for the full truth table.
+//!
+//! # Sub-modules
+//!
+//! - [`edge_candidate`] — per-(X, A) evaluator for EdgeCandidate mode.
+//! - [`legs`] — `LegLookup` + `LegMeasurement`; leg resolution with
+//!   symmetry-fallback.
+//! - [`routes`] — `enumerate_routes`; multi-hop route composition from an
+//!   endpoint pool.
 
 pub(crate) mod edge_candidate;
 pub(crate) mod legs;

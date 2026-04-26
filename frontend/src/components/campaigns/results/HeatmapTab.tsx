@@ -5,17 +5,44 @@
  * B (unique destination_agent_ids), columns represent X (unique candidate_ips).
  * Each cell shows the best_route_ms integer or "—" for unreachable pairs.
  *
- * Color tiers derive from `evaluation.useful_latency_ms` (or 80 ms) with
- * boundaries `[0.4·T, T, 2·T, 4·T]`. Boundaries can be customised per-mode
- * via the HeatmapColorEditor popover and are persisted to localStorage at
- * `meshmon.evaluation.heatmap.{mode}.colors`.
+ * ## Color-tier model (K-1, 4-handle)
  *
- * Rows and columns are independently sortable. Sort state is persisted to
- * URL search params (`hm_row_sort`, `hm_col_sort`) so the view is shareable.
- * Clicking a cell opens the DrilldownDialog scoped to (X, B).
+ * Five color tiers are derived from four boundary values `[b0, b1, b2, b3]`:
+ * - Tier 1 (excellent): ms < b0
+ * - Tier 2 (good):      b0 ≤ ms < b1
+ * - Tier 3 (fair):      b1 ≤ ms < b2
+ * - Tier 4 (marginal):  b2 ≤ ms < b3
+ * - Tier 5 (poor):      ms ≥ b3
  *
- * Virtualization kicks in when either dimension exceeds 30 using
- * `@tanstack/react-virtual`.
+ * Default boundaries are computed from `useful_latency_ms` (T): `[0.4·T, T, 2·T, 4·T]`.
+ * Fallback when T is absent: `[32, 80, 160, 320]` ms.
+ *
+ * ## Tier boundary customization
+ *
+ * The `HeatmapColorEditor` popover exposes four drag handles, one per
+ * boundary. Changes are written to localStorage at
+ * `meshmon.evaluation.heatmap.edge_candidate.colors` (a JSON array of four
+ * numbers) and restored on mount. The key is per-mode so a future mode with
+ * its own heatmap can store independent boundaries.
+ *
+ * ## Sort state
+ *
+ * Rows and columns are independently sortable via the column and row header
+ * controls. Sort state round-trips through four URL search params:
+ * - `hm_row_sort` — row sort key (`destination_agent_id` | `mean_ms` | `destinations_qualifying`)
+ * - `hm_row_dir`  — row sort direction (`asc` | `desc`)
+ * - `hm_col_sort` — column sort key (`candidate_ip` | `coverage_weighted_ping_ms` | `coverage_count`)
+ * - `hm_col_dir`  — column sort direction (`asc` | `desc`)
+ *
+ * ## Interaction
+ *
+ * Clicking a cell opens the `DrilldownDialog` scoped to `(X, B)`, showing
+ * the winning route's legs and per-leg substitution flags.
+ *
+ * ## Virtualization
+ *
+ * `@tanstack/react-virtual` kicks in when either axis exceeds 30 items,
+ * keeping the DOM bounded regardless of fleet size.
  */
 
 import { useVirtualizer } from "@tanstack/react-virtual";
