@@ -26,9 +26,9 @@ pub(crate) struct LegMeasurement {
 /// Indexed view of the available measurements for fast leg lookup.
 ///
 /// `forward` is keyed on `(source, dest)` exactly as today's matrix.
-/// `reverse_index` is keyed on `(source, dest)` of the reverse direction —
-/// internally that means we ALSO index the same set of measurements under
-/// `(dest, source)` so we can look up "is there a reverse pair?" in O(1).
+/// The same `forward` map is consulted twice: once with `(from, to)` and once
+/// with `(to, from)` to resolve both directions in O(1) without maintaining a
+/// separate reverse index.
 #[allow(dead_code)] // consumed by route-composition phases (D–E)
 pub(crate) struct LegLookup<'a> {
     pub(super) forward: HashMap<(EndpointKey, EndpointKey), &'a AttributedMeasurement>,
@@ -75,8 +75,11 @@ impl<'a> LegLookup<'a> {
     /// 4. Otherwise → missing, route discarded.
     ///
     /// `from`/`to` are the endpoints of the leg we want to construct.
-    /// `default_source_when_symmetric_reuse` controls which `LegSource`
-    /// variant the result carries when we have to use the reverse direction.
+    ///
+    /// When a reverse measurement is used (rule 2), `was_substituted` is set to `true`.
+    /// The `source` field preserves the underlying measurement's `DirectSource` mapping
+    /// (`ActiveProbe` or `VmContinuous`). Consumers should rely on `was_substituted`
+    /// for substitution detection rather than checking the `source` value.
     pub fn lookup(&self, from: &Endpoint, to: &Endpoint) -> LegLookupResult {
         let from_key = EndpointKey::from_endpoint(from);
         let to_key = EndpointKey::from_endpoint(to);
@@ -206,7 +209,7 @@ mod tests {
         let lookup = LegLookup::build(&m);
         let result = lookup.lookup(&agent("A"), &ip("10.0.0.3"));
         // forward is 100%, no reverse → Broken (or Missing per the guard).
-        matches!(result, LegLookupResult::Broken);
+        assert!(matches!(result, LegLookupResult::Broken));
     }
 
     #[test]

@@ -1793,6 +1793,7 @@ pub async fn reverse_direction_measurements_for_campaign(
          AND m.destination_ip = ap.a_ip
          AND m.protocol = c.protocol
          AND m.measured_at > now() - interval '24 hours'
+         AND m.latency_avg_ms IS NOT NULL
         "#,
         campaign_id,
     )
