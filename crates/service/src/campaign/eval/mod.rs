@@ -15,7 +15,8 @@ pub(crate) mod routes;
 pub use edge_candidate::{EdgeCandidateOutputs, EdgeCandidateRow, EdgePairRow};
 
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
-use crate::campaign::model::{DirectSource, EvaluationMode};
+use crate::campaign::eval::legs::{LegLookup, LegLookupResult};
+use crate::campaign::model::{DirectSource, Endpoint, EvaluationMode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 
@@ -255,7 +256,11 @@ fn build_pair_lookup(
 }
 
 /// Enumerate baseline `(A, B)` agent pairs that have a usable A→B
-/// measurement.
+/// measurement. Returns `(a_id, b_ip, b_id, direct_was_substituted)`.
+///
+/// `direct_was_substituted` is `true` when the A→B RTT was resolved from the
+/// reverse B→A measurement (per LegLookup §3.1 symmetry substitution). This
+/// flag is propagated onto pair-detail rows so the wire DTO can surface it.
 ///
 /// A row with no RTT (e.g. a 100 %-loss "success") cannot participate
 /// in scoring downstream, so counting it would inflate
@@ -264,8 +269,9 @@ fn build_pair_lookup(
 fn collect_baselines(
     agents: &[AgentRow],
     by_pair: &HashMap<(String, IpAddr), &AttributedMeasurement>,
-) -> Vec<(String, IpAddr, String)> {
-    let mut baselines: Vec<(String, IpAddr, String)> = Vec::new();
+    leg_lookup: &LegLookup<'_>,
+) -> Vec<(String, IpAddr, String, bool)> {
+    let mut baselines: Vec<(String, IpAddr, String, bool)> = Vec::new();
     for a in agents {
         for b in agents {
             if a.agent_id == b.agent_id {
@@ -275,7 +281,20 @@ fn collect_baselines(
                 .get(&(a.agent_id.clone(), b.ip))
                 .is_some_and(|m| m.latency_avg_ms.is_some())
             {
-                baselines.push((a.agent_id.clone(), b.ip, b.agent_id.clone()));
+                // Determine substitution flag for the direct A→B leg.
+                let a_endpoint = Endpoint::Agent {
+                    id: a.agent_id.clone(),
+                };
+                let b_endpoint = Endpoint::CandidateIp { ip: b.ip };
+                let direct_was_substituted =
+                    matches!(leg_lookup.lookup(&a_endpoint, &b_endpoint),
+                        LegLookupResult::Found { was_substituted: true, .. });
+                baselines.push((
+                    a.agent_id.clone(),
+                    b.ip,
+                    b.agent_id.clone(),
+                    direct_was_substituted,
+                ));
             }
         }
     }
@@ -299,6 +318,9 @@ struct AxLeg<'m> {
     /// Source `AttributedMeasurement`. Carried through so the inner
     /// loop can stamp `mtr_measurement_id_ax` and `loss_ratio`.
     meas: &'m AttributedMeasurement,
+    /// `true` when the leg RTT was resolved from the reverse direction
+    /// (B→X measurement used as X→B, per LegLookup §3.1 substitution).
+    was_substituted: bool,
 }
 
 /// One X→B transit leg surviving the L1/L2/L3 cartesian-product prune.
@@ -317,9 +339,13 @@ struct XbLeg<'m> {
     /// Source `AttributedMeasurement` — carried for
     /// `mtr_measurement_id_xb` + `loss_ratio` in the inner loop.
     meas: &'m AttributedMeasurement,
+    /// `true` when the leg RTT was resolved from the reverse direction
+    /// (per LegLookup §3.1 substitution).
+    was_substituted: bool,
 }
 
-/// Build per-candidate AX/XB leg lists from the baseline set.
+/// Build per-candidate AX/XB leg lists from the baseline set using
+/// [`LegLookup`] for symmetry-aware substitution (spec §3.1).
 ///
 /// AX = "A→X" for some baseline source agent A; XB = "X→B" with B as a
 /// baseline destination agent. The XB direction uses the source-
@@ -327,40 +353,66 @@ struct XbLeg<'m> {
 /// comment in [`evaluate`]'s inner triple loop. Pathological self-
 /// transits (X equals A's IP, or X equals B's IP) are skipped to keep
 /// degenerate `0.0`/`NaN` rows out of the L1 minima.
+///
+/// The [`LegLookup`] is functionally equivalent to the direct pair map for
+/// the no-substitution case — existing tests that predate substitution
+/// continue to pass unchanged.
 fn build_leg_sets<'m>(
     x_ip: IpAddr,
-    baselines: &[(String, IpAddr, String)],
+    baselines: &[(String, IpAddr, String, bool)],
     by_pair: &HashMap<(String, IpAddr), &'m AttributedMeasurement>,
     agent_by_id: &HashMap<String, IpAddr>,
+    leg_lookup: &LegLookup<'_>,
 ) -> (Vec<AxLeg<'m>>, Vec<XbLeg<'m>>) {
     let mut ax_legs: Vec<AxLeg<'m>> = Vec::new();
     let mut xb_legs: Vec<XbLeg<'m>> = Vec::new();
     let mut seen_ax: HashSet<&String> = HashSet::new();
     let mut seen_xb: HashSet<&String> = HashSet::new();
-    for (a_id, b_ip, b_id) in baselines {
+    let x_endpoint = Endpoint::CandidateIp { ip: x_ip };
+    for (a_id, b_ip, b_id, _direct_was_substituted) in baselines {
         if Some(x_ip) == agent_by_id.get(a_id).copied() || x_ip == *b_ip {
             continue;
         }
         if seen_ax.insert(a_id) {
-            if let Some(meas) = by_pair.get(&(a_id.clone(), x_ip)).copied() {
-                if let Some(rtt) = meas.latency_avg_ms {
+            let a_endpoint = Endpoint::Agent { id: a_id.clone() };
+            if let LegLookupResult::Found {
+                rtt_ms,
+                stddev_ms,
+                was_substituted,
+                ..
+            } = leg_lookup.lookup(&a_endpoint, &x_endpoint)
+            {
+                // Also need the backing AttributedMeasurement for mtr_measurement_id
+                // and loss_ratio. Fall back to direct pair map for the meas reference —
+                // the LegLookup captures the scalar values; the pair map provides the
+                // reference to the backing row.
+                if let Some(meas) = by_pair.get(&(a_id.clone(), x_ip)).copied() {
                     ax_legs.push(AxLeg {
                         a_id: a_id.clone(),
-                        rtt_ms: rtt,
-                        stddev_ms: meas.latency_stddev_ms.unwrap_or(0.0),
+                        rtt_ms,
+                        stddev_ms,
                         meas,
+                        was_substituted,
                     });
                 }
             }
         }
         if seen_xb.insert(b_id) {
-            if let Some(meas) = by_pair.get(&(b_id.clone(), x_ip)).copied() {
-                if let Some(rtt) = meas.latency_avg_ms {
+            let b_endpoint = Endpoint::Agent { id: b_id.clone() };
+            if let LegLookupResult::Found {
+                rtt_ms,
+                stddev_ms,
+                was_substituted,
+                ..
+            } = leg_lookup.lookup(&b_endpoint, &x_endpoint)
+            {
+                if let Some(meas) = by_pair.get(&(b_id.clone(), x_ip)).copied() {
                     xb_legs.push(XbLeg {
                         b_id: b_id.clone(),
-                        rtt_ms: rtt,
-                        stddev_ms: meas.latency_stddev_ms.unwrap_or(0.0),
+                        rtt_ms,
+                        stddev_ms,
                         meas,
+                        was_substituted,
                     });
                 }
             }
@@ -772,7 +824,8 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         .collect();
 
     let by_pair = build_pair_lookup(&inputs.measurements);
-    let baselines = collect_baselines(&inputs.agents, &by_pair);
+    let leg_lookup = LegLookup::build(&inputs.measurements);
+    let baselines = collect_baselines(&inputs.agents, &by_pair, &leg_lookup);
     if baselines.is_empty() {
         return Err(EvalError::NoBaseline);
     }
@@ -810,7 +863,8 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         // `apply_l1_l2_l3_pruning` returns `None` when L2/L3 (or post-
         // L1 emptiness) drops the candidate entirely — at which point
         // we skip without writing a row.
-        let (ax_legs, xb_legs) = build_leg_sets(*x_ip, &baselines, &by_pair, &agent_by_id);
+        let (ax_legs, xb_legs) =
+            build_leg_sets(*x_ip, &baselines, &by_pair, &agent_by_id, &leg_lookup);
         let Some((ax_legs, xb_legs)) =
             apply_l1_l2_l3_pruning(ax_legs, xb_legs, max_rtt_cap, max_sd_cap)
         else {
@@ -832,7 +886,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         let mut compound_losses: Vec<f32> = Vec::new();
         let mut any_threshold_fail = false;
 
-        for (a_id, b_ip, b_id) in &baselines {
+        for (a_id, b_ip, b_id, direct_was_substituted) in &baselines {
             if Some(*x_ip) == agent_by_id.get(a_id).copied() {
                 continue;
             }
@@ -972,9 +1026,9 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 mtr_measurement_id_ax: a_to_x.mtr_measurement_id,
                 mtr_measurement_id_xb: x_to_b.mtr_measurement_id,
                 destination_hostname: None,
-                ax_was_substituted: None,
-                xb_was_substituted: None,
-                direct_was_substituted: None,
+                ax_was_substituted: Some(a_to_x_leg.was_substituted),
+                xb_was_substituted: Some(x_to_b_leg.was_substituted),
+                direct_was_substituted: Some(*direct_was_substituted),
                 winning_x_position: None,
             });
         }
