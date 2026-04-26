@@ -518,6 +518,45 @@ pub async fn persist_evaluation(
     Ok(evaluation_id)
 }
 
+/// Delete all `campaign_evaluations` rows for `campaign_id` and, if the
+/// campaign is currently in `evaluated` state, flip it back to `completed`.
+///
+/// Called by the `PATCH /api/campaigns/{id}` handler whenever one of the
+/// evaluator knobs (`useful_latency_ms`, `max_hops`, `vm_lookback_minutes`,
+/// `loss_threshold_ratio`, `stddev_weight`) changes value, because the
+/// stored evaluation result would be inconsistent with the new settings.
+///
+/// The operation is a no-op when there are no evaluation rows or the
+/// campaign is not in `evaluated` state (e.g. already `completed`,
+/// `running`, etc.).
+pub async fn dismiss_evaluation(pool: &PgPool, campaign_id: Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // Dynamic queries (not `sqlx::query!` macros) so no offline-cache
+    // regeneration is required for these two new statements.
+    sqlx::query("DELETE FROM campaign_evaluations WHERE campaign_id = $1")
+        .bind(campaign_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Flip `evaluated → completed` so the state machine is consistent
+    // after the evaluation row is gone. The WHERE-clause guard means this
+    // is a no-op when the campaign is in any other state.
+    sqlx::query(
+        "UPDATE measurement_campaigns \
+              SET state        = 'completed', \
+                  evaluated_at = NULL \
+            WHERE id    = $1 \
+              AND state = 'evaluated'",
+    )
+    .bind(campaign_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Outcome of [`latest_pair_details_for_candidate`], discriminating the
 /// "campaign exists / has been evaluated / has the candidate" path from
 /// the three 404 paths the handler renders distinct error codes for.
