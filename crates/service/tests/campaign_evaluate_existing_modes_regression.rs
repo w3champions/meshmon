@@ -71,10 +71,11 @@ async fn diversity_at_max_hops_1_matches_pre_change() {
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
 
-    // Baseline pair count must be exactly 1 (only A→B exists; B→A absent).
+    // Baseline pair count is 2: A→B forward plus B→A symmetry-substituted
+    // from A→B. Both directions are scored against the X transit.
     assert_eq!(
         eval["baseline_pair_count"].as_i64().unwrap_or(0),
-        1,
+        2,
         "baseline_pair_count: {eval}"
     );
 

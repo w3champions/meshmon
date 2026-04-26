@@ -554,9 +554,11 @@ fn diversity_max_hops_2_dual_form_pool_filter_regression() {
         .expect("X=10.6.0.9 must appear as a candidate");
 
     let x_cand = &out.results.candidates[x_idx];
+    // Both (A, B) forward and (B, A) symmetry-substituted baselines are
+    // scored against the X transit; both qualify.
     assert_eq!(
-        x_cand.pairs_improved, 1,
-        "diversity max_hops=2: X must qualify for the (A, B) pair: {x_cand:?}"
+        x_cand.pairs_improved, 2,
+        "diversity max_hops=2: X must qualify for both (A, B) and (B, A) pairs: {x_cand:?}"
     );
 
     // The (A, B) pair_detail must be present with qualifies=true.

@@ -316,50 +316,80 @@ fn build_pair_lookup(
 }
 
 /// Enumerate baseline `(A, B)` agent pairs that have a usable A→B
-/// measurement. Returns `(a_id, b_ip, b_id, direct_was_substituted)`.
+/// measurement. Returns
+/// `(a_id, b_ip, b_id, direct_was_substituted, direct_measurement)`.
 ///
 /// `direct_was_substituted` is `true` when the A→B RTT was resolved from the
-/// reverse B→A measurement (per LegLookup §3.1 symmetry substitution). This
-/// flag is propagated onto pair-detail rows so the wire DTO can surface it.
+/// reverse B→A measurement (per LegLookup §3.1 symmetry substitution). The
+/// fifth tuple element is a borrow of the measurement that should be used as
+/// the direct A→B baseline downstream — the forward row when forward is
+/// usable, otherwise the reverse row that LegLookup substituted in. Callers
+/// must read direct RTT / stddev / loss / source from this reference rather
+/// than re-querying `by_pair`, otherwise symmetry-substituted baselines
+/// silently fall back to forward (or vanish entirely when forward is absent).
 ///
 /// A row with no RTT (e.g. a 100 %-loss "success") cannot participate
 /// in scoring downstream, so counting it would inflate
 /// `baseline_pair_count` and suppress the `NoBaseline → 422` error
 /// when every observed baseline is RTT-less.
-fn collect_baselines(
+fn collect_baselines<'m>(
     agents: &[AgentRow],
-    by_pair: &HashMap<(String, IpAddr), &AttributedMeasurement>,
+    by_pair: &HashMap<(String, IpAddr), &'m AttributedMeasurement>,
     leg_lookup: &LegLookup<'_>,
-) -> Vec<(String, IpAddr, String, bool)> {
-    let mut baselines: Vec<(String, IpAddr, String, bool)> = Vec::new();
+) -> Vec<(String, IpAddr, String, bool, &'m AttributedMeasurement)> {
+    let mut baselines: Vec<(String, IpAddr, String, bool, &'m AttributedMeasurement)> = Vec::new();
     for a in agents {
         for b in agents {
             if a.agent_id == b.agent_id {
                 continue;
             }
-            if by_pair
-                .get(&(a.agent_id.clone(), b.ip))
-                .is_some_and(|m| m.latency_avg_ms.is_some())
-            {
-                // Determine substitution flag for the direct A→B leg.
-                let a_endpoint = Endpoint::Agent {
-                    id: a.agent_id.clone(),
-                };
-                let b_endpoint = Endpoint::CandidateIp { ip: b.ip };
-                let direct_was_substituted = matches!(
-                    leg_lookup.lookup(&a_endpoint, &b_endpoint),
-                    LegLookupResult::Found {
-                        was_substituted: true,
-                        ..
-                    }
-                );
-                baselines.push((
-                    a.agent_id.clone(),
-                    b.ip,
-                    b.agent_id.clone(),
-                    direct_was_substituted,
-                ));
-            }
+
+            let forward = by_pair.get(&(a.agent_id.clone(), b.ip)).copied();
+            let forward_usable =
+                forward.is_some_and(|m| m.latency_avg_ms.is_some() && m.loss_ratio < 1.0);
+
+            // Determine substitution status via the leg-lookup table — this
+            // is the single source of truth for whether the direct A→B leg
+            // resolved via forward or symmetry-substituted reverse.
+            let a_endpoint = Endpoint::Agent {
+                id: a.agent_id.clone(),
+            };
+            let b_endpoint = Endpoint::CandidateIp { ip: b.ip };
+            let direct_was_substituted = matches!(
+                leg_lookup.lookup(&a_endpoint, &b_endpoint),
+                LegLookupResult::Found {
+                    was_substituted: true,
+                    ..
+                }
+            );
+
+            // Pick the measurement that downstream code should treat as the
+            // direct baseline:
+            // * Forward usable + not substituted → forward.
+            // * Substituted → reverse (B probed A.ip), looked up from `by_pair`.
+            // * Neither → no usable baseline; skip.
+            let direct_measurement = if direct_was_substituted {
+                by_pair
+                    .get(&(b.agent_id.clone(), a.ip))
+                    .copied()
+                    .filter(|m| m.latency_avg_ms.is_some() && m.loss_ratio < 1.0)
+            } else if forward_usable {
+                forward
+            } else {
+                None
+            };
+
+            let Some(direct_measurement) = direct_measurement else {
+                continue;
+            };
+
+            baselines.push((
+                a.agent_id.clone(),
+                b.ip,
+                b.agent_id.clone(),
+                direct_was_substituted,
+                direct_measurement,
+            ));
         }
     }
     baselines
@@ -763,7 +793,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         let mut compound_losses: Vec<f32> = Vec::new();
         let mut any_threshold_fail = false;
 
-        for (a_id, b_ip, b_id, direct_was_substituted) in &baselines {
+        for (a_id, b_ip, b_id, direct_was_substituted, direct) in &baselines {
             // Exclude degenerate triples where X is A or B.
             if Some(*x_ip) == agent_by_id.get(a_id).copied() {
                 continue;
@@ -772,10 +802,11 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 continue;
             }
 
-            let direct = match by_pair.get(&(a_id.clone(), *b_ip)) {
-                Some(m) => *m,
-                None => continue,
-            };
+            // `direct` is the measurement chosen by `collect_baselines` —
+            // forward A→B when usable, otherwise the symmetry-substituted
+            // reverse B→A row. Reading from this borrow keeps the persisted
+            // direct_rtt / direct_stddev / direct_loss_ratio / direct_source
+            // consistent with `direct_was_substituted`.
             let Some(direct_rtt) = direct.latency_avg_ms else {
                 continue;
             };
@@ -1176,8 +1207,85 @@ mod tests {
         assert!(matches!(err, EvalError::NoBaseline));
     }
 
+    /// Symmetry-substituted A→B baseline must drive a real triple — the
+    /// loop must read direct RTT/loss/stddev from the substituted (reverse)
+    /// measurement and persist `direct_was_substituted=true`. Regression
+    /// for the bug where `evaluate_triple` re-queried `by_pair[(a_id, b_ip)]`
+    /// and silently dropped the triple when only the reverse direction
+    /// existed.
+    #[test]
+    fn diversity_uses_reverse_substituted_direct_baseline() {
+        // A=10.0.0.1, B=10.0.0.2; X=203.0.113.7 (non-mesh candidate).
+        // No forward A→B; only B→A reverse (15ms). LegLookup substitutes.
+        // Transit: A→X (10ms) + X→B via B→X reverse (10ms) = 20ms < 15ms baseline?
+        // Actually: direct via reverse (B→A) = 60ms; transit A→X→B = 40ms.
+        // Improvement = 60 - 40 = 20ms (stddev 0 throughout) → qualifies.
+        let agents = vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")];
+        let i = EvaluationInputs {
+            measurements: vec![
+                // No forward A→B. Reverse B→A acts as the substituted direct.
+                m("b", "10.0.0.1", 60.0, 0.0, 0.0),
+                // Forward A→X for the A→X leg.
+                m("a", "203.0.113.7", 18.0, 0.0, 0.0),
+                // B→X serves both as a candidate signal and (via reverse) X→B.
+                m("b", "203.0.113.7", 22.0, 0.0, 0.0),
+            ],
+            roster: agents.clone(),
+            agents,
+            candidate_ips: vec![ip("203.0.113.7")],
+            enrichment: Default::default(),
+            loss_threshold_ratio: 0.02,
+            stddev_weight: 1.0,
+            mode: EvaluationMode::Diversity,
+            max_transit_rtt_ms: None,
+            max_transit_stddev_ms: None,
+            min_improvement_ms: None,
+            min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: 1,
+        };
+        let out = triple(evaluate(i).unwrap());
+        let cand = out
+            .results
+            .candidates
+            .iter()
+            .find(|c| c.destination_ip == "203.0.113.7")
+            .expect("candidate X must appear when symmetry-substituted baseline drives a triple");
+
+        assert!(
+            cand.pairs_total_considered >= 1,
+            "substituted baseline must reach the storage filter — instead got pairs_total_considered=0: {cand:?}"
+        );
+
+        // Locate the (A,B) pair_detail row and verify the substituted
+        // baseline's RTT / loss flowed through to persistence.
+        let ab_pair = out
+            .pair_details_by_candidate
+            .iter()
+            .flat_map(|p| p.pair_details.iter())
+            .find(|d| d.source_agent_id == "a" && d.destination_agent_id == "b")
+            .expect("(A,B) pair_detail must exist for the X candidate");
+
+        assert_eq!(
+            ab_pair.direct_was_substituted,
+            Some(true),
+            "direct_was_substituted must be true when only B→A reverse exists: {ab_pair:?}"
+        );
+        assert!(
+            (ab_pair.direct_rtt_ms - 60.0).abs() < 1e-3,
+            "direct_rtt_ms must reflect the reverse measurement (60ms), not 0/forward: {ab_pair:?}"
+        );
+        assert!(
+            ab_pair.direct_loss_ratio.abs() < 1e-3,
+            "direct_loss_ratio must come from the reverse row (0.0): {ab_pair:?}"
+        );
+    }
+
     #[test]
     fn diversity_qualifies_transit_that_beats_direct() {
+        // `inputs_basic` seeds A→B forward + A→X + B→X. The reverse direction
+        // B→A is symmetry-substituted from A→B, producing a second baseline
+        // (B, A); X transits beat both directions, so `pairs_improved == 2`.
         let out = triple(evaluate(inputs_basic(EvaluationMode::Diversity)).unwrap());
         let cand = out
             .results
@@ -1185,10 +1293,10 @@ mod tests {
             .iter()
             .find(|c| c.destination_ip == "203.0.113.7")
             .expect("candidate present");
-        assert_eq!(cand.pairs_improved, 1);
+        assert_eq!(cand.pairs_improved, 2);
         assert!(
             cand.avg_improvement_ms.unwrap() > 0.0,
-            "transit (120+121=241) beats direct (318)"
+            "transit (120+121=241) beats direct (318) in both directions"
         );
     }
 

@@ -87,7 +87,9 @@ async fn evaluate_then_reevaluate_different_mode_no_redispatch() {
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
     assert_eq!(eval1["evaluation_mode"], "optimization", "body = {eval1}");
-    assert_eq!(eval1["baseline_pair_count"], 1, "body = {eval1}");
+    // Symmetry-substituted reverse counts as a baseline too, so A→B
+    // forward + B→A reverse-from-A→B = 2 baseline pairs.
+    assert_eq!(eval1["baseline_pair_count"], 2, "body = {eval1}");
 
     // Snapshot the measurement count for this test's agents so we can
     // verify that re-evaluating does NOT dispatch new probes.
