@@ -53,8 +53,6 @@ pub struct EdgeCandidateRow {
     pub is_mesh_member: bool,
     /// Mesh agent id when `is_mesh_member`, else `None`.
     pub agent_id: Option<String>,
-    /// Reverse-DNS hostname when known (handler stamps this).
-    pub hostname: Option<String>,
     /// Number of destination agents B for which a route under T was
     /// found.
     pub coverage_count: i32,
@@ -276,16 +274,9 @@ fn score_candidate(
     let aggregates = aggregate_pair_rows(&pair_rows, destinations_total);
     let has_real_x_source_data = compute_has_real_x_source_data(x_endpoint, &pair_rows);
     let enrichment = inputs.enrichment.get(&x_ip).cloned().unwrap_or_default();
-    let (is_mesh_member, agent_id, agent_hostname) = match x_endpoint {
-        Endpoint::Agent { id } => {
-            let host = inputs
-                .agents
-                .iter()
-                .find(|a| &a.agent_id == id)
-                .and_then(|a| a.hostname.clone());
-            (true, Some(id.clone()), host)
-        }
-        Endpoint::CandidateIp { .. } => (false, None, None),
+    let (is_mesh_member, agent_id) = match x_endpoint {
+        Endpoint::Agent { id } => (true, Some(id.clone())),
+        Endpoint::CandidateIp { .. } => (false, None),
     };
 
     EdgeCandidateRow {
@@ -299,7 +290,6 @@ fn score_candidate(
         notes: enrichment.notes,
         is_mesh_member,
         agent_id,
-        hostname: agent_hostname.or(enrichment.hostname),
         coverage_count: aggregates.coverage_count,
         destinations_total,
         mean_ms_under_t: aggregates.mean_ms_under_t,

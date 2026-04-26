@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  c.avg_loss_ratio,\n                  c.website,\n                  c.notes,\n                  c.hostname,\n                  COALESCE(c.agent_id, a.agent_id) AS agent_id,\n                  c.coverage_count,\n                  c.destinations_total,\n                  c.mean_ms_under_t,\n                  c.coverage_weighted_ping_ms,\n                  c.direct_share,\n                  c.onehop_share,\n                  c.twohop_share,\n                  c.has_real_x_source_data\n             FROM campaign_evaluation_candidates c\n             LEFT JOIN agents_with_catalogue a\n                    ON a.ip = c.destination_ip\n            WHERE c.evaluation_id = $1\n            ORDER BY c.pairs_improved DESC,\n                     COALESCE(c.avg_improvement_ms, 0.0) DESC,\n                     c.destination_ip ASC",
+  "query": "SELECT c.destination_ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.is_mesh_member,\n                  c.pairs_improved,\n                  c.pairs_total_considered,\n                  c.avg_improvement_ms,\n                  c.avg_loss_ratio,\n                  c.website,\n                  c.notes,\n                  COALESCE(c.agent_id,\n                      (SELECT a.agent_id\n                         FROM agents_with_catalogue a\n                        WHERE a.ip = c.destination_ip\n                        LIMIT 1)\n                  ) AS agent_id,\n                  c.coverage_count,\n                  c.destinations_total,\n                  c.mean_ms_under_t,\n                  c.coverage_weighted_ping_ms,\n                  c.direct_share,\n                  c.onehop_share,\n                  c.twohop_share,\n                  c.has_real_x_source_data\n             FROM campaign_evaluation_candidates c\n            WHERE c.evaluation_id = $1\n            ORDER BY c.pairs_improved DESC,\n                     COALESCE(c.avg_improvement_ms, 0.0) DESC,\n                     c.destination_ip ASC",
   "describe": {
     "columns": [
       {
@@ -70,51 +70,46 @@
       },
       {
         "ordinal": 13,
-        "name": "hostname",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 14,
         "name": "agent_id",
         "type_info": "Text"
       },
       {
-        "ordinal": 15,
+        "ordinal": 14,
         "name": "coverage_count",
         "type_info": "Int4"
       },
       {
-        "ordinal": 16,
+        "ordinal": 15,
         "name": "destinations_total",
         "type_info": "Int4"
       },
       {
-        "ordinal": 17,
+        "ordinal": 16,
         "name": "mean_ms_under_t",
         "type_info": "Float4"
       },
       {
-        "ordinal": 18,
+        "ordinal": 17,
         "name": "coverage_weighted_ping_ms",
         "type_info": "Float4"
       },
       {
-        "ordinal": 19,
+        "ordinal": 18,
         "name": "direct_share",
         "type_info": "Float4"
       },
       {
-        "ordinal": 20,
+        "ordinal": 19,
         "name": "onehop_share",
         "type_info": "Float4"
       },
       {
-        "ordinal": 21,
+        "ordinal": 20,
         "name": "twohop_share",
         "type_info": "Float4"
       },
       {
-        "ordinal": 22,
+        "ordinal": 21,
         "name": "has_real_x_source_data",
         "type_info": "Bool"
       }
@@ -138,7 +133,6 @@
       true,
       true,
       true,
-      true,
       null,
       true,
       true,
@@ -150,5 +144,5 @@
       true
     ]
   },
-  "hash": "a13bbdda892ffe7933830ffdfa11856b25b7007af9b00dcb664d79294c299e09"
+  "hash": "f467e84b9a61ff624bc02b5ee10ec2a69cdcf12c4c5fcfaa1ae7eb7714fa40ea"
 }

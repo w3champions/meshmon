@@ -2236,3 +2236,96 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
         "ON DELETE CASCADE must drop the evaluation row alongside the campaign"
     );
 }
+
+/// Regression guard for the NOT NULL columns bug (T56 Phase G).
+///
+/// `persist_edge_candidate_evaluation` must write `pairs_improved = 0` and
+/// `pairs_total_considered = 0` for every EdgeCandidate row — those columns
+/// are NOT NULL on `campaign_evaluation_candidates` and have no DEFAULT.
+/// Without this fix every edge_candidate `/evaluate` call fails at runtime
+/// with a Postgres NOT NULL constraint violation.
+///
+/// Uses `create_evaluated_campaign(&h, "edge_candidate")` so the full
+/// HTTP evaluate path runs, including the evaluator + persistence. A
+/// successful return proves the NOT NULL constraint was satisfied.
+/// The assertions then confirm the persisted aggregates are coherent.
+#[tokio::test]
+async fn persist_edge_candidate_evaluation_satisfies_not_null_constraints() {
+    use meshmon_service::campaign::evaluation_repo;
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // `create_evaluated_campaign` inserts agents + seeds measurements +
+    // drives the full /evaluate HTTP path. A panic here means the NOT NULL
+    // constraint was violated (the endpoint returns 500) or the test setup
+    // itself is broken.
+    let campaign_id_str = common::create_evaluated_campaign(&h, "edge_candidate").await;
+    let campaign_id: uuid::Uuid = campaign_id_str.parse().expect("parse campaign id");
+
+    // Read back the persisted evaluation. Must be Some — the HTTP path
+    // already asserted a 200 response, but re-check at the repo layer.
+    let eval = evaluation_repo::latest_evaluation_for_campaign(pool, campaign_id)
+        .await
+        .expect("db query succeeded")
+        .expect("evaluation row exists after /evaluate");
+
+    assert_eq!(
+        eval.evaluation_mode,
+        meshmon_service::campaign::model::EvaluationMode::EdgeCandidate,
+        "evaluation must be in edge_candidate mode"
+    );
+
+    // The candidate count must be non-zero (seeded measurements cover
+    // at least the 4 destination IPs in the helper fixture).
+    assert!(
+        eval.candidates_total > 0,
+        "edge_candidate evaluation must have at least one candidate; got {}",
+        eval.candidates_total
+    );
+
+    // Verify pairs_improved and pairs_total_considered are present and
+    // valid (not violated by the constraint). The edge_candidate evaluator
+    // writes 0 for both — this is the correct sentinel per design.
+    let cand_rows: Vec<(i32, i32)> = sqlx::query_as(
+        "SELECT pairs_improved, pairs_total_considered \
+           FROM campaign_evaluation_candidates c \
+           JOIN campaign_evaluations e ON e.id = c.evaluation_id \
+          WHERE e.campaign_id = $1",
+    )
+    .bind(campaign_id)
+    .fetch_all(pool)
+    .await
+    .expect("query candidates");
+
+    assert!(
+        !cand_rows.is_empty(),
+        "candidate rows must exist in DB after persist"
+    );
+    for (improved, considered) in &cand_rows {
+        assert_eq!(
+            *improved, 0,
+            "edge_candidate rows must have pairs_improved = 0 (sentinel)"
+        );
+        assert_eq!(
+            *considered, 0,
+            "edge_candidate rows must have pairs_total_considered = 0 (sentinel)"
+        );
+    }
+
+    // Verify edge pair details were persisted (covers the pair-detail loop).
+    let edge_pair_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+           FROM campaign_evaluation_edge_pair_details epd \
+           JOIN campaign_evaluations e ON e.id = epd.evaluation_id \
+          WHERE e.campaign_id = $1",
+    )
+    .bind(campaign_id)
+    .fetch_one(pool)
+    .await
+    .expect("count edge pair details");
+
+    assert!(
+        edge_pair_count > 0,
+        "edge_candidate evaluation must persist at least one edge pair detail row; got {edge_pair_count}"
+    );
+}

@@ -58,12 +58,15 @@ CREATE INDEX campaign_eval_edge_pair_candidate_idx
   ON campaign_evaluation_edge_pair_details (evaluation_id, candidate_ip);
 
 -- 6. Edge-mode aggregate + enrichment columns on existing candidates table.
---    The enrichment columns (website, notes, hostname, agent_id) are written
---    by the EdgeCandidate evaluator arm; they are NULL for pre-T56 rows.
+--    The enrichment columns (website, notes, agent_id) are written by the
+--    EdgeCandidate evaluator arm; they are NULL for pre-T56 rows.
+--    hostname is intentionally NOT persisted here — it is stamped at
+--    response time from ip_hostname_cache via bulk_hostnames_and_enqueue,
+--    matching the invariant asserted by the
+--    get_evaluation_stamps_candidate_and_pair_detail_hostnames test.
 ALTER TABLE campaign_evaluation_candidates
   ADD COLUMN website                   TEXT    NULL,
   ADD COLUMN notes                     TEXT    NULL,
-  ADD COLUMN hostname                  TEXT    NULL,
   ADD COLUMN agent_id                  TEXT    NULL,
   ADD COLUMN coverage_count            INTEGER NULL,
   ADD COLUMN destinations_total        INTEGER NULL,

@@ -16,7 +16,6 @@ ALTER TABLE campaign_evaluation_candidates
   DROP COLUMN IF EXISTS destinations_total,
   DROP COLUMN IF EXISTS coverage_count,
   DROP COLUMN IF EXISTS agent_id,
-  DROP COLUMN IF EXISTS hostname,
   DROP COLUMN IF EXISTS notes,
   DROP COLUMN IF EXISTS website;
 

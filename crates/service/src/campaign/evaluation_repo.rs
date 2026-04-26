@@ -343,11 +343,15 @@ pub async fn latest_evaluation_for_campaign(
     // so the headline reading is independent of how aggressively
     // `min_improvement_ms` / `min_improvement_ratio` prune detail rows.
     //
-    // The LEFT JOIN against `agents_with_catalogue` projects `agent_id`
-    // for mesh-member candidates. For EdgeCandidate rows the `agent_id`
-    // column is written directly by the evaluator; for Triple rows the
-    // column is NULL in the candidates table and the JOIN fills it from
-    // the live agent catalogue so downstream callers always have it.
+    // `agent_id` for mesh-member candidates: EdgeCandidate rows write it
+    // directly; Triple rows leave it NULL in the candidates table and we
+    // fill it from the live agent catalogue. A correlated subquery with
+    // LIMIT 1 is used instead of a LEFT JOIN because `agents.ip` has no
+    // uniqueness constraint — a plain JOIN would duplicate candidate rows
+    // when multiple agent registrations share the same IP.
+    // hostname is NOT selected here — it is stamped at response time by the
+    // handler via bulk_hostnames_and_enqueue, so the relational table must
+    // not carry it (asserted by get_evaluation_stamps_candidate_and_pair_detail_hostnames).
     let candidate_rows = sqlx::query!(
         r#"SELECT c.destination_ip,
                   c.display_name,
@@ -362,8 +366,12 @@ pub async fn latest_evaluation_for_campaign(
                   c.avg_loss_ratio,
                   c.website,
                   c.notes,
-                  c.hostname,
-                  COALESCE(c.agent_id, a.agent_id) AS agent_id,
+                  COALESCE(c.agent_id,
+                      (SELECT a.agent_id
+                         FROM agents_with_catalogue a
+                        WHERE a.ip = c.destination_ip
+                        LIMIT 1)
+                  ) AS agent_id,
                   c.coverage_count,
                   c.destinations_total,
                   c.mean_ms_under_t,
@@ -373,8 +381,6 @@ pub async fn latest_evaluation_for_campaign(
                   c.twohop_share,
                   c.has_real_x_source_data
              FROM campaign_evaluation_candidates c
-             LEFT JOIN agents_with_catalogue a
-                    ON a.ip = c.destination_ip
             WHERE c.evaluation_id = $1
             ORDER BY c.pairs_improved DESC,
                      COALESCE(c.avg_improvement_ms, 0.0) DESC,
@@ -419,7 +425,9 @@ pub async fn latest_evaluation_for_campaign(
             avg_improvement_ms: c.avg_improvement_ms,
             avg_loss_ratio: c.avg_loss_ratio,
             composite_score: Some(composite_score),
-            hostname: c.hostname,
+            // hostname is stamped at response time by the handler via
+            // bulk_hostnames_and_enqueue; not persisted in this table.
+            hostname: None,
             website: c.website,
             notes: c.notes,
             agent_id: c.agent_id,
@@ -467,11 +475,14 @@ pub async fn latest_evaluation_for_campaign(
 /// row + per-candidate `campaign_evaluation_candidates` rows + per-(X, B)
 /// `campaign_evaluation_edge_pair_details` rows, all inside the caller's
 /// transaction.
+///
+/// Takes `outputs` by borrow (matching `insert_evaluation`'s `&TripleEvaluationOutputs`
+/// convention) to avoid cloning the full candidate vec at the call site.
 #[allow(clippy::too_many_arguments)]
 async fn persist_edge_candidate_evaluation(
     tx: &mut Transaction<'_, Postgres>,
     campaign_id: Uuid,
-    outputs: EdgeCandidateOutputs,
+    outputs: &EdgeCandidateOutputs,
     loss_threshold_ratio: f32,
     stddev_weight: f32,
     mode: EvaluationMode,
@@ -508,21 +519,23 @@ async fn persist_edge_candidate_evaluation(
     .fetch_one(&mut **tx)
     .await?;
 
-    for c in outputs.candidates {
+    for c in &outputs.candidates {
         let candidate_ip = IpNetwork::from(c.candidate_ip);
 
         sqlx::query!(
             r#"INSERT INTO campaign_evaluation_candidates (
                    evaluation_id, destination_ip,
                    display_name, city, country_code, asn, network_operator,
-                   website, notes, hostname,
+                   website, notes,
                    is_mesh_member, agent_id,
+                   pairs_improved, pairs_total_considered,
                    coverage_count, destinations_total, mean_ms_under_t,
                    coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,
                    has_real_x_source_data
                ) VALUES (
-                   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                   $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                   $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                   $10, $11, 0, 0,
+                   $12, $13, $14, $15, $16, $17, $18, $19
                )"#,
             evaluation_id,
             candidate_ip,
@@ -533,7 +546,6 @@ async fn persist_edge_candidate_evaluation(
             c.network_operator,
             c.website,
             c.notes,
-            c.hostname,
             c.is_mesh_member,
             c.agent_id,
             c.coverage_count,
@@ -548,7 +560,7 @@ async fn persist_edge_candidate_evaluation(
         .execute(&mut **tx)
         .await?;
 
-        for pair in c.pair_details {
+        for pair in &c.pair_details {
             let legs_jsonb = serde_json::to_value(&pair.best_route_legs).map_err(|e| {
                 sqlx::Error::Protocol(format!("failed to serialize best_route_legs: {e}"))
             })?;
@@ -666,7 +678,7 @@ pub async fn persist_evaluation(
             persist_edge_candidate_evaluation(
                 &mut tx,
                 campaign_id,
-                edge.clone(),
+                edge,
                 loss_threshold_ratio,
                 stddev_weight,
                 mode,
@@ -976,7 +988,9 @@ pub async fn latest_pair_details_for_candidate(
             direct_source::text AS direct_source_text, \
             transit_rtt_ms, transit_stddev_ms, transit_loss_ratio, \
             improvement_ms, qualifies, \
-            mtr_measurement_id_ax, mtr_measurement_id_xb \
+            mtr_measurement_id_ax, mtr_measurement_id_xb, \
+            ax_was_substituted, xb_was_substituted, \
+            direct_was_substituted, winning_x_position \
          FROM campaign_evaluation_pair_details pd \
          WHERE pd.evaluation_id = $1 AND pd.candidate_destination_ip = $2 \
          {filters} {cursor} \
@@ -1086,6 +1100,13 @@ pub async fn latest_pair_details_for_candidate(
             }
         };
 
+        let ax_was_substituted: Option<bool> = row.try_get("ax_was_substituted")?;
+        let xb_was_substituted: Option<bool> = row.try_get("xb_was_substituted")?;
+        let direct_was_substituted: Option<bool> = row.try_get("direct_was_substituted")?;
+        let winning_x_position: Option<u8> = row
+            .try_get::<Option<i16>, _>("winning_x_position")?
+            .map(|v| v as u8);
+
         entries.push(EvaluationPairDetailDto {
             source_agent_id,
             destination_agent_id,
@@ -1102,10 +1123,10 @@ pub async fn latest_pair_details_for_candidate(
             mtr_measurement_id_ax,
             mtr_measurement_id_xb,
             destination_hostname: None,
-            ax_was_substituted: None,
-            xb_was_substituted: None,
-            direct_was_substituted: None,
-            winning_x_position: None,
+            ax_was_substituted,
+            xb_was_substituted,
+            direct_was_substituted,
+            winning_x_position,
         });
     }
 
@@ -1407,17 +1428,16 @@ pub async fn latest_evaluation_edge_pairs(
     let cursor_cand_ip: Option<String> = cursor.as_ref().map(|c| c.candidate_ip.clone());
     let cursor_dest: Option<String> = cursor.as_ref().map(|c| c.destination_agent_id.clone());
 
-    // Page query. `destination_hostname` is joined from agents_with_catalogue
-    // on the agent_id field (destination_agent_id matches agents.agent_id).
+    // Page query. `destination_hostname` is NOT joined here — it is stamped
+    // at response time by the Phase H handler via bulk_hostnames_and_enqueue,
+    // matching the pattern in get_candidate_pair_details. The
+    // agents_with_catalogue view has no hostname column.
     let sql = format!(
         "SELECT ep.candidate_ip, ep.destination_agent_id, \
                 ep.best_route_ms, ep.best_route_loss_ratio, ep.best_route_stddev_ms, \
                 ep.best_route_kind, ep.best_route_intermediaries, ep.best_route_legs, \
-                ep.qualifies_under_t, ep.is_unreachable, \
-                a.hostname AS destination_hostname \
+                ep.qualifies_under_t, ep.is_unreachable \
            FROM campaign_evaluation_edge_pair_details ep \
-           LEFT JOIN agents_with_catalogue a \
-                  ON a.agent_id = ep.destination_agent_id \
           WHERE ep.evaluation_id = $1 \
           {filters} {cursor} \
           ORDER BY ep.{sort_col} {dir}, ep.candidate_ip ASC, ep.destination_agent_id ASC \
@@ -1476,7 +1496,9 @@ pub async fn latest_evaluation_edge_pairs(
         let legs_jsonb: serde_json::Value = row.try_get("best_route_legs")?;
         let qualifies_under_t: bool = row.try_get("qualifies_under_t")?;
         let is_unreachable: bool = row.try_get("is_unreachable")?;
-        let destination_hostname: Option<String> = row.try_get("destination_hostname")?;
+        // destination_hostname is stamped at response time by the Phase H
+        // handler via bulk_hostnames_and_enqueue; it is not stored in this table.
+        let destination_hostname: Option<String> = None;
 
         let best_route_kind = match best_route_kind_text.as_str() {
             "direct" => EdgeRouteKind::Direct,
