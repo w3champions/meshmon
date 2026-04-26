@@ -8,6 +8,8 @@
 //! `campaign_evaluation_{candidates, pair_details,
 //! unqualified_reasons}`.
 
+pub mod legs;
+
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
 use crate::campaign::model::{DirectSource, EvaluationMode};
 use std::collections::{BTreeMap, HashMap, HashSet};
