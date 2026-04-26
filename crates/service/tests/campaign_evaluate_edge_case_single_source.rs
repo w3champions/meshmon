@@ -63,6 +63,7 @@ fn edge_candidate_with_single_source_evaluates_only_direct_routes() {
     ];
     let inputs = EvaluationInputs {
         measurements,
+        roster: agents.clone(),
         agents,
         candidate_ips: vec![ip("10.0.0.1"), candidate_arb],
         enrichment: HashMap::new(),
@@ -182,6 +183,7 @@ fn max_hops_zero_suppresses_one_hop_routes_that_exist_at_max_hops_one() {
     // max_hops=0: only direct routes. X→B has no direct measurement → unreachable.
     let inputs_0 = EvaluationInputs {
         measurements: measurements.clone(),
+        roster: agents.clone(),
         agents: agents.clone(),
         candidate_ips: vec![x_ip],
         enrichment: HashMap::new(),
@@ -212,6 +214,7 @@ fn max_hops_zero_suppresses_one_hop_routes_that_exist_at_max_hops_one() {
     // max_hops=1: 1-hop X→A→B is admissible and found (5+5=10ms).
     let inputs_1 = EvaluationInputs {
         measurements,
+        roster: agents.clone(),
         agents,
         candidate_ips: vec![x_ip],
         enrichment: HashMap::new(),

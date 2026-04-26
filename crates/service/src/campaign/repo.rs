@@ -1564,16 +1564,27 @@ pub async fn measurements_for_campaign(
         })
         .collect();
 
-    // Roster query — the union of source-agent and destination-IP
-    // matches is correct for Diversity / Optimization, where
-    // `campaign_pairs.destination_ip` is a destination B (often itself a
-    // mesh agent). For EdgeCandidate, `destination_ip` is the candidate
-    // X — a registered mesh agent's IP would otherwise leak into
-    // `inputs.agents` and be double-counted as both X (via candidate_ips)
-    // AND B (via the agents roster the EdgeCandidate evaluator iterates
-    // as the destination set), inflating `destinations_total` and
-    // producing phantom heatmap rows. Restrict the roster to source
-    // agents in EdgeCandidate mode.
+    // Two roster slices, both pulled from `agents_with_catalogue`:
+    //
+    // * `agents` — destinations the evaluator iterates. EdgeCandidate
+    //   restricts this to campaign-source agents so a registered mesh
+    //   agent that is also a candidate X doesn't get double-counted as
+    //   both X (via `candidate_ips`) and B (via the destination roster),
+    //   inflating `destinations_total` and producing phantom heatmap
+    //   rows. Diversity / Optimization use the union of source-agent
+    //   and destination-IP matches because their baseline pair set
+    //   spans both directions.
+    //
+    // * `roster` — full identity registry covering every agent that
+    //   could appear in any leg position OR as a candidate IP that
+    //   resolves to a mesh agent. Built from the union of (source
+    //   agents) ∪ (agents whose IP appears as a campaign destination).
+    //   For Diversity / Optimization this is identical to `agents`; for
+    //   EdgeCandidate it adds back the agents that were dropped from
+    //   the destination subset so [`legs::LegLookup`]'s
+    //   `agent_by_ip` / `ip_by_agent` maps still know their identity
+    //   when scoring routes through them or detecting `is_mesh_member`
+    //   for a candidate X.
     struct AgentRosterRow {
         agent_id: String,
         ip: IpNetwork,
@@ -1627,6 +1638,39 @@ pub async fn measurements_for_campaign(
             // hostname-cache lookup; the EdgeCandidate arm consumes it,
             // and Diversity / Optimization don't read this field, so the
             // arm tolerates `None`.
+            hostname: None,
+        })
+        .collect();
+
+    // The full identity roster. Always pulled regardless of mode so
+    // [`legs::LegLookup`] can resolve a `CandidateIp { ip }` whose IP
+    // belongs to a registered mesh agent — even when that agent is not
+    // a campaign source (and therefore is missing from
+    // `agents` in EdgeCandidate mode).
+    let roster_rows: Vec<AgentRosterRow> = sqlx::query!(
+        r#"SELECT DISTINCT agent_id AS "agent_id!", ip AS "ip!"
+             FROM agents_with_catalogue
+            WHERE ip IN (
+                SELECT destination_ip FROM campaign_pairs WHERE campaign_id = $1
+            )
+               OR agent_id IN (
+                SELECT source_agent_id FROM campaign_pairs WHERE campaign_id = $1
+            )"#,
+        campaign_id,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| AgentRosterRow {
+        agent_id: r.agent_id,
+        ip: r.ip,
+    })
+    .collect();
+    let roster: Vec<EvalAgentRow> = roster_rows
+        .into_iter()
+        .map(|r| EvalAgentRow {
+            agent_id: r.agent_id,
+            ip: r.ip.ip(),
             hostname: None,
         })
         .collect();
@@ -1693,6 +1737,7 @@ pub async fn measurements_for_campaign(
     Ok(EvaluationInputs {
         measurements,
         agents,
+        roster,
         candidate_ips,
         enrichment,
         loss_threshold_ratio: campaign.loss_threshold_ratio,

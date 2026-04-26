@@ -132,14 +132,22 @@ pub struct EdgePairRow {
 /// 2. Sort candidates by `coverage_weighted_ping_ms` ASC; tiebreak
 ///    `coverage_count` DESC; tiebreak `mean_ms_under_t` ASC.
 pub fn evaluate(inputs: EvaluationInputs) -> EvaluationOutputs {
-    let lookup = LegLookup::build(&inputs.measurements, &inputs.agents);
-    // `LegLookup` resolves either endpoint form against the agent
-    // roster, so a single representation per intermediary would suffice.
-    // The pool keeps both `Agent { id }` and `CandidateIp { ip }`
-    // entries as defence-in-depth — duplicates that fail to compose are
-    // silently discarded by `enumerate_routes`.
+    // `LegLookup` keys IP↔agent identity off `inputs.roster` (the full
+    // registry) rather than `inputs.agents` (the destination subset) so
+    // a candidate X whose IP belongs to a registered mesh agent that is
+    // NOT a campaign source still resolves correctly. Without the full
+    // roster the reverse-direction lookup `(Agent("x"), Ip(b))` would
+    // never fire because `x`'s IP wouldn't appear in `agent_by_ip`.
+    let lookup = LegLookup::build(&inputs.measurements, &inputs.roster);
+    // Intermediary pool spans the full roster — any registered mesh
+    // agent can serve as a transit hop on the way to a destination B,
+    // not just the campaign-source subset. `LegLookup` resolves either
+    // endpoint form against the roster, so a single representation per
+    // intermediary would suffice. The pool keeps both `Agent { id }`
+    // and `CandidateIp { ip }` entries as defence-in-depth — duplicates
+    // that fail to compose are silently discarded by `enumerate_routes`.
     let intermediaries: Vec<Endpoint> = inputs
-        .agents
+        .roster
         .iter()
         .flat_map(|a| {
             [
@@ -155,7 +163,12 @@ pub fn evaluate(inputs: EvaluationInputs) -> EvaluationOutputs {
 
     let mut candidates: Vec<EdgeCandidateRow> = Vec::with_capacity(inputs.candidate_ips.len());
     for x_ip in &inputs.candidate_ips {
-        let x_endpoint = endpoint_for_ip(*x_ip, &inputs.agents);
+        // `endpoint_for_ip` consults the full roster: an X-IP that
+        // belongs to a registered mesh agent NOT in the source subset
+        // must still surface as `Endpoint::Agent { id }` so its
+        // `is_mesh_member` flag, route-side identity, and self-pair
+        // exclusion all line up with the agent's actual mesh role.
+        let x_endpoint = endpoint_for_ip(*x_ip, &inputs.roster);
         let row = score_candidate(
             *x_ip,
             &x_endpoint,
@@ -208,8 +221,12 @@ fn score_candidate(
     // leg that is never measured.
     let (x_agent_id, x_ip_opt) = match x_endpoint {
         Endpoint::Agent { id } => {
+            // Consult the full roster — an X agent that isn't in the
+            // campaign-source subset still has an IP in the registry,
+            // and its IP must be excluded from the intermediary pool to
+            // prevent phantom self-routing through `(Agent("x"), Ip(x.ip))`.
             let ip = inputs
-                .agents
+                .roster
                 .iter()
                 .find(|a| &a.agent_id == id)
                 .map(|a| a.ip);
@@ -527,8 +544,33 @@ mod tests {
     /// Build a fully-meshed agent set + transit candidate so every B is
     /// reachable from X via direct, one-hop, or two-hop. Used as the
     /// base fixture for aggregate tests.
+    ///
+    /// `roster` defaults to `agents.clone()` — the simple case where
+    /// every destination is also a registered mesh agent and vice
+    /// versa. Tests that exercise the source-vs-roster split (e.g.
+    /// candidate IPs belonging to non-source agents) call
+    /// [`build_inputs_with_roster`] instead.
     fn build_inputs(
         agents: Vec<AgentRow>,
+        candidate_ips: Vec<IpAddr>,
+        measurements: Vec<AttributedMeasurement>,
+        useful_latency_ms: Option<f32>,
+        max_hops: u8,
+    ) -> EvaluationInputs {
+        let roster = agents.clone();
+        build_inputs_with_roster(
+            agents,
+            roster,
+            candidate_ips,
+            measurements,
+            useful_latency_ms,
+            max_hops,
+        )
+    }
+
+    fn build_inputs_with_roster(
+        agents: Vec<AgentRow>,
+        roster: Vec<AgentRow>,
         candidate_ips: Vec<IpAddr>,
         measurements: Vec<AttributedMeasurement>,
         useful_latency_ms: Option<f32>,
@@ -537,6 +579,7 @@ mod tests {
         EvaluationInputs {
             measurements,
             agents,
+            roster,
             candidate_ips,
             enrichment: HashMap::new(),
             loss_threshold_ratio: 0.05,
@@ -717,6 +760,71 @@ mod tests {
             .pair_details
             .iter()
             .all(|p| p.destination_agent_id != "x"));
+    }
+
+    /// Regression for the source-only `inputs.agents` shape: when a
+    /// candidate IP belongs to a registered mesh agent that is NOT a
+    /// campaign source, the mesh-identity must still resolve via the
+    /// full `inputs.roster`. Pre-fix, `LegLookup`'s `agent_by_ip` was
+    /// built from `inputs.agents` only, so a candidate X = X-agent's IP
+    /// resolved as `Endpoint::CandidateIp { ip }`, the reverse-direction
+    /// leg from a source's measurement of X never matched against an
+    /// agent identity, and the row landed with `is_mesh_member=false`
+    /// and no qualifying pairs.
+    #[test]
+    fn candidate_ip_of_non_source_mesh_agent_resolves_to_agent() {
+        // Source set = { a }. Mesh registry includes { a, b, x }.
+        // X = the IP of mesh agent x — but x is NOT in inputs.agents
+        // (mirroring the EdgeCandidate roster restriction in repo.rs).
+        let source_only = vec![agent("a", "10.0.0.1")];
+        let full_roster = vec![
+            agent("a", "10.0.0.1"),
+            agent("b", "10.0.0.2"),
+            agent("x", "10.0.0.99"),
+        ];
+        // Source `a` probed both `b` (destination, but non-source so
+        // not iterated) and `x` (the candidate). With agents = source-
+        // only, the destination loop only sees `a`, so the X-pair vs
+        // self exclusion leaves zero pair rows. Add `b` to agents so
+        // there's at least one destination to score; the test then
+        // asserts that B's pair resolves via the X→B leg even though
+        // X isn't in `agents`.
+        let agents = vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")];
+        let measurements = vec![
+            meas("a", "10.0.0.99", 5.0, 0.0, 0.0), // a → x (used reverse for x→a)
+            meas("a", "10.0.0.2", 10.0, 0.0, 0.0), // a → b
+                                                   // A→B via a 1-hop X→A→B is the only path X has to B (no x→b
+                                                   // direct measurement). Without the roster fix the X→A leg
+                                                   // would fail to resolve because X (10.0.0.99) doesn't appear
+                                                   // in `agent_by_ip` built from `agents`.
+        ];
+        let inputs = build_inputs_with_roster(
+            agents,
+            full_roster,
+            vec![ip("10.0.0.99")], // candidate = X's IP
+            measurements,
+            Some(100.0),
+            1, // allow 1-hop X→A→B
+        );
+        let _ = source_only; // keep for documentation
+        let out = outputs_edge(evaluate(inputs));
+        let row = &out.candidates[0];
+        assert!(
+            row.is_mesh_member,
+            "X must surface as a mesh member when its IP is in the full roster: {row:?}"
+        );
+        assert_eq!(row.agent_id.as_deref(), Some("x"));
+        // The B pair must resolve via X→A→B (X→A reverse-resolved from
+        // a→x; A→B forward).
+        let b_pair = row
+            .pair_details
+            .iter()
+            .find(|p| p.destination_agent_id == "b")
+            .expect("pair for B must exist");
+        assert!(
+            !b_pair.is_unreachable,
+            "B must be reachable through the roster-resolved X→A leg: {b_pair:?}"
+        );
     }
 
     #[test]

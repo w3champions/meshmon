@@ -48,6 +48,10 @@ fn base_inputs(mode: EvaluationMode, max_hops: i16) -> EvaluationInputs {
     EvaluationInputs {
         measurements: Vec::new(),
         agents: Vec::new(),
+        // Tests using `..base_inputs(...)` syntax must explicitly set
+        // `roster` whenever they override `agents`; the empty default
+        // here is enough for the inputs that override neither.
+        roster: Vec::new(),
         candidate_ips: Vec::new(),
         enrichment: Default::default(),
         loss_threshold_ratio: 0.05,
@@ -98,16 +102,18 @@ fn as_edge(out: EvaluationOutputs) -> meshmon_service::campaign::eval::EdgeCandi
 /// The `direct_share` for X must be 1.0 and `onehop_share` / `twohop_share` = 0.
 #[test]
 fn edge_candidate_max_hops_0_only_direct() {
+    let agents = vec![
+        agent("x", "10.1.0.1"),
+        agent("a", "10.1.0.2"),
+        agent("b", "10.1.0.3"),
+    ];
     let inputs = EvaluationInputs {
         measurements: vec![
             m("x", "10.1.0.2", 80.0, 5.0, 0.0), // X→A direct
             m("x", "10.1.0.3", 70.0, 5.0, 0.0), // X→B direct
         ],
-        agents: vec![
-            agent("x", "10.1.0.1"),
-            agent("a", "10.1.0.2"),
-            agent("b", "10.1.0.3"),
-        ],
+        roster: agents.clone(),
+        agents,
         // X (10.1.0.1) is a mesh agent — endpoint becomes Agent("x")
         candidate_ips: vec![ip("10.1.0.1")],
         ..base_inputs(EvaluationMode::EdgeCandidate, 0)
@@ -168,17 +174,19 @@ fn edge_candidate_max_hops_0_only_direct() {
 /// onehop-share > 0 (B and C).
 #[test]
 fn edge_candidate_max_hops_1_direct_plus_one_hop() {
+    let agents = vec![
+        agent("a", "10.2.0.1"),
+        agent("b", "10.2.0.2"),
+        agent("c", "10.2.0.3"),
+    ];
     let inputs = EvaluationInputs {
         measurements: vec![
             m("a", "10.2.0.9", 30.0, 2.0, 0.0), // A→X (reverse gives X→A leg)
             m("a", "10.2.0.2", 20.0, 2.0, 0.0), // A→B forward
             m("a", "10.2.0.3", 25.0, 2.0, 0.0), // A→C forward
         ],
-        agents: vec![
-            agent("a", "10.2.0.1"),
-            agent("b", "10.2.0.2"),
-            agent("c", "10.2.0.3"),
-        ],
+        roster: agents.clone(),
+        agents,
         candidate_ips: vec![ip("10.2.0.9")], // X is non-mesh
         ..base_inputs(EvaluationMode::EdgeCandidate, 1)
     };
@@ -260,18 +268,20 @@ fn edge_candidate_max_hops_1_direct_plus_one_hop() {
 /// This test pins the monotone-coverage property and the twohop_share field.
 #[test]
 fn edge_candidate_max_hops_2_full_two_hop_set() {
+    let agents = vec![
+        agent("x", "10.3.0.1"),
+        agent("a", "10.3.0.2"),
+        agent("c", "10.3.0.3"),
+        agent("b", "10.3.0.4"),
+    ];
     let inputs = EvaluationInputs {
         measurements: vec![
             m("x", "10.3.0.2", 5.0, 0.0, 0.0),  // X→A direct (L1)
             m("c", "10.3.0.2", 10.0, 0.0, 0.0), // reverse: A→C sym (L2)
             m("c", "10.3.0.4", 10.0, 0.0, 0.0), // C→B direct (L3)
         ],
-        agents: vec![
-            agent("x", "10.3.0.1"),
-            agent("a", "10.3.0.2"),
-            agent("c", "10.3.0.3"),
-            agent("b", "10.3.0.4"),
-        ],
+        roster: agents.clone(),
+        agents,
         candidate_ips: vec![ip("10.3.0.1")], // X is mesh agent
         ..base_inputs(EvaluationMode::EdgeCandidate, 2)
     };
@@ -335,13 +345,15 @@ fn edge_candidate_max_hops_2_full_two_hop_set() {
 ///   Improvement = 300 - 210 - (7.07 - 5) * 1.0 ≈ 87.9 ms > 0 → qualifies.
 #[test]
 fn diversity_max_hops_2_x_position_best_of_wins() {
+    let agents = vec![agent("a", "10.4.0.1"), agent("b", "10.4.0.2")];
     let inputs = EvaluationInputs {
         measurements: vec![
             m("a", "10.4.0.2", 300.0, 5.0, 0.0), // A→B direct baseline
             m("a", "10.4.0.9", 100.0, 5.0, 0.0), // A→X
             m("b", "10.4.0.9", 110.0, 5.0, 0.0), // B→X → sym X→B = 110ms
         ],
-        agents: vec![agent("a", "10.4.0.1"), agent("b", "10.4.0.2")],
+        roster: agents.clone(),
+        agents,
         candidate_ips: Vec::new(),
         enrichment: Default::default(),
         loss_threshold_ratio: 0.05,
@@ -411,6 +423,11 @@ fn diversity_max_hops_2_x_position_best_of_wins() {
 /// A→Y (forward: Agent(A), Ip(Y.ip)) and Y→B (reverse: Agent(B), Ip(Y.ip)).
 #[test]
 fn optimization_max_hops_2_tiebreaker_includes_two_hop_alternatives() {
+    let agents = vec![
+        agent("a", "10.5.0.1"),
+        agent("b", "10.5.0.2"),
+        agent("y", "10.5.0.3"),
+    ];
     let inputs = EvaluationInputs {
         measurements: vec![
             m("a", "10.5.0.2", 400.0, 5.0, 0.0), // A→B baseline
@@ -419,11 +436,8 @@ fn optimization_max_hops_2_tiebreaker_includes_two_hop_alternatives() {
             m("a", "10.5.0.3", 100.0, 5.0, 0.0), // A→Y (mesh) → forward lookup works
             m("b", "10.5.0.3", 90.0, 5.0, 0.0),  // B→Y → Y→B reverse lookup works
         ],
-        agents: vec![
-            agent("a", "10.5.0.1"),
-            agent("b", "10.5.0.2"),
-            agent("y", "10.5.0.3"),
-        ],
+        roster: agents.clone(),
+        agents,
         candidate_ips: Vec::new(),
         enrichment: Default::default(),
         loss_threshold_ratio: 0.05,
@@ -501,6 +515,11 @@ fn optimization_max_hops_2_tiebreaker_includes_two_hop_alternatives() {
 ///   and that `winning_x_position = None` (correct for a 1-hop route).
 #[test]
 fn diversity_max_hops_2_dual_form_pool_filter_regression() {
+    let agents = vec![
+        agent("a", "10.6.0.1"),
+        agent("b", "10.6.0.2"),
+        agent("y", "10.6.0.3"),
+    ];
     let inputs = EvaluationInputs {
         measurements: vec![
             m("a", "10.6.0.2", 300.0, 5.0, 0.0), // A→B baseline (direct)
@@ -509,11 +528,8 @@ fn diversity_max_hops_2_dual_form_pool_filter_regression() {
             m("a", "10.6.0.3", 50.0, 2.0, 0.0),  // A→Y (mesh Y measurements)
             m("b", "10.6.0.3", 60.0, 2.0, 0.0),  // B→Y (provides Y→B via reverse)
         ],
-        agents: vec![
-            agent("a", "10.6.0.1"),
-            agent("b", "10.6.0.2"),
-            agent("y", "10.6.0.3"),
-        ],
+        roster: agents.clone(),
+        agents,
         candidate_ips: Vec::new(),
         enrichment: Default::default(),
         loss_threshold_ratio: 0.05,
@@ -606,12 +622,14 @@ fn diversity_max_hops_2_dual_form_pool_filter_regression() {
 /// `best_route_ms` (the reverse-resolved direct leg) rather than a sentinel.
 #[test]
 fn edge_candidate_non_mesh_x_resolves_direct_via_reverse_with_max_hops_zero() {
+    let agents = vec![agent("b", "10.7.0.1")];
     let inputs = EvaluationInputs {
         measurements: vec![
             // Only outbound probe is B→X. The X→B leg must be reverse-resolved.
             m("b", "203.0.113.7", 40.0, 1.0, 0.0),
         ],
-        agents: vec![agent("b", "10.7.0.1")],
+        roster: agents.clone(),
+        agents,
         candidate_ips: vec![ip("203.0.113.7")],
         ..base_inputs(EvaluationMode::EdgeCandidate, 0)
     };
@@ -635,11 +653,19 @@ fn edge_candidate_non_mesh_x_resolves_direct_via_reverse_with_max_hops_zero() {
         .find(|p| p.destination_agent_id == "b")
         .expect("pair for B must exist");
     assert!(!b_pair.is_unreachable, "X→B must be reachable: {b_pair:?}");
-    // best_route_ms = rtt + stddev_weight * stddev = 40 + 1.0*1.0 = 41
+    // `best_route_ms` is the raw RTT (40 ms). The stddev penalty is
+    // applied internally by the picker's score but intentionally not
+    // folded into the persisted RTT — the stddev surfaces independently
+    // through `best_route_stddev_ms`.
     assert!(
-        (b_pair.best_route_ms - 41.0).abs() < 1e-3,
-        "best_route_ms must equal the penalised RTT (41ms = 40 rtt + 1*1 stddev), got {}",
+        (b_pair.best_route_ms - 40.0).abs() < 1e-3,
+        "best_route_ms must equal the raw RTT (40ms), got {}",
         b_pair.best_route_ms
+    );
+    assert!(
+        (b_pair.best_route_stddev_ms - 1.0).abs() < 1e-3,
+        "stddev surfaces independently as best_route_stddev_ms (1.0ms), got {}",
+        b_pair.best_route_stddev_ms
     );
     assert_eq!(
         b_pair.best_route_kind,

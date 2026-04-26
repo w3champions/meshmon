@@ -144,8 +144,26 @@ pub struct CatalogueLookup {
 pub struct EvaluationInputs {
     /// All campaign-kind measurements the evaluator should consider.
     pub measurements: Vec<AttributedMeasurement>,
-    /// Agent roster the campaign pulled its sources from.
+    /// Agent roster used as the destination set ("B") in the
+    /// EdgeCandidate evaluator and as the baseline pair set in the
+    /// triple evaluator. EdgeCandidate restricts this to source agents
+    /// of the campaign so the heatmap doesn't double-count IPs that are
+    /// both candidates (X) and destinations (B). Diversity / Optimization
+    /// pass the union of source and destination agents (the full pair
+    /// surface they iterate). For both modes this is a *subset* of
+    /// [`Self::roster`], which carries the full identity registry needed
+    /// for IP↔agent resolution inside [`legs::LegLookup`].
     pub agents: Vec<AgentRow>,
+    /// Full identity roster — every mesh agent that may appear in any
+    /// position of any route or candidate IP, regardless of whether it
+    /// participates as a destination. This powers
+    /// [`legs::LegLookup`]'s `agent_by_ip` / `ip_by_agent` maps so a
+    /// `CandidateIp { ip }` whose IP belongs to a registered mesh agent
+    /// resolves to that agent's identity even when the agent is omitted
+    /// from [`Self::agents`] (which happens in EdgeCandidate mode for
+    /// agents that aren't a campaign source). For Diversity /
+    /// Optimization this is identical to [`Self::agents`].
+    pub roster: Vec<AgentRow>,
     /// Candidate destination IPs (the X set). For Diversity /
     /// Optimization this is derived from the measurement set; for
     /// EdgeCandidate it comes straight from
@@ -655,7 +673,11 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         .collect();
 
     let by_pair = build_pair_lookup(&inputs.measurements);
-    let leg_lookup = LegLookup::build(&inputs.measurements, &inputs.agents);
+    // Diversity / Optimization use the full roster identical to
+    // `inputs.agents` today, but route the LegLookup build through the
+    // explicit roster field so a future divergence (e.g. limiting the
+    // baseline pair set) does not silently break IP↔agent identity.
+    let leg_lookup = LegLookup::build(&inputs.measurements, &inputs.roster);
     let baselines = collect_baselines(&inputs.agents, &by_pair, &leg_lookup);
     if baselines.is_empty() {
         return Err(EvalError::NoBaseline);
@@ -1059,13 +1081,15 @@ mod tests {
     }
 
     fn inputs_basic(mode: EvaluationMode) -> EvaluationInputs {
+        let agents = vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")];
         EvaluationInputs {
             measurements: vec![
                 m("a", "10.0.0.2", 318.0, 24.0, 0.0),
                 m("a", "203.0.113.7", 120.0, 8.0, 0.0),
                 m("b", "203.0.113.7", 121.0, 8.0, 0.0),
             ],
-            agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            roster: agents.clone(),
+            agents,
             candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
@@ -1094,9 +1118,11 @@ mod tests {
 
     #[test]
     fn no_baseline_returns_empty_with_error() {
+        let agents = vec![agent("a", "10.0.0.1")];
         let i = EvaluationInputs {
             measurements: vec![m("a", "203.0.113.7", 120.0, 8.0, 0.0)],
-            agents: vec![agent("a", "10.0.0.1")],
+            roster: agents.clone(),
+            agents,
             candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
@@ -1121,6 +1147,7 @@ mod tests {
         // If the baseline-detection loop ignored that, `baseline_pair_count`
         // would be inflated and the caller-visible `NoBaseline → 422`
         // error would never fire on an all-loss campaign.
+        let agents = vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")];
         let i = EvaluationInputs {
             measurements: vec![AttributedMeasurement {
                 source_agent_id: "a".into(),
@@ -1131,7 +1158,8 @@ mod tests {
                 mtr_measurement_id: None,
                 direct_source: DirectSource::ActiveProbe,
             }],
-            agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            roster: agents.clone(),
+            agents,
             candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
@@ -1205,6 +1233,11 @@ mod tests {
         // approximation the X→B leg already uses.
         // Under optimization mode, X must NOT qualify because Y is
         // already a better transit.
+        let agents = vec![
+            agent("a", "10.0.0.1"),
+            agent("b", "10.0.0.2"),
+            agent("y", "10.0.0.3"),
+        ];
         let inputs = EvaluationInputs {
             measurements: vec![
                 m("a", "10.0.0.2", 318.0, 24.0, 0.0),   // A→B baseline
@@ -1213,11 +1246,8 @@ mod tests {
                 m("a", "10.0.0.3", 100.0, 5.0, 0.0),    // A→Y
                 m("b", "10.0.0.3", 80.0, 5.0, 0.0),     // B→Y (sym-approx Y→B)
             ],
-            agents: vec![
-                agent("a", "10.0.0.1"),
-                agent("b", "10.0.0.2"),
-                agent("y", "10.0.0.3"),
-            ],
+            roster: agents.clone(),
+            agents,
             candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
@@ -1271,13 +1301,15 @@ mod tests {
             mtr_measurement_id: None,
             direct_source: DirectSource::VmContinuous,
         };
+        let agents = vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")];
         let inputs = EvaluationInputs {
             measurements: vec![
                 a_b_baseline,
                 m("a", "203.0.113.7", 120.0, 8.0, 0.0),
                 m("b", "203.0.113.7", 121.0, 8.0, 0.0),
             ],
-            agents: vec![agent("a", "10.0.0.1"), agent("b", "10.0.0.2")],
+            roster: agents.clone(),
+            agents,
             candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,
@@ -1307,17 +1339,19 @@ mod tests {
 
     #[test]
     fn is_mesh_member_flag_set_when_x_is_agent() {
+        let agents = vec![
+            agent("a", "10.0.0.1"),
+            agent("b", "10.0.0.2"),
+            agent("c", "10.0.0.3"),
+        ];
         let inputs = EvaluationInputs {
             measurements: vec![
                 m("a", "10.0.0.2", 318.0, 24.0, 0.0),
                 m("a", "10.0.0.3", 100.0, 5.0, 0.0),
                 m("b", "10.0.0.3", 130.0, 5.0, 0.0),
             ],
-            agents: vec![
-                agent("a", "10.0.0.1"),
-                agent("b", "10.0.0.2"),
-                agent("c", "10.0.0.3"),
-            ],
+            roster: agents.clone(),
+            agents,
             candidate_ips: Vec::new(),
             enrichment: Default::default(),
             loss_threshold_ratio: 0.02,

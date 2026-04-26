@@ -58,6 +58,7 @@ fn edge_candidate_x_equals_b_excludes_self_pair() {
     ];
     let inputs = EvaluationInputs {
         measurements,
+        roster: agents.clone(),
         agents,
         // X == agent A's IP.
         candidate_ips: vec![ip("10.0.0.1")],
