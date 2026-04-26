@@ -663,7 +663,9 @@ export default function CampaignDetail() {
             </TabsContent>
           ) : null}
           <TabsContent value="pairs">
-            {effectiveTab === "pairs" ? <PairsTab campaign={campaign} /> : null}
+            {effectiveTab === "pairs" ? (
+              <PairsTab campaign={campaign} evaluation={evaluationQuery.data ?? null} />
+            ) : null}
           </TabsContent>
           {isTerminal ? (
             <TabsContent value="compare">

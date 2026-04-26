@@ -64,6 +64,7 @@ vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => {
 
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignPairs, useForcePair } from "@/api/hooks/campaigns";
+import type { Evaluation } from "@/api/hooks/evaluation";
 import { useEdgePairDetails, useTriggerDetail } from "@/api/hooks/evaluation";
 import { PairsTab } from "@/components/campaigns/results/PairsTab";
 
@@ -198,14 +199,31 @@ function setupMocks(pairs: CampaignPair[], opts?: { isLoading?: boolean; isError
   } as unknown as ReturnType<typeof useEdgePairDetails>);
 }
 
-function renderTab(campaign: Campaign) {
+function makeEvaluation(): Evaluation {
+  return {
+    campaign_id: CAMPAIGN_ID,
+    evaluated_at: "2026-04-21T10:00:00Z",
+    evaluation_mode: "edge_candidate",
+    loss_threshold_ratio: 0.02,
+    stddev_weight: 1,
+    max_hops: 2,
+    vm_lookback_minutes: 15,
+    baseline_pair_count: 0,
+    candidates_total: 0,
+    candidates_good: 0,
+    avg_improvement_ms: null,
+    results: { candidates: [], unqualified_reasons: {} },
+  } as unknown as Evaluation;
+}
+
+function renderTab(campaign: Campaign, evaluation: Evaluation | null = makeEvaluation()) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
       <IpHostnameProvider>
-        <PairsTab campaign={campaign} />
+        <PairsTab campaign={campaign} evaluation={evaluation} />
         <Toaster />
       </IpHostnameProvider>
     </QueryClientProvider>,
@@ -420,6 +438,20 @@ describe("PairsTab — row actions", () => {
 // ---------------------------------------------------------------------------
 
 describe("PairsTab — edge_candidate mode", () => {
+  test("renders the not-evaluated placeholder when evaluation is null", () => {
+    // Pre-/evaluate state: GET /evaluation/edge_pairs returns 404
+    // `not_evaluated`, which would surface as the EdgePairsTab error
+    // alert. Render a placeholder instead and skip the API call.
+    setupMocks([]);
+    renderTab(
+      makeCampaign({ state: "running", evaluation_mode: "edge_candidate" }),
+      null,
+    );
+    expect(screen.getByTestId("edge-pairs-placeholder")).toBeInTheDocument();
+    expect(screen.queryByTestId("edge-pairs-tab")).not.toBeInTheDocument();
+    expect(useEdgePairDetails).not.toHaveBeenCalled();
+  });
+
   test("renders EdgePairsTab (data-testid=edge-pairs-tab) instead of pairs-tab", () => {
     setupMocks([]);
     renderTab(makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }));
