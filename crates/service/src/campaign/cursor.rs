@@ -33,6 +33,12 @@ pub enum SortValue {
     String(String),
     /// Boolean column (qualifies).
     Bool(bool),
+    /// Sort column whose last-row value was SQL `NULL`. Currently used
+    /// by the edge-pair endpoint when sorting by `best_route_ms` and
+    /// the page tail lands on an unreachable row (which persists `NULL`
+    /// instead of an infinity sentinel). The cursor predicate handles
+    /// the NULL transition with `NULLS LAST` semantics.
+    Null,
 }
 
 /// Decoded cursor body. The wire form is base64(JSON(this)).

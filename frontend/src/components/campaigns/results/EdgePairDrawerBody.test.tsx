@@ -235,6 +235,21 @@ describe("EdgePairDrawerBody — row rendering", () => {
     renderBody([makeEdgePairRow(1, { qualifies_under_t: false })]);
     expect(screen.getByText("above T")).toBeInTheDocument();
   });
+
+  test("renders 'unreachable' placeholder when best_route_ms is null", () => {
+    renderBody([
+      makeEdgePairRow(1, {
+        is_unreachable: true,
+        best_route_ms: null,
+        best_route_loss_ratio: 1,
+        qualifies_under_t: false,
+      }),
+    ]);
+    // Both the RTT cell and the qualifies badge surface "unreachable" for
+    // a fully unreachable row — assert at least one rendered, since the
+    // contract is "the cell must not crash on null best_route_ms".
+    expect(screen.getAllByText("unreachable").length).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("EdgePairDrawerBody — self-pair-excluded note", () => {

@@ -40,7 +40,7 @@ CREATE TABLE campaign_evaluation_edge_pair_details (
   evaluation_id             UUID NOT NULL REFERENCES campaign_evaluations(id) ON DELETE CASCADE,
   candidate_ip              INET NOT NULL,
   destination_agent_id      TEXT NOT NULL,
-  best_route_ms             REAL NOT NULL,
+  best_route_ms             REAL NULL,
   best_route_loss_ratio     REAL NOT NULL,
   best_route_stddev_ms      REAL NOT NULL,
   best_route_kind           TEXT NOT NULL,

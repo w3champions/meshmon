@@ -4806,7 +4806,6 @@
         "required": [
           "candidate_ip",
           "destination_agent_id",
-          "best_route_ms",
           "best_route_loss_ratio",
           "best_route_stddev_ms",
           "best_route_kind",
@@ -4840,9 +4839,12 @@
             "description": "Best-route composed loss fraction (0.0–1.0)."
           },
           "best_route_ms": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "float",
-            "description": "Best-route composed RTT (ms)."
+            "description": "Best-route composed RTT (ms). `None` when `is_unreachable` is\n`true` — the wire serializes the field as JSON `null` rather\nthan an unrepresentable infinity sentinel."
           },
           "best_route_stddev_ms": {
             "type": "number",

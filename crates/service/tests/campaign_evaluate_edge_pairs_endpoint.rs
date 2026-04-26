@@ -101,10 +101,14 @@ async fn seed_edge_candidate(
 }
 
 /// Parameters for a single edge-pair detail row seed.
+///
+/// `best_route_ms` is `Option<f32>`: unreachable rows persist `None` (SQL
+/// `NULL`) so the wire DTO serializes a clean `null` instead of an
+/// unrepresentable infinity sentinel.
 struct EdgePairSeed {
     candidate_ip: IpAddr,
     destination_agent_id: String,
-    best_route_ms: f32,
+    best_route_ms: Option<f32>,
     best_route_loss_ratio: f32,
     best_route_stddev_ms: f32,
     best_route_kind: &'static str,
@@ -117,7 +121,7 @@ impl EdgePairSeed {
         Self {
             candidate_ip,
             destination_agent_id: dest.to_string(),
-            best_route_ms: rtt_ms,
+            best_route_ms: Some(rtt_ms),
             best_route_loss_ratio: 0.0,
             best_route_stddev_ms: 1.0,
             best_route_kind: "direct",
@@ -142,6 +146,8 @@ async fn seed_edge_pair_row(pool: &sqlx::PgPool, evaluation_id: Uuid, seed: &Edg
     .bind(evaluation_id)
     .bind(ip_net)
     .bind(&seed.destination_agent_id)
+    // `Option<f32>` binds as nullable Float4 — `None` becomes SQL `NULL`,
+    // matching the production unreachable-row write.
     .bind(seed.best_route_ms)
     .bind(seed.best_route_loss_ratio)
     .bind(seed.best_route_stddev_ms)
@@ -240,7 +246,7 @@ async fn sort_by_each_column_returns_200() {
             &EdgePairSeed {
                 candidate_ip: cand,
                 destination_agent_id: dest.to_string(),
-                best_route_ms: rtt,
+                best_route_ms: Some(rtt),
                 best_route_loss_ratio: i as f32 * 0.1,
                 best_route_stddev_ms: i as f32 * 2.0,
                 best_route_kind: if i == 0 {
@@ -417,7 +423,7 @@ async fn filter_reachable_only_true() {
         &EdgePairSeed {
             candidate_ip: cand,
             destination_agent_id: "ep5-dest-b".to_string(),
-            best_route_ms: 9999.0,
+            best_route_ms: None,
             best_route_loss_ratio: 1.0,
             best_route_stddev_ms: 0.0,
             best_route_kind: "direct",
@@ -506,6 +512,162 @@ async fn pagination_cursor_round_trip() {
     seen_dests.sort();
     seen_dests.dedup();
     assert_eq!(seen_dests.len(), 10, "every row visited exactly once");
+}
+
+#[tokio::test]
+async fn unreachable_row_serializes_best_route_ms_as_null() {
+    // Unreachable rows persist `NULL` for `best_route_ms` (no infinity
+    // sentinel); the wire DTO must surface that as JSON `null` so the
+    // contract `best_route_ms: number | null` holds.
+    let h = common::HttpHarness::start().await;
+    common::insert_agent(&h.state.pool, "t56ep-7").await;
+    let cid =
+        create_edge_candidate_campaign(&h, "ep-unreachable-null", "t56ep-7", "10.64.7.1").await;
+    let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
+
+    let cand: IpAddr = "10.64.7.1".parse().unwrap();
+    seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
+    seed_edge_pair_row(
+        &h.state.pool,
+        eval_id,
+        &EdgePairSeed {
+            candidate_ip: cand,
+            destination_agent_id: "ep7-dest-unreachable".to_string(),
+            best_route_ms: None,
+            best_route_loss_ratio: 1.0,
+            best_route_stddev_ms: 0.0,
+            best_route_kind: "direct",
+            qualifies_under_t: false,
+            is_unreachable: true,
+        },
+    )
+    .await;
+
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(cid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    let body: Value = h
+        .get_json(&format!(
+            "/api/campaigns/{cid}/evaluation/edge_pairs?limit=10"
+        ))
+        .await;
+    assert_eq!(body["total"], 1, "body = {body}");
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]["best_route_ms"].is_null(),
+        "unreachable rows must serialize best_route_ms as JSON null; body = {body}",
+    );
+    assert_eq!(entries[0]["is_unreachable"], true);
+}
+
+#[tokio::test]
+async fn pagination_cursor_round_trip_with_unreachable_rows() {
+    // Mix reachable + unreachable rows, default sort=best_route_ms asc with
+    // NULLS LAST. The cursor walk must visit every row exactly once,
+    // round-tripping the NULL sort-value through the encoded cursor.
+    let h = common::HttpHarness::start().await;
+    common::insert_agent(&h.state.pool, "t56ep-8").await;
+    let cid = create_edge_candidate_campaign(&h, "ep-null-cursor", "t56ep-8", "10.64.8.1").await;
+    let eval_id = seed_edge_evaluation(&h.state.pool, cid).await;
+
+    let cand: IpAddr = "10.64.8.1".parse().unwrap();
+    seed_edge_candidate(&h.state.pool, eval_id, cand, 1).await;
+
+    // 4 reachable rows (rtts 10, 20, 30, 40).
+    for i in 0..4 {
+        let dest = format!("ep8-dest-r{i:02}");
+        seed_edge_pair_row(
+            &h.state.pool,
+            eval_id,
+            &EdgePairSeed::simple(cand, &dest, (i as f32 + 1.0) * 10.0, true),
+        )
+        .await;
+    }
+    // 3 unreachable rows (NULL best_route_ms).
+    for i in 0..3 {
+        let dest = format!("ep8-dest-u{i:02}");
+        seed_edge_pair_row(
+            &h.state.pool,
+            eval_id,
+            &EdgePairSeed {
+                candidate_ip: cand,
+                destination_agent_id: dest,
+                best_route_ms: None,
+                best_route_loss_ratio: 1.0,
+                best_route_stddev_ms: 0.0,
+                best_route_kind: "direct",
+                qualifies_under_t: false,
+                is_unreachable: true,
+            },
+        )
+        .await;
+    }
+
+    sqlx::query("UPDATE measurement_campaigns SET state = 'evaluated' WHERE id = $1")
+        .bind(cid)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    let mut seen_dests: Vec<String> = Vec::new();
+    let mut seen_rtts: Vec<Option<f64>> = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    // 7 rows with limit=2 = 4 pages max.
+    for _page in 0..5 {
+        let url = match &cursor {
+            None => format!("/api/campaigns/{cid}/evaluation/edge_pairs?limit=2"),
+            Some(c) => {
+                format!("/api/campaigns/{cid}/evaluation/edge_pairs?limit=2&cursor={c}")
+            }
+        };
+        let body: Value = h.get_json(&url).await;
+        assert_eq!(
+            body["total"], 7,
+            "total stays 7 across pages; body = {body}"
+        );
+        for e in body["entries"].as_array().unwrap() {
+            let rtt = if e["best_route_ms"].is_null() {
+                None
+            } else {
+                Some(e["best_route_ms"].as_f64().unwrap())
+            };
+            seen_rtts.push(rtt);
+            seen_dests.push(e["destination_agent_id"].as_str().unwrap().to_string());
+        }
+        cursor = body["next_cursor"].as_str().map(String::from);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    seen_dests.sort();
+    seen_dests.dedup();
+    assert_eq!(seen_dests.len(), 7, "every row visited exactly once");
+
+    // NULLS LAST + ASC means: finite values monotonically non-decreasing,
+    // followed by NULL entries. Verify the contract.
+    let split = seen_rtts.iter().position(Option::is_none);
+    if let Some(split_idx) = split {
+        let finite_prefix: Vec<f64> = seen_rtts[..split_idx]
+            .iter()
+            .map(|v| v.expect("finite prefix"))
+            .collect();
+        let mut sorted = finite_prefix.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            finite_prefix, sorted,
+            "finite prefix must be non-decreasing"
+        );
+        assert!(
+            seen_rtts[split_idx..].iter().all(Option::is_none),
+            "NULLs LAST: every row after the first NULL must also be NULL",
+        );
+    }
 }
 
 #[tokio::test]

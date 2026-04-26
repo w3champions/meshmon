@@ -68,7 +68,10 @@ export function aggregateEdgeCandidates(
 
     bucket.totalPicked++;
 
-    if (!row.is_unreachable && row.qualifies_under_t) {
+    // `best_route_ms` is `null` for unreachable rows; the `is_unreachable`
+    // gate covers that case, but defend the type narrowing explicitly so
+    // we never push `null` into `qualifyingMs`.
+    if (!row.is_unreachable && row.qualifies_under_t && row.best_route_ms != null) {
       bucket.qualifyingMs.push(row.best_route_ms);
     }
 

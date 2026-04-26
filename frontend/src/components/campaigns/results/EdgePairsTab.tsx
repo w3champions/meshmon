@@ -322,9 +322,9 @@ function EdgePairRow({ row, index, lossThresholdRatio }: EdgePairRowProps) {
           <div className="font-mono text-xs text-muted-foreground">{row.destination_agent_id}</div>
         </TableCell>
 
-        {/* Best RTT */}
+        {/* Best RTT — `best_route_ms` is `null` for unreachable rows. */}
         <TableCell className="text-right tabular-nums text-sm">
-          {row.is_unreachable ? (
+          {row.is_unreachable || row.best_route_ms == null ? (
             <span className="text-muted-foreground">unreachable</span>
           ) : (
             formatMs(row.best_route_ms)

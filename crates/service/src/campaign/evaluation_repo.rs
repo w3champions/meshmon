@@ -567,6 +567,14 @@ async fn persist_edge_candidate_evaluation(
                 sqlx::Error::Protocol(format!("failed to serialize best_route_legs: {e}"))
             })?;
             let kind_text = edge_route_kind_to_text(pair.best_route_kind);
+            // Unreachable rows persist `NULL` for `best_route_ms` so the
+            // wire DTO can serialize a clean `null` instead of an
+            // unrepresentable infinity sentinel.
+            let best_route_ms_db: Option<f32> = if pair.is_unreachable {
+                None
+            } else {
+                Some(pair.best_route_ms)
+            };
 
             sqlx::query!(
                 r#"INSERT INTO campaign_evaluation_edge_pair_details (
@@ -578,7 +586,7 @@ async fn persist_edge_candidate_evaluation(
                 evaluation_id,
                 candidate_ip,
                 pair.destination_agent_id,
-                pair.best_route_ms,
+                best_route_ms_db,
                 pair.best_route_loss_ratio,
                 pair.best_route_stddev_ms,
                 kind_text,
@@ -942,11 +950,15 @@ pub async fn latest_pair_details_for_candidate(
     // Bind the cursor's leading sort value into one of three optional
     // placeholders typed to the column's SQL type. Only one is ever
     // bound to a real value at a time; the others stay NULL.
+    // `SortValue::Null` is unreachable here because every
+    // `PairDetailSortCol` column is `NOT NULL`; the variant only
+    // applies to the edge-pair endpoint's `best_route_ms`.
     let (cursor_f64, cursor_text, cursor_bool) = match cursor.as_ref() {
         Some(c) => match &c.sort_value {
             SortValue::F64(v) => (Some(*v), None, None),
             SortValue::String(s) => (None, Some(s.clone()), None),
             SortValue::Bool(b) => (None, None, Some(*b)),
+            SortValue::Null => (None, None, None),
         },
         None => (None, None, None),
     };
@@ -1461,35 +1473,87 @@ pub async fn latest_evaluation_edge_pairs(
         AND ($3::bool IS NULL OR ep.qualifies_under_t = $3) \
         AND ($4::bool IS NULL OR (NOT $4 OR ep.is_unreachable = false))";
 
+    // Decode the cursor into typed parts.
+    let cursor = query.cursor.as_ref().map(|raw| {
+        EdgePairCursor::decode(raw, query.sort)
+            .expect("handler must validate cursor before calling latest_evaluation_edge_pairs")
+    });
+    let (cursor_f64, cursor_text, cursor_bool, cursor_is_null) = match cursor.as_ref() {
+        Some(c) => match &c.sort_value {
+            SortValue::F64(v) => (Some(*v), None, None, false),
+            SortValue::String(s) => (None, Some(s.clone()), None, false),
+            SortValue::Bool(b) => (None, None, Some(*b), false),
+            // Edge-pair endpoint sorting by `best_route_ms` and the
+            // tail row was unreachable (NULL).
+            SortValue::Null => (None, None, None, true),
+        },
+        None => (None, None, None, false),
+    };
+    let cursor_cand_ip: Option<String> = cursor.as_ref().map(|c| c.candidate_ip.clone());
+    let cursor_dest: Option<String> = cursor.as_ref().map(|c| c.destination_agent_id.clone());
+
     // Sort column referenced by the cursor predicate. For `candidate_ip`
     // (an `inet` column) we use `host(...)` so the comparison against
     // the cursor's text-encoded value matches what the cursor stores
-    // (the bare `IpAddr.to_string()`, with no `/32` suffix). Postgres
-    // has no native `inet > text` operator, and a naive `inet::text`
-    // cast emits `'10.64.8.1/32'` for an IPv4 host and breaks `>`/`=`
-    // ordering against the cursor's bare-IP form. The ORDER BY can
-    // still use the native inet column directly since inet ordering is
-    // canonical.
+    // (the bare `IpAddr.to_string()`, with no `/32` suffix). The ORDER
+    // BY can still use the native inet column directly since inet
+    // ordering is canonical.
     let cursor_col_expr: String = match query.sort {
         EdgePairSortCol::CandidateIp => "host(ep.candidate_ip)".to_string(),
         _ => format!("ep.{sort_col}"),
     };
 
-    // Cursor predicate uses parameters $5 / $6 / $7.
-    // The tiebreak walks forward through (candidate_ip, destination_agent_id).
-    // Tiebreak comparisons against `candidate_ip` use `host(...)` for the
-    // same reason as `cursor_col_expr` above.
+    // For `best_route_ms` (the only nullable sort column), the page uses
+    // `NULLS LAST` ordering and the cursor encodes either a finite f64
+    // value or `SortValue::Null` for an unreachable tail row. The
+    // predicate switches on which side of the NULL boundary the cursor
+    // sits to keep keyset pagination monotone:
+    //   * cursor on a finite value: next page is finite-rows-after the
+    //     value, plus NULL rows (which sort after everything).
+    //   * cursor on a NULL row: next page is the remaining NULL rows
+    //     after the (candidate_ip, destination_agent_id) tiebreak.
+    //
+    // Comparisons against `candidate_ip` continue to go through
+    // `host(ep.candidate_ip)` (defined in `cursor_col_expr` above) so
+    // the cursor's bare-IP form matches without the `/32` suffix.
     let cursor_predicate = if query.cursor.is_some() {
-        format!(
-            "AND ( {col_expr} {cmp} $5 \
-                OR ({col_expr} = $5 AND host(ep.candidate_ip) > $6) \
-                OR ({col_expr} = $5 AND host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) )",
-            col_expr = cursor_col_expr,
-            cmp = leading_cmp,
-        )
+        if matches!(query.sort, EdgePairSortCol::BestRouteMs) {
+            // NULL-aware predicate. `$5::float8` carries the cursor's
+            // finite value when present; otherwise `cursor_is_null`
+            // signals the page tail was an unreachable (NULL) row.
+            // `is_null_cursor` is bound separately as `$9::bool`.
+            format!(
+                "AND ( \
+                    ($5::float8 IS NOT NULL AND ( \
+                        ep.{col} IS NULL \
+                        OR ep.{col} {cmp} $5 \
+                        OR (ep.{col} = $5 AND host(ep.candidate_ip) > $6) \
+                        OR (ep.{col} = $5 AND host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) \
+                    )) \
+                    OR \
+                    ($9::bool IS TRUE AND ep.{col} IS NULL AND ( \
+                        host(ep.candidate_ip) > $6 \
+                        OR (host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) \
+                    )) \
+                )",
+                col = sort_col,
+                cmp = leading_cmp,
+            )
+        } else {
+            format!(
+                "AND ( {col_expr} {cmp} $5 \
+                    OR ({col_expr} = $5 AND host(ep.candidate_ip) > $6) \
+                    OR ({col_expr} = $5 AND host(ep.candidate_ip) = $6 AND ep.destination_agent_id > $7) )",
+                col_expr = cursor_col_expr,
+                cmp = leading_cmp,
+            )
+        }
     } else {
-        // Three placeholder slots so the builder stays constant-arity.
-        "AND ($5::text IS NULL AND $6::text IS NULL AND $7::text IS NULL)".to_string()
+        // Four placeholder slots so the builder stays constant-arity.
+        // `$9` is also referenced unconditionally so the parameter index
+        // stays bound when the cursor is absent.
+        "AND ($5::text IS NULL AND $6::text IS NULL AND $7::text IS NULL AND $9::bool IS NULL)"
+            .to_string()
     };
 
     // Determine SQL type cast for the cursor's sort-column value.
@@ -1504,21 +1568,14 @@ pub async fn latest_evaluation_edge_pairs(
     };
     let cursor_predicate = cursor_predicate.replace("$5", cursor_value_sql_cast);
 
-    // Decode the cursor into typed parts.
-    let cursor = query.cursor.as_ref().map(|raw| {
-        EdgePairCursor::decode(raw, query.sort)
-            .expect("handler must validate cursor before calling latest_evaluation_edge_pairs")
-    });
-    let (cursor_f64, cursor_text, cursor_bool) = match cursor.as_ref() {
-        Some(c) => match &c.sort_value {
-            SortValue::F64(v) => (Some(*v), None, None),
-            SortValue::String(s) => (None, Some(s.clone()), None),
-            SortValue::Bool(b) => (None, None, Some(*b)),
-        },
-        None => (None, None, None),
+    // ORDER BY suffix. `best_route_ms` is the only sortable column that
+    // can be NULL (unreachable rows persist NULL instead of an infinity
+    // sentinel); pin it `NULLS LAST` in both ASC and DESC so the cursor
+    // walk terminates deterministically.
+    let order_by_nulls = match query.sort {
+        EdgePairSortCol::BestRouteMs => " NULLS LAST",
+        _ => "",
     };
-    let cursor_cand_ip: Option<String> = cursor.as_ref().map(|c| c.candidate_ip.clone());
-    let cursor_dest: Option<String> = cursor.as_ref().map(|c| c.destination_agent_id.clone());
 
     // Page query. `destination_hostname` is NOT joined here — it is stamped
     // at response time by the Phase H handler via bulk_hostnames_and_enqueue,
@@ -1532,12 +1589,13 @@ pub async fn latest_evaluation_edge_pairs(
            FROM campaign_evaluation_edge_pair_details ep \
           WHERE ep.evaluation_id = $1 \
           {filters} {cursor} \
-          ORDER BY ep.{sort_col} {dir}, ep.candidate_ip ASC, ep.destination_agent_id ASC \
+          ORDER BY ep.{sort_col} {dir}{nulls}, ep.candidate_ip ASC, ep.destination_agent_id ASC \
           LIMIT $8",
         filters = filter_sql,
         cursor = cursor_predicate,
         sort_col = sort_col,
         dir = sort_dir_kw,
+        nulls = order_by_nulls,
     );
 
     let bound_limit = query.limit.min(500) as i64;
@@ -1550,6 +1608,8 @@ pub async fn latest_evaluation_edge_pairs(
     // $6 = cursor candidate_ip tiebreak
     // $7 = cursor dest_agent_id tiebreak
     // $8 = LIMIT
+    // $9 = cursor `is_null` flag (true when the previous-page tail row
+    //      had a NULL sort value — only meaningful for `best_route_ms`)
     let mut q = sqlx::query(&sql)
         .bind(evaluation_id)
         .bind(candidate_inet)
@@ -1566,10 +1626,15 @@ pub async fn latest_evaluation_edge_pairs(
         | EdgePairSortCol::BestRouteLossRatio
         | EdgePairSortCol::BestRouteStddevMs => q.bind(cursor_f64),
     };
+    // `$9` is `Some(true)` only when the cursor encoded `SortValue::Null`;
+    // every other case (no cursor, or a typed value) leaves it NULL so
+    // the predicate's NULL-branch stays inert.
+    let cursor_null_flag: Option<bool> = if cursor_is_null { Some(true) } else { None };
     let q = q
         .bind(cursor_cand_ip.clone())
         .bind(cursor_dest.clone())
-        .bind(bound_limit);
+        .bind(bound_limit)
+        .bind(cursor_null_flag);
 
     let rows = q.fetch_all(pool).await?;
 
@@ -1578,7 +1643,7 @@ pub async fn latest_evaluation_edge_pairs(
     for row in &rows {
         let cand_ip: IpNetwork = row.try_get("candidate_ip")?;
         let destination_agent_id: String = row.try_get("destination_agent_id")?;
-        let best_route_ms: f32 = row.try_get("best_route_ms")?;
+        let best_route_ms: Option<f32> = row.try_get("best_route_ms")?;
         let best_route_loss_ratio: f32 = row.try_get("best_route_loss_ratio")?;
         let best_route_stddev_ms: f32 = row.try_get("best_route_stddev_ms")?;
         let best_route_kind_text: String = row.try_get("best_route_kind")?;
@@ -1654,7 +1719,13 @@ pub async fn latest_evaluation_edge_pairs(
     } else {
         let last = entries.last().expect("len >= 1");
         let sort_value = match query.sort {
-            EdgePairSortCol::BestRouteMs => SortValue::F64(last.best_route_ms as f64),
+            // `best_route_ms` is `Option<f32>` — `None` flows into the
+            // cursor as `SortValue::Null` so the next page's predicate
+            // can resume the NULLS-LAST tail.
+            EdgePairSortCol::BestRouteMs => match last.best_route_ms {
+                Some(v) => SortValue::F64(v as f64),
+                None => SortValue::Null,
+            },
             EdgePairSortCol::BestRouteLossRatio => {
                 SortValue::F64(last.best_route_loss_ratio as f64)
             }

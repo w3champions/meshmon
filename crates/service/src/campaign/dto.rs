@@ -832,8 +832,10 @@ pub struct EvaluationEdgePairDetailDto {
     /// Reverse-DNS hostname for the destination agent IP, when cached.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_hostname: Option<String>,
-    /// Best-route composed RTT (ms).
-    pub best_route_ms: f32,
+    /// Best-route composed RTT (ms). `None` when `is_unreachable` is
+    /// `true` — the wire serializes the field as JSON `null` rather
+    /// than an unrepresentable infinity sentinel.
+    pub best_route_ms: Option<f32>,
     /// Best-route composed loss fraction (0.0–1.0).
     pub best_route_loss_ratio: f32,
     /// Best-route composed RTT stddev (ms).

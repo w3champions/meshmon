@@ -157,7 +157,8 @@ function rowMean(agentId: string, candidateIps: string[], cellMap: CellMap): num
   let count = 0;
   for (const ip of candidateIps) {
     const row = cellMap.get(`${ip}::${agentId}`);
-    if (row && !row.is_unreachable) {
+    // `best_route_ms` is `null` for unreachable rows.
+    if (row && !row.is_unreachable && row.best_route_ms != null) {
       sum += row.best_route_ms;
       count++;
     }
@@ -191,7 +192,8 @@ function colWeightedPing(ip: string, agentIds: string[], cellMap: CellMap): numb
   let count = 0;
   for (const id of agentIds) {
     const row = cellMap.get(`${ip}::${id}`);
-    if (row && !row.is_unreachable) {
+    // `best_route_ms` is `null` for unreachable rows.
+    if (row && !row.is_unreachable && row.best_route_ms != null) {
       sum += row.best_route_ms;
       count++;
     }
@@ -590,8 +592,11 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
                       {colItems.map((vc) => {
                         const ip = orderedCandidateIps[vc.index]!;
                         const row = cellMap.get(`${ip}::${agentId}`);
+                        // `best_route_ms` is `null` for unreachable rows.
                         const ms =
-                          row && !row.is_unreachable ? row.best_route_ms : null;
+                          row && !row.is_unreachable && row.best_route_ms != null
+                            ? row.best_route_ms
+                            : null;
                         const style = tierStyle(ms, boundaries);
 
                         return (
