@@ -1099,6 +1099,15 @@ pub async fn evaluate(
     // active-probe data wins on `build_pair_lookup`'s last-write-wins
     // (see `eval::evaluate`'s `by_pair` loop). The campaign's
     // `vm_lookback_minutes` knob drives the PromQL `[Xm]` window.
+    //
+    // Pass the FULL identity roster (`inputs.roster`), not the
+    // source-agent subset (`inputs.agents`). For EdgeCandidate the
+    // candidate X may be a mesh agent that is not a campaign source;
+    // its outgoing X→B baseline still has to be fetched from VM so the
+    // evaluator's `LegLookup` can resolve the direct leg without
+    // falling back to a reverse-direction substitution. For Diversity /
+    // Optimization `roster == agents` (the C3-8 invariant), so behavior
+    // for those modes is unchanged.
     let vm_url_opt = state
         .config()
         .upstream
@@ -1109,7 +1118,7 @@ pub async fn evaluate(
         vm_url_opt.as_deref(),
         campaign.protocol,
         &inputs.measurements,
-        &inputs.agents,
+        &inputs.roster,
         vm_lookback_minutes,
     )
     .await
