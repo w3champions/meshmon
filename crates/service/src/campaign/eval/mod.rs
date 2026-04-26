@@ -301,231 +301,6 @@ fn collect_baselines(
     baselines
 }
 
-/// One A→X transit leg surviving the L1/L2/L3 cartesian-product prune.
-///
-/// Built once per candidate from the baseline source agent set. The
-/// inner triple loop indexes these by `a_id` to look up each baseline's
-/// matching A→X measurement without re-scanning `by_pair`.
-#[derive(Debug)]
-struct AxLeg<'m> {
-    /// Baseline source agent id.
-    a_id: String,
-    /// `latency_avg_ms` (extracted up-front so the L1/L2/L3 reductions
-    /// stay in `f32` arithmetic without re-unwrapping `Option`).
-    rtt_ms: f32,
-    /// `latency_stddev_ms.unwrap_or(0.0)` — same rationale.
-    stddev_ms: f32,
-    /// Source `AttributedMeasurement`. Carried through so the inner
-    /// loop can stamp `mtr_measurement_id_ax` and `loss_ratio`.
-    meas: &'m AttributedMeasurement,
-    /// `true` when the leg RTT was resolved from the reverse direction
-    /// (B→X measurement used as X→B, per LegLookup §3.1 substitution).
-    was_substituted: bool,
-}
-
-/// One X→B transit leg surviving the L1/L2/L3 cartesian-product prune.
-///
-/// Mirrors [`AxLeg`] for the destination side. Built using the
-/// source-symmetric `by_pair[(b_id, x_ip)]` lookup — see the
-/// `symmetry-approx` comment in the inner triple loop.
-#[derive(Debug)]
-struct XbLeg<'m> {
-    /// Baseline destination agent id.
-    b_id: String,
-    /// `latency_avg_ms` (see [`AxLeg::rtt_ms`]).
-    rtt_ms: f32,
-    /// `latency_stddev_ms.unwrap_or(0.0)`.
-    stddev_ms: f32,
-    /// Source `AttributedMeasurement` — carried for
-    /// `mtr_measurement_id_xb` + `loss_ratio` in the inner loop.
-    meas: &'m AttributedMeasurement,
-    /// `true` when the leg RTT was resolved from the reverse direction
-    /// (per LegLookup §3.1 substitution).
-    was_substituted: bool,
-}
-
-/// Build per-candidate AX/XB leg lists from the baseline set using
-/// [`LegLookup`] for symmetry-aware substitution (spec §3.1).
-///
-/// AX = "A→X" for some baseline source agent A; XB = "X→B" with B as a
-/// baseline destination agent. The XB direction uses the source-
-/// symmetric `by_pair[(b_id, x_ip)]` lookup — see the `symmetry-approx`
-/// comment in [`evaluate`]'s inner triple loop. Pathological self-
-/// transits (X equals A's IP, or X equals B's IP) are skipped to keep
-/// degenerate `0.0`/`NaN` rows out of the L1 minima.
-///
-/// The [`LegLookup`] is functionally equivalent to the direct pair map for
-/// the no-substitution case — existing tests that predate substitution
-/// continue to pass unchanged.
-fn build_leg_sets<'m>(
-    x_ip: IpAddr,
-    baselines: &[(String, IpAddr, String, bool)],
-    by_pair: &HashMap<(String, IpAddr), &'m AttributedMeasurement>,
-    agent_by_id: &HashMap<String, IpAddr>,
-    leg_lookup: &LegLookup<'_>,
-) -> (Vec<AxLeg<'m>>, Vec<XbLeg<'m>>) {
-    let mut ax_legs: Vec<AxLeg<'m>> = Vec::new();
-    let mut xb_legs: Vec<XbLeg<'m>> = Vec::new();
-    let mut seen_ax: HashSet<&String> = HashSet::new();
-    let mut seen_xb: HashSet<&String> = HashSet::new();
-    let x_endpoint = Endpoint::CandidateIp { ip: x_ip };
-    for (a_id, b_ip, b_id, _direct_was_substituted) in baselines {
-        if Some(x_ip) == agent_by_id.get(a_id).copied() || x_ip == *b_ip {
-            continue;
-        }
-        if seen_ax.insert(a_id) {
-            let a_endpoint = Endpoint::Agent { id: a_id.clone() };
-            if let LegLookupResult::Found {
-                rtt_ms,
-                stddev_ms,
-                was_substituted,
-                ..
-            } = leg_lookup.lookup(&a_endpoint, &x_endpoint)
-            {
-                // Also need the backing AttributedMeasurement for mtr_measurement_id
-                // and loss_ratio. Fall back to direct pair map for the meas reference —
-                // the LegLookup captures the scalar values; the pair map provides the
-                // reference to the backing row.
-                if let Some(meas) = by_pair.get(&(a_id.clone(), x_ip)).copied() {
-                    ax_legs.push(AxLeg {
-                        a_id: a_id.clone(),
-                        rtt_ms,
-                        stddev_ms,
-                        meas,
-                        was_substituted,
-                    });
-                }
-            }
-        }
-        if seen_xb.insert(b_id) {
-            let b_endpoint = Endpoint::Agent { id: b_id.clone() };
-            if let LegLookupResult::Found {
-                rtt_ms,
-                stddev_ms,
-                was_substituted,
-                ..
-            } = leg_lookup.lookup(&b_endpoint, &x_endpoint)
-            {
-                if let Some(meas) = by_pair.get(&(b_id.clone(), x_ip)).copied() {
-                    xb_legs.push(XbLeg {
-                        b_id: b_id.clone(),
-                        rtt_ms,
-                        stddev_ms,
-                        meas,
-                        was_substituted,
-                    });
-                }
-            }
-        }
-    }
-    (ax_legs, xb_legs)
-}
-
-/// Apply the L1/L2/L3 cartesian-product prune for the eligibility caps.
-///
-/// Returns `None` when L2/L3 (or post-L1 emptiness) drops the candidate
-/// entirely; otherwise returns the surviving leg sets. See architecture
-/// #4 (monotonic composition + L1/L2/L3 pruning) for the reasoning.
-///
-/// * **L1** — single-leg cap: every leg's RTT (and stddev) must itself
-///   be ≤ the cap; no composition `a + b ≤ cap` (RTT) or
-///   `sqrt(a² + b²) ≤ cap` (stddev) can hold otherwise.
-/// * **L2** — candidate-level early termination: if even the
-///   `(min_ax, min_xb)` pairing exceeds the cap, no triple under this
-///   candidate can satisfy it — drop the candidate.
-/// * **L3** — tight bidirectional pre-filter: once L2 admits the
-///   candidate, an A→X leg must satisfy `rtt_ax + min_xb ≤ cap` and
-///   likewise for X→B. For stddev the algebra rearranges
-///   `sqrt(l.stddev² + min_other²) ≤ cap` to
-///   `l.stddev² ≤ cap² − min_other²`; a negative RHS means no leg can
-///   satisfy and the candidate drops.
-///
-/// The in-loop guard inside the triple loop is belt-and-braces against
-/// the residual case where L3 admits a leg that pairs with the
-/// *minimum* on the opposite side but not with a non-minimum partner.
-fn apply_l1_l2_l3_pruning<'m>(
-    mut ax_legs: Vec<AxLeg<'m>>,
-    mut xb_legs: Vec<XbLeg<'m>>,
-    max_rtt_cap: Option<f64>,
-    max_sd_cap: Option<f64>,
-) -> Option<(Vec<AxLeg<'m>>, Vec<XbLeg<'m>>)> {
-    // L1 — single-leg cap on RTT and stddev.
-    if let Some(cap) = max_rtt_cap {
-        let cap32 = cap as f32;
-        ax_legs.retain(|l| l.rtt_ms <= cap32);
-        xb_legs.retain(|l| l.rtt_ms <= cap32);
-    }
-    if let Some(cap) = max_sd_cap {
-        let cap32 = cap as f32;
-        ax_legs.retain(|l| l.stddev_ms <= cap32);
-        xb_legs.retain(|l| l.stddev_ms <= cap32);
-    }
-    if ax_legs.is_empty() || xb_legs.is_empty() {
-        return None;
-    }
-
-    // Compute the minima up-front; they feed L2 + L3.
-    let min_ax_rtt = ax_legs
-        .iter()
-        .map(|l| l.rtt_ms)
-        .reduce(f32::min)
-        .expect("ax_legs non-empty");
-    let min_xb_rtt = xb_legs
-        .iter()
-        .map(|l| l.rtt_ms)
-        .reduce(f32::min)
-        .expect("xb_legs non-empty");
-    let min_ax_sd = ax_legs
-        .iter()
-        .map(|l| l.stddev_ms)
-        .reduce(f32::min)
-        .expect("ax_legs non-empty");
-    let min_xb_sd = xb_legs
-        .iter()
-        .map(|l| l.stddev_ms)
-        .reduce(f32::min)
-        .expect("xb_legs non-empty");
-
-    // L2 — candidate-level early termination.
-    if let Some(cap) = max_rtt_cap {
-        if (min_ax_rtt + min_xb_rtt) as f64 > cap {
-            return None;
-        }
-    }
-    if let Some(cap) = max_sd_cap {
-        let composed = ((min_ax_sd * min_ax_sd + min_xb_sd * min_xb_sd) as f64).sqrt();
-        if composed > cap {
-            return None;
-        }
-    }
-
-    // L3 — tight bidirectional pre-filter (RTT).
-    if let Some(cap) = max_rtt_cap {
-        let cap32 = cap as f32;
-        ax_legs.retain(|l| l.rtt_ms + min_xb_rtt <= cap32);
-        xb_legs.retain(|l| l.rtt_ms + min_ax_rtt <= cap32);
-    }
-    // L3 — tight bidirectional pre-filter (stddev). Solve
-    // `sqrt(l.stddev² + min_other²) ≤ cap` ⇒
-    // `l.stddev² ≤ cap² − min_other²`. When the RHS is negative, no
-    // leg can satisfy — drop the candidate.
-    if let Some(cap) = max_sd_cap {
-        let cap_sq = cap * cap;
-        let xb_min_sq = (min_xb_sd as f64).powi(2);
-        let ax_min_sq = (min_ax_sd as f64).powi(2);
-        let ax_budget = cap_sq - xb_min_sq;
-        let xb_budget = cap_sq - ax_min_sq;
-        if ax_budget < 0.0 || xb_budget < 0.0 {
-            return None;
-        }
-        ax_legs.retain(|l| (l.stddev_ms as f64).powi(2) <= ax_budget);
-        xb_legs.retain(|l| (l.stddev_ms as f64).powi(2) <= xb_budget);
-    }
-    if ax_legs.is_empty() || xb_legs.is_empty() {
-        return None;
-    }
-    Some((ax_legs, xb_legs))
-}
 
 /// Decide whether a scored triple's pair-detail row is persisted.
 ///
@@ -563,58 +338,6 @@ fn passes_storage_filter(
     }
 }
 
-/// Scalar score for one `(A, X, B)` triple — composed transit RTT /
-/// stddev / improvement plus the compound loss ratio.
-///
-/// Pure derivation; the caller still gates eligibility, qualification,
-/// and storage on the returned [`TripleScore`]. Per spec §2.4
-/// (`docs/superpowers/specs/2026-04-19-campaigns-04-evaluation-and-results.md`):
-///
-/// * `transit_rtt = rtt_ax + rtt_xb`
-/// * `transit_stddev = sqrt(stddev_ax² + stddev_xb²)`
-/// * `improvement = direct_rtt − transit_rtt − stddev_weight ×
-///   (transit_stddev − direct_stddev)`
-/// * `compound_loss = 1 − (1 − loss_ax) × (1 − loss_xb)`
-struct TripleScore {
-    transit_rtt: f32,
-    transit_stddev: f32,
-    transit_penalty: f32,
-    improvement_ms: f32,
-    compound_loss_ratio: f32,
-    direct_loss_ratio: f32,
-    direct_stddev: f32,
-}
-
-fn score_triple(
-    direct: &AttributedMeasurement,
-    direct_rtt: f32,
-    a_to_x_leg: &AxLeg<'_>,
-    x_to_b_leg: &XbLeg<'_>,
-    stddev_weight: f32,
-) -> TripleScore {
-    let direct_stddev = direct.latency_stddev_ms.unwrap_or(0.0);
-    let ax_stddev = a_to_x_leg.stddev_ms;
-    let xb_stddev = x_to_b_leg.stddev_ms;
-
-    let transit_rtt = a_to_x_leg.rtt_ms + x_to_b_leg.rtt_ms;
-    let transit_stddev = (ax_stddev * ax_stddev + xb_stddev * xb_stddev).sqrt();
-    let direct_penalty = stddev_weight * direct_stddev;
-    let transit_penalty = stddev_weight * transit_stddev;
-    let improvement_ms = direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
-
-    let compound_loss_ratio =
-        1.0 - (1.0 - a_to_x_leg.meas.loss_ratio) * (1.0 - x_to_b_leg.meas.loss_ratio);
-
-    TripleScore {
-        transit_rtt,
-        transit_stddev,
-        transit_penalty,
-        improvement_ms,
-        compound_loss_ratio,
-        direct_loss_ratio: direct.loss_ratio,
-        direct_stddev,
-    }
-}
 
 /// Finalize a candidate's accumulated counters + per-triple lists into
 /// an [`EvaluationCandidateDto`].
@@ -702,59 +425,119 @@ fn candidate_order(a: &EvaluationCandidateDto, b: &EvaluationCandidateDto) -> st
         })
 }
 
-/// Optimization-mode qualify predicate: does the X transit beat every
-/// other mesh agent Y as an alternative transit for the same `(A, B)`?
+/// Extract AX / XB leg metadata from the winning X-containing route for
+/// pair-detail stamping.
 ///
-/// Uses the same source-symmetric `(A→Y, B→Y)` legs convention the X
-/// path uses, so Y must be reachable from both baseline endpoints
-/// through the campaign's measurements. The tiebreaker rejects X when
-/// any Y *ties or beats* X (`>=`) so an exact tie collapses to "Y
-/// preferred", per spec §2.4.
+/// Returns `(ax_was_substituted, xb_was_substituted, mtr_id_ax, mtr_id_xb)`.
 ///
-/// Returns `false` immediately when `improvement_ms ≤ 0` (the candidate
-/// can't improve a non-improving triple). The caller still passes
-/// `transit_rtt + transit_penalty` pre-composed so this helper stays a
-/// pure scalar comparison and avoids reaching back into the legs.
-fn qualifies_under_optimization(
-    a_id: &str,
-    b_id: &str,
+/// For a 1-hop route `A→X→B`: leg[0] is the AX leg, leg[1] is the XB leg.
+/// For a 2-hop route `A→X→Y→B`: leg[0] = AX, and there is no single XB leg
+///   — use the first leg touching X for AX meta and the last leg for XB meta.
+/// For a 2-hop route `A→Y→X→B`: leg[2] = XB; first leg is AX meta.
+///
+/// Falls back to `(false, false, None, None)` when intermediary ordering
+/// can't be determined (defensive: shouldn't happen on valid routes).
+fn extract_ax_xb_meta(
+    route: &routes::ComposedRoute,
+    x_endpoint: &Endpoint,
+) -> (bool, bool, Option<i64>, Option<i64>) {
+    let legs = &route.legs;
+    match route.intermediaries.as_slice() {
+        // 1-hop: A→X→B — leg[0]=AX, leg[1]=XB
+        [only] if only == x_endpoint => {
+            let ax = legs.first();
+            let xb = legs.get(1);
+            (
+                ax.map(|l| l.was_substituted).unwrap_or(false),
+                xb.map(|l| l.was_substituted).unwrap_or(false),
+                ax.and_then(|l| l.mtr_measurement_id),
+                xb.and_then(|l| l.mtr_measurement_id),
+            )
+        }
+        // 2-hop with X first: A→X→Y→B — leg[0]=AX, leg[1]=X→Y, leg[2]=Y→B
+        [first, _second] if first == x_endpoint => {
+            let ax = legs.first();
+            let xb = legs.last();
+            (
+                ax.map(|l| l.was_substituted).unwrap_or(false),
+                xb.map(|l| l.was_substituted).unwrap_or(false),
+                ax.and_then(|l| l.mtr_measurement_id),
+                xb.and_then(|l| l.mtr_measurement_id),
+            )
+        }
+        // 2-hop with X second: A→Y→X→B — leg[0]=A→Y, leg[1]=Y→X, leg[2]=XB
+        [_first, second] if second == x_endpoint => {
+            let ax = legs.get(1); // Y→X leg as AX proxy
+            let xb = legs.last();
+            (
+                ax.map(|l| l.was_substituted).unwrap_or(false),
+                xb.map(|l| l.was_substituted).unwrap_or(false),
+                ax.and_then(|l| l.mtr_measurement_id),
+                xb.and_then(|l| l.mtr_measurement_id),
+            )
+        }
+        // Direct or unexpected shape — defensive fallback.
+        _ => (false, false, None, None),
+    }
+}
+
+/// Optimization-mode qualify predicate using [`routes::enumerate_routes`].
+///
+/// X qualifies when no non-X route from A to B is at least as good as the
+/// X route (measured by penalised RTT). "At least as good" uses `>=` so an
+/// exact tie collapses to "non-X preferred", per spec §2.4.
+///
+/// Non-X routes use other mesh agents as transit intermediaries. Their IPs
+/// are expressed as `CandidateIp` endpoints so the `LegLookup` can resolve
+/// legs via its `(Agent(src_id), Ip(dst_ip))` index and symmetry substitution
+/// (e.g. `B→Y` used as `Y→B`). This matches the symmetry convention the
+/// original scalar optimization predicate relied on.
+///
+/// Returns `false` immediately when `improvement_ms ≤ 0`.
+#[allow(clippy::too_many_arguments)]
+fn qualifies_under_optimization_v2(
+    a_endpoint: &Endpoint,
+    b_endpoint: &Endpoint,
+    x_ip: IpAddr,
     transit_score: f32,
     improvement_ms: f32,
+    leg_lookup: &LegLookup<'_>,
     agents: &[AgentRow],
-    by_pair: &HashMap<(String, IpAddr), &AttributedMeasurement>,
+    a_id: &str,
+    b_id: &str,
+    max_hops: u8,
+    max_rtt_cap: Option<f64>,
+    max_sd_cap: Option<f64>,
     stddev_weight: f32,
 ) -> bool {
     if improvement_ms <= 0.0 {
         return false;
     }
-    for y in agents {
-        if y.agent_id == a_id || y.agent_id == b_id {
-            continue;
-        }
-        // Same symmetry convention as the X-transit legs: source-is-
-        // baseline-agent, destination-is-transit. `a→y` is "A pings
-        // Y"; `b→y` is "B pings Y" — the symmetry-approx for Y→B.
-        // Using `y→b` here would require Y to be a source agent in
-        // the campaign, which is a stricter invariant than what the
-        // baseline scan assumes.
-        let ay = by_pair.get(&(a_id.to_owned(), y.ip));
-        let by = by_pair.get(&(b_id.to_owned(), y.ip));
-        if let (Some(ay), Some(by)) = (ay, by) {
-            let Some(ay_rtt) = ay.latency_avg_ms else {
-                continue;
-            };
-            let Some(by_rtt) = by.latency_avg_ms else {
-                continue;
-            };
-            let ay_stddev = ay.latency_stddev_ms.unwrap_or(0.0);
-            let by_stddev = by.latency_stddev_ms.unwrap_or(0.0);
-            let ty_rtt = ay_rtt + by_rtt;
-            let ty_stddev_pen =
-                stddev_weight * (ay_stddev * ay_stddev + by_stddev * by_stddev).sqrt();
-            // Tiebreaker: reject X when any Y ties X exactly (cf. spec §2.4).
-            if transit_score >= ty_rtt + ty_stddev_pen {
-                return false;
-            }
+    // Build non-X alternative pool: other mesh agents (not A, not B, not X)
+    // expressed as CandidateIp endpoints so LegLookup can resolve their legs
+    // via the `(Agent(src_id), Ip(agent_ip))` stored measurements.
+    let non_x_pool: Vec<Endpoint> = agents
+        .iter()
+        .filter(|a| a.agent_id != a_id && a.agent_id != b_id && a.ip != x_ip)
+        .map(|a| Endpoint::CandidateIp { ip: a.ip })
+        .collect();
+
+    let alt_routes = routes::enumerate_routes(
+        leg_lookup,
+        a_endpoint,
+        b_endpoint,
+        &non_x_pool,
+        max_hops,
+        max_rtt_cap,
+        max_sd_cap,
+        stddev_weight,
+    );
+
+    for r in &alt_routes {
+        let alt_score = r.rtt_ms + stddev_weight * r.stddev_ms;
+        // Tiebreaker: reject X when any non-X alternative ties or beats X.
+        if transit_score >= alt_score {
+            return false;
         }
     }
     true
@@ -836,18 +619,29 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         .map(|m| m.destination_ip)
         .collect();
 
+    // Build the full pool of mesh-agent endpoints (used to compose multi-hop
+    // routes). Each baseline pair's inner loop subtracts A and B before passing
+    // the pool to `enumerate_routes`.
+    let agent_endpoints: Vec<Endpoint> = inputs
+        .agents
+        .iter()
+        .map(|a| Endpoint::Agent { id: a.agent_id.clone() })
+        .collect();
+
     let total_baseline = baselines.len() as i32;
     let mut candidate_rows: Vec<EvaluationCandidateDto> = Vec::new();
     let mut pair_details_per_candidate: Vec<PairDetailsForCandidate> = Vec::new();
     let mut unqualified_reasons: BTreeMap<String, String> = BTreeMap::new();
 
-    // T55 eligibility / storage knobs (snake-cased locally for the
-    // L1/L2/L3 pruning + inner-loop guards below). All four are
-    // [`Option<f64>`] — `None` means "knob unset; gate is open".
+    // T55 eligibility / storage knobs. All four are [`Option<f64>`] — `None`
+    // means "knob unset; gate is open".
     let max_rtt_cap = inputs.max_transit_rtt_ms;
     let max_sd_cap = inputs.max_transit_stddev_ms;
     let min_imp_ms = inputs.min_improvement_ms;
     let min_imp_ratio = inputs.min_improvement_ratio;
+
+    // Clamp max_hops to [0, 2] (validated upstream, but defence-in-depth).
+    let max_hops = inputs.max_hops.clamp(0, 2) as u8;
 
     for x_ip in &candidates {
         let has_from_any = inputs
@@ -858,25 +652,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
             continue;
         }
 
-        // T55 cartesian-product pruning (architecture #4): build the
-        // per-candidate AX/XB leg sets, then fold L1/L2/L3 over them.
-        // `apply_l1_l2_l3_pruning` returns `None` when L2/L3 (or post-
-        // L1 emptiness) drops the candidate entirely — at which point
-        // we skip without writing a row.
-        let (ax_legs, xb_legs) =
-            build_leg_sets(*x_ip, &baselines, &by_pair, &agent_by_id, &leg_lookup);
-        let Some((ax_legs, xb_legs)) =
-            apply_l1_l2_l3_pruning(ax_legs, xb_legs, max_rtt_cap, max_sd_cap)
-        else {
-            continue;
-        };
-
-        // Index the surviving legs back by id so the inner triple
-        // loop can look them up cheaply.
-        let ax_by_id: HashMap<&str, &AxLeg<'_>> =
-            ax_legs.iter().map(|l| (l.a_id.as_str(), l)).collect();
-        let xb_by_id: HashMap<&str, &XbLeg<'_>> =
-            xb_legs.iter().map(|l| (l.b_id.as_str(), l)).collect();
+        let x_endpoint = Endpoint::CandidateIp { ip: *x_ip };
 
         let mut pair_details: Vec<EvaluationPairDetailDto> = Vec::new();
         let mut qualifying_legs: Vec<(String, String)> = Vec::new();
@@ -887,6 +663,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         let mut any_threshold_fail = false;
 
         for (a_id, b_ip, b_id, direct_was_substituted) in &baselines {
+            // Exclude degenerate triples where X is A or B.
             if Some(*x_ip) == agent_by_id.get(a_id).copied() {
                 continue;
             }
@@ -898,33 +675,93 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 Some(m) => *m,
                 None => continue,
             };
-            let Some(a_to_x_leg) = ax_by_id.get(a_id.as_str()) else {
-                continue;
-            };
-            let Some(x_to_b_leg) = xb_by_id.get(b_id.as_str()) else {
-                continue;
-            };
-            let a_to_x = a_to_x_leg.meas;
-            let x_to_b = x_to_b_leg.meas;
-
             let Some(direct_rtt) = direct.latency_avg_ms else {
                 continue;
             };
-            let TripleScore {
-                transit_rtt,
-                transit_stddev,
-                transit_penalty,
-                improvement_ms,
-                compound_loss_ratio,
-                direct_loss_ratio,
-                direct_stddev,
-            } = score_triple(
-                direct,
-                direct_rtt,
-                a_to_x_leg,
-                x_to_b_leg,
+            let direct_stddev = direct.latency_stddev_ms.unwrap_or(0.0);
+            let direct_loss_ratio = direct.loss_ratio;
+
+            // Build the intermediary pool for route enumeration:
+            // all agents except A and B, plus X as a CandidateIp endpoint.
+            // This allows X to appear in any intermediary position up to max_hops.
+            //
+            // Both A (source) and B (destination) are mesh agents, so their
+            // endpoints carry agent IDs. X is a non-mesh candidate IP.
+            // The LegLookup stores measurements as (Agent(src_id), Ip(dst_ip)),
+            // so using Agent endpoints for A and B lets the leg resolver find
+            // both direct (A→X, A→B) and symmetry-substituted (B→X used as X→B)
+            // measurements correctly.
+            let a_endpoint = Endpoint::Agent { id: a_id.clone() };
+            let b_endpoint = Endpoint::Agent { id: b_id.clone() };
+            let pool: Vec<Endpoint> = agent_endpoints
+                .iter()
+                .filter(|e| {
+                    // Exclude A (source) and B (destination).
+                    !matches!(e, Endpoint::Agent { id } if id == a_id || id == b_id)
+                })
+                .cloned()
+                .chain(std::iter::once(x_endpoint.clone()))
+                .collect();
+
+            let all_routes = routes::enumerate_routes(
+                &leg_lookup,
+                &a_endpoint,
+                &b_endpoint,
+                &pool,
+                max_hops,
+                max_rtt_cap,
+                max_sd_cap,
                 inputs.stddev_weight,
             );
+
+            // Filter to routes that include X in their intermediaries.
+            // For 1-hop this is A→X→B; for 2-hop both A→X→Y→B and
+            // A→Y→X→B are included; `min_by` picks the better of the two.
+            let with_x: Vec<&routes::ComposedRoute> = all_routes
+                .iter()
+                .filter(|r| r.intermediaries.iter().any(|e| e == &x_endpoint))
+                .collect();
+
+            let Some(best_x_route) = with_x.iter().min_by(|a, b| {
+                let score_a = a.rtt_ms + inputs.stddev_weight * a.stddev_ms;
+                let score_b = b.rtt_ms + inputs.stddev_weight * b.stddev_ms;
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) else {
+                // No X-containing route is reachable.
+                continue;
+            };
+
+            let transit_rtt = best_x_route.rtt_ms;
+            let transit_stddev = best_x_route.stddev_ms;
+            let transit_penalty = inputs.stddev_weight * transit_stddev;
+            let compound_loss_ratio = best_x_route.loss_ratio;
+            let direct_penalty = inputs.stddev_weight * direct_stddev;
+            let improvement_ms =
+                direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
+
+            // Determine where X sits in the winning route intermediary order.
+            // Position 1 = X is first intermediary (A→X→…→B);
+            // Position 2 = X is second intermediary (A→Y→X→B).
+            // None when max_hops ≤ 1 (only one possible position).
+            let winning_x_position: Option<u8> = if max_hops < 2 {
+                None
+            } else {
+                best_x_route
+                    .intermediaries
+                    .iter()
+                    .position(|e| e == &x_endpoint)
+                    .map(|pos| (pos + 1) as u8)
+            };
+
+            // Extract AX and XB leg metadata from the winning route.
+            // For 1-hop: leg[0] = A→X, leg[1] = X→B.
+            // For 2-hop with X first: leg[0] = A→X, leg[1] = X→Y, leg[2] = Y→B.
+            // For 2-hop with X second: leg[0] = A→Y, leg[1] = Y→X, leg[2] = X→B.
+            // mtr_measurement_id and was_substituted come from the legs.
+            let (ax_was_substituted, xb_was_substituted, mtr_id_ax, mtr_id_xb) =
+                extract_ax_xb_meta(best_x_route, &x_endpoint);
 
             let loss_ok = compound_loss_ratio <= inputs.loss_threshold_ratio
                 && direct_loss_ratio <= inputs.loss_threshold_ratio;
@@ -933,38 +770,29 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 continue;
             }
 
-            // Eligibility — last line of defence after L1+L2+L3.
-            // L3 retains legs that pair with the *minimum* on the
-            // opposite side; a non-minimum partner can still violate
-            // the combined cap, so this in-loop guard is load-bearing.
-            // NaN/Inf transit values would not be caught by this `>`
-            // check (NaN comparisons return false in IEEE 754); they
-            // cannot reach this point in practice because
-            // `build_leg_sets` requires `latency_avg_ms.is_some()` from
-            // the DB before pushing a leg, and the inner loop already
-            // short-circuits on `direct.latency_avg_ms.is_none()`.
-            if let Some(cap) = max_rtt_cap {
-                if (transit_rtt as f64) > cap {
-                    continue;
-                }
-            }
-            if let Some(cap) = max_sd_cap {
-                if (transit_stddev as f64) > cap {
-                    continue;
-                }
-            }
-
             let qualifies = match inputs.mode {
                 EvaluationMode::Diversity => improvement_ms > 0.0,
-                EvaluationMode::Optimization => qualifies_under_optimization(
-                    a_id,
-                    b_id,
-                    transit_rtt + transit_penalty,
-                    improvement_ms,
-                    &inputs.agents,
-                    &by_pair,
-                    inputs.stddev_weight,
-                ),
+                EvaluationMode::Optimization => {
+                    // Optimization: X qualifies only when no non-X route
+                    // is at least as good as the X route. Build all non-X
+                    // routes (routes where X does NOT appear in intermediaries)
+                    // from the full agent pool (excluding A, B, and X).
+                    qualifies_under_optimization_v2(
+                        &a_endpoint,
+                        &b_endpoint,
+                        *x_ip,
+                        transit_rtt + transit_penalty,
+                        improvement_ms,
+                        &leg_lookup,
+                        &inputs.agents,
+                        a_id,
+                        b_id,
+                        max_hops,
+                        max_rtt_cap,
+                        max_sd_cap,
+                        inputs.stddev_weight,
+                    )
+                }
                 // EdgeCandidate is dispatched at the top of `evaluate`
                 // and never reaches this match — the dispatcher
                 // returns from `edge_candidate::evaluate` first.
@@ -1023,13 +851,13 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
                 transit_loss_ratio: compound_loss_ratio,
                 improvement_ms,
                 qualifies,
-                mtr_measurement_id_ax: a_to_x.mtr_measurement_id,
-                mtr_measurement_id_xb: x_to_b.mtr_measurement_id,
+                mtr_measurement_id_ax: mtr_id_ax,
+                mtr_measurement_id_xb: mtr_id_xb,
                 destination_hostname: None,
-                ax_was_substituted: Some(a_to_x_leg.was_substituted),
-                xb_was_substituted: Some(x_to_b_leg.was_substituted),
+                ax_was_substituted: Some(ax_was_substituted),
+                xb_was_substituted: Some(xb_was_substituted),
                 direct_was_substituted: Some(*direct_was_substituted),
-                winning_x_position: None,
+                winning_x_position,
             });
         }
 
