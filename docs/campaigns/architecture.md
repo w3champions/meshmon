@@ -402,9 +402,12 @@ Campaign header row. Columns (selected):
 | `probe_stagger_ms` | `INTEGER` | Inter-probe stagger, default 100. |
 | `force_measurement` | `BOOLEAN` | When `true`, reuse lookup is skipped. |
 | `loss_threshold_ratio`, `stddev_weight` | `REAL` | Evaluator knobs. |
-| `evaluation_mode` | `evaluation_mode` enum | `diversity` or `optimization`. |
-| `max_transit_rtt_ms`, `max_transit_stddev_ms` | `DOUBLE PRECISION`, nullable | Eligibility caps on the composed transit path. NULL → off. |
+| `evaluation_mode` | `evaluation_mode` enum | `diversity`, `optimization`, or `edge_candidate`. |
+| `max_transit_rtt_ms`, `max_transit_stddev_ms` | `DOUBLE PRECISION`, nullable | Eligibility caps on the composed transit path. NULL → off. Used by diversity and optimization modes only. |
 | `min_improvement_ms`, `min_improvement_ratio` | `DOUBLE PRECISION`, nullable | Storage floors for per-pair scoring rows; combine with OR semantics. NULL → off. |
+| `useful_latency_ms` | `REAL`, nullable | EdgeCandidate mode: RTT threshold T (ms) below which a route counts as "useful". Required when `evaluation_mode = edge_candidate`; rejected at API validation when absent. |
+| `max_hops` | `SMALLINT`, not null, default 2 | EdgeCandidate mode: maximum transit hops for route enumeration. Range 0–2; 0 = direct only, 1 = one intermediate hop, 2 = up to two intermediate hops. Diversity and optimization receive the default and ignore it. |
+| `vm_lookback_minutes` | `INTEGER`, not null, default 15 | VictoriaMetrics baseline lookback window in minutes. Applies to all modes; the default (15 min) was previously implicit in the VM query. |
 | `created_by`, `created_at` | `TEXT` / `TIMESTAMPTZ` | Audit. |
 | `started_at`, `stopped_at`, `completed_at`, `evaluated_at` | `TIMESTAMPTZ` | Lifecycle timestamps. |
 
@@ -495,7 +498,7 @@ Five Postgres ENUMs created by the migration:
 | `probe_protocol` | `icmp`, `tcp`, `udp` |
 | `campaign_state` | `draft`, `running`, `completed`, `evaluated`, `stopped` |
 | `pair_resolution_state` | `pending`, `dispatched`, `reused`, `succeeded`, `unreachable`, `skipped` |
-| `evaluation_mode` | `diversity`, `optimization` |
+| `evaluation_mode` | `diversity`, `optimization`, `edge_candidate` |
 | `measurement_kind` | `campaign`, `detail_ping`, `detail_mtr` |
 
 `campaign::model` mirrors every enum via `#[derive(sqlx::Type)]` with
@@ -1026,14 +1029,151 @@ The scheduler samples once per tick via `repo::metrics_snapshot`:
 The snapshot query uses runtime `sqlx::query_as::<_, (T, i64)>` so new
 metric aggregates do not require a `.sqlx/` regeneration.
 
+## Evaluation modes
+
+Three evaluation modes are available. The mode is stored on
+`measurement_campaigns.evaluation_mode` and is snapshotted onto
+`campaign_evaluations.evaluation_mode` when a campaign is evaluated.
+
+### Diversity
+
+X qualifies when the composed route A→X→B has lower penalised RTT than
+the direct A→B path, regardless of what the existing mesh already
+provides. Useful for redundancy planning — identifies every potential
+improvement, including ones the mesh might already cover through another
+transit.
+
+### Optimization
+
+X qualifies when A→X→B has lower penalised RTT than the direct A→B
+path, AND when no other mesh transit agent Y produces an A→Y→B route
+that is at least as good as A→X→B. Useful for acquisition decisions —
+identifies only the destinations that beat the mesh's best existing
+option.
+
+Both diversity and optimization evaluate **transit hops**: the
+candidate IP (X) is tested as an intermediate node in the path between
+two existing mesh agents (A→X→B). X is not itself assumed to be an
+agent.
+
+### EdgeCandidate
+
+EdgeCandidate evaluates **new edge nodes** (X) by their connectivity to
+a fixed set of mesh agents rather than by transit-hop improvement. The
+semantic difference from diversity and optimization:
+
+- **Diversity / optimization**: candidate X is evaluated as a transit
+  between two mesh agents (A→X→B). Baselines are agent→agent direct
+  paths (A→B).
+- **EdgeCandidate**: X is evaluated as a new leaf node. Each source
+  agent (A) serves dual roles — as the prober and as one of the mesh
+  agents X is evaluated against. The question is "how well does X
+  connect to the mesh?" measured by the best available route
+  X→A (route shape: X→A direct, X→M→A one-hop, X→M₁→M₂→A two-hop,
+  where M is another mesh agent).
+
+Route shapes for a single (X, A) pair:
+
+```
+Direct (0 hops):    X ─────────────────────────── A
+
+1-hop:              X ─── M ──────────────────── A
+
+2-hop:              X ─── M₁ ─── M₂ ─────────── A
+```
+
+X's connectivity to A is measured as the best-RTT route among all
+route shapes allowed by `max_hops`. A route is "useful" when its RTT is
+below `useful_latency_ms` (threshold T). The per-(X, A) result carries:
+
+- `best_route_ms` — RTT of the winning route (or `null` for
+  unreachable).
+- `best_route_legs` — JSONB array of the winning route's legs, each leg
+  carrying RTT, stddev, loss, substitution flag, and MTR id.
+- `is_unreachable` — `true` when no route resolved.
+
+Candidate-level aggregates (stored in `campaign_evaluation_candidates`):
+
+- `coverage_count` — count of destination agents with a useful
+  (`best_route_ms < T`) connection.
+- `coverage_weighted_ping_ms` — weighted average RTT across useful
+  connections (lower is better).
+- `mean_ms_under_t` — mean best-route RTT across useful connections.
+- `winning_x_position` — for 2-hop routes, indicates whether X appears
+  first or second in the intermediary list.
+
+#### Symmetry-fallback rule
+
+When no forward measurement for an X→A leg is available (because X is
+a candidate IP, not an agent, and agents probe outward not inward),
+the evaluator substitutes the reverse A→X measurement and sets
+`was_substituted = true` on the affected `LegMeasurement`. Broken legs
+(both directions have 100% loss) and missing legs (neither direction has
+data) discard the route. This rule applies only to EdgeCandidate mode;
+diversity and optimization always probe A→X directly via the campaign
+pairs.
+
+#### LegLookup indexing model
+
+`LegLookup` indexes all attributed measurements in a single
+`forward: HashMap<(EndpointKey, EndpointKey), &AttributedMeasurement>`
+map. The key type is `EndpointKey`, a two-variant enum:
+
+- `EndpointKey::Agent(agent_id: String)` — mesh agent identified by its
+  string id.
+- `EndpointKey::Ip(ip: IpAddr)` — any IP-addressed endpoint (candidate
+  or mesh agent referenced by IP rather than id).
+
+Every measurement is stored once as `(Agent(source_agent_id), Ip(destination_ip))`.
+A lookup for a leg `(from, to)` probes both the forward key and the
+reverse key `(to, from)` — the symmetry-fallback rule is implemented at
+this lookup layer.
+
+**Architectural limitation**: `Agent → Agent` legs cannot be resolved.
+No measurement is ever stored with an `Agent` key as the destination;
+agents probe IP addresses and the destination is always an `Ip` key.
+This means that in diversity and optimization mode, 2-hop routes where
+a mesh agent Y appears as an intermediary between two other agents must
+use `CandidateIp(Y.ip)` not `Agent(Y.id)` as Y's endpoint form — one
+form resolves and the other does not. The route pool in those modes
+includes both `Agent` and `CandidateIp` forms of every agent for
+precisely this reason; non-matching forms produce no route and are
+filtered out by `enumerate_routes`.
+
+In EdgeCandidate mode the route pool is built from both forms per agent
+(dual-form pool), ensuring that both X→M (forward lookup using
+`CandidateIp(X)` and `Agent(M)`) and M→X reverse substitution
+(reverse lookup `(Agent(M), Ip(X))`) can resolve correctly.
+
+#### EdgeCandidate persistence
+
+A dedicated table, `campaign_evaluation_edge_pair_details`, holds one
+row per (X, A) pair:
+
+| Column | Notes |
+|---|---|
+| `evaluation_id` | FK → `campaign_evaluations(id) ON DELETE CASCADE`. |
+| `candidate_ip` | The edge candidate IP (X). |
+| `destination_agent_id` | The mesh agent (A) this pair was evaluated against. |
+| `best_route_ms` | Winning route RTT (ms); `null` for unreachable. |
+| `best_route_legs` | JSONB array of `LegMeasurement`s for the winning route. |
+| `is_unreachable` | `true` when no route resolved. |
+| `winning_x_position` | For 2-hop routes: 1 = X is first intermediary, 2 = X is second; null for direct or 1-hop. |
+
+Unlike `campaign_evaluation_pair_details` (diversity/optimization), this
+table has no `qualifies` column — every resolved pair is persisted; the
+`useful_latency_ms` threshold determines which pairs contribute to
+`coverage_count` on the candidate row but does not gate row storage.
+
 ## Evaluation
 
 Evaluation answers "which destination X improves A → X → B over A → B?"
-using the measurements attributed to a campaign (joined via
-`campaign_pairs.measurement_id`) plus, when configured, a VictoriaMetrics
-continuous-mesh fallback for agent→agent baseline pairs the campaign
-itself did not cover. The algorithm runs entirely in-process; no worker,
-no queue.
+(diversity/optimization) or "how well does X connect to the mesh?"
+(edge_candidate), using the measurements attributed to a campaign (joined
+via `campaign_pairs.measurement_id`) plus, when configured, a
+VictoriaMetrics continuous-mesh fallback for agent→agent baseline pairs
+the campaign itself did not cover. The algorithm runs entirely in-process;
+no worker, no queue.
 
 ### Baselines
 
@@ -1070,7 +1210,7 @@ in favour of the active probe.
 them in the PromQL selector, and agent IDs are validated at register
 time against `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
-### Result aggregation
+### Result aggregation — diversity and optimization
 
 The evaluator builds an in-memory matrix keyed by
 `(source_agent_id, destination_ip)` where the value is an
@@ -1100,6 +1240,25 @@ A triple `(A, B, X)` qualifies iff:
 Per-candidate aggregates: `pairs_improved`, `avg_improvement_ms`,
 `avg_loss_ratio`,
 `composite_score = (pairs_improved / total_baseline_pairs) × avg_improvement_ms`.
+
+### Result aggregation — edge_candidate
+
+The edge_candidate evaluator runs as a separate code path in
+`crates/service/src/campaign/eval/edge_candidate.rs`. The input set
+is the same attributed measurements, but the evaluation question differs.
+
+For every candidate IP (X) in `measurement_campaigns.destination_ips`,
+and for every source agent A in the campaign's agent roster, the
+evaluator enumerates all routes from X to A (direct, 1-hop, 2-hop)
+using `enumerate_routes` with the mesh agent pool, up to `max_hops`
+intermediary hops. The best route (lowest penalised RTT) is selected;
+its legs are stored in `best_route_legs` JSONB alongside `best_route_ms`.
+
+An (X, A) pair is "useful" when `best_route_ms < useful_latency_ms`.
+Candidate-level aggregates count useful pairs and compute weighted
+averages across them. The result is persisted to
+`campaign_evaluation_edge_pair_details` (one row per (X, A)) rather
+than `campaign_evaluation_pair_details`.
 
 ### Evaluation storage
 
@@ -1145,8 +1304,22 @@ The row set is relational. Four tables, all chained to
 - **`campaign_evaluation_unqualified_reasons`** — one row per rejected
   destination. Keyed by `(evaluation_id, destination_ip)` with a
   free-text `reason` column the UI renders verbatim.
+- **`campaign_evaluation_edge_pair_details`** — EdgeCandidate-only.
+  One row per `(X, A)` pair, keyed by
+  `(evaluation_id, candidate_ip, destination_agent_id)`. Columns:
+  `best_route_ms` (nullable), `best_route_legs` (JSONB array of
+  `LegMeasurement`s for the winning route), `is_unreachable` (bool),
+  `winning_x_position` (nullable `SMALLINT`). Cascades from
+  `campaign_evaluations`; written by `evaluation_repo::insert_evaluation`
+  in the same transaction as the other child tables, but only when
+  `evaluation_mode = edge_candidate`.
 
-All three child tables cascade from `campaign_evaluations`, which in
+The `campaign_evaluation_candidates` row carries additional columns for
+EdgeCandidate evaluations: `coverage_count`, `coverage_weighted_ping_ms`,
+`mean_ms_under_t`, `winning_x_position` — all nullable; populated only
+for EdgeCandidate mode and left NULL for diversity/optimization.
+
+All child tables cascade from `campaign_evaluations`, which in
 turn cascades from `measurement_campaigns`, so deleting a campaign
 tears down its entire evaluation history.
 

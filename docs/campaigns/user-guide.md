@@ -328,16 +328,18 @@ time or via an edit delta); that flag skips the lookup entirely.
 
 ## Reading results
 
-Open the campaign in `/campaigns/:id`. The page splits into four tabs;
+Open the campaign in `/campaigns/:id`. The page splits into tabs;
 the active tab rides in the URL as `?tab=` so refreshes and shared
 links survive.
 
-| Tab | What it answers |
-|---|---|
-| **Candidates** (default) | Which destinations improve direct paths? |
-| **Pairs** | What happened to each baseline pair? |
-| **Raw** | Every measurement attributed to the campaign, including in-flight detail work. |
-| **Settings** | What knobs did the evaluator use? Re-evaluate here. |
+| Tab | What it answers | Modes |
+|---|---|---|
+| **Candidates** (default) | Which destinations qualify? | all |
+| **Heatmap** | X × A latency matrix | `edge_candidate` only |
+| **Pairs** | What happened to each baseline pair? | all |
+| **Compare** | Re-aggregated candidate stats against a subset of agents | all |
+| **Raw** | Every measurement attributed to the campaign, including in-flight detail work. | all |
+| **Settings** | What knobs did the evaluator use? Re-evaluate here. | all |
 
 ### Candidates tab
 
@@ -424,7 +426,123 @@ Use **Diversity** when you want to know every destination that beats
 the direct path, regardless of what the mesh already provides —
 useful for redundancy planning. Use **Optimization** (default) when
 you want only destinations that beat every alternative the mesh
-already has — useful for "should we acquire this server?"
+already has — useful for "should we acquire this server?" Use
+**Edge candidate** when you want to measure how well a new IP (X)
+connects to each source agent in the mesh — useful for evaluating
+servers you are considering adding as leaf nodes.
+
+## Evaluating new edge candidates
+
+Edge candidate mode measures how well candidate IPs (X) reach each
+source agent in the mesh, rather than scoring X as a transit between
+two agents. The workflow below walks through a full campaign from setup
+to results.
+
+### 1. Open the Campaigns composer
+
+Navigate to **/campaigns/new**.
+
+### 2. Select Edge candidate as the evaluation mode
+
+In the **Evaluation mode** selector, choose **Edge candidate**. The
+composer updates the knob panel to show the edge-candidate-specific
+parameters.
+
+### 3. Pick the source agents
+
+In the **Sources** picker, select the mesh agents that will probe the
+candidates. These agents serve a dual role: they are both the probers
+(they issue the measurements to each candidate IP) and the mesh agents
+that the candidates are evaluated against (a candidate's coverage score
+is the fraction of these agents it reaches under the latency threshold).
+
+An explainer callout on the source picker describes this dual role.
+When only one source agent is selected, a banner in the results view
+notes that the evaluation reflects connectivity to a single agent.
+
+### 4. Pick the candidate destinations
+
+In the **Destinations** picker, select the candidate IPs (X) you want
+to evaluate. These are the edge nodes under consideration — they do not
+need to be existing mesh members. Use the catalogue filter rail or the
+paste flow to add them.
+
+### 5. Set the `useful_latency_ms` threshold
+
+The **Useful latency** field is required. Enter the RTT (in ms) below
+which a route from candidate X to a mesh agent is considered useful.
+Candidates with more useful connections rank higher. A route whose RTT
+exceeds this threshold is still measured and stored, but it does not
+count toward `coverage_count`.
+
+### 6. Optionally adjust `max_hops`
+
+**Max hops** controls how many intermediate mesh agents may appear in a
+route. Default is 2.
+
+| Value | Allowed route shapes |
+|---|---|
+| 0 | Direct only (X → A) |
+| 1 | Direct or one intermediate hop (X → M → A) |
+| 2 | Direct, one-hop, or two-hop (X → M₁ → M₂ → A) |
+
+Lower values run faster; higher values find more paths at the cost of
+additional route enumeration.
+
+### 7. Optionally adjust `vm_lookback_minutes`
+
+**VM lookback** sets how far back (in minutes) the evaluator pulls
+continuous-mesh baselines from VictoriaMetrics for agent→agent legs
+that the campaign's own probes did not cover. Default is 15 minutes.
+This knob is available in all modes; for edge_candidate it affects mesh
+inter-agent legs used as intermediary hops.
+
+### 8. Run and evaluate
+
+Click **Start**. Once the campaign reaches **Completed**, the
+evaluator runs automatically. You can also click **Re-evaluate** on
+the **Settings** tab to re-score against the same measurements with
+adjusted knobs.
+
+### 9. Review results
+
+The results page shows the following tabs for an edge-candidate
+evaluation:
+
+| Tab | Content |
+|---|---|
+| **Candidates** | Candidate rows ranked by `coverage_count` then `coverage_weighted_ping_ms`. Each row shows coverage count, weighted ping, mean RTT under threshold, and a route-mix breakdown (direct / 1-hop / 2-hop). |
+| **Heatmap** | X × A latency matrix. Rows are destination agents (A), columns are candidate IPs (X). Each cell shows `best_route_ms` or "—" for unreachable pairs; color tiers are derived from `useful_latency_ms`. Available only for edge_candidate evaluations. |
+| **Pairs** | Raw pair list showing each `(source_agent, destination_ip)` pair's resolution state and measurement outcome. |
+| **Compare** | Re-aggregated candidate stats against a subset of source agents. Use the agent picker to narrow which agents' connections count toward the comparison. |
+| **Raw** | Every measurement attributed to the campaign. |
+| **Settings** | Knobs used by the last evaluation, plus the Re-evaluate button. |
+
+### Heatmap color editor
+
+In the **Heatmap** tab, click the color-tier button to open the
+**HeatmapColorEditor** popover. Four boundary handles divide the
+color spectrum into five tiers (excellent / good / fair / marginal /
+poor). Default boundaries are computed from `useful_latency_ms`
+(`0.4·T`, `T`, `2·T`, `4·T`). Drag a handle or type a value to
+customize; the changes persist to localStorage at
+`meshmon.evaluation.heatmap.edge_candidate.colors` so the view is
+preserved across sessions.
+
+### Compare tab agent picker
+
+In the **Compare** tab, use the agent picker to select a subset of
+source agents. The candidate stats are re-aggregated in real time
+against only the selected agents, so you can see how a candidate
+performs for a specific region or cluster without re-running the
+campaign.
+
+### Legacy evaluations
+
+Evaluations made before `useful_latency_ms`, `max_hops`, and
+`vm_lookback_minutes` were added carry a **Legacy** badge in the
+Settings tab. Re-running **Re-evaluate** with the new knobs set will
+produce a fresh evaluation row without the legacy marker.
 
 ## Evaluation guardrails
 
@@ -600,8 +718,15 @@ Per-campaign parameters exposed in the composer:
 - `loss_threshold_ratio` — evaluator's loss-rate threshold as a fraction
   (default 0.02, i.e. 2 %).
 - `stddev_weight` — weight applied to RTT stddev (default 1.0).
-- `evaluation_mode` — `diversity` or `optimization` (default
-  `optimization`).
+- `evaluation_mode` — `diversity`, `optimization`, or `edge_candidate`
+  (default `optimization`).
+- `useful_latency_ms` — EdgeCandidate only. RTT threshold T (ms) below
+  which a connection is "useful". Required when `evaluation_mode` is
+  `edge_candidate`.
+- `max_hops` — EdgeCandidate only. Maximum intermediary hops per route
+  (0–2, default 2).
+- `vm_lookback_minutes` — VictoriaMetrics baseline lookback window in
+  minutes (default 15). Applies to all modes.
 
 ### Diversity vs Optimization
 
