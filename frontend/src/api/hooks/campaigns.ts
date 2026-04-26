@@ -59,6 +59,51 @@ export function campaignEvaluationKey(id: string) {
 }
 
 /**
+ * Prefix key covering every cached `/evaluation/edge_pairs` page for a
+ * campaign (regardless of filter). Used by the SSE `evaluated` handler so
+ * every active edge-pairs view refetches on a new evaluation run.
+ */
+export function campaignEdgePairsPrefixKey(id: string) {
+  return ["campaigns", "entry", id, "edge_pairs"] as const;
+}
+
+/**
+ * Narrow variant of {@link campaignEdgePairsPrefixKey} that also keys on the
+ * active filter set. Each filter permutation is a separate cache entry; prefix
+ * invalidation from SSE sweeps them all at once.
+ */
+export function campaignEdgePairsKey(id: string, query: EdgePairsQuery) {
+  return ["campaigns", "entry", id, "edge_pairs", query] as const;
+}
+
+/**
+ * Query parameters for `GET /api/campaigns/{id}/evaluation/edge_pairs`.
+ *
+ * The backend takes separate `sort` and `dir` params; `EdgePairsSortCol` and
+ * `EdgePairsSortDir` mirror the generated schema enum values exactly.
+ */
+export type EdgePairsSortCol =
+  | "best_route_ms"
+  | "best_route_loss_ratio"
+  | "best_route_stddev_ms"
+  | "best_route_kind"
+  | "qualifies_under_t"
+  | "is_unreachable"
+  | "candidate_ip"
+  | "destination_agent_id";
+
+export type EdgePairsSortDir = "asc" | "desc";
+
+export interface EdgePairsQuery {
+  candidate_ip?: string;
+  qualifies_only?: boolean;
+  reachable_only?: boolean;
+  sort?: EdgePairsSortCol;
+  dir?: EdgePairsSortDir;
+  limit?: number;
+}
+
+/**
  * Prefix key covering every cached `/measurements` page for a campaign
  * (regardless of filter). Used by the SSE `pair_settled` handler and by
  * `useTriggerDetail`'s `onSuccess` so in-flight detail rows surface live on

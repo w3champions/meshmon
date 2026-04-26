@@ -8,22 +8,29 @@
  * so a client that subscribes after the commit misses its own frame.
  * `useTriggerDetail` invalidates the `measurements` prefix so the Raw tab
  * refetches after a dispatch creates new pairs.
+ * `useEdgePairDetails` is the paginated feed for the edge-candidate evaluation
+ * edge-pairs table (mode=`edge_candidate` only).
  */
 
 import {
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import {
+  campaignEdgePairsKey,
   campaignEvaluationKey,
   campaignKey,
   campaignMeasurementsPrefixKey,
   campaignPairsKey,
   campaignPreviewKey,
+  type EdgePairsQuery,
 } from "@/api/hooks/campaigns";
 import type { components } from "@/api/schema.gen";
 import { useSeedHostnamesOnResponse } from "@/components/ip-hostname";
@@ -32,6 +39,8 @@ export type Evaluation = components["schemas"]["EvaluationDto"];
 export type DetailRequest = components["schemas"]["DetailRequest"];
 export type DetailResponse = components["schemas"]["DetailResponse"];
 export type DetailScope = components["schemas"]["DetailScope"];
+export type EdgePairsListResponse = components["schemas"]["EdgePairsListResponse"];
+export type EvaluationEdgePairDetailDto = components["schemas"]["EvaluationEdgePairDetailDto"];
 
 /**
  * Fetch a campaign's evaluation row. Returns `null` on 404 so the caller can
@@ -137,5 +146,58 @@ export function useTriggerDetail(): UseMutationResult<
       // Prefix invalidation so every filter variant of the Raw tab refetches.
       queryClient.invalidateQueries({ queryKey: campaignMeasurementsPrefixKey(id) });
     },
+  });
+}
+
+/**
+ * Infinite-cursor feed for `GET /api/campaigns/{id}/evaluation/edge_pairs`.
+ *
+ * Only applicable to `edge_candidate`-mode campaigns. Pages accumulate in a
+ * single cache entry keyed on `(campaignId, query)`; the table calls
+ * `fetchNextPage()` as the virtualized list approaches the bottom. Disabled
+ * while `campaignId` is undefined.
+ *
+ * Cache invalidation: the SSE `evaluated` handler in `campaign-stream.ts`
+ * calls `invalidateQueries({ queryKey: campaignEdgePairsPrefixKey(id) })`,
+ * which cascades to every active filter variant by prefix match.
+ */
+export function useEdgePairDetails(
+  campaignId: string | undefined,
+  query: EdgePairsQuery,
+): UseInfiniteQueryResult<InfiniteData<EdgePairsListResponse>, Error> {
+  return useInfiniteQuery<
+    EdgePairsListResponse,
+    Error,
+    InfiniteData<EdgePairsListResponse>,
+    readonly unknown[],
+    string | null
+  >({
+    queryKey: campaignId
+      ? campaignEdgePairsKey(campaignId, query)
+      : ["campaigns", "entry", "__disabled__", "edge_pairs"],
+    enabled: !!campaignId,
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }): Promise<EdgePairsListResponse> => {
+      // queryFn only runs when enabled → campaignId is defined.
+      const id = campaignId as string;
+      const { data, error } = await api.GET("/api/campaigns/{id}/evaluation/edge_pairs", {
+        params: {
+          path: { id },
+          query: {
+            ...(query.candidate_ip ? { candidate_ip: query.candidate_ip } : {}),
+            ...(query.qualifies_only != null ? { qualifies_only: query.qualifies_only } : {}),
+            ...(query.reachable_only != null ? { reachable_only: query.reachable_only } : {}),
+            ...(query.sort ? { sort: query.sort } : {}),
+            ...(query.dir ? { dir: query.dir } : {}),
+            ...(query.limit !== undefined ? { limit: query.limit } : {}),
+            ...(pageParam ? { cursor: pageParam } : {}),
+          },
+        },
+      });
+      if (error) throw new Error("failed to fetch edge pairs", { cause: error });
+      if (!data) throw new Error("empty response");
+      return data;
+    },
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? null,
   });
 }

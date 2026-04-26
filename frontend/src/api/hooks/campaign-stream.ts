@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import {
   CAMPAIGN_PREVIEW_KEY,
   CAMPAIGNS_LIST_KEY,
+  campaignEdgePairsPrefixKey,
   campaignEvaluationKey,
   campaignKey,
   campaignMeasurementsPrefixKey,
@@ -81,6 +82,9 @@ function applyEvent(queryClient: QueryClient, event: CampaignStream): void {
       // key here without updating `evaluation-pairs.ts` to add its
       // own SSE branch.
       queryClient.invalidateQueries({ queryKey: campaignEvaluationKey(event.campaign_id) });
+      // Prefix invalidation for every active edge-pairs filter variant so the
+      // edge-candidate table refreshes when the evaluator rewrites the rows.
+      queryClient.invalidateQueries({ queryKey: campaignEdgePairsPrefixKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: campaignKey(event.campaign_id) });
       queryClient.invalidateQueries({ queryKey: CAMPAIGNS_LIST_KEY });
       return;
