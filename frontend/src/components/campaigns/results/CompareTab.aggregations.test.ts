@@ -94,11 +94,11 @@ describe("aggregateEdgeCandidates", () => {
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b"]));
     expect(result[0]!.coverage_count).toBe(1);
-    // Only agent-b (reachable) counted in route mix
+    // Only agent-b (qualifying) counted in route mix.
     expect(result[0]!.direct_share).toBe(1);
   });
 
-  test("route mix shares sum to 1 over reachable rows", () => {
+  test("route mix shares sum to 1 over qualifying rows", () => {
     const rows = [
       makeRow("10.0.0.1", "agent-a", 50, { best_route_kind: "direct" }),
       makeRow("10.0.0.1", "agent-b", 60, { best_route_kind: "one_hop" }),
@@ -120,6 +120,32 @@ describe("aggregateEdgeCandidates", () => {
     expect(result[0]!.direct_share).toBeNull();
     expect(result[0]!.onehop_share).toBeNull();
     expect(result[0]!.twohop_share).toBeNull();
+  });
+
+  /**
+   * Regression: route-mix counters must gate on `qualifies_under_t` so
+   * the Compare tab matches the backend edge-candidate aggregator. With
+   * a reachable-but-non-qualifying twohop row alongside a qualifying
+   * direct row, the direct share must be 1.0 — pre-fix the denominator
+   * counted both rows and reported 50/50.
+   */
+  test("non-qualifying reachable rows are excluded from route mix", () => {
+    const rows = [
+      makeRow("10.0.0.1", "agent-a", 40, {
+        qualifies_under_t: true,
+        best_route_kind: "direct",
+      }),
+      makeRow("10.0.0.1", "agent-b", 250, {
+        qualifies_under_t: false,
+        best_route_kind: "two_hop",
+      }),
+    ];
+    const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b"]));
+    const agg = result[0]!;
+    expect(agg.coverage_count).toBe(1);
+    expect(agg.direct_share).toBeCloseTo(1);
+    expect(agg.twohop_share).toBeCloseTo(0);
+    expect(agg.onehop_share).toBeCloseTo(0);
   });
 
   test("aggregates multiple candidates independently", () => {

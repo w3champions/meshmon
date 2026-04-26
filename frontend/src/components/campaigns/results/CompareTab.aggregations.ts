@@ -68,14 +68,21 @@ export function aggregateEdgeCandidates(
 
     bucket.totalPicked++;
 
-    // `best_route_ms` is `null` for unreachable rows; the `is_unreachable`
-    // gate covers that case, but defend the type narrowing explicitly so
-    // we never push `null` into `qualifyingMs`.
-    if (!row.is_unreachable && row.qualifies_under_t && row.best_route_ms != null) {
-      bucket.qualifyingMs.push(row.best_route_ms);
-    }
-
-    if (!row.is_unreachable) {
+    // Coverage and route-mix counters BOTH gate on `qualifies_under_t`
+    // (and reachability) so the Compare tab matches the backend's
+    // qualifying-only aggregation. Counting non-qualifying-but-reachable
+    // rows in the route-mix denominator inflated the share of long-RTT
+    // routes that never satisfied T — operators saw 50/50 mixes for
+    // picks where every qualifying route was direct.
+    //
+    // `best_route_ms` is `null` for unreachable rows; the
+    // `is_unreachable` / `qualifies_under_t` guard covers that case but
+    // narrow the type explicitly so we never push `null` into
+    // `qualifyingMs`.
+    if (!row.is_unreachable && row.qualifies_under_t) {
+      if (row.best_route_ms != null) {
+        bucket.qualifyingMs.push(row.best_route_ms);
+      }
       switch (row.best_route_kind) {
         case "direct":
           bucket.direct++;
@@ -99,10 +106,12 @@ export function aggregateEdgeCandidates(
         ? bucket.qualifyingMs.reduce((a, b) => a + b, 0) / coverageCount
         : null;
 
-    const reachableTotal = bucket.direct + bucket.oneHop + bucket.twoHop;
-    const direct_share = reachableTotal > 0 ? bucket.direct / reachableTotal : null;
-    const onehop_share = reachableTotal > 0 ? bucket.oneHop / reachableTotal : null;
-    const twohop_share = reachableTotal > 0 ? bucket.twoHop / reachableTotal : null;
+    // Route-mix denominators use qualifying counts (matches the backend
+    // edge-candidate aggregator in `eval/edge_candidate.rs`).
+    const qualifyingTotal = bucket.direct + bucket.oneHop + bucket.twoHop;
+    const direct_share = qualifyingTotal > 0 ? bucket.direct / qualifyingTotal : null;
+    const onehop_share = qualifyingTotal > 0 ? bucket.oneHop / qualifyingTotal : null;
+    const twohop_share = qualifyingTotal > 0 ? bucket.twoHop / qualifyingTotal : null;
 
     aggregates.push({
       destination_ip: ip,
