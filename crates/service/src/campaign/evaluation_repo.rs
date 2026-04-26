@@ -428,14 +428,26 @@ pub async fn latest_evaluation_for_campaign(
     // derivable read-time value); recompute it from the persisted
     // counters so the wire DTO matches what the evaluator emits at
     // `/evaluate` time.
+    //
+    // EdgeCandidate evaluations rank by `coverage_weighted_ping_ms` /
+    // `coverage_count` instead, and persist `baseline_pair_count = 0` —
+    // the triple-mode formula collapses to `0.0` for those rows. Emit
+    // `None` instead so the wire DTO matches the documented contract
+    // (`composite_score` absent for edge_candidate); a literal `0` would
+    // be indistinguishable from a real triple-mode bottom-of-the-rank
+    // candidate.
     let mut candidates: Vec<EvaluationCandidateDto> = Vec::with_capacity(candidate_rows.len());
     for c in candidate_rows {
         let cand_ip = c.destination_ip.ip();
-        let composite_score = if parent.baseline_pair_count > 0 {
-            (c.pairs_improved as f32 / parent.baseline_pair_count as f32)
-                * c.avg_improvement_ms.unwrap_or(0.0)
+        let composite_score = if is_edge_candidate {
+            None
+        } else if parent.baseline_pair_count > 0 {
+            Some(
+                (c.pairs_improved as f32 / parent.baseline_pair_count as f32)
+                    * c.avg_improvement_ms.unwrap_or(0.0),
+            )
         } else {
-            0.0
+            Some(0.0)
         };
         candidates.push(EvaluationCandidateDto {
             destination_ip: cand_ip.to_string(),
@@ -449,7 +461,7 @@ pub async fn latest_evaluation_for_campaign(
             pairs_total_considered: c.pairs_total_considered,
             avg_improvement_ms: c.avg_improvement_ms,
             avg_loss_ratio: c.avg_loss_ratio,
-            composite_score: Some(composite_score),
+            composite_score,
             // hostname is stamped at response time by the handler via
             // bulk_hostnames_and_enqueue; not persisted in this table.
             hostname: None,

@@ -1202,3 +1202,95 @@ async fn evaluation_orders_edge_candidates_by_coverage_weighted_ping_ms() {
         "edge_candidate read must rank by coverage_weighted_ping_ms ASC, not by destination_ip: {eval}"
     );
 }
+
+/// `composite_score` is the triple-mode `(pairs_improved /
+/// baseline_pair_count) × avg_improvement_ms` ranking score; for
+/// edge_candidate evaluations the rank metric is `coverage_count` /
+/// `coverage_weighted_ping_ms` instead and `composite_score` must be
+/// absent from the wire DTO. The DTO field uses
+/// `serde(skip_serializing_if = "Option::is_none")`, so emitting `None`
+/// drops the key entirely — distinguishable from a real triple-mode
+/// candidate that scored exactly `0.0`.
+#[tokio::test]
+async fn evaluation_omits_composite_score_for_edge_candidate() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-composite-score-omitted",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-cs-a"],
+                "destination_ips": ["10.98.0.1"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+
+    common::insert_agent_with_ip(pool, "eval-cs-a", "10.98.0.10".parse().unwrap()).await;
+
+    // Seed a minimal edge_candidate evaluation parent + one candidate row.
+    // `baseline_pair_count = 0` is the structural distinguisher of
+    // edge_candidate parents — the triple-mode formula collapses to `0.0`
+    // here, so the read-side guard must use the `evaluation_mode` column
+    // (not just the `baseline_pair_count > 0` test) to elide the field.
+    let evaluation_id: uuid::Uuid = sqlx::query_scalar(
+        r#"INSERT INTO campaign_evaluations
+               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+                useful_latency_ms, max_hops, vm_lookback_minutes,
+                baseline_pair_count, candidates_total, candidates_good, evaluated_at)
+           VALUES ($1, 0.05, 1.0, 'edge_candidate'::evaluation_mode,
+                   80.0, 1, 30, 0, 1, 1, now())
+           RETURNING id"#,
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("insert campaign_evaluations row");
+
+    let ip_net = sqlx::types::ipnetwork::IpNetwork::from(
+        "10.98.0.1".parse::<std::net::IpAddr>().unwrap(),
+    );
+    sqlx::query(
+        r#"INSERT INTO campaign_evaluation_candidates
+               (evaluation_id, destination_ip, is_mesh_member,
+                pairs_improved, pairs_total_considered,
+                coverage_count, destinations_total, mean_ms_under_t,
+                coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,
+                has_real_x_source_data)
+           VALUES ($1, $2::inet, false, 0, 0,
+                   1, 1, 12.0,
+                   12.0, 1.0, 0.0, 0.0,
+                   true)"#,
+    )
+    .bind(evaluation_id)
+    .bind(ip_net)
+    .execute(pool)
+    .await
+    .expect("insert candidate row");
+
+    let eval: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+    let candidates = eval["results"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates missing: {eval}"));
+    assert_eq!(candidates.len(), 1, "expected exactly one candidate: {eval}");
+    let cand = &candidates[0];
+
+    // The DTO's `serde(skip_serializing_if = "Option::is_none")` drops the
+    // key when None, so the field is absent (not `null`, not `0`). Either
+    // a missing key or an explicit `null` is acceptable; a literal `0` is
+    // a regression — operators reading a triple-mode dashboard would
+    // mistake the absent score for a bottom-of-the-rank candidate.
+    let score = cand.get("composite_score");
+    assert!(
+        score.is_none() || score == Some(&Value::Null),
+        "composite_score must be absent or null for edge_candidate (got {score:?}): {cand}"
+    );
+}
