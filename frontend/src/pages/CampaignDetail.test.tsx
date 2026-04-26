@@ -39,7 +39,6 @@ vi.mock("@/api/hooks/campaigns", async () => {
     useStartCampaign: vi.fn(),
     useStopCampaign: vi.fn(),
     useDeleteCampaign: vi.fn(),
-    usePatchCampaign: vi.fn(),
     useEditCampaign: vi.fn(),
   };
 });
@@ -117,7 +116,6 @@ import {
   useCampaignPairs,
   useDeleteCampaign,
   useEditCampaign,
-  usePatchCampaign,
   usePreviewDispatchCount,
   useStartCampaign,
   useStopCampaign,
@@ -167,7 +165,6 @@ function makeMutationStub() {
 const startMutationStub = makeMutationStub();
 const stopMutationStub = makeMutationStub();
 const deleteMutationStub = makeMutationStub();
-const patchMutationStub = makeMutationStub();
 const editMutationStub = makeMutationStub();
 
 interface HookSetupOptions {
@@ -214,9 +211,6 @@ function setupHookMocks(opts: HookSetupOptions = {}) {
   );
   vi.mocked(useDeleteCampaign).mockReturnValue(
     deleteMutationStub as unknown as ReturnType<typeof useDeleteCampaign>,
-  );
-  vi.mocked(usePatchCampaign).mockReturnValue(
-    patchMutationStub as unknown as ReturnType<typeof usePatchCampaign>,
   );
   vi.mocked(useEditCampaign).mockReturnValue(
     editMutationStub as unknown as ReturnType<typeof useEditCampaign>,
@@ -295,7 +289,6 @@ beforeEach(() => {
   startMutationStub.mutate.mockReset();
   stopMutationStub.mutate.mockReset();
   deleteMutationStub.mutate.mockReset();
-  patchMutationStub.mutate.mockReset();
   editMutationStub.mutate.mockReset();
   // Reset the composer-seed store between tests — Zustand state is a
   // module-level singleton, so a leftover seed from one test would leak
@@ -815,6 +808,15 @@ describe("CampaignDetail — Heatmap tab visibility", () => {
 
     expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
     expect(screen.queryByTestId(`stub-heatmap-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+  });
+
+  test("?tab=compare falls back to candidates for non-terminal campaigns", async () => {
+    setupHookMocks({ campaign: makeCampaign({ state: "running" }) });
+    renderDetail({ search: "?tab=compare" });
+
+    expect(await screen.findByTestId(`stub-candidates-${CAMPAIGN_ID}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`stub-compare-${CAMPAIGN_ID}`)).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^compare$/i })).not.toBeInTheDocument();
   });
 
   test("renders HeatmapTab when ?tab=heatmap and evaluation exists", async () => {
