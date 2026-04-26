@@ -93,7 +93,8 @@ function countSettledPairs(campaign: Campaign): number {
 }
 
 /**
- * Upper-bound enqueue count for `scope=good_candidates`.
+ * Upper-bound enqueue count for `scope=good_candidates` in triple modes
+ * (Diversity / Optimization).
  *
  * The candidate DTO does not carry pair_detail rows on the wire — they
  * live behind the paginated endpoint — so reproducing the backend's
@@ -112,13 +113,40 @@ function countSettledPairs(campaign: Campaign): number {
  * Gates candidates on `pairs_improved >= 1` to match the backend's
  * `results.candidates.iter().filter(|c| c.pairs_improved >= 1)`.
  */
-function countGoodCandidateMeasurements(evaluation: Evaluation): number {
+function countTripleGoodCandidateMeasurements(evaluation: Evaluation): number {
   let pairs_improved_total = 0;
   for (const candidate of evaluation.results.candidates) {
     if (candidate.pairs_improved < 1) continue;
     pairs_improved_total += candidate.pairs_improved;
   }
   return 4 * pairs_improved_total;
+}
+
+/**
+ * Upper-bound enqueue count for `scope=good_candidates` in edge_candidate
+ * mode.
+ *
+ * The backend (`good_candidates_for_edge_campaign`) selects candidates
+ * with `coverage_count >= 1` and cross-joins them with the campaign's
+ * settled source agents to produce one `(source_agent, candidate_ip)`
+ * detail pair per combination. `insert_detail_pairs` then expands each
+ * pair into a `detail_ping` + `detail_mtr` row, so the total enqueued
+ * measurements equals `2 × source_agent_count × qualifying_candidates`.
+ *
+ * `pairs_improved` is the triple-mode metric — it is always 0 for
+ * edge_candidate evaluations and must NOT be used here. Gating on
+ * `coverage_count >= 1` mirrors the backend filter.
+ */
+function countEdgeGoodCandidateMeasurements(
+  evaluation: Evaluation,
+  sourceAgentCount: number,
+): number {
+  if (sourceAgentCount === 0) return 0;
+  let qualifying = 0;
+  for (const candidate of evaluation.results.candidates) {
+    if ((candidate.coverage_count ?? 0) >= 1) qualifying += 1;
+  }
+  return 2 * sourceAgentCount * qualifying;
 }
 
 interface CostEstimate {
@@ -150,7 +178,25 @@ export function computeCostEstimate(
           description: "Waiting for the evaluation to load before the cost can be estimated.",
         };
       }
-      const pairsEnqueued = countGoodCandidateMeasurements(evaluation);
+      // Mode-aware branching: edge_candidate's `pairs_improved` is always 0
+      // (the metric is meaningless for that mode), so the triple-mode formula
+      // would always report `enqueue 0` and disable the confirm button even
+      // when there are coverage-qualifying candidates ready to dispatch.
+      if (evaluation.evaluation_mode === "edge_candidate") {
+        const sourceAgentCount = campaign.source_agent_ids?.length ?? 0;
+        const pairsEnqueued = countEdgeGoodCandidateMeasurements(evaluation, sourceAgentCount);
+        const qualifyingCandidates = evaluation.results.candidates.filter(
+          (c) => (c.coverage_count ?? 0) >= 1,
+        ).length;
+        return {
+          pairs_enqueued: pairsEnqueued,
+          description:
+            pairsEnqueued > 0
+              ? `Upper bound: ${pairsEnqueued.toLocaleString()} detail measurements (${sourceAgentCount.toLocaleString()} source agents × ${qualifyingCandidates.toLocaleString()} qualifying candidates × ping + MTR).`
+              : "No qualifying candidates in the current evaluation — re-run Evaluate if the thresholds changed.",
+        };
+      }
+      const pairsEnqueued = countTripleGoodCandidateMeasurements(evaluation);
       return {
         pairs_enqueued: pairsEnqueued,
         description:
