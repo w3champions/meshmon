@@ -548,8 +548,19 @@ fn build_candidate_row(
         pairs_total_considered,
         avg_improvement_ms,
         avg_loss_ratio,
-        composite_score,
+        composite_score: Some(composite_score),
         hostname: None,
+        website: None,
+        notes: None,
+        agent_id: None,
+        coverage_count: None,
+        destinations_total: None,
+        mean_ms_under_t: None,
+        coverage_weighted_ping_ms: None,
+        direct_share: None,
+        onehop_share: None,
+        twohop_share: None,
+        has_real_x_source_data: None,
     }
 }
 
@@ -563,7 +574,8 @@ fn build_candidate_row(
 /// either side fails to parse so the sort stays total.
 fn candidate_order(a: &EvaluationCandidateDto, b: &EvaluationCandidateDto) -> std::cmp::Ordering {
     b.composite_score
-        .partial_cmp(&a.composite_score)
+        .unwrap_or(0.0)
+        .partial_cmp(&a.composite_score.unwrap_or(0.0))
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| {
             let a_ip = a.destination_ip.parse::<IpAddr>().ok();
@@ -877,6 +889,10 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
                 mtr_measurement_id_ax: a_to_x.mtr_measurement_id,
                 mtr_measurement_id_xb: x_to_b.mtr_measurement_id,
                 destination_hostname: None,
+                ax_was_substituted: None,
+                xb_was_substituted: None,
+                direct_was_substituted: None,
+                winning_x_position: None,
             });
         }
 

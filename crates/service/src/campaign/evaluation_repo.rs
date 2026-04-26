@@ -363,8 +363,19 @@ pub async fn latest_evaluation_for_campaign(
             pairs_total_considered: c.pairs_total_considered,
             avg_improvement_ms: c.avg_improvement_ms,
             avg_loss_ratio: c.avg_loss_ratio,
-            composite_score,
+            composite_score: Some(composite_score),
             hostname: None,
+            website: None,
+            notes: None,
+            agent_id: None,
+            coverage_count: None,
+            destinations_total: None,
+            mean_ms_under_t: None,
+            coverage_weighted_ping_ms: None,
+            direct_share: None,
+            onehop_share: None,
+            twohop_share: None,
+            has_real_x_source_data: None,
         });
     }
 
@@ -383,6 +394,9 @@ pub async fn latest_evaluation_for_campaign(
         max_transit_stddev_ms: parent.max_transit_stddev_ms,
         min_improvement_ms: parent.min_improvement_ms,
         min_improvement_ratio: parent.min_improvement_ratio,
+        useful_latency_ms: None,
+        max_hops: None,
+        vm_lookback_minutes: None,
         baseline_pair_count: parent.baseline_pair_count,
         candidates_total: parent.candidates_total,
         candidates_good: parent.candidates_good,
@@ -851,6 +865,10 @@ pub async fn latest_pair_details_for_candidate(
             mtr_measurement_id_ax,
             mtr_measurement_id_xb,
             destination_hostname: None,
+            ax_was_substituted: None,
+            xb_was_substituted: None,
+            direct_was_substituted: None,
+            winning_x_position: None,
         });
     }
 

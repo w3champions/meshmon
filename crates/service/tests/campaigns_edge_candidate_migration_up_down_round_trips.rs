@@ -20,7 +20,10 @@ async fn campaigns_edge_candidate_migration_up_down_round_trips() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert!(useful_latency_ms_present, "measurement_campaigns.useful_latency_ms missing after up");
+    assert!(
+        useful_latency_ms_present,
+        "measurement_campaigns.useful_latency_ms missing after up"
+    );
 
     let max_hops_present: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns
@@ -93,7 +96,9 @@ async fn campaigns_edge_candidate_migration_up_down_round_trips() {
 
     // Apply DOWN, then re-verify the schema is reversed.
     db.pool
-        .execute(include_str!("../migrations/20260426000000_campaigns_edge_candidate.down.sql"))
+        .execute(include_str!(
+            "../migrations/20260426000000_campaigns_edge_candidate.down.sql"
+        ))
         .await
         .expect("down migration should apply");
 

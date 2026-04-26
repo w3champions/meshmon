@@ -9,8 +9,8 @@
 //! rendered as a bare IP string).
 
 use super::model::{
-    CampaignRow, CampaignState, DirectSource, EvaluationMode, PairResolutionState, PairRow,
-    ProbeProtocol,
+    CampaignRow, CampaignState, DirectSource, EdgeRouteKind, EndpointKind, EvaluationMode,
+    LegSource, PairResolutionState, PairRow, ProbeProtocol,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,15 @@ pub struct CampaignDto {
     /// 0.0–1.0). See [`Self::min_improvement_ms`] for OR semantics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) for edge_candidate useful-route
+    /// qualification. `None` means the filter is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum transit hops for edge_candidate mode. Range [0, 2].
+    pub max_hops: i16,
+    /// VictoriaMetrics look-back window (minutes) for edge_candidate mode.
+    /// Range [1, 1440].
+    pub vm_lookback_minutes: i32,
     /// Session principal that created the row; audit-only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
@@ -117,6 +126,9 @@ impl From<CampaignRow> for CampaignDto {
             max_transit_stddev_ms: r.max_transit_stddev_ms,
             min_improvement_ms: r.min_improvement_ms,
             min_improvement_ratio: r.min_improvement_ratio,
+            useful_latency_ms: r.useful_latency_ms,
+            max_hops: r.max_hops,
+            vm_lookback_minutes: r.vm_lookback_minutes,
             created_by: r.created_by,
             created_at: r.created_at,
             started_at: r.started_at,
@@ -180,6 +192,21 @@ pub struct CreateCampaignRequest {
     /// Optional storage floor on relative improvement (fraction 0.0–1.0).
     #[serde(default)]
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) below which a route qualifies as
+    /// "useful" in edge_candidate mode.
+    #[serde(default)]
+    #[schema(example = 80.0)]
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum number of transit hops for edge_candidate route
+    /// enumeration. Range [0, 2]; default 2 when omitted.
+    #[serde(default)]
+    #[schema(example = 2)]
+    pub max_hops: Option<i16>,
+    /// Look-back window (minutes) for VictoriaMetrics data in
+    /// edge_candidate mode. Range [1, 1440]; default 15 when omitted.
+    #[serde(default)]
+    #[schema(example = 15)]
+    pub vm_lookback_minutes: Option<i32>,
 }
 
 /// PATCH body for `/api/campaigns/{id}`.
@@ -216,6 +243,18 @@ pub struct PatchCampaignRequest {
     /// Replacement storage floor on relative improvement (fraction 0.0–1.0).
     #[serde(default)]
     pub min_improvement_ratio: Option<f64>,
+    /// Replacement RTT threshold (ms) for edge_candidate useful-route
+    /// qualification. `None` leaves the existing value unchanged.
+    #[serde(default)]
+    pub useful_latency_ms: Option<f32>,
+    /// Replacement maximum transit hops for edge_candidate mode. `None`
+    /// leaves the existing value unchanged.
+    #[serde(default)]
+    pub max_hops: Option<i16>,
+    /// Replacement VictoriaMetrics look-back window (minutes). `None`
+    /// leaves the existing value unchanged.
+    #[serde(default)]
+    pub vm_lookback_minutes: Option<i32>,
 }
 
 /// A single `(source_agent, destination_ip)` pair identifier used by
@@ -423,6 +462,16 @@ pub struct EvaluationDto {
     /// Snapshot of [`CampaignDto::min_improvement_ratio`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub min_improvement_ratio: Option<f64>,
+    /// Snapshot of [`CampaignDto::useful_latency_ms`] at `/evaluate` time.
+    /// `None` on pre-T56 evaluation rows or when the knob was unset.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub useful_latency_ms: Option<f32>,
+    /// Snapshot of [`CampaignDto::max_hops`]. `None` on pre-T56 rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_hops: Option<i16>,
+    /// Snapshot of [`CampaignDto::vm_lookback_minutes`]. `None` on pre-T56 rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub vm_lookback_minutes: Option<i32>,
     /// Number of `(source, destination)` baseline pairs considered.
     pub baseline_pair_count: i32,
     /// Total candidate transit destinations scored.
@@ -492,12 +541,56 @@ pub struct EvaluationCandidateDto {
     pub avg_loss_ratio: Option<f32>,
     /// Composite score `(pairs_improved / baseline_pair_count) ×
     /// avg_improvement_ms`; higher is better. Candidates are returned
-    /// in descending composite-score order.
-    pub composite_score: f32,
+    /// in descending composite-score order. `None` for edge_candidate mode
+    /// (which uses `coverage_count` ordering instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composite_score: Option<f32>,
     /// Reverse-DNS hostname for the transit destination IP, when cached.
     /// Absent on cold miss and negative-cached IPs (skip-none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Catalogue website URL for the candidate, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Catalogue notes for the candidate, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Mesh agent id when `is_mesh_member = true`; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Edge_candidate: number of destination agents reachable under the
+    /// useful-latency threshold via this candidate. `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_count: Option<i32>,
+    /// Edge_candidate: total destination agents evaluated for this
+    /// candidate. `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destinations_total: Option<i32>,
+    /// Edge_candidate: mean RTT (ms) for routes that are under the
+    /// useful-latency threshold. `None` when no route qualifies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_ms_under_t: Option<f32>,
+    /// Edge_candidate: coverage-count-weighted mean ping (ms) across
+    /// qualifying routes. `None` when coverage is zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_weighted_ping_ms: Option<f32>,
+    /// Edge_candidate: fraction of qualifying routes that are direct
+    /// (zero hops). `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_share: Option<f32>,
+    /// Edge_candidate: fraction of qualifying routes that are one-hop.
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onehop_share: Option<f32>,
+    /// Edge_candidate: fraction of qualifying routes that are two-hop.
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twohop_share: Option<f32>,
+    /// Edge_candidate: `true` when at least one leg in the winning route
+    /// came from live VM or active-probe data (not symmetric-reuse).
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_real_x_source_data: Option<bool>,
 }
 
 /// Per-pair scoring row inside an [`EvaluationCandidateDto`].
@@ -546,6 +639,23 @@ pub struct EvaluationPairDetailDto {
     /// Absent on cold miss and negative-cached IPs (skip-none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_hostname: Option<String>,
+    /// `true` when the A→X leg RTT was substituted from the symmetric
+    /// X→A measurement (edge_candidate mode). `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ax_was_substituted: Option<bool>,
+    /// `true` when the X→B leg RTT was substituted from the symmetric
+    /// B→X measurement (edge_candidate mode). `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xb_was_substituted: Option<bool>,
+    /// `true` when the direct A→B baseline was VM-sourced and substituted.
+    /// `None` for other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_was_substituted: Option<bool>,
+    /// Position of the candidate X in the winning route: `1` = X is first
+    /// hop (A→X→B), `2` = X is second hop (A→Y→X→B). `None` for direct
+    /// routes or when not applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winning_x_position: Option<u8>,
 }
 
 /// Sortable columns for the paginated pair_details endpoint
@@ -710,6 +820,82 @@ pub struct DetailResponse {
     pub campaign_state: CampaignState,
 }
 
+/// Per-(X, B) result for the edge_candidate mode. Returned by
+/// `GET /api/campaigns/:id/evaluation/edge_pairs`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct EvaluationEdgePairDetailDto {
+    /// Candidate IP being evaluated as an edge (transit) node.
+    pub candidate_ip: String,
+    /// Destination agent id (the B endpoint).
+    pub destination_agent_id: String,
+    /// Reverse-DNS hostname for the destination agent IP, when cached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_hostname: Option<String>,
+    /// Best-route composed RTT (ms).
+    pub best_route_ms: f32,
+    /// Best-route composed loss fraction (0.0–1.0).
+    pub best_route_loss_ratio: f32,
+    /// Best-route composed RTT stddev (ms).
+    pub best_route_stddev_ms: f32,
+    /// Topology of the best route (direct / one_hop / two_hop).
+    pub best_route_kind: EdgeRouteKind,
+    /// Intermediate hop IPs between candidate and destination (empty for direct).
+    pub best_route_intermediaries: Vec<String>,
+    /// Ordered per-leg breakdown of the best route.
+    pub best_route_legs: Vec<LegDto>,
+    /// `true` when the best-route RTT is below the campaign's
+    /// `useful_latency_ms` threshold.
+    pub qualifies_under_t: bool,
+    /// `true` when every probed path to this destination timed out or
+    /// had 100 % loss.
+    pub is_unreachable: bool,
+}
+
+/// Per-leg detail inside an [`EvaluationEdgePairDetailDto`].
+///
+/// Mirrors the JSONB shape persisted in
+/// `campaign_evaluation_edge_pair_details.best_route_legs`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LegDto {
+    /// Kind of the from-endpoint (agent or candidate).
+    pub from_kind: EndpointKind,
+    /// ID string for the from-endpoint (agent id or IP string).
+    pub from_id: String,
+    /// Kind of the to-endpoint (agent or candidate).
+    pub to_kind: EndpointKind,
+    /// ID string for the to-endpoint (agent id or IP string).
+    pub to_id: String,
+    /// Observed RTT for this leg (ms).
+    pub rtt_ms: f32,
+    /// Observed RTT stddev for this leg (ms).
+    pub stddev_ms: f32,
+    /// Observed loss fraction for this leg (0.0–1.0).
+    pub loss_ratio: f32,
+    /// Data source that produced this leg's metrics.
+    pub source: LegSource,
+    /// `true` when this leg's direction was inferred from the reverse
+    /// measurement (symmetric-reuse substitution).
+    pub was_substituted: bool,
+    /// FK to the `measurements` row that produced this leg's data,
+    /// when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtr_measurement_id: Option<i64>,
+}
+
+/// Paginated response for `GET /api/campaigns/:id/evaluation/edge_pairs`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EdgePairsListResponse {
+    /// Entries for this page.
+    pub entries: Vec<EvaluationEdgePairDetailDto>,
+    /// Total matching rows across all pages (ignoring the cursor).
+    pub total: i64,
+    /// Opaque cursor for the next page, or `None` at end-of-result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +912,9 @@ mod tests {
             max_transit_stddev_ms: None,
             min_improvement_ms: Some(5.0),
             min_improvement_ratio: Some(0.1),
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             baseline_pair_count: 24,
             candidates_total: 10,
             candidates_good: 3,

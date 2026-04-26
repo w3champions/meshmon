@@ -160,8 +160,11 @@ pub enum DirectSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LegSource {
+    /// Leg data sourced from VictoriaMetrics continuous-mesh time series.
     VmContinuous,
+    /// Leg data sourced from a campaign active-probe measurement.
     ActiveProbe,
+    /// Leg data inferred from the reverse direction (A→X used as X→A).
     SymmetricReuse,
 }
 
@@ -175,8 +178,14 @@ pub enum LegSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Endpoint {
-    Agent { id: String },
+    /// A mesh-member agent endpoint, identified by its agent id string.
+    Agent {
+        /// Agent id (matches `agents.agent_id` in the database).
+        id: String,
+    },
+    /// A catalogue or arbitrary IP candidate endpoint.
     CandidateIp {
+        /// IP address of the candidate endpoint.
         #[schema(value_type = String)]
         ip: std::net::IpAddr,
     },
@@ -186,8 +195,11 @@ pub enum Endpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeRouteKind {
+    /// No transit hops — the candidate connects directly to the destination.
     Direct,
+    /// One intermediate transit hop between candidate and destination.
     OneHop,
+    /// Two intermediate transit hops between candidate and destination.
     TwoHop,
 }
 
@@ -195,7 +207,9 @@ pub enum EdgeRouteKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EndpointKind {
+    /// The endpoint is a mesh-member agent.
     Agent,
+    /// The endpoint is a catalogue candidate IP.
     Candidate,
 }
 
@@ -279,6 +293,15 @@ pub struct CampaignRow {
     /// row only when `improvement_ms / direct_rtt_ms` clears the floor
     /// (OR-combined with [`Self::min_improvement_ms`]).
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) below which a route qualifies as
+    /// "useful" in edge_candidate mode. `None` disables the filter.
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum number of transit hops for edge_candidate route
+    /// enumeration. Range [0, 2]; default 2.
+    pub max_hops: i16,
+    /// Look-back window (minutes) for VictoriaMetrics data in
+    /// edge_candidate mode. Range [1, 1440]; default 15.
+    pub vm_lookback_minutes: i32,
     /// Optional principal string (session username) that created the row.
     pub created_by: Option<String>,
     /// Row creation timestamp.
