@@ -45,8 +45,8 @@
  * keeping the DOM bounded regardless of fleet size.
  */
 
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Campaign } from "@/api/hooks/campaigns";
 import type { Evaluation, EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
@@ -86,10 +86,10 @@ const INITIAL_SCROLL_RECT = { width: 1200, height: 600 };
 
 /** Tier index 1–5 for a reachable pair, or 0 for unreachable. */
 export function getTier(ms: number, boundaries: number[]): 1 | 2 | 3 | 4 | 5 {
-  if (ms < boundaries[0]!) return 1;
-  if (ms < boundaries[1]!) return 2;
-  if (ms < boundaries[2]!) return 3;
-  if (ms < boundaries[3]!) return 4;
+  if (ms < (boundaries[0] ?? Number.POSITIVE_INFINITY)) return 1;
+  if (ms < (boundaries[1] ?? Number.POSITIVE_INFINITY)) return 2;
+  if (ms < (boundaries[2] ?? Number.POSITIVE_INFINITY)) return 3;
+  if (ms < (boundaries[3] ?? Number.POSITIVE_INFINITY)) return 4;
   return 5;
 }
 
@@ -108,8 +108,8 @@ const TIER_STYLES: Record<number, TierStyle> = {
 };
 
 function tierStyle(ms: number | null, boundaries: number[]): TierStyle {
-  if (ms === null) return TIER_STYLES[0]!;
-  return TIER_STYLES[getTier(ms, boundaries)]!;
+  if (ms === null) return TIER_STYLES[0] ?? { background: "var(--hm-tier-x)", color: "#fff" };
+  return TIER_STYLES[getTier(ms, boundaries)] ?? { background: "var(--hm-tier-x)", color: "#fff" };
 }
 
 // ---------------------------------------------------------------------------
@@ -261,10 +261,7 @@ function sortedCandidateIps(
 // Boundaries helper
 // ---------------------------------------------------------------------------
 
-export function readBoundaries(
-  mode: string,
-  usefulLatencyMs: number | null | undefined,
-): number[] {
+export function readBoundaries(mode: string, usefulLatencyMs: number | null | undefined): number[] {
   const T = usefulLatencyMs ?? 80;
   const defaultBoundaries = [0.4 * T, T, 2 * T, 4 * T];
   try {
@@ -303,7 +300,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
 
   const [colorEditorOpen, setColorEditorOpen] = useState(false);
   // Revision counter incremented when the editor saves so the heatmap re-reads boundaries.
-  const [boundaryRevision, setBoundaryRevision] = useState(0);
+  const [_boundaryRevision, setBoundaryRevision] = useState(0);
 
   // Selected cell for drilldown
   const [selectedCell, setSelectedCell] = useState<{
@@ -312,12 +309,14 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
   } | null>(null);
 
   const setSort = useCallback(
-    (updates: Partial<{
-      hm_row_sort: RowSortKey;
-      hm_row_dir: SortDir;
-      hm_col_sort: ColSortKey;
-      hm_col_dir: SortDir;
-    }>): void => {
+    (
+      updates: Partial<{
+        hm_row_sort: RowSortKey;
+        hm_row_dir: SortDir;
+        hm_col_sort: ColSortKey;
+        hm_col_dir: SortDir;
+      }>,
+    ): void => {
       // useNavigate() is untyped in non-strict mode; cast through unknown so
       // TypeScript doesn't try to match the global router union.
       const nav = navigate as unknown as (opts: {
@@ -352,13 +351,14 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
   const boundaries = useMemo(
     () => readBoundaries(evaluation.evaluation_mode, evaluation.useful_latency_ms),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [evaluation.evaluation_mode, evaluation.useful_latency_ms, boundaryRevision],
+    [evaluation.evaluation_mode, evaluation.useful_latency_ms],
   );
 
-  const { candidateIps: rawCandidateIps, agentIds: rawAgentIds, cellMap } = useMemo(
-    () => pivotRows(allRows),
-    [allRows],
-  );
+  const {
+    candidateIps: rawCandidateIps,
+    agentIds: rawAgentIds,
+    cellMap,
+  } = useMemo(() => pivotRows(allRows), [allRows]);
 
   // Source the column-sort metrics directly from the backend-computed
   // candidate aggregates so heatmap column order matches CandidatesTab /
@@ -397,9 +397,8 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
   const selectedCandidate: EvaluationCandidateDto | null = useMemo(() => {
     if (!selectedCell) return null;
     return (
-      evaluation.results.candidates.find(
-        (c) => c.destination_ip === selectedCell.candidateIp,
-      ) ?? null
+      evaluation.results.candidates.find((c) => c.destination_ip === selectedCell.candidateIp) ??
+      null
     );
   }, [selectedCell, evaluation.results.candidates]);
 
@@ -514,9 +513,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
             options={ROW_SORT_OPTIONS}
             activeKey={rowSortKey}
             activeDir={rowSortDir}
-            onSort={(key, dir) =>
-              setSort({ hm_row_sort: key as RowSortKey, hm_row_dir: dir })
-            }
+            onSort={(key, dir) => setSort({ hm_row_sort: key as RowSortKey, hm_row_dir: dir })}
           />
           {/* Col sort */}
           <AxisSortButton
@@ -524,9 +521,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
             options={COL_SORT_OPTIONS}
             activeKey={colSortKey}
             activeDir={colSortDir}
-            onSort={(key, dir) =>
-              setSort({ hm_col_sort: key as ColSortKey, hm_col_dir: dir })
-            }
+            onSort={(key, dir) => setSort({ hm_col_sort: key as ColSortKey, hm_col_dir: dir })}
           />
           {/* Color editor */}
           <HeatmapColorEditor
@@ -574,7 +569,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
                 style={innerColWidth ? { width: innerColWidth } : undefined}
               >
                 {colItems.map((vc) => {
-                  const ip = orderedCandidateIps[vc.index]!;
+                  const ip = orderedCandidateIps[vc.index] ?? "";
                   return (
                     <div
                       key={vc.key}
@@ -600,7 +595,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
               style={innerRowHeight ? { height: innerRowHeight } : undefined}
             >
               {rowItems.map((vr) => {
-                const agentId = orderedAgentIds[vr.index]!;
+                const agentId = orderedAgentIds[vr.index] ?? "";
                 return (
                   <div
                     key={vr.key}
@@ -623,7 +618,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
                       style={innerColWidth ? { width: innerColWidth } : undefined}
                     >
                       {colItems.map((vc) => {
-                        const ip = orderedCandidateIps[vc.index]!;
+                        const ip = orderedCandidateIps[vc.index] ?? "";
                         const row = cellMap.get(`${ip}::${agentId}`);
                         // `best_route_ms` is `null` for unreachable rows.
                         const ms =
@@ -645,9 +640,7 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
                               background: style.background,
                               color: style.color,
                             }}
-                            onClick={() =>
-                              setSelectedCell({ candidateIp: ip, agentId })
-                            }
+                            onClick={() => setSelectedCell({ candidateIp: ip, agentId })}
                             aria-label={`${ip} × ${agentId}: ${ms !== null ? `${Math.round(ms)} ms` : "unreachable"}`}
                           >
                             {ms !== null ? Math.round(ms) : "—"}
@@ -707,21 +700,17 @@ const SORT_DEFAULT_DIR: Record<string, SortDir> = {
   candidate_ip: "asc",
 };
 
-function AxisSortButton({
-  label,
-  options,
-  activeKey,
-  activeDir,
-  onSort,
-}: AxisSortButtonProps) {
+function AxisSortButton({ label, options, activeKey, activeDir, onSort }: AxisSortButtonProps) {
   return (
     <div className="flex items-center gap-1">
       <span className="text-xs text-muted-foreground">{label}:</span>
       {options.map(({ key, label: optLabel }) => {
         const isActive = key === activeKey;
         const nextDir: SortDir = isActive
-          ? activeDir === "asc" ? "desc" : "asc"
-          : SORT_DEFAULT_DIR[key] ?? "asc";
+          ? activeDir === "asc"
+            ? "desc"
+            : "asc"
+          : (SORT_DEFAULT_DIR[key] ?? "asc");
         return (
           <Button
             key={key}

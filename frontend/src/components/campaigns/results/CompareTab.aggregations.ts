@@ -8,8 +8,7 @@
  * (full wiring deferred — see followup comment in CompareTab.tsx).
  */
 
-import type { EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
-import type { Evaluation } from "@/api/hooks/evaluation";
+import type { Evaluation, EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -102,9 +101,7 @@ export function aggregateEdgeCandidates(
   for (const [ip, bucket] of byCandidate) {
     const coverageCount = bucket.qualifyingMs.length;
     const meanMsUnderT =
-      coverageCount > 0
-        ? bucket.qualifyingMs.reduce((a, b) => a + b, 0) / coverageCount
-        : null;
+      coverageCount > 0 ? bucket.qualifyingMs.reduce((a, b) => a + b, 0) / coverageCount : null;
 
     // Route-mix denominators use qualifying counts (matches the backend
     // edge-candidate aggregator in `eval/edge_candidate.rs`).
@@ -135,10 +132,7 @@ export function aggregateEdgeCandidates(
  * Fields not recomputed here (e.g. `coverage_weighted_ping_ms`) are set to
  * `null` — the Compare table renders "—" for those.
  */
-export function mergeAggregateIntoCandidate(
-  baseline: Candidate,
-  agg: CompareAggregate,
-): Candidate {
+export function mergeAggregateIntoCandidate(baseline: Candidate, agg: CompareAggregate): Candidate {
   return {
     ...baseline,
     coverage_count: agg.coverage_count,

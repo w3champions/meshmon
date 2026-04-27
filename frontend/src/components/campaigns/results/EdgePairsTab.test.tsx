@@ -18,10 +18,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSummary } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
-import type {
-  EdgePairsListResponse,
-  EvaluationEdgePairDetailDto,
-} from "@/api/hooks/evaluation";
+import type { EdgePairsListResponse, EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 import { IpHostnameProvider } from "@/components/ip-hostname";
 
 // ---------------------------------------------------------------------------
@@ -146,10 +143,7 @@ class NoopEventSource {
   close(): void {}
 }
 
-function renderTab(
-  entries: EvaluationEdgePairDetailDto[],
-  agents: AgentSummary[] = [],
-) {
+function renderTab(entries: EvaluationEdgePairDetailDto[], agents: AgentSummary[] = []) {
   vi.mocked(useEdgePairDetails).mockReturnValue(
     makeHookReturn(entries) as unknown as ReturnType<typeof useEdgePairDetails>,
   );
@@ -213,10 +207,7 @@ describe("EdgePairsTab — destination cell rendering", () => {
   });
 
   test("prefers destination_hostname over the agent's display_name when present", () => {
-    renderTab(
-      [makeEdgePairRow({ destination_hostname: "frankfurt-7.dc.example" })],
-      [makeAgent()],
-    );
+    renderTab([makeEdgePairRow({ destination_hostname: "frankfurt-7.dc.example" })], [makeAgent()]);
     expect(screen.getByText("frankfurt-7.dc.example")).toBeInTheDocument();
   });
 
@@ -226,8 +217,6 @@ describe("EdgePairsTab — destination cell rendering", () => {
     // agent_id as the secondary line.
     expect(screen.getAllByText(DEST_AGENT_ID).length).toBeGreaterThanOrEqual(1);
     // No catalogue drawer trigger button rendered for the missing agent.
-    expect(
-      screen.queryByRole("button", { name: DEST_AGENT_ID }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: DEST_AGENT_ID })).not.toBeInTheDocument();
   });
 });

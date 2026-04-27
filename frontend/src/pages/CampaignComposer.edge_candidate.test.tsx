@@ -242,9 +242,7 @@ function setupHooks(opts: SetupOptions = {}) {
     isError: false,
   } as unknown as ReturnType<typeof useAgents>);
 
-  const pages = opts.pages ?? [
-    makeListResponse([makeEntry("e1", "192.168.1.1")], 1, null),
-  ];
+  const pages = opts.pages ?? [makeListResponse([makeEntry("e1", "192.168.1.1")], 1, null)];
   vi.mocked(useCatalogueListInfinite).mockReturnValue(listInfiniteStub(pages));
 
   vi.mocked(useCatalogueFacets).mockReturnValue({
@@ -292,11 +290,9 @@ beforeEach(() => {
   startStub.mutate.mockReset();
   deleteStub.mutate.mockReset();
   useComposerSeedStore.setState({ seed: null });
-  deleteStub.mutate.mockImplementation(
-    (_id: string, handlers?: { onSettled?: () => void }) => {
-      handlers?.onSettled?.();
-    },
-  );
+  deleteStub.mutate.mockImplementation((_id: string, handlers?: { onSettled?: () => void }) => {
+    handlers?.onSettled?.();
+  });
   setupHooks();
 });
 
@@ -371,9 +367,7 @@ describe("CampaignComposer edge_candidate — mode switch reveals knobs", () => 
 
     await screen.findByLabelText(/^title$/i);
 
-    expect(
-      screen.getByText(/2 hops considers an additional mesh agent/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/2 hops considers an additional mesh agent/i)).toBeInTheDocument();
 
     await switchToEdgeCandidate(user);
 
@@ -435,9 +429,7 @@ describe("CampaignComposer edge_candidate — mode-aware sub-panel content", () 
 
     await screen.findByLabelText(/^title$/i);
 
-    expect(
-      screen.getByText(/2 hops considers an additional mesh agent/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/2 hops considers an additional mesh agent/i)).toBeInTheDocument();
   });
 
   test("max_hops caption present for optimization mode", async () => {
@@ -450,9 +442,7 @@ describe("CampaignComposer edge_candidate — mode-aware sub-panel content", () 
     const optimizationToggle = screen.getByRole("radio", { name: /optimization/i });
     await user.click(optimizationToggle);
 
-    expect(
-      screen.getByText(/2 hops considers an additional mesh agent/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/2 hops considers an additional mesh agent/i)).toBeInTheDocument();
   });
 
   test("source explainer paragraph only appears in edge_candidate mode", async () => {

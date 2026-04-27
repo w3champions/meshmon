@@ -2,10 +2,10 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderWithQuery } from "@/test/query-wrapper";
 import { CatalogueDrawerOverlay } from "@/components/catalogue/CatalogueDrawerOverlay";
-import { CandidateRef } from "./CandidateRef";
+import { renderWithQuery } from "@/test/query-wrapper";
 import type { CandidateRefData } from "./CandidateRef";
+import { CandidateRef } from "./CandidateRef";
 
 // Stub EventSource for IpHostnameProvider
 class NoopEventSource {
@@ -106,11 +106,11 @@ describe("CandidateRef", () => {
     const user = userEvent.setup();
     renderWithQuery(
       <CatalogueDrawerOverlay>
-        {/* Parent uses a div with onClick to mimic the row-level click
+        {/* Parent uses a button with onClick to mimic the row-level click
             handler used by EdgeCandidateTable / CompareCandidateRow. */}
-        <div onClick={parentClick} data-testid="parent-row">
+        <button type="button" onClick={parentClick} data-testid="parent-row">
           <CandidateRef mode="compact" data={minimal} />
-        </div>
+        </button>
       </CatalogueDrawerOverlay>,
     );
     await user.click(screen.getByRole("button", { name: /open in catalogue/i }));
@@ -122,9 +122,9 @@ describe("CandidateRef", () => {
     const user = userEvent.setup();
     renderWithQuery(
       <CatalogueDrawerOverlay>
-        <div onClick={parentClick} data-testid="parent-row">
+        <button type="button" onClick={parentClick} data-testid="parent-row">
           <CandidateRef mode="header" data={minimal} />
-        </div>
+        </button>
       </CatalogueDrawerOverlay>,
     );
     await user.click(screen.getByRole("button", { name: /open in catalogue/i }));
@@ -136,9 +136,14 @@ describe("CandidateRef", () => {
     const user = userEvent.setup();
     renderWithQuery(
       <CatalogueDrawerOverlay>
-        <div onClick={parentClick} data-testid="parent-row">
+        <button
+          type="button"
+          onClick={parentClick}
+          data-testid="parent-row"
+          aria-label="parent row"
+        >
           <CandidateRef mode="inline" data={minimal} />
-        </div>
+        </button>
       </CatalogueDrawerOverlay>,
     );
     await user.click(screen.getByRole("button", { name: "OneProvider FRA" }));

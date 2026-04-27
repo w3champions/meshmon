@@ -205,7 +205,8 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
     if (next !== "diversity" && next !== "optimization" && next !== "edge_candidate") return;
     const mode = next as EvaluationMode;
     // When leaving edge_candidate, clamp max_hops to [1, 2] since 0 is invalid for other modes.
-    const hopsFix: Partial<EvaluationKnobs> = mode !== "edge_candidate" && form.max_hops === 0 ? { max_hops: 1 } : {};
+    const hopsFix: Partial<EvaluationKnobs> =
+      mode !== "edge_candidate" && form.max_hops === 0 ? { max_hops: 1 } : {};
     setForm((prev) => ({ ...prev, evaluation_mode: mode, ...hopsFix }));
   };
 
@@ -540,8 +541,8 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
       {snapshot ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span>
-            Last evaluated {snapshot.evaluated_at} —{" "}
-            {snapshot.candidates_good} of {snapshot.candidates_total} candidates qualified.
+            Last evaluated {snapshot.evaluated_at} — {snapshot.candidates_good} of{" "}
+            {snapshot.candidates_total} candidates qualified.
           </span>
           {/* Badge variant `secondary` is the closest to "muted" in the badge component */}
           {isLegacySnapshot && (
@@ -573,9 +574,7 @@ export function SettingsTab({ campaign }: SettingsTabProps) {
        * snapshot — an empty result set with no guardrails is a different
        * shape (likely no baseline pairs).
        */}
-      {snapshot &&
-      snapshot.candidates_total === 0 &&
-      hasAnyGuardrailSet(snapshot) ? (
+      {snapshot && snapshot.candidates_total === 0 && hasAnyGuardrailSet(snapshot) ? (
         <p className="text-xs text-amber-600 dark:text-amber-400" role="status">
           The active guardrails dropped every candidate. Loosen one or more knobs and re-evaluate to
           see results.

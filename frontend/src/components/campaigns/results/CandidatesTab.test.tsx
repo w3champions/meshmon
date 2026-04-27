@@ -41,7 +41,12 @@ vi.mock("@/api/hooks/campaigns", async () => {
 vi.mock("@/api/hooks/evaluation", async () => {
   const actual =
     await vi.importActual<typeof import("@/api/hooks/evaluation")>("@/api/hooks/evaluation");
-  return { ...actual, useEvaluation: vi.fn(), useTriggerDetail: vi.fn(), useEdgePairDetails: vi.fn() };
+  return {
+    ...actual,
+    useEvaluation: vi.fn(),
+    useTriggerDetail: vi.fn(),
+    useEdgePairDetails: vi.fn(),
+  };
 });
 
 vi.mock("@/api/hooks/evaluation-pairs", async () => {
@@ -61,7 +66,6 @@ vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
   useCatalogueDrawer: () => ({ open: vi.fn() }),
   CatalogueDrawerOverlay: ({ children }: { children: unknown }) => <>{children}</>,
 }));
-
 
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignMeasurements, useForcePair } from "@/api/hooks/campaigns";

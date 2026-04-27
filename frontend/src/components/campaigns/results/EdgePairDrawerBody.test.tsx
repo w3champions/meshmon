@@ -75,7 +75,10 @@ function makeCampaign(overrides: Partial<Campaign> = {}): Campaign {
   } as unknown as Campaign;
 }
 
-function makeEdgePairRow(idx: number, overrides: Partial<EvaluationEdgePairDetailDto> = {}): EvaluationEdgePairDetailDto {
+function makeEdgePairRow(
+  idx: number,
+  overrides: Partial<EvaluationEdgePairDetailDto> = {},
+): EvaluationEdgePairDetailDto {
   return {
     candidate_ip: CANDIDATE_IP,
     destination_agent_id: `dest-agent-${idx}`,
@@ -160,7 +163,9 @@ function renderBody(
   } = {},
 ) {
   vi.mocked(useEdgePairDetails).mockReturnValue(
-    makeHookReturn(entries, opts.hookOverrides ?? {}) as unknown as ReturnType<typeof useEdgePairDetails>,
+    makeHookReturn(entries, opts.hookOverrides ?? {}) as unknown as ReturnType<
+      typeof useEdgePairDetails
+    >,
   );
 
   const candidate = {

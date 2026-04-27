@@ -114,10 +114,7 @@ function makeAgent(id: string, display_name: string, ip: string): AgentSummary {
   };
 }
 
-function makeEntry(
-  idx: number,
-  winning_x_position?: number | null,
-): Record<string, unknown> {
+function makeEntry(idx: number, winning_x_position?: number | null): Record<string, unknown> {
   return {
     source_agent_id: `agent-${idx}-src`,
     destination_agent_id: `agent-${idx}-dst`,
@@ -139,7 +136,11 @@ function pageOf(
   entries: ReturnType<typeof makeEntry>[],
   total: number,
 ): EvaluationPairDetailListResponse {
-  return { entries: entries as EvaluationPairDetailListResponse["entries"], next_cursor: null, total };
+  return {
+    entries: entries as EvaluationPairDetailListResponse["entries"],
+    next_cursor: null,
+    total,
+  };
 }
 
 interface PairsHookReturn {

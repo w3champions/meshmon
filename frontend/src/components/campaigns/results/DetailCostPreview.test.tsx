@@ -72,9 +72,7 @@ function makeEvaluation(
   };
 }
 
-function makeEdgeEvaluation(
-  candidates: Evaluation["results"]["candidates"],
-): Evaluation {
+function makeEdgeEvaluation(candidates: Evaluation["results"]["candidates"]): Evaluation {
   // edge_candidate evaluations: triple-mode counters (pairs_improved,
   // baseline_pair_count, avg_improvement_ms) are zero/unused — ranking is
   // by `coverage_count` / `coverage_weighted_ping_ms` instead.

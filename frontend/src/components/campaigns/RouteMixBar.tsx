@@ -34,14 +34,8 @@ export function RouteMixBar({ direct, oneHop, twoHop }: Props) {
         data-segment="direct"
         style={{ width: pct(direct), background: "var(--route-direct)" }}
       />
-      <div
-        data-segment="onehop"
-        style={{ width: pct(oneHop), background: "var(--route-1hop)" }}
-      />
-      <div
-        data-segment="twohop"
-        style={{ width: pct(twoHop), background: "var(--route-2hop)" }}
-      />
+      <div data-segment="onehop" style={{ width: pct(oneHop), background: "var(--route-1hop)" }} />
+      <div data-segment="twohop" style={{ width: pct(twoHop), background: "var(--route-2hop)" }} />
     </div>
   );
 }

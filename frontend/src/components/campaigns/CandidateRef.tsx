@@ -11,11 +11,11 @@
  * "Open agent detail" navigates to `/agents/:id` via TanStack Router.
  */
 
-import { ExternalLink } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
+import { ExternalLink } from "lucide-react";
+import { useCatalogueDrawer } from "@/components/catalogue/CatalogueDrawerOverlay";
 import { IpHostname } from "@/components/ip-hostname/IpHostname";
 import { lookupCountryName } from "@/lib/countries";
-import { useCatalogueDrawer } from "@/components/catalogue/CatalogueDrawerOverlay";
 
 // ---------------------------------------------------------------------------
 // Types

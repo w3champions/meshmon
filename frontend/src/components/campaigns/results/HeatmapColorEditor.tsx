@@ -71,10 +71,14 @@ function clampBoundaries(
 
   // Enforce monotonic order: push neighbours if needed
   for (let i = index - 1; i >= 0; i--) {
-    if (next[i]! > next[i + 1]!) next[i] = next[i + 1]!;
+    const cur = next[i];
+    const right = next[i + 1];
+    if (cur !== undefined && right !== undefined && cur > right) next[i] = right;
   }
   for (let i = index + 1; i < 4; i++) {
-    if (next[i]! < next[i - 1]!) next[i] = next[i - 1]!;
+    const cur = next[i];
+    const left = next[i - 1];
+    if (cur !== undefined && left !== undefined && cur < left) next[i] = left;
   }
 
   return next;
@@ -195,7 +199,7 @@ export function HeatmapColorEditor({
   }, [mode, usefulLatencyMs]);
 
   // Maximum axis value: 5× T (to give plenty of room)
-  const maxValue = Math.max((usefulLatencyMs ?? 80) * 5, boundaries[3]! * 1.2, 400);
+  const maxValue = Math.max((usefulLatencyMs ?? 80) * 5, (boundaries[3] ?? 0) * 1.2, 400);
 
   const handleChange = (index: number, value: number) => {
     setBoundaries((prev) => clampBoundaries(prev, index, value));
@@ -203,7 +207,7 @@ export function HeatmapColorEditor({
 
   const handleInputChange = (index: number, raw: string) => {
     const num = parseFloat(raw);
-    if (!isNaN(num) && num >= 0) {
+    if (!Number.isNaN(num) && num >= 0) {
       setBoundaries((prev) => clampBoundaries(prev, index, num));
     }
   };
@@ -224,8 +228,8 @@ export function HeatmapColorEditor({
 
   // Gradient stops for the preview bar
   const segments = TIER_COLORS.map((color, i) => {
-    const start = i === 0 ? 0 : (boundaries[i - 1]! / maxValue) * 100;
-    const end = i === 4 ? 100 : (boundaries[i]! / maxValue) * 100;
+    const start = i === 0 ? 0 : ((boundaries[i - 1] ?? 0) / maxValue) * 100;
+    const end = i === 4 ? 100 : ((boundaries[i] ?? 0) / maxValue) * 100;
     return { color, start, end };
   });
 
@@ -247,11 +251,7 @@ export function HeatmapColorEditor({
           🎨 Colors
         </Button>
       </PopoverTrigger>
-      <PopoverContent
-        className="w-96 p-4"
-        data-testid="hm-color-editor-content"
-        align="end"
-      >
+      <PopoverContent className="w-96 p-4" data-testid="hm-color-editor-content" align="end">
         <div className="flex flex-col gap-4">
           <div>
             <h3 className="text-sm font-semibold mb-1">Tier boundaries (ms)</h3>
@@ -268,21 +268,16 @@ export function HeatmapColorEditor({
               data-testid="hm-gradient-bar"
             />
             {boundaries.map((val, i) => (
-              <Handle
-                key={i}
-                index={i}
-                value={val}
-                maxValue={maxValue}
-                onChange={handleChange}
-              />
+              // biome-ignore lint/suspicious/noArrayIndexKey: boundaries is a fixed-length 4-tuple; index is the stable identity
+              <Handle key={i} index={i} value={val} maxValue={maxValue} onChange={handleChange} />
             ))}
           </div>
 
           {/* Tier labels */}
           <div className="flex gap-1 text-xs">
-            {["Excellent", "Good", "Warning", "Slow", "Bad"].map((label, i) => (
+            {(["Excellent", "Good", "Warning", "Slow", "Bad"] as const).map((label, i) => (
               <div
-                key={i}
+                key={label}
                 className="flex-1 text-center py-0.5 rounded font-medium truncate"
                 style={{ background: TIER_COLORS[i], color: TIER_TEXT_COLORS[i] }}
               >
@@ -294,6 +289,7 @@ export function HeatmapColorEditor({
           {/* Numeric inputs */}
           <div className="grid grid-cols-4 gap-2">
             {boundaries.map((val, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: boundaries is a fixed-length 4-tuple; index is the stable identity
               <div key={i} className="flex flex-col gap-1">
                 <label className="text-xs text-muted-foreground" htmlFor={`hm-boundary-${i}`}>
                   B{i + 1}
@@ -323,12 +319,7 @@ export function HeatmapColorEditor({
             >
               Reset
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleSave}
-              data-testid="hm-save-btn"
-            >
+            <Button type="button" size="sm" onClick={handleSave} data-testid="hm-save-btn">
               Save
             </Button>
           </div>

@@ -159,9 +159,8 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
           onValueChange={(next) => {
             if (!next) return;
             const mode = next as EvaluationMode;
-            const hopsFix = mode !== "edge_candidate" && value.max_hops === 0
-              ? { max_hops: 1 }
-              : {};
+            const hopsFix =
+              mode !== "edge_candidate" && value.max_hops === 0 ? { max_hops: 1 } : {};
             patch({ evaluation_mode: mode, ...hopsFix });
           }}
           variant="outline"
@@ -210,9 +209,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             2 hops
           </ToggleGroupItem>
         </ToggleGroup>
-        {!isEdgeCandidate && (
-          <p className="text-xs text-muted-foreground">{MAX_HOPS_CAPTION}</p>
-        )}
+        {!isEdgeCandidate && <p className="text-xs text-muted-foreground">{MAX_HOPS_CAPTION}</p>}
       </div>
 
       {/* edge_candidate-only knobs */}

@@ -55,9 +55,7 @@ import { CompareTab } from "@/components/campaigns/results/CompareTab";
 
 const CAMPAIGN_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
-function makeCampaign(
-  overrides: Partial<Campaign> & { state: CampaignState },
-): Campaign {
+function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): Campaign {
   return {
     id: overrides.id ?? CAMPAIGN_ID,
     title: overrides.title ?? "Campaign compare",
@@ -292,7 +290,7 @@ describe("P2: agent picker", () => {
     await waitFor(() => {
       const stored = localStorage.getItem(storageKey);
       expect(stored).not.toBeNull();
-      const parsed = JSON.parse(stored!) as string[];
+      const parsed = JSON.parse(stored ?? "[]") as string[];
       expect(parsed).toContain("agent-a");
     });
   });

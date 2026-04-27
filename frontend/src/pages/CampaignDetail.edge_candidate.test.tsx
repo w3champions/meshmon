@@ -6,7 +6,6 @@
  * end-to-end edge_candidate flow renders and responds to user interactions.
  */
 import "@testing-library/jest-dom/vitest";
-import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -18,6 +17,7 @@ import {
 } from "@tanstack/react-router";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Campaign, CampaignState } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
@@ -97,6 +97,7 @@ class NoopEventSource {
 // Imports AFTER mocks.
 // ---------------------------------------------------------------------------
 
+import { useAgents } from "@/api/hooks/agents";
 import { useCampaignStream } from "@/api/hooks/campaign-stream";
 import {
   useCampaign,
@@ -109,13 +110,12 @@ import {
   useStartCampaign,
   useStopCampaign,
 } from "@/api/hooks/campaigns";
-import { useAgents } from "@/api/hooks/agents";
 import {
+  type EvaluationEdgePairDetailDto,
   useEdgePairDetails,
   useEvaluateCampaign,
   useEvaluation,
   useTriggerDetail,
-  type EvaluationEdgePairDetailDto,
 } from "@/api/hooks/evaluation";
 import { IpHostnameProvider } from "@/components/ip-hostname";
 import CampaignDetail from "@/pages/CampaignDetail";
@@ -534,9 +534,7 @@ describe("CampaignDetail edge_candidate — Pairs tab", () => {
 
     await screen.findByRole("heading", { name: /edge campaign/i });
 
-    expect(
-      screen.getByRole("columnheader", { name: /candidate/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: /candidate/i })).toBeInTheDocument();
   });
 });
 
@@ -606,11 +604,9 @@ describe("CampaignDetail edge_candidate — Settings tab", () => {
       evaluation,
     });
 
-    patchStub.mutate.mockImplementation(
-      (_vars: unknown, handlers?: { onSuccess?: () => void }) => {
-        handlers?.onSuccess?.();
-      },
-    );
+    patchStub.mutate.mockImplementation((_vars: unknown, handlers?: { onSuccess?: () => void }) => {
+      handlers?.onSuccess?.();
+    });
 
     const user = userEvent.setup();
     renderDetail({ search: "?tab=settings" });

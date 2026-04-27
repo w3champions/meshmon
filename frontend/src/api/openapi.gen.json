@@ -4851,7 +4851,7 @@
               "null"
             ],
             "format": "float",
-            "description": "Best-route composed RTT (ms). `None` when `is_unreachable` is\n`true` — the wire serializes the field as JSON `null` rather\nthan an unrepresentable infinity sentinel."
+            "description": "Raw RTT of the winning route (ms). The penalty score\n(`rtt + stddev_weight * stddev`) is used internally to pick the\nwinner; only the raw RTT is exposed here. `None` when\n`is_unreachable` is `true` — the wire serializes the field as\nJSON `null` rather than an unrepresentable infinity sentinel."
           },
           "best_route_stddev_ms": {
             "type": "number",

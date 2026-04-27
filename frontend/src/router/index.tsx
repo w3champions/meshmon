@@ -104,9 +104,7 @@ export const agentDetailRoute = createRoute({
 
 const pathDetailSearchSchema = z
   .object({
-    range: z
-      .enum(["1h", "6h", "24h", "7d", "30d", "2y", "custom"])
-      .default("24h"),
+    range: z.enum(["1h", "6h", "24h", "7d", "30d", "2y", "custom"]).default("24h"),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
     protocol: z.enum(["icmp", "udp", "tcp"]).optional(),
@@ -174,9 +172,7 @@ export const catalogueRoute = createRoute({
 
 export const campaignsSearchSchema = z.object({
   q: z.string().optional(),
-  state: z
-    .enum(["draft", "running", "completed", "evaluated", "stopped"])
-    .optional(),
+  state: z.enum(["draft", "running", "completed", "evaluated", "stopped"]).optional(),
   created_by: z.string().optional(),
   sort: z.enum(["title", "created_at", "started_at", "state"]).optional(),
   dir: z.enum(["asc", "desc"]).optional(),
@@ -219,14 +215,7 @@ export const campaignDetailSearchSchema = z.object({
     .catch("candidates")
     .optional(),
   raw_state: z
-    .enum([
-      "pending",
-      "dispatched",
-      "reused",
-      "succeeded",
-      "unreachable",
-      "skipped",
-    ])
+    .enum(["pending", "dispatched", "reused", "succeeded", "unreachable", "skipped"])
     .catch(() => undefined as never)
     .optional(),
   raw_protocol: z
@@ -330,13 +319,7 @@ export const campaignDetailSearchSchema = z.object({
 export type CampaignDetailSearch = z.infer<typeof campaignDetailSearchSchema>;
 
 /** Enumeration of the active tab values; the parser fills `undefined` with `"candidates"`. */
-export type CampaignDetailTab =
-  | "candidates"
-  | "heatmap"
-  | "pairs"
-  | "compare"
-  | "raw"
-  | "settings";
+export type CampaignDetailTab = "candidates" | "heatmap" | "pairs" | "compare" | "raw" | "settings";
 
 /**
  * Safe default when the WHOLE search object is malformed (e.g. the router
@@ -409,10 +392,7 @@ export const historyPairSearchSchema = z
       .array(z.enum(["icmp", "tcp", "udp"]))
       .optional()
       .catch(undefined),
-    range: z
-      .enum(["24h", "7d", "30d", "90d", "custom"])
-      .catch("30d")
-      .default("30d"),
+    range: z.enum(["24h", "7d", "30d", "90d", "custom"]).catch("30d").default("30d"),
     from: z.string().datetime().optional().catch(undefined),
     to: z.string().datetime().optional().catch(undefined),
   })
@@ -436,9 +416,7 @@ export function parseHistoryPairSearch(search: unknown): HistoryPairSearch {
   const result = historyPairSearchSchema.safeParse(search);
   if (result.success) return result.data;
   const raw: Record<string, unknown> =
-    typeof search === "object" && search !== null
-      ? (search as Record<string, unknown>)
-      : {};
+    typeof search === "object" && search !== null ? (search as Record<string, unknown>) : {};
   const retry = historyPairSearchSchema.safeParse({
     ...raw,
     range: undefined,

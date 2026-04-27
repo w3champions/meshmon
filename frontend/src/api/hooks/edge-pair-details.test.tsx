@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { campaignEdgePairsPrefixKey, campaignEdgePairsKey } from "@/api/hooks/campaigns";
+import { campaignEdgePairsKey, campaignEdgePairsPrefixKey } from "@/api/hooks/campaigns";
 import { type EdgePairsListResponse, useEdgePairDetails } from "@/api/hooks/evaluation";
 import { IpHostnameProvider } from "@/components/ip-hostname";
 
@@ -29,10 +29,7 @@ function makeQueryClient(): QueryClient {
   });
 }
 
-function makePage(
-  count: number,
-  next_cursor: string | null = null,
-): EdgePairsListResponse {
+function makePage(count: number, next_cursor: string | null = null): EdgePairsListResponse {
   const entries = Array.from({ length: count }, (_, i) => ({
     candidate_ip: `10.0.0.${i + 1}`,
     destination_agent_id: `agent-${i}`,
@@ -96,9 +93,9 @@ describe("useEdgePairDetails", () => {
   });
 
   test("forwards sort + dir + candidate_ip as query params", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(makePage(1)), { status: 200 }),
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify(makePage(1)), { status: 200 }));
 
     const { result } = renderHook(
       () =>

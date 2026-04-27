@@ -15,7 +15,7 @@
 
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Campaign } from "@/api/hooks/campaigns";
+import type { Campaign, EdgePairsQuery } from "@/api/hooks/campaigns";
 import type { Evaluation, EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 import { useEdgePairDetails } from "@/api/hooks/evaluation";
 import { CandidateRef } from "@/components/campaigns/CandidateRef";
@@ -36,14 +36,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { CampaignDetailSearch } from "@/router/index";
-import type { EdgePairsQuery } from "@/api/hooks/campaigns";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -152,16 +146,12 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
   const [pickedAgents, setPickedAgents] = useState<Set<string>>(() => {
     // URL param wins on first render.
     if (pickedCandidateCsv) {
-      const fromUrl = pickedCandidateCsv
-        .split(",")
-        .filter((id) => sourceAgentIds.includes(id));
+      const fromUrl = pickedCandidateCsv.split(",").filter((id) => sourceAgentIds.includes(id));
       if (fromUrl.length > 0) return new Set(fromUrl);
     }
     // Fall back to localStorage.
     try {
-      const stored = JSON.parse(localStorage.getItem(localStorageKey) ?? "null") as
-        | string[]
-        | null;
+      const stored = JSON.parse(localStorage.getItem(localStorageKey) ?? "null") as string[] | null;
       if (Array.isArray(stored)) {
         return new Set(stored.filter((id) => sourceAgentIds.includes(id)));
       }
@@ -197,7 +187,7 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
     const csv = Array.from(pickedAgents).join(",") || undefined;
     setSearchParam({ picked: csv });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setSearchParam derives from a stable navigate reference; only re-run when pickedAgents actually changes
-  }, [pickedAgents]);
+  }, [pickedAgents, setSearchParam]);
 
   // ------------------------------------------------------------------
   // Candidate sub-picker state (URL-only, transient)
@@ -208,9 +198,7 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
     return new Set(
       candidateCsv
         .split(",")
-        .filter((ip) =>
-          evaluation.results.candidates.some((c) => c.destination_ip === ip),
-        ),
+        .filter((ip) => evaluation.results.candidates.some((c) => c.destination_ip === ip)),
     );
   }, [candidateCsv, evaluation.results.candidates]);
 
@@ -231,10 +219,7 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
   // Edge-pair data feed (edge_candidate only)
   // ------------------------------------------------------------------
 
-  const edgePairQuery = useEdgePairDetails(
-    isEdgeMode ? campaign.id : undefined,
-    EDGE_PAIR_QUERY,
-  );
+  const edgePairQuery = useEdgePairDetails(isEdgeMode ? campaign.id : undefined, EDGE_PAIR_QUERY);
 
   const allEdgeRows = useMemo<EvaluationEdgePairDetailDto[]>(
     () => edgePairQuery.data?.pages.flatMap((p) => p.entries) ?? [],
@@ -258,7 +243,12 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
     return aggregates.map((agg) => {
       const baseline =
         evaluation.results.candidates.find((c) => c.destination_ip === agg.destination_ip) ??
-        ({ destination_ip: agg.destination_ip, is_mesh_member: false, pairs_improved: 0, pairs_total_considered: 0 } as Candidate);
+        ({
+          destination_ip: agg.destination_ip,
+          is_mesh_member: false,
+          pairs_improved: 0,
+          pairs_total_considered: 0,
+        } as Candidate);
       return mergeAggregateIntoCandidate(baseline, agg);
     });
   }, [isEdgeMode, allEdgeRows, pickedAgents, evaluation.results.candidates]);
@@ -304,27 +294,18 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
                 ⚠ storage filter note
               </button>
             </TooltipTrigger>
-            <TooltipContent className="max-w-xs text-xs">
-              {STORAGE_FILTER_CAVEAT}
-            </TooltipContent>
+            <TooltipContent className="max-w-xs text-xs">{STORAGE_FILTER_CAVEAT}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>
 
       {/* Pick-role radio — diversity/optimization only */}
       {!isEdgeMode ? (
-        <PickRoleRadio
-          value={pickRole}
-          onChange={(next) => setSearchParam({ pick_role: next })}
-        />
+        <PickRoleRadio value={pickRole} onChange={(next) => setSearchParam({ pick_role: next })} />
       ) : null}
 
       {/* Agent picker */}
-      <AgentPicker
-        agentIds={sourceAgentIds}
-        picked={pickedAgents}
-        onToggle={handleAgentToggle}
-      />
+      <AgentPicker agentIds={sourceAgentIds} picked={pickedAgents} onToggle={handleAgentToggle} />
 
       {/* Candidate sub-picker (shown only when at least one agent is picked) */}
       {pickedAgents.size > 0 ? (
@@ -421,10 +402,7 @@ function AgentPicker({ agentIds, picked, onToggle }: AgentPickerProps) {
       <h3 className="text-sm font-semibold">Pick destination agents to compare</h3>
       <div className="flex flex-wrap gap-3">
         {agentIds.map((agentId) => (
-          <label
-            key={agentId}
-            className="flex items-center gap-2 cursor-pointer text-sm font-mono"
-          >
+          <label key={agentId} className="flex items-center gap-2 cursor-pointer text-sm font-mono">
             <input
               type="checkbox"
               data-testid={`agent-picker-${agentId}`}
@@ -645,9 +623,7 @@ function CompareCandidateRow({ candidate, index, onClick }: CompareCandidateRowP
           <span className="text-muted-foreground">—</span>
         )}
       </TableCell>
-      <TableCell className="text-sm tabular-nums">
-        {formatMs(candidate.mean_ms_under_t)}
-      </TableCell>
+      <TableCell className="text-sm tabular-nums">{formatMs(candidate.mean_ms_under_t)}</TableCell>
       <TableCell>
         <div className="w-24">
           <RouteMixBar direct={direct} oneHop={oneHop} twoHop={twoHop} />
@@ -662,9 +638,7 @@ function CompareCandidateRow({ candidate, index, onClick }: CompareCandidateRowP
             <TooltipTrigger asChild>
               <span className="cursor-help">—</span>
             </TooltipTrigger>
-            <TooltipContent className="max-w-xs text-xs">
-              {CWP_TOOLTIP}
-            </TooltipContent>
+            <TooltipContent className="max-w-xs text-xs">{CWP_TOOLTIP}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </TableCell>
@@ -678,17 +652,12 @@ function CompareCandidateRow({ candidate, index, onClick }: CompareCandidateRowP
 
 function CompareTripleStub() {
   return (
-    <Card
-      className="p-6 flex flex-col gap-2"
-      data-testid="compare-triple-stub"
-      role="status"
-    >
+    <Card className="p-6 flex flex-col gap-2" data-testid="compare-triple-stub" role="status">
       <h3 className="text-sm font-semibold">Compare for diversity/optimization</h3>
       <p className="text-sm text-muted-foreground">
-        Client-side re-aggregation for diversity and optimization modes is not wired.
-        Per-candidate pair_details live behind a paginated endpoint; fetching them
-        per picked candidate is deferred. The agent picker and pick-role filter
-        above will drive the query once wired.
+        Client-side re-aggregation for diversity and optimization modes is not wired. Per-candidate
+        pair_details live behind a paginated endpoint; fetching them per picked candidate is
+        deferred. The agent picker and pick-role filter above will drive the query once wired.
       </p>
     </Card>
   );

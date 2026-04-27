@@ -49,15 +49,12 @@ describe("aggregateEdgeCandidates", () => {
   });
 
   test("filters out rows whose destination_agent_id is not in picked set", () => {
-    const rows = [
-      makeRow("10.0.0.1", "agent-a", 50),
-      makeRow("10.0.0.1", "agent-b", 60),
-    ];
+    const rows = [makeRow("10.0.0.1", "agent-a", 50), makeRow("10.0.0.1", "agent-b", 60)];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
     expect(result).toHaveLength(1);
-    expect(result[0]!.destination_ip).toBe("10.0.0.1");
+    expect(result[0]?.destination_ip).toBe("10.0.0.1");
     // Only agent-a row counted
-    expect(result[0]!.total_picked).toBe(1);
+    expect(result[0]?.total_picked).toBe(1);
   });
 
   test("coverage_count counts qualifying rows only", () => {
@@ -67,15 +64,13 @@ describe("aggregateEdgeCandidates", () => {
       makeRow("10.0.0.1", "agent-c", 80, { qualifies_under_t: true }),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b", "agent-c"]));
-    expect(result[0]!.coverage_count).toBe(2);
+    expect(result[0]?.coverage_count).toBe(2);
   });
 
   test("mean_ms_under_t is null when no rows qualify", () => {
-    const rows = [
-      makeRow("10.0.0.1", "agent-a", 200, { qualifies_under_t: false }),
-    ];
+    const rows = [makeRow("10.0.0.1", "agent-a", 200, { qualifies_under_t: false })];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
-    expect(result[0]!.mean_ms_under_t).toBeNull();
+    expect(result[0]?.mean_ms_under_t).toBeNull();
   });
 
   test("mean_ms_under_t is mean of qualifying best_route_ms values", () => {
@@ -84,7 +79,7 @@ describe("aggregateEdgeCandidates", () => {
       makeRow("10.0.0.1", "agent-b", 60, { qualifies_under_t: true }),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b"]));
-    expect(result[0]!.mean_ms_under_t).toBeCloseTo(50);
+    expect(result[0]?.mean_ms_under_t).toBeCloseTo(50);
   });
 
   test("unreachable rows do not count toward coverage or route mix", () => {
@@ -93,9 +88,9 @@ describe("aggregateEdgeCandidates", () => {
       makeRow("10.0.0.1", "agent-b", 60, { qualifies_under_t: true }),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b"]));
-    expect(result[0]!.coverage_count).toBe(1);
+    expect(result[0]?.coverage_count).toBe(1);
     // Only agent-b (qualifying) counted in route mix.
-    expect(result[0]!.direct_share).toBe(1);
+    expect(result[0]?.direct_share).toBe(1);
   });
 
   test("route mix shares sum to 1 over qualifying rows", () => {
@@ -105,21 +100,22 @@ describe("aggregateEdgeCandidates", () => {
       makeRow("10.0.0.1", "agent-c", 80, { best_route_kind: "two_hop" }),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b", "agent-c"]));
-    const agg = result[0]!;
+    const agg = result[0];
+    if (!agg) throw new Error("expected aggregation result");
     expect(agg.direct_share).toBeCloseTo(1 / 3);
     expect(agg.onehop_share).toBeCloseTo(1 / 3);
     expect(agg.twohop_share).toBeCloseTo(1 / 3);
-    expect((agg.direct_share ?? 0) + (agg.onehop_share ?? 0) + (agg.twohop_share ?? 0)).toBeCloseTo(1);
+    expect((agg.direct_share ?? 0) + (agg.onehop_share ?? 0) + (agg.twohop_share ?? 0)).toBeCloseTo(
+      1,
+    );
   });
 
   test("route mix shares are null when all rows unreachable", () => {
-    const rows = [
-      makeRow("10.0.0.1", "agent-a", 50, { is_unreachable: true }),
-    ];
+    const rows = [makeRow("10.0.0.1", "agent-a", 50, { is_unreachable: true })];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
-    expect(result[0]!.direct_share).toBeNull();
-    expect(result[0]!.onehop_share).toBeNull();
-    expect(result[0]!.twohop_share).toBeNull();
+    expect(result[0]?.direct_share).toBeNull();
+    expect(result[0]?.onehop_share).toBeNull();
+    expect(result[0]?.twohop_share).toBeNull();
   });
 
   /**
@@ -141,7 +137,8 @@ describe("aggregateEdgeCandidates", () => {
       }),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b"]));
-    const agg = result[0]!;
+    const agg = result[0];
+    if (!agg) throw new Error("expected aggregation result");
     expect(agg.coverage_count).toBe(1);
     expect(agg.direct_share).toBeCloseTo(1);
     expect(agg.twohop_share).toBeCloseTo(0);
@@ -156,8 +153,9 @@ describe("aggregateEdgeCandidates", () => {
       makeRow("10.0.0.2", "agent-b", 30, { qualifies_under_t: true }),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b"]));
-    const agg1 = result.find((r) => r.destination_ip === "10.0.0.1")!;
-    const agg2 = result.find((r) => r.destination_ip === "10.0.0.2")!;
+    const agg1 = result.find((r) => r.destination_ip === "10.0.0.1");
+    const agg2 = result.find((r) => r.destination_ip === "10.0.0.2");
+    if (!agg1 || !agg2) throw new Error("expected both aggregation results");
     expect(agg1.coverage_count).toBe(1);
     expect(agg2.coverage_count).toBe(2);
     expect(agg2.mean_ms_under_t).toBeCloseTo(55);
@@ -170,7 +168,7 @@ describe("aggregateEdgeCandidates", () => {
       makeRow("10.0.0.1", "agent-c", 80),
     ];
     const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b", "agent-c"]));
-    expect(result[0]!.total_picked).toBe(3);
+    expect(result[0]?.total_picked).toBe(3);
   });
 });
 

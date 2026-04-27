@@ -798,7 +798,8 @@ describe("SettingsTab — R1: edge_candidate mode", () => {
 
     expect(modeGroup).not.toBeNull();
     // compareDocumentPosition: if modeGroup precedes lossInput, the flag includes DOCUMENT_POSITION_FOLLOWING (4)
-    const position = modeGroup!.compareDocumentPosition(lossInput);
+    if (!modeGroup) throw new Error("expected modeGroup");
+    const position = modeGroup.compareDocumentPosition(lossInput);
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -1014,7 +1015,7 @@ describe("SettingsTab — R2: legacy badge", () => {
         // max_hops intentionally absent (undefined) — legacy evaluations
         vm_lookback_minutes: null,
         results: { candidates: [], unqualified_reasons: {} },
-      } as any,
+      } as unknown,
       isLoading: false,
       isError: false,
     } as unknown as ReturnType<typeof useEvaluation>);

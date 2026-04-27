@@ -27,35 +27,38 @@ describe("RouteLegRow", () => {
     renderWithQuery(
       <RouteLegRow leg={makeLeg({ was_substituted: true })} lossThresholdRatio={0.1} />,
     );
-    expect(
-      screen.getByText("← reverse-substituted (ingress block detected)"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("← reverse-substituted (ingress block detected)")).toBeInTheDocument();
   });
 
   it("renders '← symmetric reuse' chip when source=symmetric_reuse and !was_substituted", () => {
     renderWithQuery(
-      <RouteLegRow leg={makeLeg({ source: "symmetric_reuse", was_substituted: false })} lossThresholdRatio={0.1} />,
+      <RouteLegRow
+        leg={makeLeg({ source: "symmetric_reuse", was_substituted: false })}
+        lossThresholdRatio={0.1}
+      />,
     );
     expect(screen.getByText("← symmetric reuse")).toBeInTheDocument();
   });
 
   it("renders no chip when source=vm_continuous and !was_substituted", () => {
     renderWithQuery(
-      <RouteLegRow leg={makeLeg({ source: "vm_continuous", was_substituted: false })} lossThresholdRatio={0.1} />,
+      <RouteLegRow
+        leg={makeLeg({ source: "vm_continuous", was_substituted: false })}
+        lossThresholdRatio={0.1}
+      />,
     );
-    expect(
-      screen.queryByText("← reverse-substituted (ingress block detected)"),
-    ).toBeNull();
+    expect(screen.queryByText("← reverse-substituted (ingress block detected)")).toBeNull();
     expect(screen.queryByText("← symmetric reuse")).toBeNull();
   });
 
   it("renders no chip when source=active_probe and !was_substituted", () => {
     renderWithQuery(
-      <RouteLegRow leg={makeLeg({ source: "active_probe", was_substituted: false })} lossThresholdRatio={0.1} />,
+      <RouteLegRow
+        leg={makeLeg({ source: "active_probe", was_substituted: false })}
+        lossThresholdRatio={0.1}
+      />,
     );
-    expect(
-      screen.queryByText("← reverse-substituted (ingress block detected)"),
-    ).toBeNull();
+    expect(screen.queryByText("← reverse-substituted (ingress block detected)")).toBeNull();
     expect(screen.queryByText("← symmetric reuse")).toBeNull();
   });
 
@@ -66,9 +69,7 @@ describe("RouteLegRow", () => {
         lossThresholdRatio={0.1}
       />,
     );
-    expect(
-      screen.getByText("← reverse-substituted (ingress block detected)"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("← reverse-substituted (ingress block detected)")).toBeInTheDocument();
     expect(screen.getByText("exceeds loss threshold")).toBeInTheDocument();
   });
 });

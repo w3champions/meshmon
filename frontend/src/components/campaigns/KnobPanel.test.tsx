@@ -176,9 +176,7 @@ describe("KnobPanel", () => {
   });
 
   test("useful_latency_ms input is hidden for optimization mode", () => {
-    render(
-      <KnobPanel value={baseKnobs({ evaluation_mode: "optimization" })} onChange={vi.fn()} />,
-    );
+    render(<KnobPanel value={baseKnobs({ evaluation_mode: "optimization" })} onChange={vi.fn()} />);
     expect(screen.queryByLabelText(/useful latency/i)).not.toBeInTheDocument();
   });
 
@@ -204,10 +202,7 @@ describe("KnobPanel", () => {
   test("typing into useful_latency_ms emits the parsed number", () => {
     const onChange = vi.fn<(next: CampaignKnobs) => void>();
     render(
-      <KnobPanel
-        value={baseKnobs({ evaluation_mode: "edge_candidate" })}
-        onChange={onChange}
-      />,
+      <KnobPanel value={baseKnobs({ evaluation_mode: "edge_candidate" })} onChange={onChange} />,
     );
 
     fireEvent.change(screen.getByLabelText(/useful latency/i), { target: { value: "80" } });
@@ -252,9 +247,7 @@ describe("KnobPanel", () => {
   });
 
   test("min_improvement_ms and min_improvement_ratio are visible for optimization mode", () => {
-    render(
-      <KnobPanel value={baseKnobs({ evaluation_mode: "optimization" })} onChange={vi.fn()} />,
-    );
+    render(<KnobPanel value={baseKnobs({ evaluation_mode: "optimization" })} onChange={vi.fn()} />);
     expect(screen.getByLabelText(/min improvement \(ms\)/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/min improvement ratio/i)).toBeInTheDocument();
   });

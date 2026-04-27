@@ -11,6 +11,7 @@ import {
   useStartCampaign,
   useStopCampaign,
 } from "@/api/hooks/campaigns";
+import { useEvaluation } from "@/api/hooks/evaluation";
 import { DeleteCampaignDialog } from "@/components/campaigns/DeleteCampaignDialog";
 import { EditMetadataSheet } from "@/components/campaigns/EditMetadataSheet";
 import { CandidatesTab } from "@/components/campaigns/results/CandidatesTab";
@@ -25,7 +26,6 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useEvaluation } from "@/api/hooks/evaluation";
 import { isIllegalStateTransition, stateBadgeVariant } from "@/lib/campaign";
 import { ratioToPercentInput } from "@/lib/campaign-config";
 import {
@@ -599,16 +599,10 @@ export default function CampaignDetail() {
            * SettingsTab inputs verbatim for at-a-glance parity.
            */}
           {isEdgeCandidate ? (
-            <KnobRow
-              label="Useful latency (ms)"
-              value={campaign.useful_latency_ms ?? null}
-            />
+            <KnobRow label="Useful latency (ms)" value={campaign.useful_latency_ms ?? null} />
           ) : null}
           <KnobRow label="Max hops" value={campaign.max_hops ?? null} />
-          <KnobRow
-            label="Lookback window (min)"
-            value={campaign.vm_lookback_minutes ?? null}
-          />
+          <KnobRow label="Lookback window (min)" value={campaign.vm_lookback_minutes ?? null} />
           {/*
            * Guardrail knobs. Optional on the campaign row — `?? null`
            * collapses `undefined` (legacy campaigns predating the
@@ -656,9 +650,7 @@ export default function CampaignDetail() {
         >
           <TabsList aria-label="Campaign results tabs">
             <TabsTrigger value="candidates">Candidates</TabsTrigger>
-            {isEdgeCandidate ? (
-              <TabsTrigger value="heatmap">Heatmap</TabsTrigger>
-            ) : null}
+            {isEdgeCandidate ? <TabsTrigger value="heatmap">Heatmap</TabsTrigger> : null}
             <TabsTrigger value="pairs">Pairs</TabsTrigger>
             {isTerminal ? <TabsTrigger value="compare">Compare</TabsTrigger> : null}
             <TabsTrigger value="raw">Raw measurements</TabsTrigger>
@@ -674,7 +666,9 @@ export default function CampaignDetail() {
               {effectiveTab === "heatmap" && freshEvaluation ? (
                 <HeatmapTab campaign={campaign} evaluation={freshEvaluation} />
               ) : effectiveTab === "heatmap" ? (
-                <p className="text-sm text-muted-foreground p-4">Evaluate first to view the heatmap.</p>
+                <p className="text-sm text-muted-foreground p-4">
+                  Evaluate first to view the heatmap.
+                </p>
               ) : null}
             </TabsContent>
           ) : null}

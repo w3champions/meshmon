@@ -191,9 +191,7 @@ export default function CampaignComposer() {
       // useful_latency_ms is required in edge_candidate mode (enforced by
       // the validation gate below); for diversity/optimization, omit the
       // field entirely when null so the backend doesn't receive a null value.
-      ...(knobs.useful_latency_ms !== null
-        ? { useful_latency_ms: knobs.useful_latency_ms }
-        : {}),
+      ...(knobs.useful_latency_ms !== null ? { useful_latency_ms: knobs.useful_latency_ms } : {}),
       source_agent_ids: Array.from(sourceSet),
       destination_ips: Array.from(destSet),
     };
@@ -410,8 +408,10 @@ export default function CampaignComposer() {
   // --- Computed UI state --------------------------------------------------
 
   const startDisabled =
-    knobs.protocol === "mtr" || createMutation.isPending || startMutation.isPending
-    || (knobs.evaluation_mode === "edge_candidate" && knobs.useful_latency_ms === null);
+    knobs.protocol === "mtr" ||
+    createMutation.isPending ||
+    startMutation.isPending ||
+    (knobs.evaluation_mode === "edge_candidate" && knobs.useful_latency_ms === null);
 
   // Pre-commit view: always mirror the operator's explicit selection. The
   // DestinationPanel footer already advertises the filter's first-page total

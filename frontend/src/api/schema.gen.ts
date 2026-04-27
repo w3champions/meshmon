@@ -2101,9 +2101,11 @@ export interface components {
             best_route_loss_ratio: number;
             /**
              * Format: float
-             * @description Best-route composed RTT (ms). `None` when `is_unreachable` is
-             *     `true` — the wire serializes the field as JSON `null` rather
-             *     than an unrepresentable infinity sentinel.
+             * @description Raw RTT of the winning route (ms). The penalty score
+             *     (`rtt + stddev_weight * stddev`) is used internally to pick the
+             *     winner; only the raw RTT is exposed here. `None` when
+             *     `is_unreachable` is `true` — the wire serializes the field as
+             *     JSON `null` rather than an unrepresentable infinity sentinel.
              */
             best_route_ms?: number | null;
             /**

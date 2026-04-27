@@ -90,7 +90,8 @@ describe("HeatmapColorEditor", () => {
     const gradientBar = screen.getByTestId("hm-gradient-bar");
 
     // Mock getBoundingClientRect on the parent track element
-    const track = gradientBar.parentElement!;
+    if (!gradientBar.parentElement) throw new Error("expected parent track element");
+    const track = gradientBar.parentElement;
     vi.spyOn(track, "getBoundingClientRect").mockReturnValue({
       left: 0,
       right: 400,
@@ -148,7 +149,7 @@ describe("HeatmapColorEditor", () => {
     // localStorage should be updated
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null") as number[] | null;
     expect(stored).not.toBeNull();
-    expect(stored![1]).toBe(90);
+    expect(stored?.[1]).toBe(90);
 
     // onSaved called
     expect(onSaved).toHaveBeenCalledOnce();

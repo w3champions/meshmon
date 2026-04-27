@@ -443,10 +443,7 @@ describe("PairsTab — edge_candidate mode", () => {
     // `not_evaluated`, which would surface as the EdgePairsTab error
     // alert. Render a placeholder instead and skip the API call.
     setupMocks([]);
-    renderTab(
-      makeCampaign({ state: "running", evaluation_mode: "edge_candidate" }),
-      null,
-    );
+    renderTab(makeCampaign({ state: "running", evaluation_mode: "edge_candidate" }), null);
     expect(screen.getByTestId("edge-pairs-placeholder")).toBeInTheDocument();
     expect(screen.queryByTestId("edge-pairs-tab")).not.toBeInTheDocument();
     expect(useEdgePairDetails).not.toHaveBeenCalled();
@@ -487,8 +484,14 @@ describe("PairsTab — edge_candidate mode", () => {
         pages: [
           {
             entries: [
-              makeEdgePairRow("10.0.55.1", "agent-b", { best_route_kind: "direct", qualifies_under_t: true }),
-              makeEdgePairRow("10.0.55.2", "agent-c", { best_route_kind: "one_hop", qualifies_under_t: false }),
+              makeEdgePairRow("10.0.55.1", "agent-b", {
+                best_route_kind: "direct",
+                qualifies_under_t: true,
+              }),
+              makeEdgePairRow("10.0.55.2", "agent-c", {
+                best_route_kind: "one_hop",
+                qualifies_under_t: false,
+              }),
             ],
             next_cursor: null,
           },

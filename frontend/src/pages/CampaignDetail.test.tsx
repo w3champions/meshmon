@@ -1,5 +1,4 @@
 import "@testing-library/jest-dom/vitest";
-import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -11,6 +10,7 @@ import {
 } from "@tanstack/react-router";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Campaign, CampaignState, PreviewDispatchResponse } from "@/api/hooks/campaigns";
 

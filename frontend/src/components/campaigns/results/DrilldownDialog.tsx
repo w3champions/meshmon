@@ -17,8 +17,10 @@ import type { Campaign } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
 import { CandidateRef } from "@/components/campaigns/CandidateRef";
 import { EdgePairDrawerBody } from "@/components/campaigns/results/EdgePairDrawerBody";
-import { TripleDrawerBody } from "@/components/campaigns/results/TripleDrawerBody";
-import { summarizeGuardrails } from "@/components/campaigns/results/TripleDrawerBody";
+import {
+  summarizeGuardrails,
+  TripleDrawerBody,
+} from "@/components/campaigns/results/TripleDrawerBody";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import {
@@ -141,16 +143,12 @@ function DialogBody({
           <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground mt-2">
             {isEdgeMode ? (
               /* Edge-candidate: show coverage stats */
-              <span>
-                Edge candidate{" "}
-                {candidate.destination_ip}
-              </span>
+              <span>Edge candidate {candidate.destination_ip}</span>
             ) : (
               /* Triple: show pair stats */
               <>
                 <span>
-                  Transit candidate{" "}
-                  <span className="font-mono">{candidate.destination_ip}</span>
+                  Transit candidate <span className="font-mono">{candidate.destination_ip}</span>
                 </span>
                 <span aria-hidden>·</span>
                 <span>
@@ -173,9 +171,7 @@ function DialogBody({
         </DialogDescription>
 
         {/* Provenance chips — edge_candidate mode only (per plan M3 lines 3095-3101) */}
-        {isEdgeMode ? (
-          <ProvenanceChips candidate={candidate} />
-        ) : null}
+        {isEdgeMode ? <ProvenanceChips candidate={candidate} /> : null}
 
         {unqualifiedReason ? (
           <Card className="border-amber-500/50 bg-amber-500/5 p-3 text-sm" role="status">
@@ -218,8 +214,8 @@ function DialogBody({
  *   yellow "Symmetric-reuse approximation (mesh agent — VM data unavailable)"
  */
 function ProvenanceChips({ candidate }: { candidate: Candidate }) {
-  const hasReal =
-    (candidate as Candidate & { has_real_x_source_data?: boolean | null }).has_real_x_source_data;
+  const hasReal = (candidate as Candidate & { has_real_x_source_data?: boolean | null })
+    .has_real_x_source_data;
 
   if (hasReal === true) {
     return (

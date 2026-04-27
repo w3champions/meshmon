@@ -78,10 +78,7 @@ export function EdgeKPIStrip({ evaluation }: EdgeKPIStripProps) {
 
   return (
     <section aria-label="Edge evaluation summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-      <EdgeKpiCard
-        label="Candidates"
-        value={evaluation.candidates_total.toLocaleString()}
-      />
+      <EdgeKpiCard label="Candidates" value={evaluation.candidates_total.toLocaleString()} />
       <EdgeKpiCard
         label="Destinations"
         value={totalDestinations != null ? totalDestinations.toLocaleString() : "—"}
@@ -298,7 +295,12 @@ export function EdgeCandidateTable({
                         <RouteMixBar direct={direct} oneHop={oneHop} twoHop={twoHop} />
                       </div>
                     </TableCell>
-                    <TableCell className={cn("text-sm tabular-nums", candidate.coverage_weighted_ping_ms != null ? "" : "text-muted-foreground")}>
+                    <TableCell
+                      className={cn(
+                        "text-sm tabular-nums",
+                        candidate.coverage_weighted_ping_ms != null ? "" : "text-muted-foreground",
+                      )}
+                    >
                       {formatMs(candidate.coverage_weighted_ping_ms)}
                     </TableCell>
                   </TableRow>
@@ -323,7 +325,11 @@ interface CoverageChipProps {
 
 function CoverageChip({ count, total }: CoverageChipProps) {
   if (count == null) {
-    return <Badge variant="outline" className="text-muted-foreground">—</Badge>;
+    return (
+      <Badge variant="outline" className="text-muted-foreground">
+        —
+      </Badge>
+    );
   }
   const label = total != null ? `${count} / ${total}` : String(count);
   const isGood = total != null && count > 0;

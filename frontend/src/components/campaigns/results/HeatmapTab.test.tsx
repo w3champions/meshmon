@@ -7,8 +7,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Campaign, CampaignState } from "@/api/hooks/campaigns";
-import type { Evaluation } from "@/api/hooks/evaluation";
-import type { EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
+import type { Evaluation, EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 import { IpHostnameProvider } from "@/components/ip-hostname";
 
 // ---------------------------------------------------------------------------
@@ -50,7 +49,7 @@ vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
 }));
 
 import { useEdgePairDetails } from "@/api/hooks/evaluation";
-import { getTier, readBoundaries, HeatmapTab } from "@/components/campaigns/results/HeatmapTab";
+import { getTier, HeatmapTab, readBoundaries } from "@/components/campaigns/results/HeatmapTab";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -278,7 +277,10 @@ describe("O1: HeatmapTab basic render", () => {
     render(
       <QueryClientProvider client={qc}>
         <IpHostnameProvider>
-          <HeatmapTab campaign={makeCampaign({ state: "evaluated" })} evaluation={makeEvaluation()} />
+          <HeatmapTab
+            campaign={makeCampaign({ state: "evaluated" })}
+            evaluation={makeEvaluation()}
+          />
         </IpHostnameProvider>
       </QueryClientProvider>,
     );
@@ -407,7 +409,8 @@ describe("O3: Sort + cell click", () => {
     // B: 60 * (3/3)  = 60       — tie
     // To break the tie, drop A's qualifying RTT to 10 so the backend ranks A
     // strictly better than B (10*3 = 30 vs 60).
-    rows[0] = { ...rows[0]!, best_route_ms: 10 };
+    if (!rows[0]) throw new Error("expected rows[0]");
+    rows[0] = { ...rows[0], best_route_ms: 10 };
 
     renderHeatmap(rows, {
       results: {
@@ -569,10 +572,7 @@ describe("O3: Sort + cell click", () => {
     renderHeatmap(rows);
 
     const cell = screen.getByTestId("heatmap-cell-10.0.0.1-agent-a");
-    expect(cell).toHaveAttribute(
-      "aria-label",
-      expect.stringContaining("75 ms"),
-    );
+    expect(cell).toHaveAttribute("aria-label", expect.stringContaining("75 ms"));
   });
 
   test("unreachable cell aria-label says unreachable", () => {

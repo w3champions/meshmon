@@ -747,9 +747,7 @@ describe("CampaignComposer — edge_candidate source explainer", () => {
     const edgeToggle = screen.getByRole("radio", { name: /edge.?candidate/i });
     await user.click(edgeToggle);
 
-    expect(
-      screen.getByText(/selected source agents probe each candidate/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/selected source agents probe each candidate/i)).toBeInTheDocument();
   });
 
   test("source explainer disappears when switching away from edge_candidate", async () => {
@@ -761,9 +759,7 @@ describe("CampaignComposer — edge_candidate source explainer", () => {
 
     const edgeToggle = screen.getByRole("radio", { name: /edge.?candidate/i });
     await user.click(edgeToggle);
-    expect(
-      screen.getByText(/selected source agents probe each candidate/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/selected source agents probe each candidate/i)).toBeInTheDocument();
 
     // Switch back to optimization.
     const optimizationToggle = screen.getByRole("radio", { name: /optimization/i });

@@ -15,8 +15,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import type { AgentSummary } from "@/api/hooks/agents";
 import { useAgents } from "@/api/hooks/agents";
-import type { Campaign } from "@/api/hooks/campaigns";
-import type { EdgePairsSortCol, EdgePairsSortDir } from "@/api/hooks/campaigns";
+import type { Campaign, EdgePairsSortCol, EdgePairsSortDir } from "@/api/hooks/campaigns";
 import type { EvaluationEdgePairDetailDto } from "@/api/hooks/evaluation";
 import { useEdgePairDetails } from "@/api/hooks/evaluation";
 import { CandidateRef } from "@/components/campaigns/CandidateRef";
@@ -144,10 +143,10 @@ export function EdgePairsTab({ campaign }: EdgePairsTabProps) {
     [navigate, search],
   );
 
-  const query = useEdgePairDetails(campaign.id, useMemo(
-    () => ({ sort: sortCol, dir: sortDir }),
-    [sortCol, sortDir],
-  ));
+  const query = useEdgePairDetails(
+    campaign.id,
+    useMemo(() => ({ sort: sortCol, dir: sortDir }), [sortCol, sortDir]),
+  );
   const agentsQuery = useAgents();
 
   const rows = useMemo<EvaluationEdgePairDetailDto[]>(
@@ -284,7 +283,9 @@ export function EdgePairsTab({ campaign }: EdgePairsTabProps) {
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => { void query.fetchNextPage(); }}
+            onClick={() => {
+              void query.fetchNextPage();
+            }}
             disabled={query.isFetchingNextPage}
             data-testid="edge-pairs-load-more"
           >
@@ -321,8 +322,7 @@ function EdgePairRow({ row, index, lossThresholdRatio, agentsById }: EdgePairRow
   // the response-provided hostname, falling back to the agent's display name
   // and finally the agent_id when the agent isn't in the roster.
   const destAgent = agentsById.get(row.destination_agent_id);
-  const destLabel =
-    row.destination_hostname ?? destAgent?.display_name ?? row.destination_agent_id;
+  const destLabel = row.destination_hostname ?? destAgent?.display_name ?? row.destination_agent_id;
   const destRefData = destAgent
     ? {
         ip: destAgent.ip,
@@ -353,7 +353,9 @@ function EdgePairRow({ row, index, lossThresholdRatio, agentsById }: EdgePairRow
           ) : (
             <>
               <span className="text-sm font-medium">{destLabel}</span>
-              <div className="font-mono text-xs text-muted-foreground">{row.destination_agent_id}</div>
+              <div className="font-mono text-xs text-muted-foreground">
+                {row.destination_agent_id}
+              </div>
             </>
           )}
         </TableCell>
@@ -407,9 +409,9 @@ function EdgePairRow({ row, index, lossThresholdRatio, agentsById }: EdgePairRow
       {row.best_route_legs.length > 0 ? (
         <TableRow className="bg-muted/10 hover:bg-muted/10">
           <TableCell colSpan={7} className="py-1 pl-6">
-            {row.best_route_legs.map((leg, legIdx) => (
+            {row.best_route_legs.map((leg) => (
               <RouteLegRow
-                key={`${row.candidate_ip}-${row.destination_agent_id}-leg-${legIdx}`}
+                key={`${leg.from_id}::${leg.to_id}`}
                 leg={leg}
                 lossThresholdRatio={lossThresholdRatio}
               />
