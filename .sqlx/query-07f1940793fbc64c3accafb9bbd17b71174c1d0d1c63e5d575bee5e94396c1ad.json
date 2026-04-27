@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator\n             FROM ip_catalogue c\n            WHERE c.ip IN (\n                SELECT DISTINCT destination_ip FROM campaign_pairs WHERE campaign_id = $1\n            )",
+  "query": "SELECT c.ip,\n                  c.display_name,\n                  c.city,\n                  c.country_code,\n                  c.asn,\n                  c.network_operator,\n                  c.website,\n                  c.notes\n             FROM ip_catalogue c\n            WHERE c.ip IN (\n                SELECT DISTINCT destination_ip FROM campaign_pairs\n                 WHERE campaign_id = $1\n                   AND kind = 'campaign'\n            )",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,16 @@
         "ordinal": 5,
         "name": "network_operator",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "notes",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -45,8 +55,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "7621cda4ef02a2dcc4ce6e7cbe6c875f887c4b5345474b4f160482d9ef64360c"
+  "hash": "07f1940793fbc64c3accafb9bbd17b71174c1d0d1c63e5d575bee5e94396c1ad"
 }

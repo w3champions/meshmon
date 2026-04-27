@@ -14,7 +14,9 @@ import type { AgentSummary } from "@/api/hooks/agents";
 import { useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import { useCampaignPairs, useForcePair } from "@/api/hooks/campaigns";
+import type { Evaluation } from "@/api/hooks/evaluation";
 import { useTriggerDetail } from "@/api/hooks/evaluation";
+import { EdgePairsTab } from "@/components/campaigns/results/EdgePairsTab";
 import {
   type PairRowAction,
   PairTable,
@@ -44,9 +46,50 @@ const PAIRS_TAB_LIMIT = 5000;
 
 export interface PairsTabProps {
   campaign: Campaign;
+  /**
+   * Latest evaluation snapshot, if any. `null` when the campaign has not
+   * been `/evaluate`-d yet (or the evaluation was dismissed by a knob
+   * change). Edge-candidate mode reads from `/evaluation/edge_pairs`,
+   * which 404s with `not_evaluated` until an evaluation row exists; gate
+   * the inner tab on this prop so unevaluated campaigns render a
+   * placeholder instead of the API error alert.
+   */
+  evaluation: Evaluation | null;
 }
 
-export function PairsTab({ campaign }: PairsTabProps) {
+export function PairsTab({ campaign, evaluation }: PairsTabProps) {
+  // Edge-candidate mode delegates entirely to the flat (X, B) pivot.
+  if (campaign.evaluation_mode === "edge_candidate") {
+    if (!evaluation) {
+      return (
+        <section data-testid="pairs-tab" className="flex flex-col gap-4">
+          <Card
+            className="flex flex-col items-start gap-3 p-6"
+            data-testid="edge-pairs-placeholder"
+          >
+            <h2 className="text-base font-semibold">No evaluation yet</h2>
+            <p className="text-sm text-muted-foreground">
+              Run /evaluate to populate edge pairs for this campaign.
+            </p>
+          </Card>
+        </section>
+      );
+    }
+    return <EdgePairsTab campaign={campaign} />;
+  }
+  return <TriplePairsTab campaign={campaign} />;
+}
+
+interface TriplePairsTabProps {
+  campaign: Campaign;
+}
+
+/**
+ * Pairs tab body for non-edge_candidate evaluation modes (optimization / diversity).
+ * Renders the full baseline (A, B) pair table with force-remeasure and detail-dispatch
+ * row actions.
+ */
+function TriplePairsTab({ campaign }: TriplePairsTabProps) {
   const pairsQuery = useCampaignPairs(campaign.id, { limit: PAIRS_TAB_LIMIT });
   const agentsQuery = useAgents();
   const forcePairMutation = useForcePair();

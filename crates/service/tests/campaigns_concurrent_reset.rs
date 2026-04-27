@@ -73,6 +73,9 @@ async fn late_settle_is_dropped_when_pair_was_reset() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )
@@ -250,6 +253,9 @@ async fn scheduler_revert_does_not_clobber_concurrent_reset() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )

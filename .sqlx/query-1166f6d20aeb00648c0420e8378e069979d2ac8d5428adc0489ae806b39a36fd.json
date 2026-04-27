@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE measurement_campaigns SET state = $2, stopped_at = now()\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 max_transit_rtt_ms, max_transit_stddev_ms,\n                 min_improvement_ms, min_improvement_ratio,\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
+  "query": "\n            UPDATE measurement_campaigns\n               SET state = $2\n             WHERE id = $1 AND state = ANY($3::campaign_state[])\n             RETURNING id, title, notes,\n                 state AS \"state: CampaignState\",\n                 protocol AS \"protocol: ProbeProtocol\",\n                 probe_count, probe_count_detail, timeout_ms, probe_stagger_ms,\n                 force_measurement, loss_threshold_ratio, stddev_weight,\n                 evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                 max_transit_rtt_ms, max_transit_stddev_ms,\n                 min_improvement_ms, min_improvement_ratio,\n                 useful_latency_ms, max_hops, vm_lookback_minutes,\n                 created_by, created_at, started_at, stopped_at, completed_at, evaluated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -96,7 +96,8 @@
             "kind": {
               "Enum": [
                 "diversity",
-                "optimization"
+                "optimization",
+                "edge_candidate"
               ]
             }
           }
@@ -124,31 +125,46 @@
       },
       {
         "ordinal": 17,
+        "name": "useful_latency_ms",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 18,
+        "name": "max_hops",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 19,
+        "name": "vm_lookback_minutes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 20,
         "name": "created_by",
         "type_info": "Text"
       },
       {
-        "ordinal": 18,
+        "ordinal": 21,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 19,
+        "ordinal": 22,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 20,
+        "ordinal": 23,
         "name": "stopped_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 21,
+        "ordinal": 24,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 22,
+        "ordinal": 25,
         "name": "evaluated_at",
         "type_info": "Timestamptz"
       }
@@ -213,11 +229,14 @@
       true,
       true,
       false,
+      false,
+      true,
+      false,
       true,
       true,
       true,
       true
     ]
   },
-  "hash": "27dc692918babe7112a6a8957e1e6d7fb7a12661fe4285f8b2d4c6c559e8e5b5"
+  "hash": "1166f6d20aeb00648c0420e8378e069979d2ac8d5428adc0489ae806b39a36fd"
 }

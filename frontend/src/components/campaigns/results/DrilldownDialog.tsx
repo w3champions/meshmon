@@ -1,43 +1,27 @@
 /**
  * Centered drilldown dialog for the Candidates tab.
  *
- * Centered modal (`max-w-6xl`, `max-h-[85vh]`, internal scroll). The
- * body paginates the candidate's pair-detail rows via
- * [`useCandidatePairDetails`], surfaces a sticky filter toolbar, and
- * (lazily) renders an inline `MtrPanel` below the table when an MTR
- * icon is clicked.
+ * Centered modal (`max-w-6xl`, `max-h-[85vh]`, internal scroll). Branches on
+ * `evaluation.evaluation_mode`:
+ * - `edge_candidate` → `<EdgePairDrawerBody>` + provenance chips
+ * - else (diversity/optimization) → `<TripleDrawerBody>` (paginated pair-detail)
  *
- * Caption math: the dialog runs `useCandidatePairDetails` twice. The
- * first call mirrors the active toolbar state (drives the table); the
- * second clears every toolbar filter so its `pages[0].total` is the
- * full count of rows the *storage* filter let through. The caption
- * renders `Showing X of Y rows · Z hidden by storage guardrails`,
- * where `Z = candidate.pairs_total_considered − Y`. With no
- * guardrails active, `Z = 0` and the trailing clause is omitted.
+ * Header: `<CandidateRef mode="header">` replaces the bare name + IP text
+ * from the pre-M3 implementation.
  *
- * Cost: one extra `COUNT(*)` per dialog open for the unfiltered hook.
- * Justified — the alternative (a sidecar `total_dropped` field on
- * every paginated response) would persist a value that goes stale the
- * moment the operator changes a guardrail, and the bounded row set is
- * served by an indexed scan.
+ * Toolbar (Qualifies-only toggle, Sort, Reset) persists to
+ * `localStorage[meshmon.evaluation.drawer.{mode}]` (per-mode globally).
  */
 
-import { useMemo, useState } from "react";
-import { type AgentSummary, useAgents } from "@/api/hooks/agents";
 import type { Campaign } from "@/api/hooks/campaigns";
 import type { Evaluation } from "@/api/hooks/evaluation";
+import { CandidateRef } from "@/components/campaigns/CandidateRef";
+import { EdgePairDrawerBody } from "@/components/campaigns/results/EdgePairDrawerBody";
 import {
-  type EvaluationPairDetail,
-  type PairDetailSortCol,
-  type PairDetailsQuery,
-  useCandidatePairDetails,
-} from "@/api/hooks/evaluation-pairs";
-import { CandidatePairFilters } from "@/components/campaigns/results/CandidatePairFilters";
-import { CandidatePairTable } from "@/components/campaigns/results/CandidatePairTable";
-import { MtrPanel } from "@/components/campaigns/results/MtrPanel";
-import { IpHostname } from "@/components/ip-hostname";
+  summarizeGuardrails,
+  TripleDrawerBody,
+} from "@/components/campaigns/results/TripleDrawerBody";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   Dialog,
@@ -46,7 +30,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { SortState } from "@/components/ui/sortable-header";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,11 +53,6 @@ export interface DrilldownDialogProps {
   unqualifiedReason?: string;
   onClose: () => void;
 }
-
-const DEFAULT_QUERY: PairDetailsQuery = {
-  sort: "improvement_ms",
-  dir: "desc",
-};
 
 // ---------------------------------------------------------------------------
 // Component
@@ -124,159 +102,77 @@ function DialogBody({
   unqualifiedReason,
   onClose,
 }: DialogBodyProps) {
-  const [query, setQuery] = useState<PairDetailsQuery>(DEFAULT_QUERY);
-  const [activeMtr, setActiveMtr] = useState<{
-    measurementId: number;
-    label: string;
-  } | null>(null);
+  const isEdgeMode = evaluation?.evaluation_mode === "edge_candidate";
 
-  // Reset the inline MTR panel when the operator switches sort/filter
-  // — the rows under the panel are about to change, so the lingering
-  // measurement label would be stale.
-  const sort = useMemo<SortState<PairDetailSortCol>>(
-    () => ({ col: query.sort, dir: query.dir }),
-    [query.sort, query.dir],
-  );
-
-  const onSortChange = (col: PairDetailSortCol | null, dir: "asc" | "desc" | null) => {
-    if (col === null || dir === null) {
-      // Three-state cycle reached "no sort". The dialog has no
-      // representation for an unsorted view — the table always
-      // renders against some sort. We fall back to the default,
-      // except when the current state already IS the default: in
-      // that case the fallback would loop the operator back to the
-      // same view, and they could never reach the opposite direction
-      // by clicking the active column. Flip the direction instead so
-      // the active column toggles asc ↔ desc indefinitely.
-      setQuery((prev) =>
-        prev.sort === DEFAULT_QUERY.sort && prev.dir === DEFAULT_QUERY.dir
-          ? { ...prev, dir: prev.dir === "asc" ? "desc" : "asc" }
-          : { ...prev, ...DEFAULT_QUERY },
-      );
-    } else {
-      setQuery((prev) => ({ ...prev, sort: col, dir }));
-    }
-    setActiveMtr(null);
+  const guardrails = {
+    min_improvement_ms: evaluation?.min_improvement_ms ?? null,
+    min_improvement_ratio: evaluation?.min_improvement_ratio ?? null,
+    max_transit_rtt_ms: evaluation?.max_transit_rtt_ms ?? null,
+    max_transit_stddev_ms: evaluation?.max_transit_stddev_ms ?? null,
   };
 
-  const onFilterChange = (next: PairDetailsQuery) => {
-    setQuery(next);
-    setActiveMtr(null);
+  const guardrailActive =
+    guardrails.min_improvement_ms !== null ||
+    guardrails.min_improvement_ratio !== null ||
+    guardrails.max_transit_rtt_ms !== null ||
+    guardrails.max_transit_stddev_ms !== null;
+
+  // Build CandidateRef data from the candidate DTO
+  const candidateRefData = {
+    ip: candidate.destination_ip,
+    display_name: candidate.display_name,
+    city: candidate.city,
+    country_code: candidate.country_code,
+    asn: candidate.asn,
+    network_operator: candidate.network_operator,
+    hostname: candidate.hostname,
+    is_mesh_member: candidate.is_mesh_member,
+    agent_id: (candidate as Candidate & { agent_id?: string | null }).agent_id,
   };
-
-  // Unfiltered count drives the caption math. We strip every toolbar
-  // filter but keep the sort key — the row count is filter-invariant
-  // under sort, so reusing the active sort lets TanStack Query share
-  // the pages[0].total number across both hooks when the operator has
-  // not narrowed yet.
-  const unfilteredQuery = useMemo<PairDetailsQuery>(
-    () => ({
-      sort: query.sort,
-      dir: query.dir,
-      // limit=0 returns an empty entries array but the same `total`,
-      // so we pay a single `COUNT(*)` round-trip and skip the row-
-      // hydration cost when the operator opens the dialog.
-      limit: 0,
-    }),
-    [query.sort, query.dir],
-  );
-
-  const filteredHook = useCandidatePairDetails(campaign.id, candidate.destination_ip, query);
-  const unfilteredHook = useCandidatePairDetails(
-    campaign.id,
-    candidate.destination_ip,
-    unfilteredQuery,
-  );
-
-  const agentsQuery = useAgents();
-  const agentsById = useMemo<Map<string, AgentSummary>>(() => {
-    const map = new Map<string, AgentSummary>();
-    for (const agent of agentsQuery.data ?? []) {
-      map.set(agent.id, agent);
-    }
-    return map;
-  }, [agentsQuery.data]);
-
-  const rows = useMemo<EvaluationPairDetail[]>(
-    () => filteredHook.data?.pages.flatMap((p) => p.entries) ?? [],
-    [filteredHook.data],
-  );
-
-  const filteredTotal = filteredHook.data?.pages[0]?.total ?? 0;
-  const unfilteredTotal = unfilteredHook.data?.pages[0]?.total ?? 0;
-
-  const guardrails = useMemo(
-    () => ({
-      min_improvement_ms: evaluation?.min_improvement_ms ?? null,
-      min_improvement_ratio: evaluation?.min_improvement_ratio ?? null,
-      max_transit_rtt_ms: evaluation?.max_transit_rtt_ms ?? null,
-      max_transit_stddev_ms: evaluation?.max_transit_stddev_ms ?? null,
-    }),
-    [evaluation],
-  );
-  const guardrailActive = useMemo(
-    () =>
-      guardrails.min_improvement_ms !== null ||
-      guardrails.min_improvement_ratio !== null ||
-      guardrails.max_transit_rtt_ms !== null ||
-      guardrails.max_transit_stddev_ms !== null,
-    [guardrails],
-  );
-
-  const totalConsidered = candidate.pairs_total_considered;
-  // Clamp to zero in case a stale unfiltered count slips above the
-  // counter (e.g. an old SSE invalidation racing the read).
-  const guardrailHidden = guardrailActive ? Math.max(0, totalConsidered - unfilteredTotal) : 0;
-
-  const filterIsActive =
-    query.min_improvement_ms != null ||
-    query.min_improvement_ratio != null ||
-    query.max_transit_rtt_ms != null ||
-    query.max_transit_stddev_ms != null ||
-    query.qualifies_only === true;
-
-  const errorState = filteredHook.error;
-  const is404NotACandidate =
-    errorState?.cause &&
-    typeof errorState.cause === "object" &&
-    "error" in (errorState.cause as Record<string, unknown>) &&
-    (errorState.cause as { error?: unknown }).error === "not_a_candidate";
 
   return (
     <>
       <DialogHeader className="border-b px-6 pb-4 pt-5">
-        <DialogTitle className="flex flex-wrap items-center gap-2">
-          {candidate.display_name ? (
-            candidate.display_name
-          ) : (
-            <IpHostname ip={candidate.destination_ip} />
-          )}
-          {candidate.is_mesh_member ? (
-            <Badge variant="secondary" aria-label="Mesh member">
-              mesh
-            </Badge>
-          ) : null}
+        <DialogTitle asChild>
+          <div>
+            <CandidateRef mode="header" data={candidateRefData} />
+          </div>
         </DialogTitle>
-        <DialogDescription className="flex flex-wrap items-center gap-3">
-          <span>
-            Transit candidate <IpHostname ip={candidate.destination_ip} />
-          </span>
-          <span aria-hidden>·</span>
-          <span>
-            <strong className="tabular-nums">{candidate.pairs_improved}</strong> of{" "}
-            <strong className="tabular-nums">{candidate.pairs_total_considered}</strong> baseline
-            pairs improved
-          </span>
-          {guardrailActive ? (
-            <Badge
-              variant="outline"
-              className="font-mono text-[10px]"
-              aria-label="Active guardrails"
-            >
-              {summarizeGuardrails(guardrails)}
-            </Badge>
-          ) : null}
+
+        <DialogDescription asChild>
+          <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground mt-2">
+            {isEdgeMode ? (
+              /* Edge-candidate: show coverage stats */
+              <span>Edge candidate {candidate.destination_ip}</span>
+            ) : (
+              /* Triple: show pair stats */
+              <>
+                <span>
+                  Transit candidate <span className="font-mono">{candidate.destination_ip}</span>
+                </span>
+                <span aria-hidden>·</span>
+                <span>
+                  <strong className="tabular-nums">{candidate.pairs_improved}</strong> of{" "}
+                  <strong className="tabular-nums">{candidate.pairs_total_considered}</strong>{" "}
+                  baseline pairs improved
+                </span>
+                {guardrailActive ? (
+                  <Badge
+                    variant="outline"
+                    className="font-mono text-[10px]"
+                    aria-label="Active guardrails"
+                  >
+                    {summarizeGuardrails(guardrails)}
+                  </Badge>
+                ) : null}
+              </>
+            )}
+          </div>
         </DialogDescription>
+
+        {/* Provenance chips — edge_candidate mode only (per plan M3 lines 3095-3101) */}
+        {isEdgeMode ? <ProvenanceChips candidate={candidate} /> : null}
+
         {unqualifiedReason ? (
           <Card className="border-amber-500/50 bg-amber-500/5 p-3 text-sm" role="status">
             <span className="font-medium">Unqualified:</span> {unqualifiedReason}
@@ -284,143 +180,81 @@ function DialogBody({
         ) : null}
       </DialogHeader>
 
-      <CandidatePairFilters value={query} onChange={onFilterChange} guardrails={guardrails} />
-
-      <div className="flex-1 overflow-auto px-4 py-3" data-testid="drilldown-body">
-        <p
-          className="mb-2 text-xs text-muted-foreground"
-          role="status"
-          aria-live="polite"
-          data-testid="drilldown-caption"
-        >
-          {captionText({
-            filteredTotal,
-            unfilteredTotal,
-            guardrailHidden,
-            guardrailActive,
-            isLoading: filteredHook.isLoading || unfilteredHook.isLoading,
-          })}
-        </p>
-
-        {is404NotACandidate ? (
-          <Card className="border-destructive/50 bg-destructive/5 p-4 text-sm" role="alert">
-            <p className="mb-2">
-              <strong>Not a candidate.</strong> The latest evaluation does not list{" "}
-              <IpHostname ip={candidate.destination_ip} /> as a transit candidate. Re-run the
-              evaluator if the candidate set has changed.
-            </p>
-            <Button type="button" size="sm" variant="outline" onClick={onClose}>
-              Close
-            </Button>
-          </Card>
-        ) : filteredHook.isError ? (
-          <Card className="border-destructive/50 bg-destructive/5 p-4 text-sm" role="alert">
-            <p className="mb-2">
-              <strong>Failed to load pair details.</strong>{" "}
-              {filteredHook.error?.message ?? "Unknown error."}
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => filteredHook.refetch()}
-            >
-              Retry
-            </Button>
-          </Card>
-        ) : filteredHook.isLoading ? (
-          // Initial network round-trip — `filteredTotal` resolves to 0
-          // until the first page lands, so without this branch the chain
-          // below would flash the "all scored rows dropped" empty state
-          // for a few hundred ms. Render a muted loading card instead;
-          // the caption already shows "Loading pair details…" and the
-          // spinner keeps both surfaces in lockstep.
-          <Card
-            className="p-4 text-sm text-muted-foreground"
-            role="status"
-            aria-busy="true"
-            data-testid="drilldown-loading"
-          >
-            Loading pair details…
-          </Card>
-        ) : filteredTotal === 0 && filterIsActive ? (
-          <Card
-            className="p-4 text-sm text-muted-foreground"
-            role="status"
-            data-testid="drilldown-empty-filters"
-          >
-            No rows match these filters. Clear filters or re-evaluate with looser guardrails.
-          </Card>
-        ) : filteredTotal === 0 && !filterIsActive ? (
-          <Card
-            className="p-4 text-sm text-muted-foreground"
-            role="status"
-            data-testid="drilldown-empty-guardrails"
-          >
-            All scored rows for this candidate were dropped by the active guardrails. Re-evaluate
-            with looser guardrails to inspect them.
-          </Card>
-        ) : (
-          <CandidatePairTable
-            rows={rows}
-            agentsById={agentsById}
-            sort={sort}
-            onSortChange={onSortChange}
-            hasNextPage={filteredHook.hasNextPage}
-            isFetchingNextPage={filteredHook.isFetchingNextPage}
-            fetchNextPage={() => {
-              void filteredHook.fetchNextPage();
-            }}
-            onOpenMtr={(measurementId, label) => setActiveMtr({ measurementId, label })}
-          />
-        )}
-
-        {activeMtr ? (
-          <MtrPanel
-            campaign={campaign}
-            measurementId={activeMtr.measurementId}
-            label={activeMtr.label}
-            onClose={() => setActiveMtr(null)}
-          />
-        ) : null}
-      </div>
+      {isEdgeMode ? (
+        <EdgePairDrawerBody
+          candidateIp={candidate.destination_ip}
+          candidate={candidate}
+          campaign={campaign}
+        />
+      ) : (
+        <TripleDrawerBody
+          candidate={candidate}
+          campaign={campaign}
+          evaluation={evaluation}
+          unqualifiedReason={unqualifiedReason}
+          onClose={onClose}
+        />
+      )}
     </>
   );
 }
 
-interface CaptionInput {
-  filteredTotal: number;
-  unfilteredTotal: number;
-  guardrailHidden: number;
-  guardrailActive: boolean;
-  isLoading: boolean;
-}
+// ---------------------------------------------------------------------------
+// Provenance chips (edge_candidate mode only)
+// ---------------------------------------------------------------------------
 
-function captionText({
-  filteredTotal,
-  unfilteredTotal,
-  guardrailHidden,
-  guardrailActive,
-  isLoading,
-}: CaptionInput): string {
-  if (isLoading) return "Loading pair details…";
-  const head = `Showing ${filteredTotal.toLocaleString()} of ${unfilteredTotal.toLocaleString()} rows for this candidate`;
-  if (!guardrailActive || guardrailHidden === 0) {
-    return head;
+/**
+ * Provenance chips for edge_candidate mode (per plan M3 / brainstorm Q-final).
+ *
+ * - has_real_x_source_data === true →
+ *   green "Real X-source data — no symmetry approximation"
+ * - is_mesh_member === false (every leg symmetric reuse) →
+ *   gray "Symmetric-reuse approximation (no agent at this candidate)"
+ * - is_mesh_member === true && has_real_x_source_data === false →
+ *   yellow "Symmetric-reuse approximation (mesh agent — VM data unavailable)"
+ */
+function ProvenanceChips({ candidate }: { candidate: Candidate }) {
+  const hasReal = (candidate as Candidate & { has_real_x_source_data?: boolean | null })
+    .has_real_x_source_data;
+
+  if (hasReal === true) {
+    return (
+      <div className="flex flex-wrap gap-2 mt-1">
+        <Badge
+          variant="outline"
+          className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+          data-testid="provenance-real"
+        >
+          Real X-source data — no symmetry approximation
+        </Badge>
+      </div>
+    );
   }
-  return `${head} · ${guardrailHidden.toLocaleString()} hidden by storage guardrails`;
-}
 
-function summarizeGuardrails(g: {
-  min_improvement_ms: number | null;
-  min_improvement_ratio: number | null;
-  max_transit_rtt_ms: number | null;
-  max_transit_stddev_ms: number | null;
-}): string {
-  const parts: string[] = [];
-  if (g.min_improvement_ms !== null) parts.push(`Δ ≥ ${g.min_improvement_ms} ms`);
-  if (g.min_improvement_ratio !== null) parts.push(`Δ ratio ≥ ${g.min_improvement_ratio}`);
-  if (g.max_transit_rtt_ms !== null) parts.push(`transit RTT ≤ ${g.max_transit_rtt_ms} ms`);
-  if (g.max_transit_stddev_ms !== null) parts.push(`transit σ ≤ ${g.max_transit_stddev_ms} ms`);
-  return parts.join(" · ");
+  if (!candidate.is_mesh_member) {
+    return (
+      <div className="flex flex-wrap gap-2 mt-1">
+        <Badge
+          variant="outline"
+          className="bg-muted text-muted-foreground"
+          data-testid="provenance-sym-no-agent"
+        >
+          Symmetric-reuse approximation (no agent at this candidate)
+        </Badge>
+      </div>
+    );
+  }
+
+  // is_mesh_member === true && has_real_x_source_data === false/null/undefined
+  return (
+    <div className="flex flex-wrap gap-2 mt-1">
+      <Badge
+        variant="outline"
+        className="bg-amber-500/15 text-amber-700 dark:text-amber-300"
+        data-testid="provenance-sym-mesh"
+      >
+        Symmetric-reuse approximation (mesh agent — VM data unavailable)
+      </Badge>
+    </div>
+  );
 }

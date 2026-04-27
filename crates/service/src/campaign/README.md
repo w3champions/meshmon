@@ -1,6 +1,17 @@
 # `crates/service/src/campaign/`
 
-Measurement-campaign subsystem.
+Measurement-campaign subsystem. Three evaluation modes are supported:
+
+- **diversity** — scores each candidate IP (X) as a transit between two
+  mesh agents (A→X→B), qualifying X when it beats the direct A→B path.
+- **optimization** — same as diversity, but additionally requires that
+  X beats every alternative mesh transit.
+- **edge_candidate** — evaluates new leaf nodes (X) by the best route
+  X can reach each source mesh agent (direct, 1-hop, 2-hop), scored
+  against a configurable `useful_latency_ms` threshold. Three new knob
+  columns on `measurement_campaigns` support this mode:
+  `useful_latency_ms` (required threshold T), `max_hops` (0–2, default 2),
+  and `vm_lookback_minutes` (VictoriaMetrics baseline lookback, default 15).
 
 ## Invariants
 
@@ -62,19 +73,37 @@ the first two; the SSE listener listens on all three via
 - `sse.rs` — `/api/campaigns/stream` handler; subscribes to the broker
   and serializes events as `Event::data` frames.
 - `dto.rs` — wire DTOs; `utoipa::ToSchema` on every public type.
-- `eval.rs` — pure-function evaluator core. Builds the (A,B,X) triple
-  matrix from attributed measurements, applies the mode-specific
-  predicate (diversity / optimization), returns the result payload
-  for `evaluation_repo` to persist across the relational child tables.
+- `eval/mod.rs` — pure-function evaluator core. Dispatches on
+  `EvaluationMode`: diversity and optimization run the triple-scoring
+  path (`evaluate_triple`) that returns `EvaluationOutputs::Triple`;
+  edge_candidate hands off to `eval/edge_candidate.rs` which returns
+  `EvaluationOutputs::EdgeCandidate`. No DB, no IO.
+- `eval/edge_candidate.rs` — EdgeCandidate evaluator arm. For each
+  candidate IP (X) and each source agent (A), enumerates routes X→A
+  (direct, 1-hop, 2-hop via mesh intermediaries), picks the
+  best-RTT route, and aggregates per-candidate coverage stats
+  (`coverage_count`, `coverage_weighted_ping_ms`, `mean_ms_under_t`).
+  Uses `LegLookup` with symmetry-fallback substitution so X→A legs
+  can be resolved from A→X reverse measurements.
+- `eval/legs.rs` — `LegLookup` and `LegMeasurement`. Indexes attributed
+  measurements as `(Agent(source_id), Ip(destination_ip))` and resolves
+  legs via a forward-then-reverse priority lookup (real forward
+  measurement → reverse substitution with `was_substituted=true` →
+  broken → missing). `Agent → Agent` legs are not resolvable; the
+  intermediary pool in diversity/optimization uses both Agent and
+  CandidateIp forms per mesh agent to work around this.
+- `eval/routes.rs` — `enumerate_routes`; composes multi-hop routes from
+  an endpoint pool up to `max_hops` hops.
 - `evaluation_repo.rs` — owns the `campaign_evaluations` family:
-  `insert_evaluation` (atomic writer primitive that fans the evaluator
-  output across `campaign_evaluations` + `campaign_evaluation_candidates`
-  + `campaign_evaluation_pair_details` +
+  `insert_evaluation` (atomic writer that fans the evaluator output
+  across `campaign_evaluations`, `campaign_evaluation_candidates`,
+  `campaign_evaluation_pair_details` or
+  `campaign_evaluation_edge_pair_details`, and
   `campaign_evaluation_unqualified_reasons` inside the caller's tx),
-  `persist_evaluation` (the orchestrator that locks the campaign row,
+  `persist_evaluation` (orchestrator that locks the campaign row,
   inserts, and promotes `completed → evaluated` in one tx), and
-  `latest_evaluation_for_campaign` (the read-path that assembles the
-  wire DTO from the four tables).
+  `latest_evaluation_for_campaign` (read-path that assembles the wire
+  DTO from the relational tables).
 - `handlers.rs` — axum handlers for every campaign HTTP endpoint.
 
 ## Evaluation flow

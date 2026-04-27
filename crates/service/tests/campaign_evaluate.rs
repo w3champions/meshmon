@@ -21,6 +21,7 @@
 //! | `vm_not_configured_still_422_without_active`          | `eval-t10-a`                             | `192.0.2.161`                    |
 //! | `active_probe_wins_over_vm`                           | `eval-t11-a`, `eval-t11-b`              | `192.0.2.171`, `.172`, `.179`    |
 //! | `malformed_vm_response_returns_503`                   | `eval-t12-a`, `eval-t12-b`              | `192.0.2.181`, `.182`, `.189`    |
+//! | `read_legacy_evaluation_with_null_snapshot_columns`   | `eval-t13-a`, `eval-t13-b`              | `192.0.2.191`, `.192`            |
 //!
 //! The campaign scheduler is not spawned in the test harness, so
 //! `AppState.campaign_cancel` is a no-op token; state transitions
@@ -86,7 +87,9 @@ async fn evaluate_then_reevaluate_different_mode_no_redispatch() {
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
     assert_eq!(eval1["evaluation_mode"], "optimization", "body = {eval1}");
-    assert_eq!(eval1["baseline_pair_count"], 1, "body = {eval1}");
+    // Symmetry-substituted reverse counts as a baseline too, so A→B
+    // forward + B→A reverse-from-A→B = 2 baseline pairs.
+    assert_eq!(eval1["baseline_pair_count"], 2, "body = {eval1}");
 
     // Snapshot the measurement count for this test's agents so we can
     // verify that re-evaluating does NOT dispatch new probes.
@@ -387,8 +390,8 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
     // T54-02 dropped the per-campaign UNIQUE constraint so every
     // `/evaluate` call appends a fresh `campaign_evaluations` row.
     // Guards: two rows exist after two calls, the first row's id +
-    // evaluated_at + evaluation_mode + candidate count are all
-    // untouched, and the read-path surfaces the second (newer) row.
+    // evaluated_at + evaluation_mode are all untouched, and the
+    // read-path surfaces the second (newer) row.
     let h = common::HttpHarness::start().await;
 
     let a_ip: IpAddr = "192.0.2.71".parse().unwrap();
@@ -448,18 +451,14 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
     // Force a measurable clock delta before the second call.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-    // Switch evaluation mode and re-evaluate — a distinct row should
+    // Re-evaluate without changing any knobs — a distinct row should
     // land in `campaign_evaluations` rather than overwriting the first.
-    let _patch: Value = h
-        .patch_json(
-            &format!("/api/campaigns/{campaign_id}"),
-            &json!({ "evaluation_mode": "diversity" }),
-        )
-        .await;
+    // Knob-changing PATCHes (mode, max_hops, useful_latency_ms, etc.)
+    // dismiss the existing row by design so they don't appear here.
     let eval2: Value = h
         .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
         .await;
-    assert_eq!(eval2["evaluation_mode"], "diversity", "body = {eval2}");
+    assert_eq!(eval2["evaluation_mode"], "optimization", "body = {eval2}");
 
     // Two rows exist, the first is untouched, the second is newer.
     let row_count: i64 =
@@ -499,7 +498,7 @@ async fn second_evaluate_appends_new_row_without_mutating_first() {
     let fetched: Value = h
         .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
         .await;
-    assert_eq!(fetched["evaluation_mode"], "diversity");
+    assert_eq!(fetched["evaluation_mode"], "optimization");
     assert_eq!(
         fetched["evaluated_at"], second_evaluated_at,
         "GET /evaluation must surface the latest row: {fetched}"
@@ -1002,4 +1001,419 @@ async fn malformed_vm_response_returns_503() {
         )
         .await;
     assert_eq!(res["error"], "vm_upstream", "body = {res}");
+}
+
+/// G4: The read path must tolerate pre-T56 `campaign_evaluations` rows that
+/// have NULL in the three new snapshot columns (`useful_latency_ms`,
+/// `max_hops`, `vm_lookback_minutes`). These NULLs arise from rows written
+/// before the 20260426000000 migration added the columns; the migration
+/// intentionally makes all three nullable so pre-existing data remains
+/// valid and the evaluator's read path does not panic on NULL.
+///
+/// Strategy: bypass the normal `/evaluate` handler and INSERT a raw row
+/// with NULL snapshot columns, then assert the GET endpoint returns the
+/// row with those fields absent (skip_serializing_if = None) rather than
+/// erroring.
+#[tokio::test]
+async fn read_legacy_evaluation_with_null_snapshot_columns() {
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: std::net::IpAddr = "192.0.2.191".parse().unwrap();
+    let b_ip: std::net::IpAddr = "192.0.2.192".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t13-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t13-b", b_ip).await;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t13-legacy-null-snapshot",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t13-a", "eval-t13-b"],
+                "destination_ips": ["192.0.2.192", "192.0.2.191"],
+                "loss_threshold_ratio": 0.02,
+                "stddev_weight": 1.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id").to_string();
+
+    // Force the campaign to `completed` so the state gate allows an
+    // evaluation row. We bypass `/evaluate` and insert the row directly
+    // with NULL snapshot columns — simulating a pre-T56 evaluation row.
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    // Insert a minimal `campaign_evaluations` row with NULL for all three
+    // T56 snapshot columns. This is exactly the shape of rows that existed
+    // before the 20260426000000_campaigns_edge_candidate migration.
+    sqlx::query(
+        "INSERT INTO campaign_evaluations
+            (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+             baseline_pair_count, candidates_total, candidates_good,
+             useful_latency_ms, max_hops, vm_lookback_minutes,
+             evaluated_at)
+         VALUES
+            ($1::uuid, 0.02, 1.0, 'optimization',
+             2, 0, 0,
+             NULL, NULL, NULL,
+             now())",
+    )
+    .bind(&campaign_id)
+    .execute(&h.state.pool)
+    .await
+    .expect("raw insert of legacy evaluation row");
+
+    // Flip campaign state to `evaluated` so the GET endpoint doesn't
+    // require an additional state check.
+    sqlx::query(
+        "UPDATE measurement_campaigns SET state = 'evaluated', evaluated_at = now() WHERE id = $1::uuid",
+    )
+    .bind(&campaign_id)
+    .execute(&h.state.pool)
+    .await
+    .expect("flip state to evaluated");
+
+    // The read-path must return the row with NULL snapshot columns mapped
+    // to absent JSON keys (skip_serializing_if = None).
+    let got: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+
+    assert_eq!(
+        got["baseline_pair_count"], 2,
+        "baseline_pair_count must be readable: body = {got}"
+    );
+    assert_eq!(
+        got["evaluation_mode"], "optimization",
+        "evaluation_mode must be readable: body = {got}"
+    );
+
+    // The three T56 snapshot columns were NULL in the DB → must be absent
+    // from the JSON (skip_serializing_if = Option::is_none).
+    assert!(
+        got.get("useful_latency_ms").is_none() || got["useful_latency_ms"].is_null(),
+        "useful_latency_ms must be absent or null for legacy row: body = {got}"
+    );
+    assert!(
+        got.get("max_hops").is_none() || got["max_hops"].is_null(),
+        "max_hops must be absent or null for legacy row: body = {got}"
+    );
+    assert!(
+        got.get("vm_lookback_minutes").is_none() || got["vm_lookback_minutes"].is_null(),
+        "vm_lookback_minutes must be absent or null for legacy row: body = {got}"
+    );
+}
+
+/// `latest_evaluation_for_campaign` must order edge_candidate candidates
+/// by `coverage_weighted_ping_ms ASC` (lower is better) with tie-break
+/// by `coverage_count DESC`. The shared SELECT previously ordered by
+/// triple-mode `pairs_improved DESC, avg_improvement_ms DESC`, which
+/// collapses to destination-IP order for edge_candidate (every row has
+/// `pairs_improved=0` and `avg_improvement_ms=NULL`) and buries the
+/// real ranking signal.
+#[tokio::test]
+async fn evaluation_orders_edge_candidates_by_coverage_weighted_ping_ms() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-rank-by-coverage-weighted",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-rank-a"],
+                "destination_ips": ["10.99.0.1"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+
+    common::insert_agent_with_ip(pool, "eval-rank-a", "10.99.0.10".parse().unwrap()).await;
+
+    // Seed an evaluation parent and three candidates with deliberately
+    // permuted `coverage_weighted_ping_ms` values such that
+    // destination-IP order disagrees with the spec ranking. After the
+    // fix, the read should order by `coverage_weighted_ping_ms ASC`,
+    // not by IP.
+    let evaluation_id: uuid::Uuid = sqlx::query_scalar(
+        r#"INSERT INTO campaign_evaluations
+               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+                useful_latency_ms, max_hops, vm_lookback_minutes,
+                baseline_pair_count, candidates_total, candidates_good, evaluated_at)
+           VALUES ($1, 0.05, 1.0, 'edge_candidate'::evaluation_mode,
+                   80.0, 1, 30, 0, 3, 3, now())
+           RETURNING id"#,
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("insert campaign_evaluations row");
+
+    // Three rows: ascending IP, but the desired rank order is mid → low → high IP.
+    // best:    coverage_weighted_ping_ms = 12.0  (IP 10.99.0.21)
+    // middle:  coverage_weighted_ping_ms = 25.0  (IP 10.99.0.20)
+    // worst:   coverage_weighted_ping_ms = 75.0  (IP 10.99.0.22)
+    for (ip, cwp_ms, coverage) in &[
+        ("10.99.0.20", 25.0_f32, 1_i32),
+        ("10.99.0.21", 12.0_f32, 2_i32),
+        ("10.99.0.22", 75.0_f32, 1_i32),
+    ] {
+        let ip_net =
+            sqlx::types::ipnetwork::IpNetwork::from(ip.parse::<std::net::IpAddr>().unwrap());
+        sqlx::query(
+            r#"INSERT INTO campaign_evaluation_candidates
+                   (evaluation_id, destination_ip, is_mesh_member,
+                    pairs_improved, pairs_total_considered,
+                    coverage_count, destinations_total, mean_ms_under_t,
+                    coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,
+                    has_real_x_source_data)
+               VALUES ($1, $2::inet, false, 0, 0,
+                       $3, 1, $4,
+                       $4, 1.0, 0.0, 0.0,
+                       true)"#,
+        )
+        .bind(evaluation_id)
+        .bind(ip_net)
+        .bind(coverage)
+        .bind(cwp_ms)
+        .execute(pool)
+        .await
+        .expect("insert candidate row");
+    }
+
+    let eval: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+    let candidates = eval["results"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates missing: {eval}"));
+
+    let order: Vec<&str> = candidates
+        .iter()
+        .map(|c| c["destination_ip"].as_str().expect("destination_ip"))
+        .collect();
+    assert_eq!(
+        order,
+        vec!["10.99.0.21", "10.99.0.20", "10.99.0.22"],
+        "edge_candidate read must rank by coverage_weighted_ping_ms ASC, not by destination_ip: {eval}"
+    );
+}
+
+/// `composite_score` is the triple-mode `(pairs_improved /
+/// baseline_pair_count) × avg_improvement_ms` ranking score; for
+/// edge_candidate evaluations the rank metric is `coverage_count` /
+/// `coverage_weighted_ping_ms` instead and `composite_score` must be
+/// absent from the wire DTO. The DTO field uses
+/// `serde(skip_serializing_if = "Option::is_none")`, so emitting `None`
+/// drops the key entirely — distinguishable from a real triple-mode
+/// candidate that scored exactly `0.0`.
+#[tokio::test]
+async fn evaluation_omits_composite_score_for_edge_candidate() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "ec-composite-score-omitted",
+                "evaluation_mode": "edge_candidate",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-cs-a"],
+                "destination_ips": ["10.98.0.1"],
+                "useful_latency_ms": 80.0,
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+    let campaign_uuid: uuid::Uuid = campaign_id.parse().expect("uuid");
+
+    common::insert_agent_with_ip(pool, "eval-cs-a", "10.98.0.10".parse().unwrap()).await;
+
+    // Seed a minimal edge_candidate evaluation parent + one candidate row.
+    // `baseline_pair_count = 0` is the structural distinguisher of
+    // edge_candidate parents — the triple-mode formula collapses to `0.0`
+    // here, so the read-side guard must use the `evaluation_mode` column
+    // (not just the `baseline_pair_count > 0` test) to elide the field.
+    let evaluation_id: uuid::Uuid = sqlx::query_scalar(
+        r#"INSERT INTO campaign_evaluations
+               (campaign_id, loss_threshold_ratio, stddev_weight, evaluation_mode,
+                useful_latency_ms, max_hops, vm_lookback_minutes,
+                baseline_pair_count, candidates_total, candidates_good, evaluated_at)
+           VALUES ($1, 0.05, 1.0, 'edge_candidate'::evaluation_mode,
+                   80.0, 1, 30, 0, 1, 1, now())
+           RETURNING id"#,
+    )
+    .bind(campaign_uuid)
+    .fetch_one(pool)
+    .await
+    .expect("insert campaign_evaluations row");
+
+    let ip_net =
+        sqlx::types::ipnetwork::IpNetwork::from("10.98.0.1".parse::<std::net::IpAddr>().unwrap());
+    sqlx::query(
+        r#"INSERT INTO campaign_evaluation_candidates
+               (evaluation_id, destination_ip, is_mesh_member,
+                pairs_improved, pairs_total_considered,
+                coverage_count, destinations_total, mean_ms_under_t,
+                coverage_weighted_ping_ms, direct_share, onehop_share, twohop_share,
+                has_real_x_source_data)
+           VALUES ($1, $2::inet, false, 0, 0,
+                   1, 1, 12.0,
+                   12.0, 1.0, 0.0, 0.0,
+                   true)"#,
+    )
+    .bind(evaluation_id)
+    .bind(ip_net)
+    .execute(pool)
+    .await
+    .expect("insert candidate row");
+
+    let eval: Value = h
+        .get_json(&format!("/api/campaigns/{campaign_id}/evaluation"))
+        .await;
+    let candidates = eval["results"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates missing: {eval}"));
+    assert_eq!(
+        candidates.len(),
+        1,
+        "expected exactly one candidate: {eval}"
+    );
+    let cand = &candidates[0];
+
+    // The DTO's `serde(skip_serializing_if = "Option::is_none")` drops the
+    // key when None, so the field is absent (not `null`, not `0`). Either
+    // a missing key or an explicit `null` is acceptable; a literal `0` is
+    // a regression — operators reading a triple-mode dashboard would
+    // mistake the absent score for a bottom-of-the-rank candidate.
+    let score = cand.get("composite_score");
+    assert!(
+        score.is_none() || score == Some(&Value::Null),
+        "composite_score must be absent or null for edge_candidate (got {score:?}): {cand}"
+    );
+}
+
+/// C12-1 regression: when a campaign settles BOTH directions of a pair
+/// (A→B and B→A), the reverse-direction fetch must not be allowed to
+/// clobber the campaign-owned B→A row in `inputs.measurements`.
+///
+/// The reverse query (`reverse_direction_measurements_for_campaign`)
+/// scans the global `measurements` table over a 24h window — it can
+/// legitimately surface unrelated rows (detail-ping kind, another
+/// campaign, a fresher reuse-bound sample) for the same
+/// `(source_agent_id, destination_ip)` key the campaign already owns.
+/// Pre-fix, those reverse rows were appended unconditionally and
+/// `build_pair_lookup`'s last-write-wins replaced the campaign-owned
+/// B→A baseline with whatever the global table held last. That broke
+/// the per-pair direct RTT used by the evaluator's scoring. The fix
+/// filters reverse rows whose `(source, destination_ip)` is already in
+/// the campaign's active set; reverse rows still flow through for
+/// pairs the campaign measured in only one direction, preserving the
+/// `LegLookup` symmetry-fallback behavior.
+#[tokio::test]
+async fn reverse_does_not_clobber_campaign_owned_active_pair() {
+    let h = common::HttpHarness::start().await;
+
+    let a_ip: IpAddr = "192.0.2.211".parse().unwrap();
+    let b_ip: IpAddr = "192.0.2.212".parse().unwrap();
+    common::insert_agent_with_ip(&h.state.pool, "eval-t14-a", a_ip).await;
+    common::insert_agent_with_ip(&h.state.pool, "eval-t14-b", b_ip).await;
+
+    // Both A and B are sources; both .211 and .212 appear as
+    // destinations so the campaign-owned set covers BOTH directions
+    // (A→B and B→A) plus a transit candidate at .219.
+    let campaign: Value = h
+        .post_json(
+            "/api/campaigns",
+            &json!({
+                "title": "evaluate-t14-reverse-no-clobber",
+                "protocol": "icmp",
+                "source_agent_ids": ["eval-t14-a", "eval-t14-b"],
+                "destination_ips": ["192.0.2.212", "192.0.2.211", "192.0.2.219"],
+                "loss_threshold_ratio": 0.05,
+                "stddev_weight": 1.0,
+                "evaluation_mode": "optimization",
+            }),
+        )
+        .await;
+    let campaign_id = campaign["id"].as_str().expect("id is string").to_string();
+
+    // Campaign-owned baselines: A→B at 300 ms, B→A at 350 ms — both
+    // distinct from the polluting value seeded below. The transit legs
+    // go through .219 so a candidate row exists in the evaluation.
+    common::seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            ("eval-t14-a", "192.0.2.212", 300.0, 20.0, 0.0),
+            ("eval-t14-b", "192.0.2.211", 350.0, 22.0, 0.0),
+            ("eval-t14-a", "192.0.2.219", 120.0, 8.0, 0.0),
+            ("eval-t14-b", "192.0.2.219", 121.0, 8.0, 0.0),
+        ],
+    )
+    .await;
+
+    // Polluting B→A row from outside the campaign (a `detail_ping` in
+    // the same 24h window, written AFTER the campaign rows so its
+    // `measured_at` is strictly newer). Without the C12-1 filter,
+    // `reverse_direction_measurements_for_campaign` returns this row
+    // (DISTINCT ON + ORDER BY measured_at DESC picks the newest), the
+    // handler appends it to `inputs.measurements`, and
+    // `build_pair_lookup`'s last-write-wins replaces the campaign-owned
+    // 350.0 ms B→A baseline with this 999.0 ms pollutant.
+    let dst_a = sqlx::types::ipnetwork::IpNetwork::from(a_ip);
+    sqlx::query(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, latency_stddev_ms, loss_ratio, kind, measured_at) \
+         VALUES ($1, $2, 'icmp', 10, 999.0, 50.0, 0.0, 'detail_ping', \
+                 now() + interval '1 second')",
+    )
+    .bind("eval-t14-b")
+    .bind(dst_a)
+    .execute(&h.state.pool)
+    .await
+    .expect("insert polluting B→A detail_ping measurement");
+
+    common::mark_completed(&h.state.pool, &campaign_id).await;
+
+    let _eval: Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    // Read the .219 candidate's pair_details and locate the (B→A) row.
+    // The DTO's `direct_rtt_ms` for `(source=eval-t14-b,
+    // destination=eval-t14-a)` is the B→A baseline RTT — must be the
+    // campaign-owned 350.0, not the 999.0 pollutant.
+    let pair_page: Value = h
+        .get_expect_status(
+            &format!(
+                "/api/campaigns/{campaign_id}/evaluation/candidates/192.0.2.219/pair_details?limit=500"
+            ),
+            200,
+        )
+        .await;
+    let entries = pair_page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pair_details endpoint missing entries: {pair_page}"));
+    let ba_leg = entries
+        .iter()
+        .find(|pd| {
+            pd["source_agent_id"] == "eval-t14-b" && pd["destination_agent_id"] == "eval-t14-a"
+        })
+        .unwrap_or_else(|| panic!("B→A pair_detail missing: {pair_page}"));
+    let rtt = ba_leg["direct_rtt_ms"]
+        .as_f64()
+        .expect("direct_rtt_ms on B→A leg");
+    assert!(
+        (rtt - 350.0).abs() < 1e-3,
+        "C12-1: campaign-owned B→A baseline (350.0) must win over the \
+         unrelated reverse-fetched row (999.0); got direct_rtt_ms = {rtt}: \
+         {ba_leg}"
+    );
 }

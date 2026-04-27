@@ -4,7 +4,7 @@
 //! Each cursor captures three things: the sort column the page-1 caller
 //! requested, the value of that column on the last row of the previous
 //! page, and the `(source_agent_id, destination_agent_id)` tiebreak tail
-//! drawn from the post-T54 composite primary key. Encoding is JSON inside
+//! drawn from the composite primary key. Encoding is JSON inside
 //! base64 (URL-safe, no padding) — clients should treat the byte stream
 //! as opaque and never inspect or fabricate it.
 //!
@@ -33,6 +33,12 @@ pub enum SortValue {
     String(String),
     /// Boolean column (qualifies).
     Bool(bool),
+    /// Sort column whose last-row value was SQL `NULL`. Currently used
+    /// by the edge-pair endpoint when sorting by `best_route_ms` and
+    /// the page tail lands on an unreachable row (which persists `NULL`
+    /// instead of an infinity sentinel). The cursor predicate handles
+    /// the NULL transition with `NULLS LAST` semantics.
+    Null,
 }
 
 /// Decoded cursor body. The wire form is base64(JSON(this)).
@@ -50,7 +56,7 @@ pub struct PairDetailCursor {
     pub destination_agent_id: String,
 }
 
-/// Reasons cursor decoding can fail. All three map to the same
+/// Reasons cursor decoding can fail. All variants map to the same
 /// `400 invalid_cursor` response on the wire — splitting them out is for
 /// telemetry / log clarity.
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +74,14 @@ pub enum CursorError {
     /// truncated-discriminant failures separately.
     #[error("cursor sort column discriminant out of range")]
     InvalidEnum,
+    /// A cursor field that downstream SQL casts to `inet` (the
+    /// edge-pair endpoint's `candidate_ip` tiebreak, plus the
+    /// `sort_value` when `sort_col == CandidateIp`) failed `IpAddr`
+    /// parsing. Without this validation a hand-crafted cursor would
+    /// pass `decode` but trip a Postgres cast at query time —
+    /// surfacing as 500 instead of the documented 400.
+    #[error("cursor IP literal failed to parse: {0}")]
+    InvalidIp(String),
 }
 
 impl PairDetailCursor {

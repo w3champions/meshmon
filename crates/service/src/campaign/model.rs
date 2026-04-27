@@ -126,6 +126,10 @@ pub enum EvaluationMode {
     Diversity,
     /// Optimize the aggregate result against the loss/stddev target.
     Optimization,
+    /// Rank candidate IPs by their connectivity to the existing mesh
+    /// (directly or transitively). See spec
+    /// `docs/superpowers/specs/2026-04-26-campaigns-edge-candidate-evaluation-mode-design.md`.
+    EdgeCandidate,
 }
 
 /// Where an evaluation pair-detail's "direct A→B" baseline came from.
@@ -148,8 +152,69 @@ pub enum DirectSource {
     VmContinuous,
 }
 
+/// Provenance of a leg within a composed evaluator route.
+///
+/// Distinct from `DirectSource` (baseline-only) because edge_candidate routes
+/// can include legs derived from symmetric reuse (using an `agent → candidate`
+/// probe to model `candidate → agent` direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LegSource {
+    /// Leg data sourced from VictoriaMetrics continuous-mesh time series.
+    VmContinuous,
+    /// Leg data sourced from a campaign active-probe measurement.
+    ActiveProbe,
+    /// Leg data inferred from the reverse direction (A→X used as X→A).
+    SymmetricReuse,
+}
+
+/// One end of a leg or route. Mixes agent IDs (for mesh agents) with
+/// arbitrary IPs (for catalogue candidates).
+///
+/// `IpAddr` has no built-in `ToSchema` impl under utoipa 5; the field is
+/// annotated `schema(value_type = String)` so the OpenAPI document renders
+/// the IP as a plain string. Serde still uses the default `IpAddr` display
+/// serializer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Endpoint {
+    /// A mesh-member agent endpoint, identified by its agent id string.
+    Agent {
+        /// Agent id (matches `agents.agent_id` in the database).
+        id: String,
+    },
+    /// A catalogue or arbitrary IP candidate endpoint.
+    CandidateIp {
+        /// IP address of the candidate endpoint.
+        #[schema(value_type = String)]
+        ip: std::net::IpAddr,
+    },
+}
+
+/// Wire-friendly companion enum used by `EvaluationEdgePairDetailDto.best_route_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeRouteKind {
+    /// No transit hops — the candidate connects directly to the destination.
+    Direct,
+    /// One intermediate transit hop between candidate and destination.
+    OneHop,
+    /// Two intermediate transit hops between candidate and destination.
+    TwoHop,
+}
+
+/// Discriminator that pairs with `LegDto.from_id` / `to_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointKind {
+    /// The endpoint is a mesh-member agent.
+    Agent,
+    /// The endpoint is a catalogue candidate IP.
+    Candidate,
+}
+
 /// Kind of measurement row stored in `measurements`. `campaign` is the
-/// default; T44 never writes anything else (T45/T48 do).
+/// default written by the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "measurement_kind", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -228,6 +293,15 @@ pub struct CampaignRow {
     /// row only when `improvement_ms / direct_rtt_ms` clears the floor
     /// (OR-combined with [`Self::min_improvement_ms`]).
     pub min_improvement_ratio: Option<f64>,
+    /// Optional RTT threshold (ms) below which a route qualifies as
+    /// "useful" in edge_candidate mode. `None` disables the filter.
+    pub useful_latency_ms: Option<f32>,
+    /// Maximum number of transit hops for edge_candidate route
+    /// enumeration. Range [0, 2]; default 2.
+    pub max_hops: i16,
+    /// Look-back window (minutes) for VictoriaMetrics data in
+    /// edge_candidate mode. Range [1, 1440]; default 15.
+    pub vm_lookback_minutes: i32,
     /// Optional principal string (session username) that created the row.
     pub created_by: Option<String>,
     /// Row creation timestamp.

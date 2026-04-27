@@ -186,6 +186,12 @@ export default function CampaignComposer() {
       min_improvement_ms: knobs.min_improvement_ms,
       min_improvement_ratio: knobs.min_improvement_ratio,
       force_measurement: knobs.force_measurement,
+      max_hops: knobs.max_hops,
+      vm_lookback_minutes: knobs.vm_lookback_minutes,
+      // useful_latency_ms is required in edge_candidate mode (enforced by
+      // the validation gate below); for diversity/optimization, omit the
+      // field entirely when null so the backend doesn't receive a null value.
+      ...(knobs.useful_latency_ms !== null ? { useful_latency_ms: knobs.useful_latency_ms } : {}),
       source_agent_ids: Array.from(sourceSet),
       destination_ips: Array.from(destSet),
     };
@@ -246,6 +252,13 @@ export default function CampaignComposer() {
         pushToast({
           kind: "error",
           message: "MTR is not a valid campaign protocol.",
+        });
+        return;
+      }
+      if (knobs.evaluation_mode === "edge_candidate" && knobs.useful_latency_ms === null) {
+        pushToast({
+          kind: "error",
+          message: "Useful latency (ms) is required for edge candidate mode.",
         });
         return;
       }
@@ -395,7 +408,10 @@ export default function CampaignComposer() {
   // --- Computed UI state --------------------------------------------------
 
   const startDisabled =
-    knobs.protocol === "mtr" || createMutation.isPending || startMutation.isPending;
+    knobs.protocol === "mtr" ||
+    createMutation.isPending ||
+    startMutation.isPending ||
+    (knobs.evaluation_mode === "edge_candidate" && knobs.useful_latency_ms === null);
 
   // Pre-commit view: always mirror the operator's explicit selection. The
   // DestinationPanel footer already advertises the filter's first-page total
@@ -434,6 +450,12 @@ export default function CampaignComposer() {
               onOpenMap={openSourceMap}
               disabled={draftLocked}
             />
+            {knobs.evaluation_mode === "edge_candidate" && (
+              <p className="text-sm text-muted-foreground mt-2">
+                Selected source agents probe each candidate, and are also the mesh agents the
+                candidate is evaluated against. Add an agent here only if you want both.
+              </p>
+            )}
           </Card>
           <Card className="flex flex-col gap-3 p-4">
             <DestinationPanel

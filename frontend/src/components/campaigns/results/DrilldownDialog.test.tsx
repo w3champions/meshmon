@@ -35,12 +35,32 @@ vi.mock("@/api/hooks/evaluation-pairs", async () => {
   return { ...actual, useCandidatePairDetails: vi.fn() };
 });
 
+vi.mock("@/api/hooks/evaluation", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/api/hooks/evaluation")>("@/api/hooks/evaluation");
+  return { ...actual, useEdgePairDetails: vi.fn() };
+});
+
 vi.mock("@/components/RouteTopology", () => ({
   RouteTopology: () => <div data-testid="route-topology" />,
 }));
 
+vi.mock("@/components/catalogue/CatalogueDrawerOverlay", () => ({
+  useCatalogueDrawer: () => ({ open: vi.fn() }),
+  CatalogueDrawerOverlay: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
+
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+  };
+});
+
 import { useAgents } from "@/api/hooks/agents";
 import { useCampaignMeasurements } from "@/api/hooks/campaigns";
+import { useEdgePairDetails } from "@/api/hooks/evaluation";
 import { useCandidatePairDetails } from "@/api/hooks/evaluation-pairs";
 import { DrilldownDialog } from "@/components/campaigns/results/DrilldownDialog";
 
@@ -73,7 +93,7 @@ function makeCampaign(): Campaign {
     completed_at: null,
     evaluated_at: null,
     pair_counts: [["succeeded", 6]],
-  };
+  } as unknown as Campaign;
 }
 
 function makeCandidate(
@@ -213,6 +233,20 @@ function renderDialog(
     isError: false,
     error: null,
   } as unknown as ReturnType<typeof useCampaignMeasurements>);
+
+  // useEdgePairDetails is only called in edge_candidate mode; provide a
+  // sensible default so the mock doesn't fail when the dialog renders the
+  // TripleDrawerBody branch (which never calls this hook).
+  vi.mocked(useEdgePairDetails).mockReturnValue({
+    data: { pages: [{ entries: [], next_cursor: null, total: 0 }], pageParams: [null] },
+    isLoading: false,
+    isError: false,
+    isFetchingNextPage: false,
+    hasNextPage: false,
+    error: null,
+    fetchNextPage: vi.fn(),
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useEdgePairDetails>);
 
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },

@@ -46,10 +46,15 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
       ["succeeded", 7],
       ["reused", 3],
     ],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 
-function makeEvaluation(candidates: Evaluation["results"]["candidates"]): Evaluation {
+function makeEvaluation(
+  candidates: Evaluation["results"]["candidates"],
+  overrides: Partial<Evaluation> = {},
+): Evaluation {
   return {
     campaign_id: CAMPAIGN_ID,
     evaluated_at: "2026-04-21T10:00:00Z",
@@ -58,11 +63,24 @@ function makeEvaluation(candidates: Evaluation["results"]["candidates"]): Evalua
     evaluation_mode: "optimization",
     baseline_pair_count: 6,
     candidates_total: candidates.length,
-    // T55: pair-detail rows live behind the paginated endpoint, so
+    // Pair-detail rows live behind the paginated endpoint, so
     // candidates_good is approximated from `pairs_improved >= 1`.
     candidates_good: candidates.filter((c) => c.pairs_improved >= 1).length,
     avg_improvement_ms: 0,
     results: { candidates, unqualified_reasons: {} },
+    ...overrides,
+  };
+}
+
+function makeEdgeEvaluation(candidates: Evaluation["results"]["candidates"]): Evaluation {
+  // edge_candidate evaluations: triple-mode counters (pairs_improved,
+  // baseline_pair_count, avg_improvement_ms) are zero/unused — ranking is
+  // by `coverage_count` / `coverage_weighted_ping_ms` instead.
+  return {
+    ...makeEvaluation(candidates),
+    evaluation_mode: "edge_candidate",
+    baseline_pair_count: 0,
+    candidates_good: candidates.filter((c) => (c.coverage_count ?? 0) >= 1).length,
   };
 }
 
@@ -83,6 +101,30 @@ function qualifyingCandidate(
     avg_improvement_ms: 10,
     avg_loss_ratio: 0.001,
     composite_score: 10,
+  };
+}
+
+function edgeCandidate(
+  destinationIp: string,
+  coverage_count: number,
+): Evaluation["results"]["candidates"][number] {
+  // edge_candidate candidates carry coverage_count + coverage_weighted_ping_ms
+  // for ranking; pairs_improved is zero (the metric is meaningless for that
+  // mode) and composite_score is absent on the wire.
+  return {
+    destination_ip: destinationIp,
+    display_name: destinationIp,
+    city: null,
+    country_code: null,
+    asn: null,
+    network_operator: null,
+    is_mesh_member: false,
+    pairs_improved: 0,
+    pairs_total_considered: 0,
+    avg_improvement_ms: null,
+    avg_loss_ratio: null,
+    coverage_count,
+    coverage_weighted_ping_ms: 25.0,
   };
 }
 
@@ -144,11 +186,11 @@ describe("computeCostEstimate", () => {
   });
 
   test("scope=good_candidates returns the upper-bound 4 × Σ pairs_improved", () => {
-    // T55 dropped pair-detail rows from the candidate's wire shape, so
-    // the preview no longer mirrors the backend's exact
-    // `(agent, transit_ip)` dedup — that requires fetching every page
-    // of every candidate's pair-details, which is too expensive for a
-    // preview render. The estimator returns
+    // The candidate wire shape does not carry pair-detail rows, so the
+    // preview cannot mirror the backend's exact `(agent, transit_ip)`
+    // dedup — that requires fetching every page of every candidate's
+    // pair-details, which is too expensive for a preview render. The
+    // estimator returns
     // `4 × Σ candidate.pairs_improved` as an upper bound: each
     // qualifying triple contributes one source-side and one
     // destination-side `(agent, transit)` entry pre-dedup, each
@@ -194,6 +236,59 @@ describe("computeCostEstimate", () => {
       destination_ip: "10.0.0.1",
     });
     expect(est.pairs_enqueued).toBe(2);
+  });
+
+  test("scope=good_candidates branches on edge_candidate mode", () => {
+    // Backend `good_candidates_for_edge_campaign` cross-joins
+    // `coverage_count >= 1` candidates with the campaign's source agents,
+    // and `insert_detail_pairs` enqueues a ping + MTR per pair → the
+    // upper bound is `2 × source_agents × qualifying_candidates`.
+    //
+    // The triple-mode formula must NOT be used here: edge_candidate
+    // evaluations always set `pairs_improved = 0`, so it would always
+    // report zero and disable the confirm button even when there are
+    // qualifying candidates ready to dispatch.
+    const candidates = [
+      edgeCandidate("10.0.0.1", 2), // qualifies
+      edgeCandidate("10.0.0.2", 1), // qualifies
+      { ...edgeCandidate("10.0.0.3", 0), coverage_count: 0 }, // filtered
+    ];
+    const evaluation = makeEdgeEvaluation(candidates);
+    const campaign = {
+      ...makeCampaign({ state: "evaluated" }),
+      source_agent_ids: ["agent-a", "agent-b", "agent-c"],
+      evaluation_mode: "edge_candidate" as const,
+    };
+    const est = computeCostEstimate("good_candidates", campaign, evaluation, undefined);
+    // 3 source agents × 2 qualifying candidates × 2 (ping + MTR) = 12.
+    expect(est.pairs_enqueued).toBe(12);
+  });
+
+  test("scope=good_candidates returns 0 for edge_candidate when no source agents", () => {
+    // An edge_candidate campaign whose `source_agent_ids` is empty (e.g.
+    // never persisted) has no agents to fan out to; the cross-join is empty.
+    const evaluation = makeEdgeEvaluation([edgeCandidate("10.0.0.1", 1)]);
+    const campaign = {
+      ...makeCampaign({ state: "evaluated" }),
+      source_agent_ids: [],
+      evaluation_mode: "edge_candidate" as const,
+    };
+    const est = computeCostEstimate("good_candidates", campaign, evaluation, undefined);
+    expect(est.pairs_enqueued).toBe(0);
+  });
+
+  test("scope=good_candidates skips edge candidates with coverage_count=0", () => {
+    // `good_candidates_for_edge_campaign` filters
+    // `WHERE coverage_count >= 1` — a candidate at exactly 0 contributes
+    // nothing to the upper-bound estimate.
+    const evaluation = makeEdgeEvaluation([edgeCandidate("10.0.0.1", 0)]);
+    const campaign = {
+      ...makeCampaign({ state: "evaluated" }),
+      source_agent_ids: ["agent-a", "agent-b"],
+      evaluation_mode: "edge_candidate" as const,
+    };
+    const est = computeCostEstimate("good_candidates", campaign, evaluation, undefined);
+    expect(est.pairs_enqueued).toBe(0);
   });
 });
 
@@ -277,6 +372,30 @@ describe("DetailCostPreview — dialog behaviour", () => {
     expect(confirm).toHaveTextContent(/no pairs to enqueue/i);
     // And the description explains the *why* (not a loading message).
     expect(screen.getByText(/no qualifying pairs/i)).toBeInTheDocument();
+  });
+
+  test("scope=good_candidates with edge_candidate evaluation enables confirm button", () => {
+    // Regression: the triple-mode formula uses `pairs_improved`, which is
+    // always 0 in edge_candidate evaluations — so the dialog used to render
+    // `≤ 0` and disable the confirm button even when there are coverage
+    // candidates to dispatch. The mode-aware formula must report the
+    // cross-join `2 × source_agents × qualifying_candidates` instead.
+    const evaluation = makeEdgeEvaluation([
+      edgeCandidate("10.0.0.1", 2),
+      edgeCandidate("10.0.0.2", 1),
+    ]);
+    const campaign = {
+      ...makeCampaign({ state: "evaluated" }),
+      source_agent_ids: ["agent-a", "agent-b"],
+      evaluation_mode: "edge_candidate" as const,
+    };
+    renderDialog({ scope: "good_candidates", evaluation, campaign });
+
+    // 2 agents × 2 qualifying × 2 (ping + MTR) = 8.
+    expect(screen.getByTestId("cost-preview-pairs")).toHaveTextContent("8");
+    const confirm = screen.getByTestId("cost-preview-confirm");
+    expect(confirm).not.toBeDisabled();
+    expect(confirm).toHaveTextContent(/enqueue 8/i);
   });
 
   test("scope=pair body carries the supplied pair identifier", async () => {

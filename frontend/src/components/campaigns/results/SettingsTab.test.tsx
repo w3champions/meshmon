@@ -56,6 +56,7 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     max_transit_stddev_ms: overrides.max_transit_stddev_ms ?? null,
     min_improvement_ms: overrides.min_improvement_ms ?? null,
     min_improvement_ratio: overrides.min_improvement_ratio ?? null,
+    useful_latency_ms: overrides.useful_latency_ms ?? null,
     created_at: overrides.created_at ?? "2026-04-01T12:00:00Z",
     created_by: overrides.created_by ?? "alice",
     started_at: overrides.started_at ?? null,
@@ -63,6 +64,8 @@ function makeCampaign(overrides: Partial<Campaign> & { state: CampaignState }): 
     completed_at: overrides.completed_at ?? null,
     evaluated_at: overrides.evaluated_at ?? null,
     pair_counts: overrides.pair_counts ?? [],
+    max_hops: overrides.max_hops ?? 2,
+    vm_lookback_minutes: overrides.vm_lookback_minutes ?? 15,
   };
 }
 
@@ -144,7 +147,7 @@ describe("SettingsTab — form seeding", () => {
     expect(screen.getByRole("radio", { name: /diversity/i })).toHaveAttribute("data-state", "on");
   });
 
-  test("prefers the evaluation row snapshot when present", async () => {
+  test("prefers the evaluation row snapshot when present and fresh", async () => {
     vi.mocked(useEvaluation).mockReturnValue({
       data: {
         id: "eval-1",
@@ -153,6 +156,8 @@ describe("SettingsTab — form seeding", () => {
         // Wire ratio 0.0325 renders as "3.25" in the percent-facing input.
         loss_threshold_ratio: 0.0325,
         stddev_weight: 0.5,
+        // The snapshot's mode matches the campaign's mode below — i.e.
+        // the snapshot is *fresh* (reflects the current campaign config).
         evaluation_mode: "diversity",
         baseline_pair_count: 4,
         candidates_total: 2,
@@ -171,7 +176,7 @@ describe("SettingsTab — form seeding", () => {
         // but the evaluation-row snapshot takes precedence and shows "3.25".
         loss_threshold_ratio: 0.09,
         stddev_weight: 9,
-        evaluation_mode: "optimization",
+        evaluation_mode: "diversity",
       }),
     );
 
@@ -179,6 +184,95 @@ describe("SettingsTab — form seeding", () => {
     expect(lossInput.value).toBe("3.25");
     // Evaluated footer references the evaluation-row timestamp.
     expect(screen.getByText(/last evaluated/i)).toBeInTheDocument();
+  });
+
+  test("seeds from the campaign row when state=completed even if a stale snapshot exists", () => {
+    // After a knob-change PATCH dismisses the evaluation, `state` flips
+    // back to `completed` while the historical `campaign_evaluations`
+    // row stays around for the read-side history view. The form must
+    // seed from the campaign's *current* knob values (the operator's
+    // most recent PATCH), not from the pre-dismissal evaluation.
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-stale",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-05T12:00:00Z",
+        // Historical (pre-dismissal) values.
+        loss_threshold_ratio: 0.01,
+        stddev_weight: 0.1,
+        evaluation_mode: "diversity",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        useful_latency_ms: 30,
+        max_hops: 1,
+        vm_lookback_minutes: 5,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(
+      makeCampaign({
+        // `completed` => the snapshot is stale; the form must NOT seed from it.
+        state: "completed",
+        // Current campaign values (post-PATCH that dismissed the evaluation).
+        loss_threshold_ratio: 0.075,
+        stddev_weight: 1.75,
+        evaluation_mode: "diversity",
+      }),
+    );
+
+    // Form reflects the campaign row, NOT the historical snapshot.
+    const lossInput = screen.getByLabelText(/loss threshold/i) as HTMLInputElement;
+    const stddevInput = screen.getByLabelText(/stddev weight/i) as HTMLInputElement;
+    expect(lossInput.value).toBe("7.5");
+    expect(stddevInput.value).toBe("1.75");
+    // The historical snapshot is still rendered in the footer though —
+    // the legacy badge / "last evaluated" line track the stored row,
+    // independent of the form-seed freshness gate.
+    expect(screen.getByText(/last evaluated/i)).toBeInTheDocument();
+  });
+
+  test("seeds from the campaign row when snapshot mode != campaign mode", () => {
+    // Operator may have PATCHed `evaluation_mode` against a historical
+    // row that targeted a different mode. The form must seed from the
+    // campaign's current mode + knobs, not from the stale snapshot.
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-mode-mismatch",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-08T12:00:00Z",
+        loss_threshold_ratio: 0.0125,
+        stddev_weight: 0.25,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(
+      makeCampaign({
+        state: "evaluated",
+        // Mode mismatch with the historical snapshot above.
+        loss_threshold_ratio: 0.06,
+        stddev_weight: 2,
+        evaluation_mode: "diversity",
+      }),
+    );
+
+    const lossInput = screen.getByLabelText(/loss threshold/i) as HTMLInputElement;
+    const stddevInput = screen.getByLabelText(/stddev weight/i) as HTMLInputElement;
+    expect(lossInput.value).toBe("6");
+    expect(stddevInput.value).toBe("2");
+    expect(screen.getByRole("radio", { name: /diversity/i })).toHaveAttribute("data-state", "on");
   });
 });
 
@@ -259,6 +353,9 @@ describe("SettingsTab — submit flow", () => {
         max_transit_stddev_ms: null,
         min_improvement_ms: null,
         min_improvement_ratio: null,
+        // New edge_candidate knobs always ride on the PATCH body.
+        max_hops: 2,
+        vm_lookback_minutes: 15,
       },
     });
 
@@ -526,6 +623,8 @@ describe("SettingsTab — guardrail knobs", () => {
         max_transit_stddev_ms: null,
         min_improvement_ms: 5,
         min_improvement_ratio: null,
+        max_hops: 2,
+        vm_lookback_minutes: 15,
       },
     });
   });
@@ -674,5 +773,352 @@ describe("SettingsTab — guardrail footgun warning", () => {
     renderTab(makeCampaign({ state: "completed", max_transit_rtt_ms: 50 }));
 
     expect(screen.queryByText(/dropped every candidate/i)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R1 — edge_candidate mode selector + mode-aware knobs
+// ---------------------------------------------------------------------------
+
+describe("SettingsTab — R1: edge_candidate mode", () => {
+  test("mode selector has three items: Diversity, Optimization, Edge candidate", () => {
+    renderTab(makeCampaign({ state: "completed" }));
+
+    expect(screen.getByRole("radio", { name: /diversity/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /optimization/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /edge candidate/i })).toBeInTheDocument();
+  });
+
+  test("mode selector is placed before the loss-threshold inputs", () => {
+    renderTab(makeCampaign({ state: "completed" }));
+
+    const form = screen.getByRole("form", { name: /re-evaluate/i });
+    const modeGroup = form.querySelector("[aria-labelledby='settings-evaluation-mode-label']");
+    const lossInput = screen.getByLabelText(/loss threshold/i);
+
+    expect(modeGroup).not.toBeNull();
+    // compareDocumentPosition: if modeGroup precedes lossInput, the flag includes DOCUMENT_POSITION_FOLLOWING (4)
+    if (!modeGroup) throw new Error("expected modeGroup");
+    const position = modeGroup.compareDocumentPosition(lossInput);
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  test("clicking Edge candidate switches mode and shows edge hint", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+
+    expect(screen.getByRole("radio", { name: /edge candidate/i })).toHaveAttribute(
+      "data-state",
+      "on",
+    );
+    expect(screen.getByText(/direct \+ transitive/i)).toBeInTheDocument();
+  });
+
+  test("edge_candidate mode shows useful_latency_ms and vm_lookback_minutes inputs", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+
+    expect(screen.getByLabelText(/useful latency/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/lookback window/i)).toBeInTheDocument();
+  });
+
+  test("diversity mode hides useful_latency_ms and vm_lookback_minutes inputs", () => {
+    renderTab(makeCampaign({ state: "completed", evaluation_mode: "diversity" }));
+
+    expect(screen.queryByLabelText(/useful latency/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/lookback window/i)).not.toBeInTheDocument();
+  });
+
+  test("optimization mode hides useful_latency_ms and vm_lookback_minutes inputs", () => {
+    renderTab(makeCampaign({ state: "completed", evaluation_mode: "optimization" }));
+
+    expect(screen.queryByLabelText(/useful latency/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/lookback window/i)).not.toBeInTheDocument();
+  });
+
+  test("edge_candidate mode hides min_improvement_ms and min_improvement_ratio", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+
+    expect(screen.queryByLabelText(/min improvement \(ms\)/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/min improvement ratio/i)).not.toBeInTheDocument();
+  });
+
+  test("diversity mode shows min_improvement_ms and min_improvement_ratio", () => {
+    renderTab(makeCampaign({ state: "completed", evaluation_mode: "diversity" }));
+
+    expect(screen.getByLabelText(/min improvement \(ms\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/min improvement ratio/i)).toBeInTheDocument();
+  });
+
+  test("max_hops has 'Direct only' option only in edge_candidate mode", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    // optimization: no "Direct only"
+    expect(screen.queryByRole("radio", { name: /direct only/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+
+    // edge_candidate: "Direct only" appears
+    expect(screen.getByRole("radio", { name: /direct only/i })).toBeInTheDocument();
+  });
+
+  test("useful_latency_ms required validation: Submit disabled when null in edge_candidate mode", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+
+    // useful_latency_ms starts as null → button should be disabled
+    const submit = screen.getByRole("button", { name: /re-evaluate/i });
+    expect(submit).toBeDisabled();
+    expect(screen.getByText(/required for edge candidate/i)).toBeInTheDocument();
+  });
+
+  test("useful_latency_ms set: Submit enabled in edge_candidate mode", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+
+    fireEvent.change(screen.getByLabelText(/useful latency/i), { target: { value: "80" } });
+
+    const submit = screen.getByRole("button", { name: /re-evaluate/i });
+    expect(submit).not.toBeDisabled();
+  });
+
+  test("PATCH body includes max_hops, vm_lookback_minutes, and useful_latency_ms in edge_candidate mode", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed" }));
+
+    await user.click(screen.getByRole("radio", { name: /edge candidate/i }));
+    fireEvent.change(screen.getByLabelText(/useful latency/i), { target: { value: "80" } });
+
+    patchStub.mutate.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: (result: unknown) => void }) => {
+        opts?.onSuccess?.({});
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
+
+    expect(patchStub.mutate).toHaveBeenCalledTimes(1);
+    const [patchVars] = patchStub.mutate.mock.calls[0];
+    const body = (patchVars as { body: Record<string, unknown> }).body;
+    expect(body.evaluation_mode).toBe("edge_candidate");
+    expect(body.max_hops).toBe(2);
+    expect(body.vm_lookback_minutes).toBe(15);
+    expect(body.useful_latency_ms).toBe(80);
+  });
+
+  test("PATCH body omits useful_latency_ms in diversity mode", async () => {
+    const user = userEvent.setup();
+    renderTab(makeCampaign({ state: "completed", evaluation_mode: "diversity" }));
+
+    patchStub.mutate.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: (result: unknown) => void }) => {
+        opts?.onSuccess?.({});
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: /re-evaluate/i }));
+
+    const [patchVars] = patchStub.mutate.mock.calls[0];
+    const body = (patchVars as { body: Record<string, unknown> }).body;
+    expect("useful_latency_ms" in body).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2 — "legacy" badge for NULL-snapshot evaluations
+// ---------------------------------------------------------------------------
+
+describe("SettingsTab — R2: legacy badge", () => {
+  test("renders legacy badge when snapshot.max_hops is null", () => {
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-legacy",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-10T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        max_hops: null,
+        vm_lookback_minutes: null,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.getByText(/legacy/i)).toBeInTheDocument();
+  });
+
+  test("does NOT render legacy badge when snapshot.max_hops is non-null", () => {
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-modern",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-10T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        max_hops: 2,
+        vm_lookback_minutes: 15,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.queryByText(/legacy/i)).not.toBeInTheDocument();
+  });
+
+  test("does NOT render legacy badge when there is no evaluation row", () => {
+    renderTab(makeCampaign({ state: "completed" }));
+
+    expect(screen.queryByText(/legacy/i)).not.toBeInTheDocument();
+  });
+
+  test("renders legacy badge when snapshot.max_hops is undefined", () => {
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-legacy-undef",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-10T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "optimization",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        // max_hops intentionally absent (undefined) — legacy evaluations
+        vm_lookback_minutes: null,
+        results: { candidates: [], unqualified_reasons: {} },
+      } as unknown,
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    renderTab(makeCampaign({ state: "evaluated" }));
+
+    expect(screen.getByText(/legacy/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R3 — single-source-agent banner for edge_candidate
+// ---------------------------------------------------------------------------
+
+describe("SettingsTab — R3: single-source-agent banner", () => {
+  function makeEvalEdgeCandidate() {
+    return {
+      data: {
+        id: "eval-edge",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-10T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "edge_candidate",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        max_hops: 2,
+        vm_lookback_minutes: 15,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>;
+  }
+
+  test("renders banner when evaluation_mode=edge_candidate AND single source agent", () => {
+    vi.mocked(useEvaluation).mockReturnValue(makeEvalEdgeCandidate());
+
+    const campaign = {
+      ...makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      source_agent_ids: ["agent-1"],
+    } as unknown as Campaign;
+
+    renderTab(campaign);
+
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByText(/only one source agent/i)).toBeInTheDocument();
+  });
+
+  test("does NOT render banner when evaluation_mode=edge_candidate AND multiple source agents", () => {
+    vi.mocked(useEvaluation).mockReturnValue(makeEvalEdgeCandidate());
+
+    const campaign = {
+      ...makeCampaign({ state: "evaluated", evaluation_mode: "edge_candidate" }),
+      source_agent_ids: ["agent-1", "agent-2"],
+    } as unknown as Campaign;
+
+    renderTab(campaign);
+
+    expect(screen.queryByText(/only one source agent/i)).not.toBeInTheDocument();
+  });
+
+  test("does NOT render banner when evaluation_mode is not edge_candidate", () => {
+    vi.mocked(useEvaluation).mockReturnValue({
+      data: {
+        id: "eval-div",
+        campaign_id: CAMPAIGN_ID,
+        evaluated_at: "2026-04-10T12:00:00Z",
+        loss_threshold_ratio: 0.02,
+        stddev_weight: 1,
+        evaluation_mode: "diversity",
+        baseline_pair_count: 4,
+        candidates_total: 2,
+        candidates_good: 1,
+        avg_improvement_ms: 12,
+        max_hops: 2,
+        vm_lookback_minutes: 15,
+        results: { candidates: [], unqualified_reasons: {} },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useEvaluation>);
+
+    const campaign = {
+      ...makeCampaign({ state: "evaluated", evaluation_mode: "diversity" }),
+      source_agent_ids: ["agent-1"],
+    } as unknown as Campaign;
+
+    renderTab(campaign);
+
+    expect(screen.queryByText(/only one source agent/i)).not.toBeInTheDocument();
+  });
+
+  test("does NOT render banner when no evaluation row exists", () => {
+    const campaign = {
+      ...makeCampaign({ state: "completed", evaluation_mode: "edge_candidate" }),
+      source_agent_ids: ["agent-1"],
+    } as unknown as Campaign;
+
+    renderTab(campaign);
+
+    expect(screen.queryByText(/only one source agent/i)).not.toBeInTheDocument();
   });
 });

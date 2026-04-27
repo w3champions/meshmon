@@ -17,14 +17,14 @@ const MTR_HINT =
   "MTR is expensive — prefer ICMP/TCP/UDP here and use the per-pair Detail action in the results view.";
 const FORCE_HELP =
   "When on, the 24 h reuse cache is ignored and the reusable count collapses to zero.";
-// Diversity and Optimization describe what the evaluator does with the
-// measurements this campaign collects. Operators pick the mode up front so
-// the evaluator can score candidates without a re-dispatch. Hints below
-// summarise the predicate each mode applies — full semantics in spec 04 §2.
 const DIVERSITY_HINT =
   "Evaluator qualifies a transit agent X when A → X → B beats the direct A → B path. Broader result set; surfaces every viable alternative route.";
 const OPTIMIZATION_HINT =
   "Evaluator qualifies X only when A → X → B beats direct AND every existing mesh transit. Tighter result set; surfaces the genuinely best candidates.";
+const EDGE_CANDIDATE_HINT =
+  "Evaluator scores X candidates by their direct + transitive (X → A → B) connectivity to a fixed set of mesh agents. Use to evaluate new edge-node locations.";
+const MAX_HOPS_CAPTION =
+  "2 hops considers an additional mesh agent in each route. Default for richer evaluation.";
 
 export interface KnobPanelProps {
   value: CampaignKnobs;
@@ -41,47 +41,37 @@ export interface KnobPanelProps {
 export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps) {
   const patch = (delta: Partial<CampaignKnobs>) => onChange({ ...value, ...delta });
 
-  // Keys whose backing state is a plain `number` (loss_threshold_ratio is
-  // wired through its own percent-aware handler below).
+  const isEdgeCandidate = value.evaluation_mode === "edge_candidate";
+
   type NumericKey =
     | "probe_count"
     | "probe_count_detail"
     | "timeout_ms"
     | "probe_stagger_ms"
-    | "stddev_weight";
+    | "stddev_weight"
+    | "vm_lookback_minutes";
 
   const handleNumber = (key: NumericKey) => (event: React.ChangeEvent<HTMLInputElement>) => {
     const raw = event.target.value;
-    // When the operator clears the field, preserve the fallback so the
-    // knob stays at the current value rather than becoming NaN.
     const parsed = raw === "" ? value[key] : Number(raw);
     patch({ [key]: clampKnob(key, parsed, value[key]) } as Partial<CampaignKnobs>);
   };
 
-  // Keys whose backing state is `number | null`. Empty input clears the
-  // local form state to `null`; on submit, `null` flows through to the
-  // wire as `null` and the backend keeps the prior column value (PATCH
-  // semantics) or omits the gate (CREATE semantics).
   type NullableKey =
     | "max_transit_rtt_ms"
     | "max_transit_stddev_ms"
     | "min_improvement_ms"
-    | "min_improvement_ratio";
+    | "min_improvement_ratio"
+    | "useful_latency_ms";
 
   const handleNullable = (key: NullableKey) => (event: React.ChangeEvent<HTMLInputElement>) => {
-    const next = parseNullableKnob(key, event.target.value, value[key]);
+    const next = parseNullableKnob(key, event.target.value, value[key] as number | null);
     patch({ [key]: next } as Partial<CampaignKnobs>);
   };
 
-  // `loss_threshold_ratio` is wire-format ratio (0.0–1.0), but the form UX
-  // presents percent — convert at the form boundary so the DTO stays in
-  // ratio units while the operator still types "2" for 2 %.
   const handleLossThresholdPct = (event: React.ChangeEvent<HTMLInputElement>) => {
     const raw = event.target.value;
-    if (raw === "") {
-      // Operator cleared the field — hold the current knob value.
-      return;
-    }
+    if (raw === "") return;
     const percent = Number(raw);
     if (!Number.isFinite(percent)) return;
     const ratio = percent / 100;
@@ -89,6 +79,13 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
       loss_threshold_ratio: clampKnob("loss_threshold_ratio", ratio, value.loss_threshold_ratio),
     });
   };
+
+  const evaluationModeHint =
+    value.evaluation_mode === "diversity"
+      ? DIVERSITY_HINT
+      : value.evaluation_mode === "edge_candidate"
+        ? EDGE_CANDIDATE_HINT
+        : OPTIMIZATION_HINT;
 
   return (
     <section
@@ -127,9 +124,6 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
           type="single"
           value={value.protocol}
           onValueChange={(next) => {
-            // Radix emits an empty string when the active item is clicked
-            // again; treat that as "keep current" so the knob never goes
-            // blank under us.
             if (!next) return;
             patch({ protocol: next as KnobProtocol });
           }}
@@ -164,7 +158,10 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
           value={value.evaluation_mode}
           onValueChange={(next) => {
             if (!next) return;
-            patch({ evaluation_mode: next as EvaluationMode });
+            const mode = next as EvaluationMode;
+            const hopsFix =
+              mode !== "edge_candidate" && value.max_hops === 0 ? { max_hops: 1 } : {};
+            patch({ evaluation_mode: mode, ...hopsFix });
           }}
           variant="outline"
           aria-label="Evaluation mode"
@@ -177,11 +174,88 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
           <ToggleGroupItem value="optimization" aria-label="optimization">
             Optimization
           </ToggleGroupItem>
+          <ToggleGroupItem value="edge_candidate" aria-label="edge_candidate">
+            Edge candidate
+          </ToggleGroupItem>
         </ToggleGroup>
         <p id="knob-evaluation-mode-hint" className="text-xs text-muted-foreground">
-          {value.evaluation_mode === "diversity" ? DIVERSITY_HINT : OPTIMIZATION_HINT}
+          {evaluationModeHint}
         </p>
       </div>
+
+      {/* max_hops — diversity/optimization: 1–2 hops; edge_candidate: 0–2 hops */}
+      <div className="space-y-1">
+        <Label>Max hops</Label>
+        <ToggleGroup
+          type="single"
+          value={String(value.max_hops)}
+          onValueChange={(next) => {
+            if (!next) return;
+            patch({ max_hops: Number(next) });
+          }}
+          variant="outline"
+          aria-label="Max hops"
+          disabled={disabled}
+        >
+          {isEdgeCandidate && (
+            <ToggleGroupItem value="0" aria-label="Direct only (0)">
+              Direct only
+            </ToggleGroupItem>
+          )}
+          <ToggleGroupItem value="1" aria-label="1 hop">
+            1 hop
+          </ToggleGroupItem>
+          <ToggleGroupItem value="2" aria-label="2 hops">
+            2 hops
+          </ToggleGroupItem>
+        </ToggleGroup>
+        {!isEdgeCandidate && <p className="text-xs text-muted-foreground">{MAX_HOPS_CAPTION}</p>}
+      </div>
+
+      {/* edge_candidate-only knobs */}
+      {isEdgeCandidate && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label htmlFor="knob-useful-latency-ms">
+              Useful latency (ms){" "}
+              <span className="text-destructive" aria-hidden="true">
+                *
+              </span>
+            </Label>
+            <Input
+              id="knob-useful-latency-ms"
+              type="number"
+              min={KNOB_BOUNDS.useful_latency_ms.min}
+              max={KNOB_BOUNDS.useful_latency_ms.max}
+              value={nullableKnobInputValue(value.useful_latency_ms)}
+              placeholder="e.g. 80"
+              aria-required="true"
+              className={
+                value.useful_latency_ms === null
+                  ? "border-destructive focus-visible:ring-destructive"
+                  : undefined
+              }
+              onChange={handleNullable("useful_latency_ms")}
+              disabled={disabled}
+            />
+            {value.useful_latency_ms === null && (
+              <p className="text-xs text-destructive">Required for edge candidate mode.</p>
+            )}
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="knob-vm-lookback-minutes">Lookback window (min)</Label>
+            <Input
+              id="knob-vm-lookback-minutes"
+              type="number"
+              min={KNOB_BOUNDS.vm_lookback_minutes.min}
+              max={KNOB_BOUNDS.vm_lookback_minutes.max}
+              value={value.vm_lookback_minutes}
+              onChange={handleNumber("vm_lookback_minutes")}
+              disabled={disabled}
+            />
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
@@ -264,7 +338,7 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
        * Guardrail knobs (eligibility caps + storage floors). Optional —
        * leaving an input blank disables that gate. The two improvement
        * knobs accept negative values per spec. See `campaign-config.ts`
-       * for bounds.
+       * for bounds. Hidden in edge_candidate mode (those are diversity/optimization-only).
        */}
       <div className="space-y-1">
         <Label className="text-sm font-semibold">Evaluation guardrails (optional)</Label>
@@ -300,34 +374,38 @@ export function KnobPanel({ value, onChange, disabled = false }: KnobPanelProps)
             disabled={disabled}
           />
         </div>
-        <div className="space-y-1">
-          <Label htmlFor="knob-min-improvement-ms">Min improvement (ms)</Label>
-          <Input
-            id="knob-min-improvement-ms"
-            type="number"
-            step="0.1"
-            min={KNOB_BOUNDS.min_improvement_ms.min}
-            max={KNOB_BOUNDS.min_improvement_ms.max}
-            value={nullableKnobInputValue(value.min_improvement_ms)}
-            placeholder="e.g. 5 (negative values allowed)"
-            onChange={handleNullable("min_improvement_ms")}
-            disabled={disabled}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="knob-min-improvement-ratio">Min improvement ratio</Label>
-          <Input
-            id="knob-min-improvement-ratio"
-            type="number"
-            step="0.01"
-            min={KNOB_BOUNDS.min_improvement_ratio.min}
-            max={KNOB_BOUNDS.min_improvement_ratio.max}
-            value={nullableKnobInputValue(value.min_improvement_ratio)}
-            placeholder="e.g. 0.1 (10%)"
-            onChange={handleNullable("min_improvement_ratio")}
-            disabled={disabled}
-          />
-        </div>
+        {!isEdgeCandidate && (
+          <>
+            <div className="space-y-1">
+              <Label htmlFor="knob-min-improvement-ms">Min improvement (ms)</Label>
+              <Input
+                id="knob-min-improvement-ms"
+                type="number"
+                step="0.1"
+                min={KNOB_BOUNDS.min_improvement_ms.min}
+                max={KNOB_BOUNDS.min_improvement_ms.max}
+                value={nullableKnobInputValue(value.min_improvement_ms)}
+                placeholder="e.g. 5 (negative values allowed)"
+                onChange={handleNullable("min_improvement_ms")}
+                disabled={disabled}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="knob-min-improvement-ratio">Min improvement ratio</Label>
+              <Input
+                id="knob-min-improvement-ratio"
+                type="number"
+                step="0.01"
+                min={KNOB_BOUNDS.min_improvement_ratio.min}
+                max={KNOB_BOUNDS.min_improvement_ratio.max}
+                value={nullableKnobInputValue(value.min_improvement_ratio)}
+                placeholder="e.g. 0.1 (10%)"
+                onChange={handleNullable("min_improvement_ratio")}
+                disabled={disabled}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <div className="space-y-1">

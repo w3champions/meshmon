@@ -36,6 +36,9 @@ fn make_input(title: &str) -> CreateInput {
         max_transit_stddev_ms: None,
         min_improvement_ms: None,
         min_improvement_ratio: None,
+        useful_latency_ms: None,
+        max_hops: None,
+        vm_lookback_minutes: None,
         created_by: Some("tester".into()),
     }
 }
@@ -194,6 +197,9 @@ async fn patch_updates_provided_fields_only() {
         None,
         Some(7.5_f64),
         None,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -221,6 +227,9 @@ async fn patch_returns_not_found_for_unknown_id() {
         &pool,
         fresh,
         Some("x"),
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -1427,7 +1436,7 @@ async fn measurements_for_campaign_filters_detail_kind() {
     .await
     .unwrap();
 
-    let inputs = repo::measurements_for_campaign(&pool, row.id)
+    let (inputs, vm_lookback_minutes) = repo::measurements_for_campaign(&pool, row.id)
         .await
         .unwrap();
 
@@ -1455,6 +1464,10 @@ async fn measurements_for_campaign_filters_detail_kind() {
     );
     assert_eq!(inputs.stddev_weight, row.stddev_weight);
     assert_eq!(inputs.mode, row.evaluation_mode);
+    // `vm_lookback_minutes` rides alongside `inputs` from the same atomic
+    // SELECT, so the `/evaluate` handler reads the same snapshot value
+    // as the scoring knobs (TOCTOU regression for a racing PATCH).
+    assert_eq!(vm_lookback_minutes, row.vm_lookback_minutes);
 
     repo::delete(&pool, row.id).await.unwrap();
     sqlx::query("DELETE FROM measurements WHERE id = ANY($1)")
@@ -1471,7 +1484,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
     // per-campaign UNIQUE constraint, so two rows must coexist and
     // the read-path must surface the freshest.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, TripleEvaluationOutputs};
     use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
@@ -1481,7 +1494,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
     // persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
-    let first = EvaluationOutputs {
+    let first = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 3,
         candidates_total: 2,
         candidates_good: 1,
@@ -1491,7 +1504,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
     let first_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
@@ -1503,6 +1516,9 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .unwrap();
@@ -1532,7 +1548,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
     // strictly greater regardless of platform timestamp resolution.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-    let second = EvaluationOutputs {
+    let second = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 7,
         candidates_total: 5,
         candidates_good: 4,
@@ -1542,7 +1558,7 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
     let second_id = evaluation_repo::persist_evaluation(
         &pool,
         row.id,
@@ -1554,6 +1570,9 @@ async fn persist_evaluation_appends_history_and_read_surfaces_latest() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .unwrap();
@@ -1619,7 +1638,7 @@ async fn persist_evaluation_rejects_running_campaign() {
     // must abort with IllegalTransition rather than silently writing a
     // fresh evaluation against a now-running campaign.
     use meshmon_service::campaign::dto::EvaluationResultsDto;
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, TripleEvaluationOutputs};
     use meshmon_service::campaign::evaluation_repo;
     let pool = common::shared_migrated_pool().await;
 
@@ -1629,7 +1648,7 @@ async fn persist_evaluation_rejects_running_campaign() {
     repo::start(&pool, row.id).await.unwrap();
     // Campaign is now in `running`.
 
-    let outputs = EvaluationOutputs {
+    let outputs = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 0,
         candidates_total: 0,
         candidates_good: 0,
@@ -1639,7 +1658,7 @@ async fn persist_evaluation_rejects_running_campaign() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
 
     let err = evaluation_repo::persist_evaluation(
         &pool,
@@ -1652,6 +1671,9 @@ async fn persist_evaluation_rejects_running_campaign() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .expect_err("persist_evaluation must reject running state");
@@ -1689,7 +1711,9 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
     use meshmon_service::campaign::dto::{
         EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto,
     };
-    use meshmon_service::campaign::eval::{EvaluationOutputs, PairDetailsForCandidate};
+    use meshmon_service::campaign::eval::{
+        EvaluationOutputs, PairDetailsForCandidate, TripleEvaluationOutputs,
+    };
     use meshmon_service::campaign::evaluation_repo;
     use meshmon_service::campaign::model::DirectSource;
     let pool = common::shared_migrated_pool().await;
@@ -1713,8 +1737,19 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         pairs_total_considered: 1,
         avg_improvement_ms: Some(0.0),
         avg_loss_ratio: Some(0.0),
-        composite_score: 0.0,
+        composite_score: Some(0.0),
         hostname: None,
+        website: None,
+        notes: None,
+        agent_id: None,
+        coverage_count: None,
+        destinations_total: None,
+        mean_ms_under_t: None,
+        coverage_weighted_ping_ms: None,
+        direct_share: None,
+        onehop_share: None,
+        twohop_share: None,
+        has_real_x_source_data: None,
     };
     // Sidecar pair-detail bundle. The bundle's `destination_ip` is
     // intentionally a real IP — the evaluator sets this from the
@@ -1741,10 +1776,14 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             mtr_measurement_id_ax: None,
             mtr_measurement_id_xb: None,
             destination_hostname: None,
+            ax_was_substituted: None,
+            xb_was_substituted: None,
+            direct_was_substituted: None,
+            winning_x_position: None,
         }],
         qualifying_legs: Vec::new(),
     };
-    let outputs = EvaluationOutputs {
+    let outputs = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 1,
         candidates_total: 1,
         candidates_good: 0,
@@ -1754,7 +1793,7 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: vec![bundle],
-    };
+    });
 
     let err = evaluation_repo::persist_evaluation(
         &pool,
@@ -1767,6 +1806,9 @@ async fn persist_evaluation_rolls_back_on_unparseable_candidate_ip() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .expect_err("unparseable candidate destination_ip must abort the tx");
@@ -1978,6 +2020,9 @@ async fn apply_edit_preserves_detail_rows() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )
@@ -2063,6 +2108,9 @@ async fn apply_edit_force_measurement_preserves_detail_rows() {
             max_transit_stddev_ms: None,
             min_improvement_ms: None,
             min_improvement_ratio: None,
+            useful_latency_ms: None,
+            max_hops: None,
+            vm_lookback_minutes: None,
             created_by: None,
         },
     )
@@ -2131,7 +2179,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
     // attempts on a recreated campaign reusing the same UUID (tests
     // and disaster-recovery paths both rely on reusable ids).
     use meshmon_service::campaign::dto::EvaluationResultsDto;
-    use meshmon_service::campaign::eval::EvaluationOutputs;
+    use meshmon_service::campaign::eval::{EvaluationOutputs, TripleEvaluationOutputs};
     use meshmon_service::campaign::evaluation_repo;
 
     let pool = common::shared_migrated_pool().await;
@@ -2142,7 +2190,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
     // completed so the persistence path opens.
     common::mark_completed(&pool, &row.id.to_string()).await;
 
-    let outputs = EvaluationOutputs {
+    let outputs = EvaluationOutputs::Triple(TripleEvaluationOutputs {
         baseline_pair_count: 1,
         candidates_total: 0,
         candidates_good: 0,
@@ -2152,7 +2200,7 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
             unqualified_reasons: Default::default(),
         },
         pair_details_by_candidate: Vec::new(),
-    };
+    });
     evaluation_repo::persist_evaluation(
         &pool,
         row.id,
@@ -2164,6 +2212,9 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
         None,
         None,
         None,
+        None,
+        1,
+        15,
     )
     .await
     .unwrap();
@@ -2188,4 +2239,227 @@ async fn campaign_evaluations_cascade_on_campaign_delete() {
         after, 0,
         "ON DELETE CASCADE must drop the evaluation row alongside the campaign"
     );
+}
+
+/// Regression guard for the NOT NULL columns bug (T56 Phase G).
+///
+/// `persist_edge_candidate_evaluation` must write `pairs_improved = 0` and
+/// `pairs_total_considered = 0` for every EdgeCandidate row — those columns
+/// are NOT NULL on `campaign_evaluation_candidates` and have no DEFAULT.
+/// Without this fix every edge_candidate `/evaluate` call fails at runtime
+/// with a Postgres NOT NULL constraint violation.
+///
+/// Uses `create_evaluated_campaign(&h, "edge_candidate")` so the full
+/// HTTP evaluate path runs, including the evaluator + persistence. A
+/// successful return proves the NOT NULL constraint was satisfied.
+/// The assertions then confirm the persisted aggregates are coherent.
+#[tokio::test]
+async fn persist_edge_candidate_evaluation_satisfies_not_null_constraints() {
+    use meshmon_service::campaign::evaluation_repo;
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    // `create_evaluated_campaign` inserts agents + seeds measurements +
+    // drives the full /evaluate HTTP path. A panic here means the NOT NULL
+    // constraint was violated (the endpoint returns 500) or the test setup
+    // itself is broken.
+    let campaign_id_str = common::create_evaluated_campaign(&h, "edge_candidate").await;
+    let campaign_id: uuid::Uuid = campaign_id_str.parse().expect("parse campaign id");
+
+    // Read back the persisted evaluation. Must be Some — the HTTP path
+    // already asserted a 200 response, but re-check at the repo layer.
+    let eval = evaluation_repo::latest_evaluation_for_campaign(pool, campaign_id)
+        .await
+        .expect("db query succeeded")
+        .expect("evaluation row exists after /evaluate");
+
+    assert_eq!(
+        eval.evaluation_mode,
+        meshmon_service::campaign::model::EvaluationMode::EdgeCandidate,
+        "evaluation must be in edge_candidate mode"
+    );
+
+    // The candidate count must be non-zero (seeded measurements cover
+    // at least the 4 destination IPs in the helper fixture).
+    assert!(
+        eval.candidates_total > 0,
+        "edge_candidate evaluation must have at least one candidate; got {}",
+        eval.candidates_total
+    );
+
+    // Verify pairs_improved and pairs_total_considered are present and
+    // valid (not violated by the constraint). The edge_candidate evaluator
+    // writes 0 for both — this is the correct sentinel per design.
+    let cand_rows: Vec<(i32, i32)> = sqlx::query_as(
+        "SELECT pairs_improved, pairs_total_considered \
+           FROM campaign_evaluation_candidates c \
+           JOIN campaign_evaluations e ON e.id = c.evaluation_id \
+          WHERE e.campaign_id = $1",
+    )
+    .bind(campaign_id)
+    .fetch_all(pool)
+    .await
+    .expect("query candidates");
+
+    assert!(
+        !cand_rows.is_empty(),
+        "candidate rows must exist in DB after persist"
+    );
+    for (improved, considered) in &cand_rows {
+        assert_eq!(
+            *improved, 0,
+            "edge_candidate rows must have pairs_improved = 0 (sentinel)"
+        );
+        assert_eq!(
+            *considered, 0,
+            "edge_candidate rows must have pairs_total_considered = 0 (sentinel)"
+        );
+    }
+
+    // Verify edge pair details were persisted (covers the pair-detail loop).
+    let edge_pair_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+           FROM campaign_evaluation_edge_pair_details epd \
+           JOIN campaign_evaluations e ON e.id = epd.evaluation_id \
+          WHERE e.campaign_id = $1",
+    )
+    .bind(campaign_id)
+    .fetch_one(pool)
+    .await
+    .expect("count edge pair details");
+
+    assert!(
+        edge_pair_count > 0,
+        "edge_candidate evaluation must persist at least one edge pair detail row; got {edge_pair_count}"
+    );
+}
+
+/// `persist_edge_candidate_evaluation` must snapshot the campaign's
+/// `max_transit_rtt_ms` and `max_transit_stddev_ms` onto the parent
+/// `campaign_evaluations` row. The route enumerator already consumes these
+/// caps, so omitting them from the persisted row leaves Settings/audit
+/// views with NULL caps that misrepresent what scoring values produced
+/// the result.
+#[tokio::test]
+async fn persist_edge_candidate_evaluation_snapshots_transit_caps() {
+    let h = common::HttpHarness::start().await;
+    let pool = &h.state.pool;
+
+    let campaign_id_str = common::create_evaluated_campaign(&h, "edge_candidate").await;
+
+    // PATCH the caps onto the campaign — fresh patch dismisses the prior
+    // evaluation, so re-evaluate to write a new parent row that picks
+    // them up.
+    let _: serde_json::Value = h
+        .patch_json(
+            &format!("/api/campaigns/{campaign_id_str}"),
+            &serde_json::json!({
+                "max_transit_rtt_ms": 250.0,
+                "max_transit_stddev_ms": 12.5,
+            }),
+        )
+        .await;
+    let _: serde_json::Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id_str}/evaluate"))
+        .await;
+
+    let campaign_id: uuid::Uuid = campaign_id_str.parse().expect("parse campaign id");
+    let (rtt_cap, stddev_cap): (Option<f64>, Option<f64>) = sqlx::query_as(
+        "SELECT max_transit_rtt_ms, max_transit_stddev_ms \
+           FROM campaign_evaluations \
+          WHERE campaign_id = $1 \
+          ORDER BY evaluated_at DESC \
+          LIMIT 1",
+    )
+    .bind(campaign_id)
+    .fetch_one(pool)
+    .await
+    .expect("query evaluation caps");
+
+    assert_eq!(
+        rtt_cap,
+        Some(250.0),
+        "max_transit_rtt_ms must round-trip onto the edge_candidate evaluation row"
+    );
+    assert_eq!(
+        stddev_cap,
+        Some(12.5),
+        "max_transit_stddev_ms must round-trip onto the edge_candidate evaluation row"
+    );
+}
+
+/// `reverse_direction_measurements_for_campaign` must dedupe to the
+/// most recent in-window measurement per `(source_agent_id,
+/// destination_ip)` pair so the symmetry-fallback substitution is
+/// reproducible. PostgreSQL's row order is implementation-defined
+/// without an explicit ORDER BY; pre-fix, multiple in-window samples
+/// for the same pair let `LegLookup`'s first-write-wins pick a
+/// non-deterministic representative.
+#[tokio::test]
+async fn reverse_direction_measurements_dedup_to_latest_per_pair() {
+    let pool = common::shared_migrated_pool().await;
+
+    // Two agents: A is the campaign source, B is the destination.
+    // Reverse direction is B→A (source=B, destination_ip=A.ip).
+    let a_ip: std::net::IpAddr = "198.51.100.61".parse().unwrap();
+    let b_ip: std::net::IpAddr = "198.51.100.62".parse().unwrap();
+    common::insert_agent_with_ip(&pool, "t56-rev-a", a_ip).await;
+    common::insert_agent_with_ip(&pool, "t56-rev-b", b_ip).await;
+
+    let mut input = make_input("t-reverse-dedup");
+    input.source_agent_ids = vec!["t56-rev-a".into()];
+    input.destination_ips = vec![b_ip];
+    let row = repo::create(&pool, input).await.unwrap();
+
+    // Two reverse-direction (B → A.ip) measurements within the 24h
+    // window — older one first, newer one second. The query must pick
+    // the newer one (latency_avg_ms = 99.0) regardless of insert
+    // order or PostgreSQL's underlying scan.
+    let dst = sqlx::types::ipnetwork::IpNetwork::from(a_ip);
+    sqlx::query(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_ratio, measured_at) \
+         VALUES ($1, $2, 'icmp', 10, 50.0, 0.0, now() - interval '6 hours')",
+    )
+    .bind("t56-rev-b")
+    .bind(dst)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO measurements \
+            (source_agent_id, destination_ip, protocol, probe_count, \
+             latency_avg_ms, loss_ratio, measured_at) \
+         VALUES ($1, $2, 'icmp', 10, 99.0, 0.0, now() - interval '1 minute')",
+    )
+    .bind("t56-rev-b")
+    .bind(dst)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let rev = repo::reverse_direction_measurements_for_campaign(&pool, row.id)
+        .await
+        .expect("reverse-direction fetch");
+    let matching: Vec<_> = rev
+        .iter()
+        .filter(|m| m.source_agent_id == "t56-rev-b" && m.destination_ip == a_ip)
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "DISTINCT ON must collapse multiple in-window samples to one row: got {matching:?}"
+    );
+    assert!(
+        (matching[0].latency_avg_ms.unwrap_or(0.0) - 99.0).abs() < 1e-3,
+        "DISTINCT ON + ORDER BY measured_at DESC must surface the latest sample: got {:?}",
+        matching[0].latency_avg_ms
+    );
+
+    repo::delete(&pool, row.id).await.unwrap();
+    sqlx::query("DELETE FROM measurements WHERE source_agent_id = 't56-rev-b'")
+        .execute(&pool)
+        .await
+        .unwrap();
 }

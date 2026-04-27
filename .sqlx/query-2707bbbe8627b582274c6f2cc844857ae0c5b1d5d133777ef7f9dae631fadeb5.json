@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  max_transit_rtt_ms, max_transit_stddev_ms,\n                  min_improvement_ms, min_improvement_ratio,\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms\n             FROM campaign_evaluations\n            WHERE campaign_id = $1\n            ORDER BY evaluated_at DESC\n            LIMIT 1",
+  "query": "SELECT id, campaign_id, evaluated_at, loss_threshold_ratio, stddev_weight,\n                  evaluation_mode AS \"evaluation_mode: EvaluationMode\",\n                  max_transit_rtt_ms, max_transit_stddev_ms,\n                  min_improvement_ms, min_improvement_ratio,\n                  useful_latency_ms, max_hops, vm_lookback_minutes,\n                  baseline_pair_count, candidates_total, candidates_good,\n                  avg_improvement_ms\n             FROM campaign_evaluations\n            WHERE campaign_id = $1\n            ORDER BY evaluated_at DESC\n            LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -37,7 +37,8 @@
             "kind": {
               "Enum": [
                 "diversity",
-                "optimization"
+                "optimization",
+                "edge_candidate"
               ]
             }
           }
@@ -65,21 +66,36 @@
       },
       {
         "ordinal": 10,
-        "name": "baseline_pair_count",
-        "type_info": "Int4"
+        "name": "useful_latency_ms",
+        "type_info": "Float4"
       },
       {
         "ordinal": 11,
-        "name": "candidates_total",
-        "type_info": "Int4"
+        "name": "max_hops",
+        "type_info": "Int2"
       },
       {
         "ordinal": 12,
-        "name": "candidates_good",
+        "name": "vm_lookback_minutes",
         "type_info": "Int4"
       },
       {
         "ordinal": 13,
+        "name": "baseline_pair_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 14,
+        "name": "candidates_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "candidates_good",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 16,
         "name": "avg_improvement_ms",
         "type_info": "Float4"
       }
@@ -100,11 +116,14 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
       false,
       false,
       false,
       true
     ]
   },
-  "hash": "c74fdb550326a248efe41cb4e77ab1827fd55795c3c6ad177381311a85cad1bb"
+  "hash": "2707bbbe8627b582274c6f2cc844857ae0c5b1d5d133777ef7f9dae631fadeb5"
 }

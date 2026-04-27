@@ -1,6 +1,41 @@
 @import "leaflet/dist/leaflet.css";
 @import "tailwindcss";
 
+:root {
+  /* Route mix (Okabe-Ito, CVD-safe) */
+  --route-direct: #009e73;
+  --route-1hop: #56b4e9;
+  --route-2hop: #e69f00;
+
+  /* Heatmap default tiers */
+  --hm-tier-1: #009e73; /* < 0.4·T excellent */
+  --hm-tier-2: #71b340; /* 0.4·T to T good */
+  --hm-tier-3: #f0e442; /* T to 2·T warning */
+  --hm-tier-4: #e69f00; /* 2·T to 4·T slow */
+  --hm-tier-5: #d55e00; /* > 4·T bad */
+  --hm-tier-x: #999999; /* unreachable */
+  --hm-tier-3-text: #1d1d1f; /* dark text on yellow tier */
+  --hm-tier-4-text: #1d1d1f; /* dark text on orange tier */
+}
+
+/* Route-mix stacked bar — three CVD-safe colour segments in a single row. */
+.route-mix-bar {
+  display: flex;
+  height: 8px;
+  width: 100%;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.route-mix-bar > [data-segment] {
+  height: 100%;
+  transition: width 200ms ease;
+}
+
+.route-mix-bar-empty {
+  background: var(--color-muted, #3a3a3a);
+}
+
 /* Leaflet ships a fixed-white popup chrome and a green/yellow/red cluster
    badge palette via its own stylesheets. Both look out of place inside our
    themed shell: white-on-dark in dark mode makes popup text unreadable, and

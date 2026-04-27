@@ -2421,6 +2421,77 @@ impl ResolverBackend for StubHostnameBackend {
     }
 }
 
+/// Create a campaign, seed minimal measurements, mark it completed, then
+/// drive `/start` + `/stop` + `/evaluate` so the campaign carries a live
+/// `campaign_evaluations` row. Returns the campaign UUID string.
+///
+/// `mode_str` is the `evaluation_mode` sent to `POST /api/campaigns`
+/// (e.g. `"diversity"`, `"optimization"`, `"edge_candidate"`).
+/// For `edge_candidate` the request automatically includes a
+/// `useful_latency_ms: 80.0` so the new B1 validation passes.
+///
+/// Agents `t56v-a` / `t56v-b` / `t56v-c` at `198.51.100.{71,72,73}` are
+/// inserted once per process (via `INSERT … ON CONFLICT DO NOTHING`), so
+/// multiple tests within the same binary can reuse them safely.
+///
+/// Reused by Tasks B2, E2, F3, H2, H3.
+pub async fn create_evaluated_campaign(h: &HttpHarness, mode_str: &str) -> String {
+    let a_ip: IpAddr = "198.51.100.71".parse().unwrap();
+    let b_ip: IpAddr = "198.51.100.72".parse().unwrap();
+    let c_ip: IpAddr = "198.51.100.73".parse().unwrap();
+    insert_agent_with_ip(&h.state.pool, "t56v-a", a_ip).await;
+    insert_agent_with_ip(&h.state.pool, "t56v-b", b_ip).await;
+    insert_agent_with_ip(&h.state.pool, "t56v-c", c_ip).await;
+
+    let mut create_body = serde_json::json!({
+        "title": format!("t56-evaluated-{mode_str}"),
+        "protocol": "icmp",
+        "source_agent_ids": ["t56v-a", "t56v-b", "t56v-c"],
+        "destination_ips": [
+            "198.51.100.72", "198.51.100.71", "198.51.100.73", "198.51.100.79",
+        ],
+        "evaluation_mode": mode_str,
+        "loss_threshold_ratio": 0.05,
+        "stddev_weight": 1.0,
+    });
+
+    // edge_candidate requires useful_latency_ms to be present and positive.
+    if mode_str == "edge_candidate" {
+        create_body["useful_latency_ms"] = serde_json::json!(80.0);
+    }
+
+    let campaign: serde_json::Value = h.post_json("/api/campaigns", &create_body).await;
+    let campaign_id = campaign["id"].as_str().expect("campaign id").to_string();
+
+    seed_measurements(
+        &h.state.pool,
+        &campaign_id,
+        &[
+            // Baselines a↔b, a↔c, b↔c.
+            ("t56v-a", "198.51.100.72", 300.0, 5.0, 0.0),
+            ("t56v-b", "198.51.100.71", 300.0, 5.0, 0.0),
+            ("t56v-a", "198.51.100.73", 300.0, 5.0, 0.0),
+            ("t56v-c", "198.51.100.71", 300.0, 5.0, 0.0),
+            ("t56v-b", "198.51.100.73", 300.0, 5.0, 0.0),
+            ("t56v-c", "198.51.100.72", 300.0, 5.0, 0.0),
+            // Transit through X = 198.51.100.79.
+            ("t56v-a", "198.51.100.79", 100.0, 5.0, 0.0),
+            ("t56v-b", "198.51.100.79", 101.0, 5.0, 0.0),
+            ("t56v-c", "198.51.100.79", 102.0, 5.0, 0.0),
+        ],
+    )
+    .await;
+
+    mark_completed(&h.state.pool, &campaign_id).await;
+
+    // Drive /evaluate to produce the evaluation row.
+    let _: serde_json::Value = h
+        .post_json_empty(&format!("/api/campaigns/{campaign_id}/evaluate"))
+        .await;
+
+    campaign_id
+}
+
 /// `ResolverBackend` that panics on first call. Used by the resolver
 /// panic-containment integration test.
 pub struct PanicHostnameBackend {
