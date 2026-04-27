@@ -622,7 +622,8 @@ export default function CampaignDetail() {
       {/* Radix `TabsContent` keeps every panel in the DOM by default —     */}
       {/* we gate the children on `tab` so only the active sub-component    */}
       {/* mounts. That preserves "lazy tabs" (expensive per-tab queries     */}
-      {/* only fire once the operator opens the tab).                       */}
+      {/* only fire once the operator opens the tab). State that needs to  */}
+      {/* survive tab switches is lifted into URL search params.           */}
       {/* ---------------------------------------------------------------- */}
       <CatalogueDrawerOverlay>
         <Tabs

@@ -22,6 +22,7 @@ import { CandidateRef } from "@/components/campaigns/CandidateRef";
 import { RouteMixBar } from "@/components/campaigns/RouteMixBar";
 import {
   aggregateEdgeCandidates,
+  type CompareAggregate,
   mergeAggregateIntoCandidate,
 } from "@/components/campaigns/results/CompareTab.aggregations";
 import { DrilldownDialog } from "@/components/campaigns/results/DrilldownDialog";
@@ -46,6 +47,9 @@ import type { CampaignDetailSearch } from "@/router/index";
 type Candidate = Evaluation["results"]["candidates"][number];
 type PickRole = "both" | "source" | "destination";
 
+type SortKey = "wins" | "coverage" | "mean" | "delta";
+type SortDir = "asc" | "desc";
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -55,8 +59,11 @@ const STORAGE_FILTER_CAVEAT =
 
 const EDGE_PAIR_QUERY: EdgePairsQuery = { limit: 500 };
 
-const CWP_TOOLTIP =
-  "Coverage-weighted ping is computed against the full agent set; not recomputed in Compare. Open the Candidates tab to inspect per-candidate CWP at full-roster scope.";
+const WINS_TOOLTIP =
+  "Number of picked destination agents (B) where this candidate has the lowest qualifying RTT. Sole qualifiers count as wins; non-qualifying candidates are excluded from the contest for that B.";
+
+const DELTA_TOOLTIP =
+  "Average gap (in ms) between this candidate's RTT and the runner-up's across the B's it wins. Negative means this candidate leads. Uncontested wins (only one qualifier) don't contribute.";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -237,27 +244,78 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
   // Re-aggregated candidates (edge_candidate only)
   // ------------------------------------------------------------------
 
-  const recomputedCandidates = useMemo<Candidate[]>(() => {
+  // Lookup table from `destination_ip` → baseline candidate. We keep this
+  // separate from the aggregate so the comparison-specific columns (wins,
+  // delta) stay on `CompareAggregate` without polluting the broader
+  // `Candidate` shape.
+  const candidatesByIp = useMemo<Map<string, Candidate>>(() => {
+    const map = new Map<string, Candidate>();
+    for (const c of evaluation.results.candidates) {
+      map.set(c.destination_ip, c);
+    }
+    return map;
+  }, [evaluation.results.candidates]);
+
+  const aggregates = useMemo<CompareAggregate[]>(() => {
     if (!isEdgeMode) return [];
-    const aggregates = aggregateEdgeCandidates(allEdgeRows, pickedAgents);
-    return aggregates.map((agg) => {
-      const baseline =
-        evaluation.results.candidates.find((c) => c.destination_ip === agg.destination_ip) ??
-        ({
-          destination_ip: agg.destination_ip,
-          is_mesh_member: false,
-          pairs_improved: 0,
-          pairs_total_considered: 0,
-        } as Candidate);
-      return mergeAggregateIntoCandidate(baseline, agg);
-    });
-  }, [isEdgeMode, allEdgeRows, pickedAgents, evaluation.results.candidates]);
+    return aggregateEdgeCandidates(allEdgeRows, pickedAgents);
+  }, [isEdgeMode, allEdgeRows, pickedAgents]);
 
   // Filter by candidate sub-picker when active.
-  const displayedCandidates = useMemo<Candidate[]>(() => {
-    if (pickedCandidateIps.size === 0) return recomputedCandidates;
-    return recomputedCandidates.filter((c) => pickedCandidateIps.has(c.destination_ip));
-  }, [recomputedCandidates, pickedCandidateIps]);
+  const filteredAggregates = useMemo<CompareAggregate[]>(() => {
+    if (pickedCandidateIps.size === 0) return aggregates;
+    return aggregates.filter((a) => pickedCandidateIps.has(a.destination_ip));
+  }, [aggregates, pickedCandidateIps]);
+
+  // ------------------------------------------------------------------
+  // Sort state
+  // ------------------------------------------------------------------
+
+  const [sortKey, setSortKey] = useState<SortKey>("wins");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const handleSort = useCallback((key: SortKey): void => {
+    setSortKey((prevKey) => {
+      if (prevKey === key) {
+        // Toggle direction when clicking the active column.
+        setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+        return prevKey;
+      }
+      // Switching columns picks a sensible default direction: "wins" /
+      // "coverage" / "delta" (signed lead) sort high-to-low; "mean" sorts
+      // low-to-high (lower latency first).
+      setSortDir(key === "mean" ? "asc" : "desc");
+      return key;
+    });
+  }, []);
+
+  const sortedAggregates = useMemo<CompareAggregate[]>(() => {
+    const dirSign = sortDir === "asc" ? 1 : -1;
+    // Always push nullish metric values to the end regardless of direction
+    // so empty / unreachable candidates don't crowd the comparison view.
+    const cmpNullable = (a: number | null, b: number | null): number => {
+      if (a == null && b == null) return 0;
+      if (a == null) return 1;
+      if (b == null) return -1;
+      return dirSign * (a - b);
+    };
+    const arr = [...filteredAggregates];
+    arr.sort((a, b) => {
+      switch (sortKey) {
+        case "wins":
+          return dirSign * (a.wins - b.wins);
+        case "coverage":
+          return dirSign * (a.coverage_count - b.coverage_count);
+        case "mean":
+          return cmpNullable(a.mean_ms_under_t, b.mean_ms_under_t);
+        case "delta":
+          return cmpNullable(a.avg_delta_to_runner_up_ms, b.avg_delta_to_runner_up_ms);
+        default:
+          return 0;
+      }
+    });
+    return arr;
+  }, [filteredAggregates, sortKey, sortDir]);
 
   // ------------------------------------------------------------------
   // Drilldown state
@@ -265,9 +323,25 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
 
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
 
-  const handleRowClick = useCallback((candidate: Candidate): void => {
-    setSelectedCandidate(candidate);
-  }, []);
+  const handleRowClick = useCallback(
+    (agg: CompareAggregate): void => {
+      const baseline = candidatesByIp.get(agg.destination_ip);
+      if (!baseline) {
+        // Synthesize a minimal candidate for IPs that exist in edge-pair
+        // rows but not in the candidates roster (defensive — shouldn't
+        // happen in practice).
+        setSelectedCandidate({
+          destination_ip: agg.destination_ip,
+          is_mesh_member: false,
+          pairs_improved: 0,
+          pairs_total_considered: 0,
+        } as Candidate);
+        return;
+      }
+      setSelectedCandidate(mergeAggregateIntoCandidate(baseline, agg));
+    },
+    [candidatesByIp],
+  );
 
   const handleCloseDialog = useCallback((): void => {
     setSelectedCandidate(null);
@@ -320,9 +394,13 @@ function CompareView({ campaign, evaluation }: CompareViewProps) {
       {isEdgeMode ? (
         <EdgeCompareContent
           query={edgePairQuery}
-          candidates={displayedCandidates}
-          pickedAgents={pickedAgents}
-          onSelectCandidate={handleRowClick}
+          aggregates={sortedAggregates}
+          candidatesByIp={candidatesByIp}
+          pickedAgentCount={pickedAgents.size}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onSelectAggregate={handleRowClick}
         />
       ) : (
         <CompareTripleStub />
@@ -492,16 +570,24 @@ function CandidateSubPicker({ candidates, pickedIps, onToggle }: CandidateSubPic
 
 interface EdgeCompareContentProps {
   query: ReturnType<typeof useEdgePairDetails>;
-  candidates: Candidate[];
-  pickedAgents: Set<string>;
-  onSelectCandidate: (candidate: Candidate) => void;
+  aggregates: CompareAggregate[];
+  candidatesByIp: Map<string, Candidate>;
+  pickedAgentCount: number;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (key: SortKey) => void;
+  onSelectAggregate: (agg: CompareAggregate) => void;
 }
 
 function EdgeCompareContent({
   query,
-  candidates,
-  pickedAgents,
-  onSelectCandidate,
+  aggregates,
+  candidatesByIp,
+  pickedAgentCount,
+  sortKey,
+  sortDir,
+  onSort,
+  onSelectAggregate,
 }: EdgeCompareContentProps) {
   if (query.isLoading) {
     return (
@@ -521,11 +607,11 @@ function EdgeCompareContent({
     );
   }
 
-  if (pickedAgents.size === 0) {
+  if (pickedAgentCount === 0) {
     return null;
   }
 
-  if (candidates.length === 0) {
+  if (aggregates.length === 0) {
     return (
       <Card className="p-6 text-sm text-muted-foreground" role="status">
         No candidates matched the selected agents.
@@ -546,19 +632,54 @@ function EdgeCompareContent({
             <TableRow>
               <TableHead className="w-10">#</TableHead>
               <TableHead>Candidate</TableHead>
-              <TableHead>Coverage</TableHead>
-              <TableHead>Mean ping under T</TableHead>
+              <SortableHeader
+                label="Wins"
+                tooltip={WINS_TOOLTIP}
+                active={sortKey === "wins"}
+                dir={sortDir}
+                onClick={() => onSort("wins")}
+                testid="compare-sort-wins"
+                ariaSort="Wins per candidate"
+              />
+              <SortableHeader
+                label="Δ vs runner-up"
+                tooltip={DELTA_TOOLTIP}
+                active={sortKey === "delta"}
+                dir={sortDir}
+                onClick={() => onSort("delta")}
+                testid="compare-sort-delta"
+                ariaSort="Average lead over runner-up"
+              />
+              <SortableHeader
+                label="Coverage"
+                active={sortKey === "coverage"}
+                dir={sortDir}
+                onClick={() => onSort("coverage")}
+                testid="compare-sort-coverage"
+                ariaSort="Coverage count"
+              />
+              <SortableHeader
+                label="Mean ping under T"
+                active={sortKey === "mean"}
+                dir={sortDir}
+                onClick={() => onSort("mean")}
+                testid="compare-sort-mean"
+                ariaSort="Mean RTT for qualifying destinations"
+              />
               <TableHead>Route mix</TableHead>
-              <TableHead>Coverage-wtd ping</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {candidates.map((candidate, index) => (
+            {aggregates.map((agg, index) => (
               <CompareCandidateRow
-                key={candidate.destination_ip}
-                candidate={candidate}
+                key={agg.destination_ip}
+                aggregate={agg}
+                candidate={candidatesByIp.get(agg.destination_ip)}
                 index={index}
-                onClick={() => onSelectCandidate(candidate)}
+                isTopRanked={
+                  index === 0 && sortKey === "wins" && sortDir === "desc" && agg.wins > 0
+                }
+                onClick={() => onSelectAggregate(agg)}
               />
             ))}
           </TableBody>
@@ -569,12 +690,69 @@ function EdgeCompareContent({
 }
 
 // ---------------------------------------------------------------------------
+// SortableHeader
+// ---------------------------------------------------------------------------
+
+interface SortableHeaderProps {
+  label: string;
+  tooltip?: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+  testid: string;
+  ariaSort: string;
+}
+
+function SortableHeader({
+  label,
+  tooltip,
+  active,
+  dir,
+  onClick,
+  testid,
+  ariaSort,
+}: SortableHeaderProps) {
+  const arrow = active ? (dir === "desc" ? "↓" : "↑") : "";
+  const button = (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid={testid}
+      aria-label={`Sort by ${ariaSort}, currently ${active ? dir : "inactive"}`}
+      className={
+        active
+          ? "inline-flex items-center gap-1 text-foreground font-semibold"
+          : "inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+      }
+    >
+      <span>{label}</span>
+      <span className="text-xs">{arrow || "↕"}</span>
+    </button>
+  );
+  if (!tooltip) {
+    return <TableHead>{button}</TableHead>;
+  }
+  return (
+    <TableHead>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent className="max-w-xs text-xs">{tooltip}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </TableHead>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // CompareCandidateRow
 // ---------------------------------------------------------------------------
 
 interface CompareCandidateRowProps {
-  candidate: Candidate;
+  aggregate: CompareAggregate;
+  candidate: Candidate | undefined;
   index: number;
+  isTopRanked: boolean;
   onClick: () => void;
 }
 
@@ -583,64 +761,96 @@ function formatMs(value: number | null | undefined): string {
   return `${value.toFixed(1)} ms`;
 }
 
-function CompareCandidateRow({ candidate, index, onClick }: CompareCandidateRowProps) {
-  const refData = {
-    ip: candidate.destination_ip,
-    display_name: candidate.display_name,
-    city: candidate.city,
-    country_code: candidate.country_code,
-    asn: candidate.asn,
-    network_operator: candidate.network_operator,
-    hostname: candidate.hostname,
-    is_mesh_member: candidate.is_mesh_member,
-    agent_id: (candidate as Candidate & { agent_id?: string | null }).agent_id,
-  };
+function formatDelta(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  // Negative = lead. Render with explicit sign so the direction is obvious.
+  const sign = value < 0 ? "−" : "+";
+  return `${sign}${Math.abs(value).toFixed(1)} ms`;
+}
 
-  const direct = candidate.direct_share ?? 0;
-  const oneHop = candidate.onehop_share ?? 0;
-  const twoHop = candidate.twohop_share ?? 0;
+function CompareCandidateRow({
+  aggregate,
+  candidate,
+  index,
+  isTopRanked,
+  onClick,
+}: CompareCandidateRowProps) {
+  const refData = candidate
+    ? {
+        ip: candidate.destination_ip,
+        display_name: candidate.display_name,
+        city: candidate.city,
+        country_code: candidate.country_code,
+        asn: candidate.asn,
+        network_operator: candidate.network_operator,
+        hostname: candidate.hostname,
+        is_mesh_member: candidate.is_mesh_member,
+        agent_id: (candidate as Candidate & { agent_id?: string | null }).agent_id,
+      }
+    : { ip: aggregate.destination_ip, is_mesh_member: false };
+
+  const direct = aggregate.direct_share ?? 0;
+  const oneHop = aggregate.onehop_share ?? 0;
+  const twoHop = aggregate.twohop_share ?? 0;
+
+  const delta = aggregate.avg_delta_to_runner_up_ms;
+  const deltaClass =
+    delta == null
+      ? "text-muted-foreground"
+      : delta < 0
+        ? "text-emerald-600 dark:text-emerald-400"
+        : "text-amber-600 dark:text-amber-400";
 
   return (
     <TableRow
-      data-testid={`compare-candidate-row-${candidate.destination_ip}`}
+      data-testid={`compare-candidate-row-${aggregate.destination_ip}`}
       className="cursor-pointer"
       onClick={onClick}
     >
-      <TableCell className="text-muted-foreground">{index + 1}</TableCell>
+      <TableCell className="text-muted-foreground">
+        <div className="flex items-center gap-1">
+          <span>{index + 1}</span>
+          {isTopRanked ? (
+            <Badge
+              variant="secondary"
+              className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+              data-testid={`compare-top-${aggregate.destination_ip}`}
+            >
+              Top
+            </Badge>
+          ) : null}
+        </div>
+      </TableCell>
       <TableCell>
         <CandidateRef mode="compact" data={refData} />
       </TableCell>
-      <TableCell data-testid={`compare-coverage-${candidate.destination_ip}`}>
-        {candidate.coverage_count != null ? (
-          <Badge
-            variant="secondary"
-            className="tabular-nums"
-            aria-label={`Coverage: ${candidate.coverage_count}`}
-          >
-            {candidate.coverage_count}
-          </Badge>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        )}
+      <TableCell
+        data-testid={`compare-wins-${aggregate.destination_ip}`}
+        className="text-sm tabular-nums"
+      >
+        <span className="font-semibold">{aggregate.wins}</span>
+        <span className="text-muted-foreground"> / {aggregate.total_picked}</span>
       </TableCell>
-      <TableCell className="text-sm tabular-nums">{formatMs(candidate.mean_ms_under_t)}</TableCell>
+      <TableCell
+        data-testid={`compare-delta-${aggregate.destination_ip}`}
+        className={`text-sm tabular-nums ${deltaClass}`}
+      >
+        {formatDelta(delta)}
+      </TableCell>
+      <TableCell data-testid={`compare-coverage-${aggregate.destination_ip}`}>
+        <Badge
+          variant="secondary"
+          className="tabular-nums"
+          aria-label={`Coverage: ${aggregate.coverage_count}`}
+        >
+          {aggregate.coverage_count}
+        </Badge>
+      </TableCell>
+      <TableCell className="text-sm tabular-nums">{formatMs(aggregate.mean_ms_under_t)}</TableCell>
       <TableCell>
         <div className="w-24">
           <RouteMixBar direct={direct} oneHop={oneHop} twoHop={twoHop} />
         </div>
-      </TableCell>
-      <TableCell
-        data-testid={`compare-cwp-${candidate.destination_ip}`}
-        className="text-sm tabular-nums text-muted-foreground"
-      >
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="cursor-help">—</span>
-            </TooltipTrigger>
-            <TooltipContent className="max-w-xs text-xs">{CWP_TOOLTIP}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
       </TableCell>
     </TableRow>
   );

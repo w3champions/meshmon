@@ -348,10 +348,10 @@ export function HeatmapTab({ campaign, evaluation }: HeatmapTabProps) {
     }
   }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: _boundaryRevision is a forced re-run trigger — readBoundaries() reads localStorage (a side-effect outside the deps), and the editor's onSaved() bumps this counter so the heatmap recolors immediately on save instead of waiting for an unrelated re-render.
   const boundaries = useMemo(
     () => readBoundaries(evaluation.evaluation_mode, evaluation.useful_latency_ms),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [evaluation.evaluation_mode, evaluation.useful_latency_ms],
+    [evaluation.evaluation_mode, evaluation.useful_latency_ms, _boundaryRevision],
   );
 
   const {

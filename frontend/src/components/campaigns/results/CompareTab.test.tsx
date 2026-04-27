@@ -414,15 +414,75 @@ describe("P5: re-aggregation for edge_candidate", () => {
     });
   });
 
-  test("coverage_weighted_ping_ms column shows dash (deferred)", async () => {
-    const rows = [makeEdgePairRow("10.0.0.1", "agent-a", 50)];
+  test("wins column shows winner count vs total picked", async () => {
+    const rows = [
+      makeEdgePairRow("10.0.0.1", "agent-a", 30, true),
+      makeEdgePairRow("10.0.0.2", "agent-a", 70, true),
+    ];
     renderCompareTab(makeEvaluation(), { source_agent_ids: ["agent-a"] }, rows);
     fireEvent.click(screen.getByTestId("agent-picker-agent-a"));
 
     await waitFor(() => {
-      const cwpCell = screen.getByTestId("compare-cwp-10.0.0.1");
-      expect(cwpCell).toHaveTextContent("—");
+      const winsCell = screen.getByTestId("compare-wins-10.0.0.1");
+      expect(winsCell).toHaveTextContent("1");
+      expect(winsCell).toHaveTextContent("/ 1");
     });
+    expect(screen.getByTestId("compare-wins-10.0.0.2")).toHaveTextContent("0");
+  });
+
+  test("delta column renders signed lead vs runner-up", async () => {
+    const rows = [
+      makeEdgePairRow("10.0.0.1", "agent-a", 30, true),
+      makeEdgePairRow("10.0.0.2", "agent-a", 50, true),
+    ];
+    renderCompareTab(makeEvaluation(), { source_agent_ids: ["agent-a"] }, rows);
+    fireEvent.click(screen.getByTestId("agent-picker-agent-a"));
+
+    await waitFor(() => {
+      const deltaCell = screen.getByTestId("compare-delta-10.0.0.1");
+      // Negative because the winner is faster than the runner-up.
+      expect(deltaCell).toHaveTextContent("−20.0 ms");
+    });
+    // The runner-up has no wins, so its delta cell is empty.
+    expect(screen.getByTestId("compare-delta-10.0.0.2")).toHaveTextContent("—");
+  });
+
+  test("default sort is wins desc; top winner gets the Top badge", async () => {
+    const rows = [
+      // 10.0.0.2 wins agent-a; 10.0.0.1 wins agent-b → 10.0.0.1 is the only
+      // 1-win when only agent-b is picked.
+      makeEdgePairRow("10.0.0.1", "agent-b", 30, true),
+      makeEdgePairRow("10.0.0.2", "agent-b", 60, true),
+    ];
+    renderCompareTab(makeEvaluation(), { source_agent_ids: ["agent-b"] }, rows);
+    fireEvent.click(screen.getByTestId("agent-picker-agent-b"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-top-10.0.0.1")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("compare-top-10.0.0.2")).not.toBeInTheDocument();
+  });
+
+  test("clicking a column header changes the sort order", async () => {
+    const rows = [
+      // Two candidates; mean RTT differs so a mean-asc sort surfaces the
+      // faster one first.
+      makeEdgePairRow("10.0.0.1", "agent-a", 80, true),
+      makeEdgePairRow("10.0.0.2", "agent-a", 30, true),
+    ];
+    renderCompareTab(makeEvaluation(), { source_agent_ids: ["agent-a"] }, rows);
+    fireEvent.click(screen.getByTestId("agent-picker-agent-a"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-candidates-table")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("compare-sort-mean"));
+
+    // After sorting by mean asc, the lower-RTT candidate (10.0.0.2) should
+    // be the first row.
+    const rowsRendered = screen.getAllByTestId(/^compare-candidate-row-/);
+    expect(rowsRendered[0]).toHaveAttribute("data-testid", "compare-candidate-row-10.0.0.2");
   });
 
   test("clicking a row opens DrilldownDialog", async () => {

@@ -209,6 +209,8 @@ describe("mergeAggregateIntoCandidate", () => {
       direct_share: 0.6,
       onehop_share: 0.4,
       twohop_share: 0,
+      wins: 0,
+      avg_delta_to_runner_up_ms: null,
     };
     const merged = mergeAggregateIntoCandidate(baseline, agg);
     expect(merged.coverage_count).toBe(3);
@@ -226,6 +228,8 @@ describe("mergeAggregateIntoCandidate", () => {
       direct_share: 1,
       onehop_share: 0,
       twohop_share: 0,
+      wins: 0,
+      avg_delta_to_runner_up_ms: null,
     };
     const merged = mergeAggregateIntoCandidate(baseline, agg);
     expect(merged.coverage_weighted_ping_ms).toBeNull();
@@ -240,10 +244,92 @@ describe("mergeAggregateIntoCandidate", () => {
       direct_share: 1,
       onehop_share: 0,
       twohop_share: 0,
+      wins: 0,
+      avg_delta_to_runner_up_ms: null,
     };
     const merged = mergeAggregateIntoCandidate(baseline, agg);
     expect(merged.city).toBe("Berlin");
     expect(merged.asn).toBe(12345);
     expect(merged.is_mesh_member).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wins + delta semantics
+// ---------------------------------------------------------------------------
+
+describe("aggregateEdgeCandidates wins + delta", () => {
+  test("sole qualifying candidate per agent gets the win, delta is null", () => {
+    const rows = [
+      makeRow("10.0.0.1", "agent-a", 30, { qualifies_under_t: true }),
+      makeRow("10.0.0.2", "agent-a", 250, { qualifies_under_t: false }),
+    ];
+    const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
+    const cand1 = result.find((r) => r.destination_ip === "10.0.0.1");
+    const cand2 = result.find((r) => r.destination_ip === "10.0.0.2");
+    if (!cand1 || !cand2) throw new Error("expected both candidates");
+    expect(cand1.wins).toBe(1);
+    expect(cand1.avg_delta_to_runner_up_ms).toBeNull();
+    expect(cand2.wins).toBe(0);
+  });
+
+  test("contested win records negative delta to runner-up", () => {
+    const rows = [
+      makeRow("10.0.0.1", "agent-a", 30, { qualifies_under_t: true }),
+      makeRow("10.0.0.2", "agent-a", 50, { qualifies_under_t: true }),
+    ];
+    const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
+    const winner = result.find((r) => r.destination_ip === "10.0.0.1");
+    const runner = result.find((r) => r.destination_ip === "10.0.0.2");
+    if (!winner || !runner) throw new Error("expected both candidates");
+    expect(winner.wins).toBe(1);
+    expect(winner.avg_delta_to_runner_up_ms).toBeCloseTo(-20);
+    expect(runner.wins).toBe(0);
+    expect(runner.avg_delta_to_runner_up_ms).toBeNull();
+  });
+
+  test("delta averages across multiple contested wins", () => {
+    const rows = [
+      // agent-a: cand1 wins 30 vs cand2 50 → delta -20
+      makeRow("10.0.0.1", "agent-a", 30, { qualifies_under_t: true }),
+      makeRow("10.0.0.2", "agent-a", 50, { qualifies_under_t: true }),
+      // agent-b: cand1 wins 40 vs cand2 100 → delta -60
+      makeRow("10.0.0.1", "agent-b", 40, { qualifies_under_t: true }),
+      makeRow("10.0.0.2", "agent-b", 100, { qualifies_under_t: false }),
+      // agent-c: cand1 wins 50 vs cand2 80 → delta -30
+      makeRow("10.0.0.1", "agent-c", 50, { qualifies_under_t: true }),
+      makeRow("10.0.0.2", "agent-c", 80, { qualifies_under_t: true }),
+    ];
+    const result = aggregateEdgeCandidates(rows, new Set(["agent-a", "agent-b", "agent-c"]));
+    const winner = result.find((r) => r.destination_ip === "10.0.0.1");
+    if (!winner) throw new Error("expected winner candidate");
+    expect(winner.wins).toBe(3);
+    // Two contested wins (agent-a: -20, agent-c: -30); agent-b is uncontested
+    // because cand2 didn't qualify for it.
+    expect(winner.avg_delta_to_runner_up_ms).toBeCloseTo(-25);
+  });
+
+  test("non-qualifying candidates never win even when reachable", () => {
+    const rows = [
+      makeRow("10.0.0.1", "agent-a", 250, { qualifies_under_t: false }),
+      makeRow("10.0.0.2", "agent-a", 300, { qualifies_under_t: false }),
+    ];
+    const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
+    for (const r of result) {
+      expect(r.wins).toBe(0);
+    }
+  });
+
+  test("unreachable rows are excluded from the contest", () => {
+    const rows = [
+      makeRow("10.0.0.1", "agent-a", 30, { is_unreachable: false, qualifies_under_t: true }),
+      makeRow("10.0.0.2", "agent-a", 999, { is_unreachable: true, qualifies_under_t: false }),
+    ];
+    const result = aggregateEdgeCandidates(rows, new Set(["agent-a"]));
+    const reach = result.find((r) => r.destination_ip === "10.0.0.1");
+    if (!reach) throw new Error("expected reachable candidate");
+    expect(reach.wins).toBe(1);
+    // Sole qualifier — uncontested win.
+    expect(reach.avg_delta_to_runner_up_ms).toBeNull();
   });
 });

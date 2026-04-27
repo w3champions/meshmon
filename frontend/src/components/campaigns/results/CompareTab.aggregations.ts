@@ -25,6 +25,20 @@ export interface CompareAggregate {
   direct_share: number | null;
   onehop_share: number | null;
   twohop_share: number | null;
+  /**
+   * Number of picked destination agents (B) where this candidate has the
+   * lowest qualifying `best_route_ms` among all qualifying candidates for
+   * that B. A B with only one qualifying candidate counts as a win for that
+   * sole qualifier (the operator still gets coverage from it).
+   */
+  wins: number;
+  /**
+   * Average gap between this candidate's RTT and the runner-up's RTT across
+   * the B's it wins. Negative means this candidate leads (lower RTT).
+   * `null` when the candidate has zero wins, or every win was uncontested
+   * (only one qualifier for that B). Reported in milliseconds.
+   */
+  avg_delta_to_runner_up_ms: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +58,35 @@ export function aggregateEdgeCandidates(
 ): CompareAggregate[] {
   if (pickedAgentIds.size === 0) return [];
 
-  // Group by candidate_ip over the picked-agent rows.
+  // First pass: per-B winner determination. For each picked B, find the
+  // candidate with the lowest qualifying `best_route_ms` and record the gap
+  // to the runner-up. Non-qualifying / unreachable rows are excluded — they
+  // aren't competing on the operator's terms.
+  const winnerByAgent = new Map<string, { winnerIp: string; deltaMs: number | null }>();
+  const qualifiersByAgent = new Map<string, { ip: string; ms: number }[]>();
+  for (const row of rows) {
+    if (!pickedAgentIds.has(row.destination_agent_id)) continue;
+    if (row.is_unreachable || !row.qualifies_under_t) continue;
+    if (row.best_route_ms == null) continue;
+    let bucket = qualifiersByAgent.get(row.destination_agent_id);
+    if (!bucket) {
+      bucket = [];
+      qualifiersByAgent.set(row.destination_agent_id, bucket);
+    }
+    bucket.push({ ip: row.candidate_ip, ms: row.best_route_ms });
+  }
+  for (const [agentId, qualifiers] of qualifiersByAgent) {
+    qualifiers.sort((a, b) => a.ms - b.ms);
+    const winner = qualifiers[0];
+    if (!winner) continue;
+    const runnerUp = qualifiers[1];
+    winnerByAgent.set(agentId, {
+      winnerIp: winner.ip,
+      deltaMs: runnerUp ? winner.ms - runnerUp.ms : null,
+    });
+  }
+
+  // Second pass: group by candidate_ip over the picked-agent rows.
   const byCandidate = new Map<
     string,
     {
@@ -53,6 +95,8 @@ export function aggregateEdgeCandidates(
       oneHop: number;
       twoHop: number;
       totalPicked: number;
+      wins: number;
+      contestedDeltas: number[];
     }
   >();
 
@@ -61,11 +105,30 @@ export function aggregateEdgeCandidates(
 
     let bucket = byCandidate.get(row.candidate_ip);
     if (!bucket) {
-      bucket = { qualifyingMs: [], direct: 0, oneHop: 0, twoHop: 0, totalPicked: 0 };
+      bucket = {
+        qualifyingMs: [],
+        direct: 0,
+        oneHop: 0,
+        twoHop: 0,
+        totalPicked: 0,
+        wins: 0,
+        contestedDeltas: [],
+      };
       byCandidate.set(row.candidate_ip, bucket);
     }
 
     bucket.totalPicked++;
+
+    // Tally win attribution from the first pass. Each (B, candidate) row
+    // contributes at most one win; a contested win also contributes its
+    // delta to the runner-up so we can report a mean lead per candidate.
+    const winnerInfo = winnerByAgent.get(row.destination_agent_id);
+    if (winnerInfo && winnerInfo.winnerIp === row.candidate_ip) {
+      bucket.wins++;
+      if (winnerInfo.deltaMs != null) {
+        bucket.contestedDeltas.push(winnerInfo.deltaMs);
+      }
+    }
 
     // Coverage and route-mix counters BOTH gate on `qualifies_under_t`
     // (and reachability) so the Compare tab matches the backend's
@@ -110,6 +173,11 @@ export function aggregateEdgeCandidates(
     const onehop_share = qualifyingTotal > 0 ? bucket.oneHop / qualifyingTotal : null;
     const twohop_share = qualifyingTotal > 0 ? bucket.twoHop / qualifyingTotal : null;
 
+    const avgDelta =
+      bucket.contestedDeltas.length > 0
+        ? bucket.contestedDeltas.reduce((a, b) => a + b, 0) / bucket.contestedDeltas.length
+        : null;
+
     aggregates.push({
       destination_ip: ip,
       coverage_count: coverageCount,
@@ -118,6 +186,8 @@ export function aggregateEdgeCandidates(
       direct_share,
       onehop_share,
       twohop_share,
+      wins: bucket.wins,
+      avg_delta_to_runner_up_ms: avgDelta,
     });
   }
 

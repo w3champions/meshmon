@@ -256,7 +256,9 @@ export function HeatmapColorEditor({
           <div>
             <h3 className="text-sm font-semibold mb-1">Tier boundaries (ms)</h3>
             <p className="text-xs text-muted-foreground">
-              Drag handles or enter values. Default T = {Math.round(usefulLatencyMs ?? 80)} ms.
+              Drag handles or type values. Defaults are derived from the campaign&apos;s
+              useful-latency target ({Math.round(usefulLatencyMs ?? 80)} ms); changes here only
+              affect coloring.
             </p>
           </div>
 
