@@ -57,7 +57,7 @@ pub(crate) mod routes;
 pub use edge_candidate::{EdgeCandidateOutputs, EdgeCandidateRow, EdgePairRow};
 
 use crate::campaign::dto::{EvaluationCandidateDto, EvaluationPairDetailDto, EvaluationResultsDto};
-use crate::campaign::eval::legs::{LegLookup, LegLookupResult};
+use crate::campaign::eval::legs::{LegLookup, LegLookupResult, LegMeasurement};
 use crate::campaign::model::{DirectSource, Endpoint, EvaluationMode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
@@ -518,6 +518,299 @@ fn candidate_order(a: &EvaluationCandidateDto, b: &EvaluationCandidateDto) -> st
         })
 }
 
+/// Resolve a single leg via [`LegLookup::lookup`], adapting a `Found`
+/// result into the standalone [`LegMeasurement`] shape route composers
+/// consume. Returns `None` on `Broken` / `Missing` — the caller drops
+/// any route containing the unresolvable leg, matching
+/// `routes::look_up_leg` exactly.
+fn lookup_leg(lookup: &LegLookup<'_>, from: &Endpoint, to: &Endpoint) -> Option<LegMeasurement> {
+    match lookup.lookup(from, to) {
+        LegLookupResult::Found {
+            rtt_ms,
+            stddev_ms,
+            loss_ratio,
+            source,
+            was_substituted,
+            mtr_measurement_id,
+        } => Some(LegMeasurement {
+            from: from.clone(),
+            to: to.clone(),
+            rtt_ms,
+            stddev_ms,
+            loss_ratio,
+            source,
+            was_substituted,
+            mtr_measurement_id,
+        }),
+        _ => None,
+    }
+}
+
+/// Per-X leg cache. Built once per candidate IP X before the baseline
+/// loop runs; reused for every (A, B) triple.
+///
+/// All four maps store legs resolved via [`LegLookup::lookup`] — entries
+/// only exist when the lookup returns `Found`.
+struct XLegCache {
+    /// A→X leg, keyed by the source mesh agent id. Used for both 1-hop
+    /// (A→X→B) and 2-hop "X first" (A→X→Y→B) compositions.
+    ax_by_a: HashMap<String, LegMeasurement>,
+    /// X→B leg, keyed by the destination IP. Used for 1-hop (A→X→B)
+    /// and 2-hop "X second" (A→Y→X→B).
+    xb_by_b: HashMap<IpAddr, LegMeasurement>,
+    /// X→Y middle leg, keyed by Y's agent id. Used for 2-hop "X first"
+    /// compositions.
+    xy_by_y: HashMap<String, LegMeasurement>,
+    /// Y→X middle leg, keyed by Y's agent id. Used for 2-hop "X second"
+    /// compositions.
+    yx_by_y: HashMap<String, LegMeasurement>,
+}
+
+/// Build the per-X leg cache used by [`best_x_containing_route`].
+///
+/// X is always `Endpoint::CandidateIp { ip: x_ip }`. The middle-leg
+/// maps (`xy_by_y`, `yx_by_y`) are skipped when `max_hops < 2` — they
+/// have no consumer in that regime.
+fn build_x_leg_cache(
+    lookup: &LegLookup<'_>,
+    agents: &[AgentRow],
+    x_ip: IpAddr,
+    max_hops: u8,
+) -> XLegCache {
+    let x_endpoint = Endpoint::CandidateIp { ip: x_ip };
+    let mut ax_by_a: HashMap<String, LegMeasurement> = HashMap::with_capacity(agents.len());
+    let mut xb_by_b: HashMap<IpAddr, LegMeasurement> = HashMap::with_capacity(agents.len());
+    let mut xy_by_y: HashMap<String, LegMeasurement> = HashMap::new();
+    let mut yx_by_y: HashMap<String, LegMeasurement> = HashMap::new();
+    for a in agents {
+        let a_endpoint = Endpoint::Agent {
+            id: a.agent_id.clone(),
+        };
+        let to_x = lookup_leg(lookup, &a_endpoint, &x_endpoint);
+        let from_x = lookup_leg(lookup, &x_endpoint, &a_endpoint);
+        if let Some(leg) = to_x.clone() {
+            ax_by_a.insert(a.agent_id.clone(), leg);
+        }
+        if let Some(leg) = from_x.clone() {
+            xb_by_b.insert(a.ip, leg);
+        }
+        if max_hops >= 2 {
+            if let Some(leg) = from_x {
+                xy_by_y.insert(a.agent_id.clone(), leg);
+            }
+            if let Some(leg) = to_x {
+                yx_by_y.insert(a.agent_id.clone(), leg);
+            }
+        }
+    }
+    XLegCache {
+        ax_by_a,
+        xb_by_b,
+        xy_by_y,
+        yx_by_y,
+    }
+}
+
+/// Composition arithmetic shared by the inline composer. Matches
+/// `routes::compose_one_hop` exactly — using the same evaluation order
+/// keeps the f32 result byte-identical to the original implementation.
+fn compose_two_legs(l1: &LegMeasurement, l2: &LegMeasurement) -> (f32, f32, f32) {
+    let rtt = l1.rtt_ms + l2.rtt_ms;
+    let stddev = (l1.stddev_ms.powi(2) + l2.stddev_ms.powi(2)).sqrt();
+    let loss = 1.0 - (1.0 - l1.loss_ratio) * (1.0 - l2.loss_ratio);
+    (rtt, stddev, loss)
+}
+
+/// Composition arithmetic for 2-hop routes. Matches
+/// `routes::compose_two_hop` exactly.
+fn compose_three_legs(
+    l1: &LegMeasurement,
+    l2: &LegMeasurement,
+    l3: &LegMeasurement,
+) -> (f32, f32, f32) {
+    let rtt = l1.rtt_ms + l2.rtt_ms + l3.rtt_ms;
+    let stddev = (l1.stddev_ms.powi(2) + l2.stddev_ms.powi(2) + l3.stddev_ms.powi(2)).sqrt();
+    let loss = 1.0 - (1.0 - l1.loss_ratio) * (1.0 - l2.loss_ratio) * (1.0 - l3.loss_ratio);
+    (rtt, stddev, loss)
+}
+
+/// Cap predicate identical to `routes::exceeds_caps`. Returns `true`
+/// when the route should be discarded.
+fn exceeds_caps(
+    rtt: f32,
+    stddev: f32,
+    stddev_weight: f32,
+    max_rtt: Option<f64>,
+    max_stddev: Option<f64>,
+) -> bool {
+    let with_penalty = rtt + stddev_weight * stddev;
+    if let Some(cap) = max_rtt {
+        if (with_penalty as f64) > cap {
+            return true;
+        }
+    }
+    if let Some(cap) = max_stddev {
+        if (stddev as f64) > cap {
+            return true;
+        }
+    }
+    false
+}
+
+/// Compose only X-containing routes from the pre-built leg caches and
+/// pick the best by penalised RTT. Mirrors the original
+/// `routes::enumerate_routes(...).filter(with_x).min_by(score)` chain
+/// without enumerating any non-X routes.
+///
+/// Returns `None` when no X-containing route resolves under the caps.
+#[allow(clippy::too_many_arguments)]
+fn best_x_containing_route(
+    x_cache: &XLegCache,
+    x_endpoint: &Endpoint,
+    x_ip: IpAddr,
+    a_id: &str,
+    b_ip: IpAddr,
+    b_id: &str,
+    mesh_from: &HashMap<String, Vec<(Endpoint, LegMeasurement)>>,
+    mesh_to: &HashMap<IpAddr, Vec<(Endpoint, LegMeasurement)>>,
+    agent_by_id: &HashMap<String, IpAddr>,
+    max_hops: u8,
+    max_rtt_cap: Option<f64>,
+    max_sd_cap: Option<f64>,
+    stddev_weight: f32,
+) -> Option<routes::ComposedRoute> {
+    let mut best: Option<routes::ComposedRoute> = None;
+    let mut best_score: f32 = f32::INFINITY;
+
+    let consider = |route: routes::ComposedRoute,
+                    best: &mut Option<routes::ComposedRoute>,
+                    best_score: &mut f32| {
+        let score = route.rtt_ms + stddev_weight * route.stddev_ms;
+        if score < *best_score {
+            *best_score = score;
+            *best = Some(route);
+        }
+    };
+
+    let ax = x_cache.ax_by_a.get(a_id);
+    let xb = x_cache.xb_by_b.get(&b_ip);
+
+    // 1-hop A→X→B (requires max_hops >= 1, validated upstream; the cap
+    // matches `routes::enumerate_routes`'s `max_hops >= 1` guard).
+    if max_hops >= 1 {
+        if let (Some(ax), Some(xb)) = (ax, xb) {
+            let (rtt, stddev, loss) = compose_two_legs(ax, xb);
+            if !exceeds_caps(rtt, stddev, stddev_weight, max_rtt_cap, max_sd_cap) {
+                consider(
+                    routes::ComposedRoute {
+                        legs: vec![ax.clone(), xb.clone()],
+                        rtt_ms: rtt,
+                        stddev_ms: stddev,
+                        loss_ratio: loss,
+                        kind: routes::RouteKind::OneHop,
+                        intermediaries: vec![x_endpoint.clone()],
+                    },
+                    &mut best,
+                    &mut best_score,
+                );
+            }
+        }
+    }
+
+    if max_hops >= 2 {
+        // 2-hop "X first": A → X → Y → B. Iterate Y over legs Y→B.
+        if let Some(ax) = ax {
+            // Short-circuit: if A→X already exceeds the RTT cap, every
+            // A→X→Y→B route (rtt = ax.rtt + xy.rtt + yb.rtt, monotonic
+            // in ax.rtt) is doomed regardless of Y.
+            let ax_score = ax.rtt_ms + stddev_weight * ax.stddev_ms;
+            let ax_alone_doomed = matches!(max_rtt_cap, Some(cap) if (ax_score as f64) > cap);
+            if !ax_alone_doomed {
+                if let Some(yb_list) = mesh_to.get(&b_ip) {
+                    for (y_endpoint, yb_leg) in yb_list {
+                        let y_id = match y_endpoint {
+                            Endpoint::Agent { id } => id,
+                            // mesh_to entries are always Agent-form by
+                            // construction; defensive skip otherwise.
+                            _ => continue,
+                        };
+                        if y_id == a_id || y_id == b_id {
+                            continue;
+                        }
+                        // Skip Y when X is itself a mesh agent at Y.ip
+                        // (the route degenerates into A→X→X→B).
+                        if agent_by_id.get(y_id).copied() == Some(x_ip) {
+                            continue;
+                        }
+                        let Some(xy_leg) = x_cache.xy_by_y.get(y_id) else {
+                            continue;
+                        };
+                        let (rtt, stddev, loss) = compose_three_legs(ax, xy_leg, yb_leg);
+                        if exceeds_caps(rtt, stddev, stddev_weight, max_rtt_cap, max_sd_cap) {
+                            continue;
+                        }
+                        consider(
+                            routes::ComposedRoute {
+                                legs: vec![ax.clone(), xy_leg.clone(), yb_leg.clone()],
+                                rtt_ms: rtt,
+                                stddev_ms: stddev,
+                                loss_ratio: loss,
+                                kind: routes::RouteKind::TwoHop,
+                                intermediaries: vec![x_endpoint.clone(), y_endpoint.clone()],
+                            },
+                            &mut best,
+                            &mut best_score,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2-hop "X second": A → Y → X → B. Iterate Y over legs A→Y.
+        if let Some(xb) = xb {
+            let xb_score = xb.rtt_ms + stddev_weight * xb.stddev_ms;
+            let xb_alone_doomed = matches!(max_rtt_cap, Some(cap) if (xb_score as f64) > cap);
+            if !xb_alone_doomed {
+                if let Some(ay_list) = mesh_from.get(a_id) {
+                    for (y_endpoint, ay_leg) in ay_list {
+                        let y_id = match y_endpoint {
+                            Endpoint::Agent { id } => id,
+                            _ => continue,
+                        };
+                        if y_id == a_id || y_id == b_id {
+                            continue;
+                        }
+                        if agent_by_id.get(y_id).copied() == Some(x_ip) {
+                            continue;
+                        }
+                        let Some(yx_leg) = x_cache.yx_by_y.get(y_id) else {
+                            continue;
+                        };
+                        let (rtt, stddev, loss) = compose_three_legs(ay_leg, yx_leg, xb);
+                        if exceeds_caps(rtt, stddev, stddev_weight, max_rtt_cap, max_sd_cap) {
+                            continue;
+                        }
+                        consider(
+                            routes::ComposedRoute {
+                                legs: vec![ay_leg.clone(), yx_leg.clone(), xb.clone()],
+                                rtt_ms: rtt,
+                                stddev_ms: stddev,
+                                loss_ratio: loss,
+                                kind: routes::RouteKind::TwoHop,
+                                intermediaries: vec![y_endpoint.clone(), x_endpoint.clone()],
+                            },
+                            &mut best,
+                            &mut best_score,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    best
+}
+
 /// Extract AX / XB leg metadata from the winning X-containing route for
 /// pair-detail stamping.
 ///
@@ -577,66 +870,50 @@ fn extract_ax_xb_meta(
     }
 }
 
-/// Optimization-mode qualify predicate using [`routes::enumerate_routes`].
+/// Build per-baseline alt-route caches for Optimization mode.
 ///
-/// X qualifies when no non-X route from A to B is at least as good as the
-/// X route (measured by penalised RTT). "At least as good" uses `>=` so an
-/// exact tie collapses to "non-X preferred", per spec §2.4.
+/// For each baseline `(A, B)` we enumerate every A→B route via mesh
+/// intermediaries (expressed as `CandidateIp` endpoints so symmetry
+/// substitution resolves legs like `B→Y` as `Y→B`). X is NOT excluded
+/// from the pool at build time; per-X filtering is applied at the query
+/// site by skipping routes whose intermediaries contain
+/// `CandidateIp(x_ip)`.
 ///
-/// Non-X routes use other mesh agents as transit intermediaries. Their IPs
-/// are expressed as `CandidateIp` endpoints so the `LegLookup` can resolve
-/// legs via its `(Agent(src_id), Ip(dst_ip))` index and symmetry substitution
-/// (e.g. `B→Y` used as `Y→B`). This matches the symmetry convention the
-/// original scalar optimization predicate relied on.
-///
-/// Returns `false` immediately when `improvement_ms ≤ 0`.
-#[allow(clippy::too_many_arguments)]
-fn qualifies_under_optimization_v2(
-    a_endpoint: &Endpoint,
-    b_endpoint: &Endpoint,
-    x_ip: IpAddr,
-    transit_score: f32,
-    improvement_ms: f32,
+/// Building these once per evaluator pass avoids re-enumerating the
+/// non-X alternatives for every (X, A, B) inner triple — the dominant
+/// cost in the original implementation when `max_hops == 2`.
+fn build_alt_routes_per_baseline(
     leg_lookup: &LegLookup<'_>,
     agents: &[AgentRow],
-    a_id: &str,
-    b_id: &str,
+    baselines: &[(String, IpAddr, String, bool, &AttributedMeasurement)],
     max_hops: u8,
     max_rtt_cap: Option<f64>,
     max_sd_cap: Option<f64>,
     stddev_weight: f32,
-) -> bool {
-    if improvement_ms <= 0.0 {
-        return false;
+) -> HashMap<(String, IpAddr), Vec<routes::ComposedRoute>> {
+    let mut out: HashMap<(String, IpAddr), Vec<routes::ComposedRoute>> =
+        HashMap::with_capacity(baselines.len());
+    for (a_id, b_ip, b_id, _direct_was_substituted, _direct) in baselines {
+        let a_endpoint = Endpoint::Agent { id: a_id.clone() };
+        let b_endpoint = Endpoint::Agent { id: b_id.clone() };
+        let non_ab_pool: Vec<Endpoint> = agents
+            .iter()
+            .filter(|a| a.agent_id != *a_id && a.agent_id != *b_id)
+            .map(|a| Endpoint::CandidateIp { ip: a.ip })
+            .collect();
+        let alts = routes::enumerate_routes(
+            leg_lookup,
+            &a_endpoint,
+            &b_endpoint,
+            &non_ab_pool,
+            max_hops,
+            max_rtt_cap,
+            max_sd_cap,
+            stddev_weight,
+        );
+        out.insert((a_id.clone(), *b_ip), alts);
     }
-    // Build non-X alternative pool: other mesh agents (not A, not B, not X)
-    // expressed as CandidateIp endpoints so LegLookup can resolve their legs
-    // via the `(Agent(src_id), Ip(agent_ip))` stored measurements.
-    let non_x_pool: Vec<Endpoint> = agents
-        .iter()
-        .filter(|a| a.agent_id != a_id && a.agent_id != b_id && a.ip != x_ip)
-        .map(|a| Endpoint::CandidateIp { ip: a.ip })
-        .collect();
-
-    let alt_routes = routes::enumerate_routes(
-        leg_lookup,
-        a_endpoint,
-        b_endpoint,
-        &non_x_pool,
-        max_hops,
-        max_rtt_cap,
-        max_sd_cap,
-        stddev_weight,
-    );
-
-    for r in &alt_routes {
-        let alt_score = r.rtt_ms + stddev_weight * r.stddev_ms;
-        // Tiebreaker: reject X when any non-X alternative ties or beats X.
-        if transit_score >= alt_score {
-            return false;
-        }
-    }
-    true
+    out
 }
 
 /// Derive the headline `avg_improvement_ms` from per-candidate
@@ -690,6 +967,29 @@ pub fn evaluate(inputs: EvaluationInputs) -> Result<EvaluationOutputs, EvalError
 /// Triple-scoring evaluator path (Diversity / Optimization). Pure
 /// function; the `evaluate` dispatcher wraps the result in
 /// [`EvaluationOutputs::Triple`].
+///
+/// # Performance model
+///
+/// The naive form ran `routes::enumerate_routes` once per `(X, A, B)`
+/// triple — quadratic in the agent count and re-enumerating the same
+/// legs ~1.3B times on a real ~50-agent roster with `max_hops == 2`.
+/// Instead we pre-compute three layers of leg/route caches once per
+/// evaluator pass and compose only X-containing routes inline:
+///
+/// 1. **Per-(A,B) mesh-neighbor leg caches** (`mesh_from`, `mesh_to`) —
+///    every leg A→Y / Y→B where Y is another mesh agent, keyed off A
+///    and B. Built once.
+/// 2. **Per-X leg caches** (`XLegCache`) — A→X / X→B / X→Y / Y→X legs
+///    for the current X. Built once per X candidate.
+/// 3. **Per-(A,B) alt-route cache** (`alt_routes_per_baseline`) — only
+///    built for Optimization mode; lets the qualify predicate check
+///    cached A→B alt routes by removing the per-(X,A,B) re-enumeration.
+///
+/// Route composition in the hot loop is therefore reduced to a handful
+/// of `HashMap::get` calls per (X, A, B) plus the arithmetic for
+/// `compose_one_hop` / `compose_two_hop` re-implemented inline. The
+/// composition math is identical to `routes::compose_*` — see those
+/// functions for the source of truth.
 fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, EvalError> {
     let agent_by_ip: HashMap<IpAddr, String> = inputs
         .agents
@@ -719,46 +1019,6 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         .map(|m| m.destination_ip)
         .collect();
 
-    // Build the full pool of mesh-agent endpoints (used to compose multi-hop
-    // routes). Each baseline pair's inner loop subtracts A and B before passing
-    // the pool to `enumerate_routes`.
-    //
-    // Each mesh agent contributes BOTH its `Agent { id }` form and its
-    // `CandidateIp { ip }` form to the pool. Both forms are needed because
-    // `LegLookup` indexes measurements as `(Agent(src_id), Ip(dst_ip))`, and
-    // different leg positions require different endpoint variants:
-    //
-    // * `CandidateIp { ip }` — required for legs where the intermediary is the
-    //   destination of a stored measurement. For example, the A→Y first leg
-    //   resolves via forward key `(Agent("a"), Ip(Y.ip))`. For the terminal
-    //   Y→B leg (where B is `Agent("b")`), using `CandidateIp(Y.ip)` allows the
-    //   reverse key `(Agent("b"), Ip(Y.ip))` to hit the map. Using `Agent("y")`
-    //   instead would yield `(Agent("y"), Agent("b"))` which never exists.
-    //
-    // * `Agent { id }` — required for the middle leg of a 2-hop route where
-    //   the agent is the SOURCE of a stored measurement. For example, in
-    //   `A → CandidateIp(Y) → Agent("y") → B`, the middle leg resolves via
-    //   reverse `(Agent("y"), Ip(Y.ip))` — the agent-ID form is the key.
-    //
-    // Including both forms doubles the pool size but has no correctness cost:
-    // `enumerate_routes` discards routes whose any leg can't resolve, so
-    // non-matching endpoint forms simply produce no route and are filtered out.
-    // `qualifies_under_optimization_v2` uses `CandidateIp`-only for its non-X
-    // pool (a simpler 1-hop-only case); this pool is the richer dual-form version
-    // needed to compose both X-first and X-second 2-hop routes correctly.
-    let agent_endpoints: Vec<Endpoint> = inputs
-        .agents
-        .iter()
-        .flat_map(|a| {
-            [
-                Endpoint::CandidateIp { ip: a.ip },
-                Endpoint::Agent {
-                    id: a.agent_id.clone(),
-                },
-            ]
-        })
-        .collect();
-
     let total_baseline = baselines.len() as i32;
     let mut candidate_rows: Vec<EvaluationCandidateDto> = Vec::new();
     let mut pair_details_per_candidate: Vec<PairDetailsForCandidate> = Vec::new();
@@ -773,6 +1033,67 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
 
     // Clamp max_hops to [0, 2] (validated upstream, but defence-in-depth).
     let max_hops = inputs.max_hops.clamp(0, 2) as u8;
+    let stddev_weight = inputs.stddev_weight;
+
+    // ── Cache 1 & 2: mesh-neighbor legs keyed off A and B ─────────────
+    //
+    // `mesh_from[a_id]` lists every leg A→Y (for mesh agent Y ≠ A) that
+    // `LegLookup` returns `Found` for. Same shape for `mesh_to[b_ip]`:
+    // legs Y→B where Y is a mesh agent ≠ the agent at `b_ip`.
+    //
+    // Entries are pushed in `inputs.agents` iteration order so 2-hop
+    // tie-breaks in the inline composer match the order
+    // `routes::enumerate_routes` would have produced (which iterates
+    // the pool linearly).
+    let mut mesh_from: HashMap<String, Vec<(Endpoint, LegMeasurement)>> =
+        HashMap::with_capacity(inputs.agents.len());
+    let mut mesh_to: HashMap<IpAddr, Vec<(Endpoint, LegMeasurement)>> =
+        HashMap::with_capacity(inputs.agents.len());
+    for pivot in &inputs.agents {
+        // Treat the pivot as A: collect every A→Y leg.
+        let pivot_endpoint = Endpoint::Agent {
+            id: pivot.agent_id.clone(),
+        };
+        let mut from_legs: Vec<(Endpoint, LegMeasurement)> =
+            Vec::with_capacity(inputs.agents.len().saturating_sub(1));
+        // Also treat the pivot as B: collect every Y→B leg.
+        let mut to_legs: Vec<(Endpoint, LegMeasurement)> =
+            Vec::with_capacity(inputs.agents.len().saturating_sub(1));
+        for y in &inputs.agents {
+            if y.agent_id == pivot.agent_id {
+                continue;
+            }
+            let y_endpoint = Endpoint::Agent {
+                id: y.agent_id.clone(),
+            };
+            if let Some(leg) = lookup_leg(&leg_lookup, &pivot_endpoint, &y_endpoint) {
+                from_legs.push((y_endpoint.clone(), leg));
+            }
+            if let Some(leg) = lookup_leg(&leg_lookup, &y_endpoint, &pivot_endpoint) {
+                to_legs.push((y_endpoint, leg));
+            }
+        }
+        mesh_from.insert(pivot.agent_id.clone(), from_legs);
+        mesh_to.insert(pivot.ip, to_legs);
+    }
+
+    // ── Cache 4: Optimization-mode alt routes per (A, B) ─────────────
+    //
+    // Only built for Optimization mode; Diversity mode never calls the
+    // qualify predicate that consumes it.
+    let alt_routes_per_baseline = if inputs.mode == EvaluationMode::Optimization {
+        build_alt_routes_per_baseline(
+            &leg_lookup,
+            &inputs.agents,
+            &baselines,
+            max_hops,
+            max_rtt_cap,
+            max_sd_cap,
+            stddev_weight,
+        )
+    } else {
+        HashMap::new()
+    };
 
     for x_ip in &candidates {
         let has_from_any = inputs
@@ -784,6 +1105,9 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
         }
 
         let x_endpoint = Endpoint::CandidateIp { ip: *x_ip };
+
+        // ── Cache 3: per-X leg caches ────────────────────────────────
+        let x_cache = build_x_leg_cache(&leg_lookup, &inputs.agents, *x_ip, max_hops);
 
         let mut pair_details: Vec<EvaluationPairDetailDto> = Vec::new();
         let mut qualifying_legs: Vec<(String, String)> = Vec::new();
@@ -813,69 +1137,36 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
             let direct_stddev = direct.latency_stddev_ms.unwrap_or(0.0);
             let direct_loss_ratio = direct.loss_ratio;
 
-            // Build the intermediary pool for route enumeration:
-            // all agents except A and B, plus X as a CandidateIp endpoint.
-            // This allows X to appear in any intermediary position up to max_hops.
-            //
-            // Both A (source) and B (destination) are mesh agents, so their
-            // endpoints carry agent IDs. X is a non-mesh candidate IP.
-            // The LegLookup stores measurements as (Agent(src_id), Ip(dst_ip)),
-            // so using Agent endpoints for A and B lets the leg resolver find
-            // both direct (A→X, A→B) and symmetry-substituted (B→X used as X→B)
-            // measurements correctly.
-            let a_endpoint = Endpoint::Agent { id: a_id.clone() };
-            let b_endpoint = Endpoint::Agent { id: b_id.clone() };
-            // `agent_endpoints` contains both `CandidateIp` and `Agent` forms of
-            // each mesh agent (see construction comment above). Both forms of A
-            // and B must be removed from the pool so that `enumerate_routes`
-            // doesn't route through A or B as a transit intermediary.
-            let pool: Vec<Endpoint> = agent_endpoints
-                .iter()
-                .filter(|e| match e {
-                    Endpoint::Agent { id } => id != a_id && id != b_id,
-                    Endpoint::CandidateIp { ip } => {
-                        Some(*ip) != agent_by_id.get(a_id.as_str()).copied() && *ip != *b_ip
-                    }
-                })
-                .cloned()
-                .chain(std::iter::once(x_endpoint.clone()))
-                .collect();
-
-            let all_routes = routes::enumerate_routes(
-                &leg_lookup,
-                &a_endpoint,
-                &b_endpoint,
-                &pool,
+            // Compose only X-containing routes inline.
+            // The original `routes::enumerate_routes` + `with_x` filter
+            // explored every non-X intermediary too; here we only consider
+            // shapes that put X somewhere in the chain.
+            let best_x_route = best_x_containing_route(
+                &x_cache,
+                &x_endpoint,
+                *x_ip,
+                a_id,
+                *b_ip,
+                b_id,
+                &mesh_from,
+                &mesh_to,
+                &agent_by_id,
                 max_hops,
                 max_rtt_cap,
                 max_sd_cap,
-                inputs.stddev_weight,
+                stddev_weight,
             );
 
-            // Filter to routes that include X in their intermediaries.
-            // For 1-hop this is A→X→B; for 2-hop both A→X→Y→B and
-            // A→Y→X→B are included; `min_by` picks the better of the two.
-            let with_x: Vec<&routes::ComposedRoute> = all_routes
-                .iter()
-                .filter(|r| r.intermediaries.iter().any(|e| e == &x_endpoint))
-                .collect();
-
-            let Some(best_x_route) = with_x.iter().min_by(|a, b| {
-                let score_a = a.rtt_ms + inputs.stddev_weight * a.stddev_ms;
-                let score_b = b.rtt_ms + inputs.stddev_weight * b.stddev_ms;
-                score_a
-                    .partial_cmp(&score_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }) else {
+            let Some(best_x_route) = best_x_route else {
                 // No X-containing route is reachable.
                 continue;
             };
 
             let transit_rtt = best_x_route.rtt_ms;
             let transit_stddev = best_x_route.stddev_ms;
-            let transit_penalty = inputs.stddev_weight * transit_stddev;
+            let transit_penalty = stddev_weight * transit_stddev;
             let compound_loss_ratio = best_x_route.loss_ratio;
-            let direct_penalty = inputs.stddev_weight * direct_stddev;
+            let direct_penalty = stddev_weight * direct_stddev;
             let improvement_ms = direct_rtt - transit_rtt - (transit_penalty - direct_penalty);
 
             // Determine where X sits in the winning route intermediary order.
@@ -900,7 +1191,7 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
             // For 2-hop with X second: leg[0] = A→Y, leg[1] = Y→X, leg[2] = X→B.
             // mtr_measurement_id and was_substituted come from the legs.
             let (ax_was_substituted, xb_was_substituted, mtr_id_ax, mtr_id_xb) =
-                extract_ax_xb_meta(best_x_route, &x_endpoint);
+                extract_ax_xb_meta(&best_x_route, &x_endpoint);
 
             let loss_ok = compound_loss_ratio <= inputs.loss_threshold_ratio
                 && direct_loss_ratio <= inputs.loss_threshold_ratio;
@@ -912,25 +1203,31 @@ fn evaluate_triple(inputs: EvaluationInputs) -> Result<TripleEvaluationOutputs, 
             let qualifies = match inputs.mode {
                 EvaluationMode::Diversity => improvement_ms > 0.0,
                 EvaluationMode::Optimization => {
-                    // Optimization: X qualifies only when no non-X route
-                    // is at least as good as the X route. Build all non-X
-                    // routes (routes where X does NOT appear in intermediaries)
-                    // from the full agent pool (excluding A, B, and X).
-                    qualifies_under_optimization_v2(
-                        &a_endpoint,
-                        &b_endpoint,
-                        *x_ip,
-                        transit_rtt + transit_penalty,
-                        improvement_ms,
-                        &leg_lookup,
-                        &inputs.agents,
-                        a_id,
-                        b_id,
-                        max_hops,
-                        max_rtt_cap,
-                        max_sd_cap,
-                        inputs.stddev_weight,
-                    )
+                    if improvement_ms <= 0.0 {
+                        false
+                    } else {
+                        match alt_routes_per_baseline.get(&(a_id.clone(), *b_ip)) {
+                            // No baseline entry — degenerate; treat as
+                            // no alt available, so X qualifies.
+                            None => true,
+                            Some(alts) => {
+                                let transit_score = transit_rtt + transit_penalty;
+                                let x_endpoint_match = Endpoint::CandidateIp { ip: *x_ip };
+                                // Reject X when any non-X alt route is
+                                // at least as good as the X route
+                                // (penalised RTT, `>=` collapses ties
+                                // to "non-X preferred" per spec §2.4).
+                                // "Non-X" excludes routes whose
+                                // intermediaries contain
+                                // `CandidateIp(x_ip)`.
+                                !alts.iter().any(|r| {
+                                    let alt_score = r.rtt_ms + stddev_weight * r.stddev_ms;
+                                    transit_score >= alt_score
+                                        && !r.intermediaries.iter().any(|e| e == &x_endpoint_match)
+                                })
+                            }
+                        }
+                    }
                 }
                 // EdgeCandidate is dispatched at the top of `evaluate`
                 // and never reaches this match — the dispatcher
