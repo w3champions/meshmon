@@ -1,12 +1,15 @@
 # vmalert-tool unit tests for meshmon.agent_health group.
 #
-# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# Note: vmalert-tool v1.153.0 requires `groupname` on every alert_rule_test
 # block and automatically injects an `alertgroup` label equal to the group name.
 #
-# vmalert-tool uses a synthetic clock starting at epoch 0. With
-# `meshmon_agent_last_seen_seconds = 0`, `time() - 0 = time()` which
-# crosses the 300s threshold at eval_time 5m. With `for: 2m` the alert
-# arms from ~7m onward.
+# vmalert-tool's synthetic clock starts at 2000-01-01T00:00:00Z
+# (946684800) since v1.148.0 — it was epoch 0 before; see
+# VictoriaMetrics#11219 / #11437. The series is pinned to that start
+# timestamp so `time() - last_seen` equals the elapsed test time: it
+# crosses the 300s threshold after eval_time 5m and, with `for: 2m`, the
+# alert fires from ~8m on. If a future vmalert-tool moves the clock
+# origin again, update the series value to match.
 #
 # The AgentOffline metric has only `source` — no target or protocol.
 # The `description` annotation renders via `printf "%.0f"` so at eval_time
@@ -18,13 +21,19 @@ evaluation_interval: 60s
 
 tests:
   # --- AgentOffline fires when agent stops pushing ---------------------------
-  # Series flat at 0 simulates the last_seen timestamp frozen at epoch.
-  # At eval_time 10m (600s): time() - 0 = 600 > 300 ✓; for: 2m armed since 7m.
+  # Series flat at the test start timestamp simulates last_seen frozen
+  # when the test begins. At eval_time 6m (360s > 300) the rule is only
+  # pending (for: 2m), so nothing fires yet. At eval_time 10m:
+  # 600 > 300 ✓ and pending since 6m ✓.
   - interval: 60s
     input_series:
       - series: 'meshmon_agent_last_seen_seconds{source="a"}'
-        values: '0+0x20'
+        values: '946684800+0x20'
     alert_rule_test:
+      - eval_time: 6m
+        groupname: meshmon.agent_health
+        alertname: AgentOffline
+        exp_alerts: []
       - eval_time: 10m
         groupname: meshmon.agent_health
         alertname: AgentOffline

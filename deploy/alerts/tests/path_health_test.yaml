@@ -1,7 +1,7 @@
 # vmalert-tool unit tests for meshmon.path_health group.
 # Series values use `N+0xM` shorthand meaning "value N, step 0, repeated M+1 times".
 #
-# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# Note: vmalert-tool v1.153.0 requires `groupname` on every alert_rule_test
 # block and automatically injects an `alertgroup` label equal to the group name.
 rule_files:
   - ../rules.yaml

@@ -5,8 +5,8 @@
 # image so operators need only docker-compose.yml + .env + meshmon.toml
 # on disk (no repo checkout).
 
-ARG GRAFANA_TAG=13.0.1
-FROM grafana/grafana-oss:${GRAFANA_TAG}
+ARG GRAFANA_TAG=13.0.10
+FROM grafana/grafana:${GRAFANA_TAG}
 
 COPY deploy/grafana/grafana.ini                      /etc/grafana/grafana.ini
 COPY deploy/grafana/provisioning/datasources         /etc/grafana/provisioning/datasources

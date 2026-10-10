@@ -11,9 +11,9 @@ use tower::util::ServiceExt;
 
 mod common;
 
-const GRAFANA_IMAGE: &str = "grafana/grafana-oss";
+const GRAFANA_IMAGE: &str = "grafana/grafana";
 /// Must match (or be <=) `GRAFANA_TAG` in `deploy/versions.env`.
-const GRAFANA_TAG_FALLBACK: &str = "13.0.1";
+const GRAFANA_TAG_FALLBACK: &str = "13.0.10";
 
 fn grafana_tag() -> String {
     std::env::var("GRAFANA_TAG").unwrap_or_else(|_| GRAFANA_TAG_FALLBACK.to_owned())
@@ -51,7 +51,7 @@ async fn spawn_grafana() -> (testcontainers::ContainerAsync<GenericImage>, Strin
         .with_startup_timeout(std::time::Duration::from_secs(120))
         .start()
         .await
-        .expect("start grafana-oss container — is Docker running?");
+        .expect("start grafana container — is Docker running?");
 
     let port = container
         .get_host_port_ipv4(3000)

@@ -1,6 +1,6 @@
 # vmalert-tool unit tests for meshmon.path_latency group.
 #
-# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# Note: vmalert-tool v1.153.0 requires `groupname` on every alert_rule_test
 # block and automatically injects an `alertgroup` label equal to the group name.
 #
 # PathLatencyAnomaly (zscore_over_time) is NOT tested here — a synthetic
