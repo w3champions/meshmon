@@ -92,9 +92,12 @@ Full reference: https://prometheus.io/docs/alerting/latest/notifications/
 
 ---
 
-## Default (no template files)
+## Bundled templates
 
-If this directory remains empty (only this README), Alertmanager uses its
-built-in default formatting.  The bundled `alertmanager.yml` does not
-reference any custom template names, so no configuration changes are required
-to deploy without custom templates.
+`discord.tmpl` ships in the image and is referenced by the bundled
+`alertmanager.yml`. It defines `discord.meshmon.title` and
+`discord.meshmon.message`, which render one batched message per
+(alertname, severity) group: a `[FIRING:N] alertname (severity)` title and a
+`• source → target (protocol)` line per alert (first 35 firing / 10 resolved,
+then an "(N of M shown)" note, to stay inside Discord's 4096-char limit).
+Overrides of `alertmanager.yml` can reference the same template names.

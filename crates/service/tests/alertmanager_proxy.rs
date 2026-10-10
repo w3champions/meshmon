@@ -24,7 +24,7 @@ mod common;
 
 const AM_IMAGE: &str = "prom/alertmanager";
 /// Must match (or be <=) `ALERTMANAGER_TAG` in `deploy/versions.env`.
-const AM_TAG_FALLBACK: &str = "v0.32.0";
+const AM_TAG_FALLBACK: &str = "v0.34.1";
 
 fn am_tag() -> String {
     std::env::var("ALERTMANAGER_TAG").unwrap_or_else(|_| AM_TAG_FALLBACK.to_owned())
@@ -42,7 +42,7 @@ fn with_peer(mut req: Request<Body>, ip: [u8; 4]) -> Request<Body> {
 }
 
 async fn spawn_am() -> (testcontainers::ContainerAsync<GenericImage>, String) {
-    // Alertmanager v0.32.0 writes startup lines to stderr with the
+    // Alertmanager v0.34.1 writes startup lines to stderr with the
     // format `level=INFO ... msg="Listening on" address=[::]:9093`. We
     // match the capitalised substring because the log output preserves
     // the original message casing.

@@ -1,0 +1,47 @@
+{{/*
+  Batched Discord notifications for meshmon.
+
+  Routes group by [alertname, severity], so one notification can carry
+  hundreds of per-path alerts. Discord caps an embed description at 4096
+  characters (Alertmanager truncates beyond that), so the firing list is
+  capped at 35 lines and the remainder is summarised as "(35 of N shown)".
+  Resolved alerts are summarised by count plus a short sample.
+*/}}
+
+{{ define "discord.meshmon.alert_line" -}}
+• {{ if .Labels.source }}{{ .Labels.source }}{{ else }}?{{ end -}}
+{{- if .Labels.target }} → {{ .Labels.target }}{{ end -}}
+{{- if .Labels.protocol }} ({{ .Labels.protocol }}){{ end -}}
+{{- end }}
+
+{{ define "discord.meshmon.title" -}}
+{{- if eq .Status "firing" -}}
+[FIRING:{{ .Alerts.Firing | len }}]
+{{- else -}}
+[RESOLVED:{{ .Alerts.Resolved | len }}]
+{{- end }} {{ .CommonLabels.alertname }}
+{{- if .CommonLabels.severity }} ({{ .CommonLabels.severity }}){{ end -}}
+{{- end }}
+
+{{ define "discord.meshmon.message" -}}
+{{- with .CommonAnnotations.summary }}{{ . }}
+{{ end -}}
+{{- if .Alerts.Firing -}}
+**Firing ({{ .Alerts.Firing | len }})**
+{{ range $i, $a := .Alerts.Firing -}}
+{{- if lt $i 35 }}{{ template "discord.meshmon.alert_line" $a }}
+{{ end -}}
+{{- end -}}
+{{- if gt (.Alerts.Firing | len) 35 }}… (35 of {{ .Alerts.Firing | len }} shown)
+{{ end -}}
+{{- end -}}
+{{- if .Alerts.Resolved -}}
+**Resolved ({{ .Alerts.Resolved | len }})**
+{{ range $i, $a := .Alerts.Resolved -}}
+{{- if lt $i 10 }}{{ template "discord.meshmon.alert_line" $a }}
+{{ end -}}
+{{- end -}}
+{{- if gt (.Alerts.Resolved | len) 10 }}… (10 of {{ .Alerts.Resolved | len }} shown)
+{{ end -}}
+{{- end -}}
+{{- end }}
