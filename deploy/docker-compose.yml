@@ -104,7 +104,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.alertmanager
       args:
-        ALERTMANAGER_TAG: "v0.32.0"
+        ALERTMANAGER_TAG: "v0.34.1"
       cache_from:
         - type=registry,ref=ghcr.io/w3champions/meshmon-alertmanager:buildcache-linux-amd64
     container_name: meshmon-alertmanager
@@ -114,6 +114,7 @@ services:
       - "--web.route-prefix=/alertmanager"
       - "--web.external-url=${MESHMON_PUBLIC_URL:-http://localhost:8080}/alertmanager"
       - "--storage.path=/alertmanager"
+      - "--cluster.listen-address="
     volumes:
       - meshmon-am-data:/alertmanager
     secrets:

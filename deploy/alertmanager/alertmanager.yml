@@ -24,19 +24,25 @@ route:
   # Alerts without one of these labels (e.g. AgentOffline has no
   # target/protocol) group by the labels they do carry — Alertmanager's
   # default behavior.
-  group_by: [alertname, source, target, protocol]
-  group_wait: 30s
-  group_interval: 5m
-  repeat_interval: 4h
+  #
+  # Deliberately coarse: grouping per (source, target, protocol) creates one
+  # aggregation group per alert (thousands on a full mesh), each with its own
+  # Discord request, which trips Discord's webhook rate limit (HTTP 429, not
+  # retried by the Discord notifier). Per-path detail lives in the batched
+  # message body (templates/discord.tmpl) instead.
+  group_by: [alertname, severity]
+  group_wait: 1m
+  group_interval: 15m
+  repeat_interval: 12h
 
   routes:
     # Critical alerts page immediately and repeat more aggressively.
     - matchers:
         - severity="critical"
       receiver: discord-critical
-      group_wait: 0s
-      group_interval: 1m
-      repeat_interval: 1h
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
       continue: false
 
     # Info alerts (route changes, anomalies, subtle loss) — quieter channel.
@@ -44,8 +50,8 @@ route:
         - severity="info"
       receiver: discord-info
       group_wait: 1m
-      group_interval: 10m
-      repeat_interval: 12h
+      group_interval: 30m
+      repeat_interval: 24h
       continue: false
 
 receivers:
@@ -53,16 +59,22 @@ receivers:
     discord_configs:
       - webhook_url_file: /etc/alertmanager/secrets/discord_webhook
         send_resolved: true
+        title: '{{ template "discord.meshmon.title" . }}'
+        message: '{{ template "discord.meshmon.message" . }}'
 
   - name: discord-critical
     discord_configs:
       - webhook_url_file: /etc/alertmanager/secrets/discord_webhook_critical
         send_resolved: true
+        title: '{{ template "discord.meshmon.title" . }}'
+        message: '{{ template "discord.meshmon.message" . }}'
 
   - name: discord-info
     discord_configs:
       - webhook_url_file: /etc/alertmanager/secrets/discord_webhook_info
         send_resolved: true
+        title: '{{ template "discord.meshmon.title" . }}'
+        message: '{{ template "discord.meshmon.message" . }}'
 
 inhibit_rules:
   # Critical unreachable subsumes lower-severity loss alerts for the same
@@ -76,7 +88,8 @@ inhibit_rules:
       - category="loss"
     equal: [source, target]
 
-# Templates directory scanned on boot. Empty by default; overlays can drop
-# *.tmpl files to customize Discord embeds.
+# Templates baked into the image (discord.tmpl defines
+# discord.meshmon.title / discord.meshmon.message). Overlays can drop more
+# *.tmpl files here.
 templates:
   - /etc/alertmanager/templates/*.tmpl

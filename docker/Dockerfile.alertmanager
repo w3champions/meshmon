@@ -8,7 +8,7 @@
 # OSS users keep the default (webhook URLs injected via docker-compose's
 # `secrets:` stanza — see deploy/docker-compose.yml).
 
-ARG ALERTMANAGER_TAG=v0.32.0
+ARG ALERTMANAGER_TAG=v0.34.1
 FROM prom/alertmanager:${ALERTMANAGER_TAG}
 
 COPY deploy/alertmanager/alertmanager.yml /etc/alertmanager/alertmanager.yml
