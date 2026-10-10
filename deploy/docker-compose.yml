@@ -114,6 +114,7 @@ services:
       - "--web.route-prefix=/alertmanager"
       - "--web.external-url=${MESHMON_PUBLIC_URL:-http://localhost:8080}/alertmanager"
       - "--storage.path=/alertmanager"
+      - "--cluster.listen-address="
     volumes:
       - meshmon-am-data:/alertmanager
     secrets:

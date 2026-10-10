@@ -1,12 +1,8 @@
 # Alertmanager Notification Templates
 
-Alertmanager ships with a built-in Discord receiver that produces a
-plain-text embed with the alert name, labels, and annotations.  For most
-meshmon deployments this default output is sufficient.
-
-This directory exists so operators can drop in custom `*.tmpl` files and
-reference them from `alertmanager.yml` without modifying the bundled
-configuration.
+This directory holds the notification templates baked into the
+meshmon-alertmanager image. `discord.tmpl` is required by the bundled
+`alertmanager.yml`; see below for how to customize it safely.
 
 ---
 
@@ -21,54 +17,41 @@ Add a template here when you need one of the following:
 
 ---
 
-## Adding a template
+## Bundled template
 
-1. Create a file with a `.tmpl` extension in this directory, for example
-   `discord-rich.tmpl`.
+`discord.tmpl` ships in the image at `/etc/alertmanager/templates/discord.tmpl`
+and is referenced by the bundled `alertmanager.yml`. It defines
+`discord.meshmon.title` and `discord.meshmon.message`, rendering one batched
+message per (alertname, severity) group: a `[FIRING:N] alertname (severity)`
+title and a `• source → target (protocol): description` line per alert (first
+15 firing / 5 resolved, descriptions on firing lines only, then an "(N of M shown)" note, to stay inside
+Discord's 4096-char limit).
 
-2. Define a named template block inside it:
+---
 
-   ```
-   {{ define "discord.meshmon.title" -}}
-   [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}
-   severity={{ .CommonLabels.severity }}  category={{ .CommonLabels.category }}
-   {{- end }}
+## Customizing
 
-   {{ define "discord.meshmon.message" -}}
-   {{- range .Alerts }}
-   source={{ .Labels.source }}  target={{ .Labels.target }}
-   started={{ .StartsAt | since }}
-   {{ .Annotations.description }}
-   {{- end }}
-   {{- end }}
-   ```
+Do NOT add a second file that defines the same `discord.meshmon.*` names:
+Alertmanager loads templates in alphabetical order and the bundled
+`discord.tmpl` wins, so the duplicate is silently ignored. Instead either:
 
-3. Mount the file into the Alertmanager container.  In
-   `deploy/docker-compose.yml`, under the `meshmon-alertmanager` service:
+1. Copy and edit `discord.tmpl`, then mount your version over
+   `/etc/alertmanager/templates/discord.tmpl`; or
+2. Add a new `*.tmpl` file that defines DIFFERENT names (e.g.
+   `discord.custom.title`) and reference those in your receivers:
 
    ```yaml
-   volumes:
-     - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-     - ./alertmanager/templates:/etc/alertmanager/templates:ro
+   discord_configs:
+     - webhook_url_file: /run/secrets/discord_webhook
+       title: '{{ template "discord.custom.title" . }}'
+       message: '{{ template "discord.custom.message" . }}'
    ```
 
-4. Register the templates directory in `alertmanager.yml`:
+WARNING: do not mount a directory over `/etc/alertmanager/templates` unless it
+contains `discord.tmpl`. It hides the bundled file, notifications then fail at
+send time, and `amtool check-config` still reports SUCCESS.
 
-   ```yaml
-   templates:
-     - /etc/alertmanager/templates/*.tmpl
-   ```
-
-5. Reference the template names in the receiver definition:
-
-   ```yaml
-   receivers:
-     - name: discord-default
-       discord_configs:
-         - webhook_url_file: /run/secrets/discord_webhook
-           title: '{{ template "discord.meshmon.title" . }}'
-           message: '{{ template "discord.meshmon.message" . }}'
-   ```
+`alertmanager.yml` must keep `templates: [/etc/alertmanager/templates/*.tmpl]`.
 
 ---
 
@@ -91,13 +74,3 @@ built-ins:
 Full reference: https://prometheus.io/docs/alerting/latest/notifications/
 
 ---
-
-## Bundled templates
-
-`discord.tmpl` ships in the image and is referenced by the bundled
-`alertmanager.yml`. It defines `discord.meshmon.title` and
-`discord.meshmon.message`, which render one batched message per
-(alertname, severity) group: a `[FIRING:N] alertname (severity)` title and a
-`• source → target (protocol)` line per alert (first 35 firing / 10 resolved,
-then an "(N of M shown)" note, to stay inside Discord's 4096-char limit).
-Overrides of `alertmanager.yml` can reference the same template names.
