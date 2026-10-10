@@ -70,7 +70,7 @@ services:
     networks: [meshmon-internal]
 
   meshmon-vm:
-    image: victoriametrics/victoria-metrics:v1.140.0
+    image: victoriametrics/victoria-metrics:v1.153.0
     container_name: meshmon-vm
     restart: unless-stopped
     command:
@@ -85,7 +85,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.vmalert
       args:
-        VMALERT_TAG: "v1.140.0"
+        VMALERT_TAG: "v1.153.0"
       cache_from:
         - type=registry,ref=ghcr.io/w3champions/meshmon-vmalert:buildcache-linux-amd64
     container_name: meshmon-vmalert
@@ -132,7 +132,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.grafana
       args:
-        GRAFANA_TAG: "13.0.1"
+        GRAFANA_TAG: "13.0.10"
       cache_from:
         - type=registry,ref=ghcr.io/w3champions/meshmon-grafana:buildcache-linux-amd64
     container_name: meshmon-grafana

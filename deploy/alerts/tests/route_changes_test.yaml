@@ -1,6 +1,6 @@
 # vmalert-tool unit tests for meshmon.route_changes group.
 #
-# Note: vmalert-tool v1.140.0 requires `groupname` on every alert_rule_test
+# Note: vmalert-tool v1.153.0 requires `groupname` on every alert_rule_test
 # block and automatically injects an `alertgroup` label equal to the group name.
 #
 # `changes()` counts the number of value changes in the time window. A
