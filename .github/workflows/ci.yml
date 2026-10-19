@@ -5,9 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same PR makes the running checks obsolete. Cancel them.
+# Pushes to main also run the `release` job (image push, tags, Azure trigger), so a
+# main run is never cancelled mid-release; a newer push only replaces a queued one.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
